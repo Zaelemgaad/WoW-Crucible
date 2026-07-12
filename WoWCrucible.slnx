@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/WoWCrucible.Core/WoWCrucible.Core.csproj" />
+  <Project Path="src/WoWCrucible.App/WoWCrucible.App.csproj" />
+  <Project Path="tests/WoWCrucible.Core.Tests/WoWCrucible.Core.Tests.csproj" />
+</Solution>

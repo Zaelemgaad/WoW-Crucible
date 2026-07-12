@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/WoWCrucible.Core/WoWCrucible.Core.csproj" />
+    <None Include="../../third_party/StormLib/win-x64/StormLib.dll" Link="StormLib.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

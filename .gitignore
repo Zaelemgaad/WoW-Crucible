@@ -1,0 +1,37 @@
+# .NET build output
+**/bin/
+**/obj/
+dist/
+publish/
+artifacts/
+
+# IDE and user settings
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Generated/editor data
+*.bak
+*.tmp
+*.log
+TestResults/
+coverage/
+
+# Game and server data must never be committed
+*.dbc
+*.db2
+*.adb
+*.wdb
+*.MPQ
+*.mpq
+*.sql.gz
+Data/
+data/
+
+# OS files
+Thumbs.db
+.DS_Store
