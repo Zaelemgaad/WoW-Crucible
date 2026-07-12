@@ -36,6 +36,7 @@ public sealed class MainForm : Form
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("New Row", (_, _) => AddRow()));
         tools.Items.Add(Button("Clone Row", (_, _) => CloneRow()));
+        tools.Items.Add(Button("Clone Multiple", (_, _) => CloneMultipleRows()));
         tools.Items.Add(Button("Delete Rows", (_, _) => DeleteRows()));
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("Build Patch MPQ", (_, _) => OpenPatchBuilder()));
@@ -262,6 +263,36 @@ public sealed class MainForm : Form
             _status.Text = $"Cloned source row {source:N0} into row {row:N0} with a new ID";
         }
         catch (Exception ex) { ShowError(ex); }
+    }
+
+    private void CloneMultipleRows()
+    {
+        if (_file is null || _grid.CurrentCell is null) return;
+        var count = PromptForCloneCount();
+        if (count is null) return;
+        try
+        {
+            var source = SourceRow(_grid.CurrentCell.RowIndex);
+            ClearFilterForStructureChange();
+            var firstRow = _file.CloneRows(source, count.Value, IdColumn);
+            _history.Clear();
+            RefreshRows(firstRow);
+            _status.Text = $"Created {count.Value:N0} clones in one batch, starting at row {firstRow:N0}";
+        }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private int? PromptForCloneCount()
+    {
+        using var dialog = new Form { Text = "Clone multiple rows", Width = 390, Height = 170, StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false };
+        var label = new Label { Text = "Number of copies to create:", AutoSize = true, Location = new(16, 18) };
+        var count = new NumericUpDown { Minimum = 2, Maximum = 100_000, Value = 100, ThousandsSeparator = true, Width = 180, Location = new(18, 48) };
+        var create = new Button { Text = "Create clones", DialogResult = DialogResult.OK, AutoSize = true, Location = new(218, 88) };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, Location = new(140, 88) };
+        dialog.Controls.AddRange([label, count, create, cancel]);
+        dialog.AcceptButton = create;
+        dialog.CancelButton = cancel;
+        return dialog.ShowDialog(this) == DialogResult.OK ? decimal.ToInt32(count.Value) : null;
     }
 
     private void DeleteRows()

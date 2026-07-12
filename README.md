@@ -16,6 +16,7 @@ The client build is fixed, but server integration will not be tied to an old rep
 - Searches all fields in parallel.
 - Edits strings, bytes, integers, unsigned values, raw 32-bit values, and floats.
 - Creates blank records, clones records with a new ID, and deletes selected records.
+- Uses geometric record capacity and single-allocation bulk cloning for large creation batches.
 - Supports cell-level undo/redo with `Ctrl+Z` and `Ctrl+Y` (structural operations begin a new history).
 - Provides a grouped Spell Workspace for general properties, costs, three effects, localized text, visuals, and links.
 - Saves atomically and creates `.bak` files before overwriting data.

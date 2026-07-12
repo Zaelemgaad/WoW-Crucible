@@ -95,30 +95,46 @@ public sealed class WdbcFile
 
     public int AddBlankRow(DbcColumn? idColumn = null)
     {
-        var newRecords = GC.AllocateUninitializedArray<byte>(checked(_records.Length + RecordSize));
-        _records.CopyTo(newRecords, 0);
-        newRecords.AsSpan(_records.Length, RecordSize).Clear();
-        _records = newRecords;
-        var newRow = RowCount++;
-        if (idColumn is not null)
-            SetDisplayValue(newRow, idColumn, NextId(idColumn));
-        IsDirty = true;
-        return newRow;
+        return AddBlankRows(1, idColumn);
     }
 
     public int CloneRow(int sourceRow, DbcColumn? idColumn = null)
     {
+        return CloneRows(sourceRow, 1, idColumn);
+    }
+
+    public int AddBlankRows(int count, DbcColumn? idColumn = null)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
+        var firstRow = RowCount;
+        var firstId = idColumn is null ? 0u : NextId(idColumn);
+        EnsureRowCapacity(count);
+        for (var index = 0; index < count; index++)
+        {
+            var row = RowCount++;
+            _records.AsSpan(row * RecordSize, RecordSize).Clear();
+            if (idColumn is not null) SetRaw(row, idColumn, checked(firstId + (uint)index));
+        }
+        IsDirty = true;
+        return firstRow;
+    }
+
+    public int CloneRows(int sourceRow, int count, DbcColumn? idColumn = null)
+    {
         ArgumentOutOfRangeException.ThrowIfNegative(sourceRow);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(sourceRow, RowCount);
-        var newRecords = GC.AllocateUninitializedArray<byte>(checked(_records.Length + RecordSize));
-        _records.CopyTo(newRecords, 0);
-        _records.AsSpan(sourceRow * RecordSize, RecordSize).CopyTo(newRecords.AsSpan(_records.Length, RecordSize));
-        _records = newRecords;
-        var newRow = RowCount++;
-        if (idColumn is not null)
-            SetDisplayValue(newRow, idColumn, NextId(idColumn));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
+        var firstRow = RowCount;
+        var firstId = idColumn is null ? 0u : NextId(idColumn);
+        EnsureRowCapacity(count);
+        for (var index = 0; index < count; index++)
+        {
+            var row = RowCount++;
+            _records.AsSpan(sourceRow * RecordSize, RecordSize).CopyTo(_records.AsSpan(row * RecordSize, RecordSize));
+            if (idColumn is not null) SetRaw(row, idColumn, checked(firstId + (uint)index));
+        }
         IsDirty = true;
-        return newRow;
+        return firstRow;
     }
 
     public void DeleteRows(IEnumerable<int> rows)
@@ -219,7 +235,7 @@ public sealed class WdbcFile
             BinaryPrimitives.WriteInt32LittleEndian(header[12..16], RecordSize);
             BinaryPrimitives.WriteInt32LittleEndian(header[16..20], _strings.Length);
             stream.Write(header);
-            stream.Write(_records);
+            stream.Write(_records.AsSpan(0, checked(RowCount * RecordSize)));
             stream.Write(_strings);
             stream.Flush(true);
         }
@@ -231,6 +247,19 @@ public sealed class WdbcFile
     {
         var value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
         return value > 0 ? value : throw new InvalidDataException($"Invalid {name}: {value}.");
+    }
+
+    private void EnsureRowCapacity(int additionalRows)
+    {
+        var requiredRows = checked(RowCount + additionalRows);
+        var requiredBytes = checked(requiredRows * RecordSize);
+        if (requiredBytes <= _records.Length) return;
+
+        var currentRows = _records.Length / RecordSize;
+        var grownRows = Math.Max(requiredRows, Math.Max(16, checked(currentRows * 2)));
+        var expanded = GC.AllocateUninitializedArray<byte>(checked(grownRows * RecordSize));
+        _records.AsSpan(0, RowCount * RecordSize).CopyTo(expanded);
+        _records = expanded;
     }
 
     private static int ReadNonNegative(ReadOnlySpan<byte> bytes, string name)

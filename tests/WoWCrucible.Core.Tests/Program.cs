@@ -1,4 +1,5 @@
 using WoWCrucible.Core;
+using System.Diagnostics;
 
 if (args.Length != 2)
     throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
@@ -32,6 +33,7 @@ foreach (var path in files)
 }
 
 var spellPath = files.FirstOrDefault(path => Path.GetFileName(path).Equals("Spell.dbc", StringComparison.OrdinalIgnoreCase));
+long spellBulkCloneMilliseconds = -1;
 if (spellPath is not null)
 {
     var spell = WdbcFile.Load(spellPath);
@@ -40,6 +42,13 @@ if (spellPath is not null)
     if (!File.ReadAllBytes(spellPath).SequenceEqual(File.ReadAllBytes(output)))
         throw new InvalidOperationException("Unmodified WDBC round trip changed bytes.");
     File.Delete(output);
+    var spellColumns = builtInSchema.GetColumns("Spell", spell.FieldCount);
+    var spellRowsBefore = spell.RowCount;
+    var timer = Stopwatch.StartNew();
+    spell.CloneRows(0, 100, spellColumns[0]);
+    timer.Stop();
+    spellBulkCloneMilliseconds = timer.ElapsedMilliseconds;
+    if (spell.RowCount != spellRowsBefore + 100) throw new InvalidOperationException("Real Spell.dbc bulk clone failed.");
 }
 
 var animationPath = files.First(path => Path.GetFileName(path).Equals("AnimationData.dbc", StringComparison.OrdinalIgnoreCase));
@@ -69,6 +78,22 @@ if (editedReload.GetString(editedReload.GetRaw(clone, nameColumn)) != "WoWCrucib
     throw new InvalidOperationException("UTF-8 string edit did not survive save/reload.");
 File.Delete(editedOutput);
 
+var bulk = WdbcFile.Load(animationPath);
+var bulkColumns = schema.GetColumns("AnimationData", bulk.FieldCount);
+var bulkId = bulkColumns.First(column => column.IsIndex);
+var bulkRowsBefore = bulk.RowCount;
+var firstBulkRow = bulk.CloneRows(0, 100, bulkId);
+if (firstBulkRow != bulkRowsBefore || bulk.RowCount != bulkRowsBefore + 100)
+    throw new InvalidOperationException("Bulk clone row count failed.");
+for (var index = 1; index < 100; index++)
+    if (bulk.GetRaw(firstBulkRow + index, bulkId) != bulk.GetRaw(firstBulkRow, bulkId) + index)
+        throw new InvalidOperationException("Bulk clone did not allocate contiguous IDs.");
+var bulkOutput = Path.Combine(Path.GetTempPath(), $"wow-crucible-bulk-{Guid.NewGuid():N}.dbc");
+bulk.Save(bulkOutput, false);
+if (WdbcFile.Load(bulkOutput).RowCount != bulkRowsBefore + 100)
+    throw new InvalidOperationException("Bulk-created records did not survive save/reload.");
+File.Delete(bulkOutput);
+
 var mpqOutput = Path.Combine(Path.GetTempPath(), $"wow-crucible-patch-{Guid.NewGuid():N}.mpq");
 var mapped = PatchInputMapper.Map([animationPath]);
 if (mapped.Count != 1 || !mapped[0].ArchivePath.Equals("DBFilesClient\\AnimationData.dbc", StringComparison.OrdinalIgnoreCase))
@@ -79,4 +104,4 @@ if (!patchService.Contains(mpqOutput, "DBFilesClient\\AnimationData.dbc"))
     throw new InvalidOperationException("Created MPQ does not contain the mapped DBC path.");
 File.Delete(mpqOutput);
 
-Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, verified edits/structural persistence, and created/reopened a patch MPQ with its preserved DBC path.");
+Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, and created/reopened a patch MPQ.");
