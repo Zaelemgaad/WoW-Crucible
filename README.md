@@ -16,6 +16,7 @@ The client build is fixed, but server integration will not be tied to an old rep
 - Searches all fields in parallel.
 - Edits strings, bytes, integers, unsigned values, raw 32-bit values, and floats.
 - Creates blank records, clones records with a new ID, and deletes selected records.
+- Supports cell-level undo/redo with `Ctrl+Z` and `Ctrl+Y` (structural operations begin a new history).
 - Saves atomically and creates `.bak` files before overwriting data.
 - Accepts DBC and patch-builder drag-and-drop.
 - Builds WotLK patch MPQs from edited DBCs or existing folder trees.
@@ -49,7 +50,7 @@ The corpus test runner accepts a WDBX 12340 definition XML and a directory conta
 
 ## Roadmap
 
-1. Undo/redo, bulk operations, validation, and project-wide ID allocation.
+1. Bulk operations, validation, and project-wide ID allocation.
 2. Spell workspace with grouped effects, flags, localized text, and related-table navigation.
 3. CSV import/export and target-aware SQL generation.
 4. MPQ browsing and extraction.

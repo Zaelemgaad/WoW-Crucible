@@ -9,6 +9,7 @@ public sealed class MainForm : Form
     private readonly ToolStripStatusLabel _status = new();
     private readonly ToolStripTextBox _search = new() { AutoSize = false, Width = 280 };
     private readonly System.Windows.Forms.Timer _searchTimer = new() { Interval = 250 };
+    private readonly EditHistory _history = new();
     private WdbcFile? _file;
     private IReadOnlyList<DbcColumn> _columns = [];
     private int[]? _visibleRows;
@@ -21,11 +22,15 @@ public sealed class MainForm : Form
         Height = 900;
         StartPosition = FormStartPosition.CenterScreen;
         AllowDrop = true;
+        KeyPreview = true;
 
         var tools = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new(6, 4, 6, 4) };
         tools.Items.Add(Button("Open DBC", (_, _) => OpenFile()));
         tools.Items.Add(Button("Save", (_, _) => SaveFile(false)));
         tools.Items.Add(Button("Save As", (_, _) => SaveFile(true)));
+        tools.Items.Add(new ToolStripSeparator());
+        tools.Items.Add(Button("Undo", (_, _) => UndoEdit()));
+        tools.Items.Add(Button("Redo", (_, _) => RedoEdit()));
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("New Row", (_, _) => AddRow()));
         tools.Items.Add(Button("Clone Row", (_, _) => CloneRow()));
@@ -60,6 +65,7 @@ public sealed class MainForm : Form
         _search.TextChanged += (_, _) => { _searchTimer.Stop(); _searchTimer.Start(); };
         _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); ApplyFilter(); };
         FormClosing += OnFormClosing;
+        KeyDown += OnShortcutKeyDown;
         DragEnter += (_, e) => e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
         DragDrop += (_, e) =>
         {
@@ -136,6 +142,7 @@ public sealed class MainForm : Form
             var columns = schemas.GetColumns(table, loaded.FieldCount);
 
             _file = loaded;
+            _history.Clear();
             _columns = columns;
             _visibleRows = null;
             _grid.Columns.Clear();
@@ -209,6 +216,7 @@ public sealed class MainForm : Form
         {
             ClearFilterForStructureChange();
             var row = _file.AddBlankRow(IdColumn);
+            _history.Clear();
             RefreshRows(row);
             _status.Text = $"Created row {row:N0} with the next available ID";
         }
@@ -223,6 +231,7 @@ public sealed class MainForm : Form
             var source = SourceRow(_grid.CurrentCell.RowIndex);
             ClearFilterForStructureChange();
             var row = _file.CloneRow(source, IdColumn);
+            _history.Clear();
             RefreshRows(row);
             _status.Text = $"Cloned source row {source:N0} into row {row:N0} with a new ID";
         }
@@ -238,6 +247,7 @@ public sealed class MainForm : Form
         try
         {
             _file.DeleteRows(rows);
+            _history.Clear();
             ClearFilterForStructureChange();
             RefreshRows(Math.Min(rows.Min(), Math.Max(0, _file.RowCount - 1)));
             _status.Text = $"Deleted {rows.Length:N0} row(s)";
@@ -274,7 +284,15 @@ public sealed class MainForm : Form
     private void GridCellValuePushed(object? sender, DataGridViewCellValueEventArgs e)
     {
         if (_file is null) return;
-        try { _file.SetDisplayValue(SourceRow(e.RowIndex), _columns[e.ColumnIndex], e.Value); _status.Text = "Modified — save to write changes"; }
+        try
+        {
+            var row = SourceRow(e.RowIndex);
+            var column = _columns[e.ColumnIndex];
+            var before = _file.GetRaw(row, column);
+            _file.SetDisplayValue(row, column, e.Value);
+            _history.Record(row, column, before, _file.GetRaw(row, column));
+            _status.Text = "Modified — Ctrl+Z to undo, save to write changes";
+        }
         catch (Exception ex) { ShowError(ex); _grid.InvalidateCell(e.ColumnIndex, e.RowIndex); }
     }
 
@@ -286,6 +304,34 @@ public sealed class MainForm : Form
     }
 
     private int SourceRow(int visibleRow) => _visibleRows?[visibleRow] ?? visibleRow;
+
+    private void UndoEdit()
+    {
+        if (_file is null) return;
+        var edit = _history.Undo(_file);
+        if (edit is null) { _status.Text = "Nothing to undo"; return; }
+        _grid.Invalidate();
+        _status.Text = $"Undid {edit.Description}";
+    }
+
+    private void RedoEdit()
+    {
+        if (_file is null) return;
+        var edit = _history.Redo(_file);
+        if (edit is null) { _status.Text = "Nothing to redo"; return; }
+        _grid.Invalidate();
+        _status.Text = $"Redid {edit.Description}";
+    }
+
+    private void OnShortcutKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!e.Control) return;
+        if (e.KeyCode == Keys.Z) UndoEdit();
+        else if (e.KeyCode == Keys.Y) RedoEdit();
+        else return;
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+    }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {

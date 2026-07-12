@@ -57,6 +57,17 @@ public sealed class WdbcFile
         return column.Size == 1 ? cell[0] : BinaryPrimitives.ReadUInt32LittleEndian(cell);
     }
 
+    public void SetRaw(int row, DbcColumn column, uint raw)
+    {
+        ValidateCell(row, column);
+        if (column.Size == 1 && raw > byte.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(raw), "The value does not fit in this byte field.");
+        var cell = _records.AsSpan(row * RecordSize + column.Offset, column.Size);
+        if (column.Size == 1) cell[0] = (byte)raw;
+        else BinaryPrimitives.WriteUInt32LittleEndian(cell, raw);
+        IsDirty = true;
+    }
+
     public object GetDisplayValue(int row, DbcColumn column) => column.Type switch
     {
         DbcValueType.Int32 => unchecked((int)GetRaw(row, column)),
@@ -79,11 +90,7 @@ public sealed class WdbcFile
             _ => throw new ArgumentOutOfRangeException()
         };
 
-        ValidateCell(row, column);
-        var cell = _records.AsSpan(row * RecordSize + column.Offset, column.Size);
-        if (column.Size == 1) cell[0] = (byte)raw;
-        else BinaryPrimitives.WriteUInt32LittleEndian(cell, raw);
-        IsDirty = true;
+        SetRaw(row, column, raw);
     }
 
     public int AddBlankRow(DbcColumn? idColumn = null)
