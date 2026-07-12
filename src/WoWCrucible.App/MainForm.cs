@@ -131,10 +131,9 @@ public sealed class MainForm : Form
             Cursor = Cursors.WaitCursor;
             var timer = Stopwatch.StartNew();
             var loaded = WdbcFile.Load(path);
-            DbcSchemaCatalog? schemas = _schemaPath is null ? null : DbcSchemaCatalog.Load(_schemaPath);
+            var schemas = _schemaPath is null ? DbcSchemaCatalog.CreateBuiltIn12340() : DbcSchemaCatalog.Load(_schemaPath);
             var table = Path.GetFileNameWithoutExtension(path);
-            var columns = schemas?.GetColumns(table, loaded.FieldCount) ?? Enumerable.Range(0, loaded.FieldCount)
-                .Select(i => new DbcColumn(i, i * 4, 4, i == 0 ? "ID" : $"Field_{i}", DbcValueType.Raw32, i == 0)).ToArray();
+            var columns = schemas.GetColumns(table, loaded.FieldCount);
 
             _file = loaded;
             _columns = columns;

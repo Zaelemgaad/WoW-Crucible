@@ -4,6 +4,10 @@ if (args.Length != 2)
     throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
 
 var schema = DbcSchemaCatalog.Load(args[0]);
+var builtInSchema = DbcSchemaCatalog.CreateBuiltIn12340();
+var builtInSpellColumns = builtInSchema.GetColumns("Spell", 234);
+if (builtInSpellColumns[136].Name != "Name[enUS]" || builtInSpellColumns[233].Name != "SpellDifficultyID")
+    throw new InvalidOperationException("Built-in Spell.dbc schema is incomplete.");
 var files = Directory.EnumerateFiles(args[1], "*.dbc").ToArray();
 if (files.Length == 0) throw new InvalidOperationException("No DBC test files were found.");
 

@@ -11,7 +11,7 @@ The client build is fixed, but server integration will not be tied to an old rep
 
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
-- Loads field names and types from WDBX build-12340 definitions.
+- Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.
 - Resolves and safely extends DBC string tables.
 - Searches all fields in parallel.
 - Edits strings, bytes, integers, unsigned values, raw 32-bit values, and floats.
