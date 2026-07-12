@@ -32,6 +32,8 @@ public sealed class MainForm : Form
         tools.Items.Add(Button("Undo", (_, _) => UndoEdit()));
         tools.Items.Add(Button("Redo", (_, _) => RedoEdit()));
         tools.Items.Add(new ToolStripSeparator());
+        tools.Items.Add(Button("Spell Workspace", (_, _) => OpenSpellWorkspace()));
+        tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("New Row", (_, _) => AddRow()));
         tools.Items.Add(Button("Clone Row", (_, _) => CloneRow()));
         tools.Items.Add(Button("Delete Rows", (_, _) => DeleteRows()));
@@ -54,6 +56,7 @@ public sealed class MainForm : Form
         _grid.CellValuePushed += GridCellValuePushed;
         _grid.RowPostPaint += GridRowPostPaint;
         _grid.DataError += (_, e) => { e.ThrowException = false; ShowError(e.Exception); };
+        _grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0 && IsSpellFile) OpenSpellWorkspace(); };
 
         var statusStrip = new StatusStrip();
         statusStrip.Items.Add(_status);
@@ -208,6 +211,29 @@ public sealed class MainForm : Form
     }
 
     private DbcColumn? IdColumn => _columns.FirstOrDefault(column => column.IsIndex) ?? _columns.FirstOrDefault();
+    private bool IsSpellFile => _file is not null && Path.GetFileNameWithoutExtension(_file.SourcePath).Equals("Spell", StringComparison.OrdinalIgnoreCase) && _file.FieldCount == 234;
+
+    private void OpenSpellWorkspace()
+    {
+        if (_file is null || _grid.CurrentCell is null) return;
+        if (!IsSpellFile)
+        {
+            MessageBox.Show(this, "The Spell Workspace is available when Spell.dbc is open.", "WoW Crucible", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        using var editor = new SpellEditorForm(_file, SourceRow(_grid.CurrentCell.RowIndex), _columns, ApplyEditorValue);
+        editor.ShowDialog(this);
+        _grid.Invalidate();
+    }
+
+    private void ApplyEditorValue(int row, DbcColumn column, object? value)
+    {
+        if (_file is null) return;
+        var before = _file.GetRaw(row, column);
+        _file.SetDisplayValue(row, column, value);
+        _history.Record(row, column, before, _file.GetRaw(row, column));
+        _status.Text = $"Modified {column.Name} — Ctrl+Z to undo";
+    }
 
     private void AddRow()
     {
