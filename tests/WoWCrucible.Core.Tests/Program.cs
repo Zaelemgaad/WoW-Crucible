@@ -228,6 +228,16 @@ File.AppendAllText(Path.Combine(overrideLayer, "SpellCastTimes.dbc"), "size mism
 var mismatchedArchive = PatchManifestService.Validate(loadedManifest, builtPatch);
 if (mismatchedArchive.Passed || !mismatchedArchive.Errors.Any(error => error.Code == "UnexpectedArchiveEntry") || !mismatchedArchive.Errors.Any(error => error.Code == "SizeMismatch"))
     throw new InvalidOperationException("Existing MPQ comparison did not report unexpected/size-mismatched content.");
+var validationParent = Path.Combine(layerRoot, "validation-parent"); var validationChild = Path.Combine(validationParent, "DBFilesClient"); Directory.CreateDirectory(validationChild); File.Copy(animationPath, Path.Combine(validationChild, "AnimationData.dbc"));
+try
+{
+    _ = DbcCorpusValidator.Validate(args[0], validationParent, verifyRoundTrip: false);
+    throw new InvalidOperationException("Zero-file top-directory DBC validation succeeded unexpectedly.");
+}
+catch (InvalidDataException ex) when (ex.Message.Contains("No DBC files", StringComparison.Ordinal)) { }
+var recursiveValidation = DbcCorpusValidator.Validate(args[0], validationParent, verifyRoundTrip: false, recursive: true);
+if (recursiveValidation.Count != 1 || !Path.GetFileName(recursiveValidation[0].Path).Equals("AnimationData.dbc", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Recursive DBC validation did not discover the nested corpus.");
 Directory.Delete(layerRoot, true);
 
 Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, layered comparison, manifest build, and MPQ workflows.");

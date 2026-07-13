@@ -81,16 +81,19 @@ static int Dbc(string[] args)
         Console.Error.WriteLine($"Created promoted DBC: {Path.GetFullPath(outputPath)}");
         return 0;
     }
-    if (args.Length is 3 or 4 && args[0] == "validate")
+    if (args.Length >= 3 && args[0] == "validate")
     {
-        var strict = args.Length == 4 && args[3].Equals("--strict", StringComparison.OrdinalIgnoreCase);
-        if (args.Length == 4 && !strict) return Fail("Unknown validate option. Supported: --strict");
-        var results = DbcCorpusValidator.Validate(args[1], args[2]);
+        var options = args[3..];
+        var unknown = options.Where(option => !option.Equals("--strict", StringComparison.OrdinalIgnoreCase) && !option.Equals("--recursive", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown validate option: {unknown[0]}. Supported: --strict, --recursive");
+        var strict = options.Any(option => option.Equals("--strict", StringComparison.OrdinalIgnoreCase));
+        var recursive = options.Any(option => option.Equals("--recursive", StringComparison.OrdinalIgnoreCase));
+        var results = DbcCorpusValidator.Validate(args[1], args[2], recursive: recursive);
         foreach (var result in results) Console.WriteLine($"{(result.Skipped ? "SKIP" : !result.Passed ? "FAIL" : result.Warning ? "WARN" : "PASS")}\t{result.Rows}\t{result.Fields}\t{result.Path}\t{result.Message}");
         Console.Error.WriteLine($"Validated {results.Count:N0} DBC paths: {results.Count(result => result.Passed && !result.Skipped && !result.Warning):N0} named-schema passes, {results.Count(result => result.Warning):N0} fallbacks, {results.Count(result => result.Skipped):N0} skipped, {results.Count(result => !result.Passed):N0} failed.");
         return results.All(result => result.Passed) && (!strict || results.All(result => !result.Warning)) ? 0 : 1;
     }
-    if (args.Length != 2 || args[0] != "info") return Fail("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml>\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>");
+    if (args.Length != 2 || args[0] != "info") return Fail("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml>\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>");
     var file = WdbcFile.Load(args[1]);
     Console.WriteLine($"Path\t{Path.GetFullPath(args[1])}");
     Console.WriteLine($"Rows\t{file.RowCount}"); Console.WriteLine($"Fields\t{file.FieldCount}"); Console.WriteLine($"StringBytes\t{file.StringTableSize}");
@@ -137,7 +140,7 @@ static int Mpq(string[] args)
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> <output-folder>");
+    Console.WriteLine("WoW Crucible CLI\n\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> <output-folder>");
     return 0;
 }
 

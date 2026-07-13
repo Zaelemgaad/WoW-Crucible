@@ -43,7 +43,7 @@ The client build is fixed, but server integration will not be tied to an old rep
 
 ```text
 wowcrucible dbc info Spell.dbc
-wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder [--strict]
+wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder [--strict] [--recursive]
 wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).xml"
 wowcrucible dbc promote apply base\Spell.dbc override\Spell.dbc schema.xml selection.dbc-promotion.json output\Spell.dbc
 wowcrucible mpq list patch.MPQ [filter]

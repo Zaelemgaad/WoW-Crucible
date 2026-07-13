@@ -4,11 +4,16 @@ public sealed record DbcValidationResult(string Path, bool Passed, bool Skipped,
 
 public static class DbcCorpusValidator
 {
-    public static IReadOnlyList<DbcValidationResult> Validate(string schemaPath, string dbcDirectory, bool verifyRoundTrip = true)
+    public static IReadOnlyList<DbcValidationResult> Validate(string schemaPath, string dbcDirectory, bool verifyRoundTrip = true, bool recursive = false)
     {
+        dbcDirectory = Path.GetFullPath(dbcDirectory);
+        if (!Directory.Exists(dbcDirectory)) throw new DirectoryNotFoundException($"DBC validation directory does not exist: {dbcDirectory}");
         var schema = DbcSchemaCatalog.Load(schemaPath);
         var results = new List<DbcValidationResult>();
-        foreach (var path in Directory.EnumerateFiles(dbcDirectory, "*.dbc").Order(StringComparer.OrdinalIgnoreCase))
+        var paths = Directory.EnumerateFiles(dbcDirectory, "*.dbc", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (paths.Length == 0)
+            throw new InvalidDataException($"No DBC files were found in '{dbcDirectory}' ({(recursive ? "recursive" : "top directory only")}).{(recursive ? string.Empty : " Point to the DBC directory or use --recursive.")}");
+        foreach (var path in paths)
         {
             if (new FileInfo(path).Length == 0) { results.Add(new(path, true, true, false, "Empty placeholder", 0, 0)); continue; }
             string? temp = null;
