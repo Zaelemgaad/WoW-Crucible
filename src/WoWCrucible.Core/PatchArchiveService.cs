@@ -49,6 +49,7 @@ public static class PatchInputMapper
 
 public sealed class PatchArchiveService
 {
+    public const long MaximumSafeUpdateBytes = 2L * 1024 * 1024 * 1024;
     private const uint CreateListFile = 0x00100000;
     private const uint CreateArchiveV2 = 0x01000000;
     private const uint FileCompress = 0x00000200;
@@ -150,6 +151,8 @@ public sealed class PatchArchiveService
     {
         archivePath = Path.GetFullPath(archivePath);
         if (!File.Exists(archivePath)) throw new FileNotFoundException("The MPQ patch does not exist.", archivePath);
+        if (new FileInfo(archivePath).Length > MaximumSafeUpdateBytes)
+            throw new InvalidOperationException($"Refusing to copy-update this {new FileInfo(archivePath).Length / (1024d * 1024 * 1024):0.##} GB archive. Build a small manifest-driven patch MPQ instead; large source layers must remain immutable.");
         var entries = ValidateEntries(sourceEntries);
         var tempPath = archivePath + ".tmp";
         File.Copy(archivePath, tempPath, true);

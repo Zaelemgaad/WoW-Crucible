@@ -23,13 +23,15 @@ public sealed class PatchBuilderForm : Form
         bar.Controls.Add(MakeButton("Add Files", (_, _) => AddFiles()));
         bar.Controls.Add(MakeButton("Add Folder", (_, _) => AddFolder()));
         bar.Controls.Add(MakeButton("Open Existing MPQ", (_, _) => OpenExistingPatch()));
+        bar.Controls.Add(MakeButton("Load Manifest", (_, _) => LoadManifest()));
+        bar.Controls.Add(MakeButton("Save Manifest", (_, _) => SaveManifest()));
         bar.Controls.Add(MakeButton("Remove Selected", (_, _) => RemoveSelected()));
         bar.Controls.Add(MakeButton("Build MPQ", (_, _) => BuildPatch()));
 
         _hint.Dock = DockStyle.Bottom;
         _hint.Height = 34;
         _hint.Padding = new(8);
-        _hint.Text = "Drop DBC files or folder trees here. Raw DBC files map to DBFilesClient\\. Internal paths can be edited before building.";
+        _hint.Text = "Build a tiny patch containing only these files. Large base/mod archives are immutable sources, not update targets.";
 
         _grid.Dock = DockStyle.Fill;
         _grid.AllowUserToAddRows = false;
@@ -71,6 +73,32 @@ public sealed class PatchBuilderForm : Form
         _hint.Text = $"Updating {Path.GetFileName(_existingPatch)}. Added files replace matching internal paths; all other existing files remain intact.";
     }
 
+    private void SaveManifest()
+    {
+        try
+        {
+            _grid.EndEdit();
+            using var dialog = new SaveFileDialog { InitialDirectory = Directory.Exists(_settings.ClientDataPath) ? _settings.ClientDataPath : string.Empty, Filter = "WoW Crucible patch manifest (*.crucible-patch.json)|*.crucible-patch.json|JSON (*.json)|*.json", FileName = "classless.crucible-patch.json" };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            PatchManifestService.Save(dialog.FileName, Path.GetFileNameWithoutExtension(dialog.FileName), "patch-W.mpq", EntriesFromGrid());
+            _hint.Text = $"Saved manifest: {dialog.FileName}";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+
+    private void LoadManifest()
+    {
+        try
+        {
+            using var dialog = new OpenFileDialog { InitialDirectory = Directory.Exists(_settings.ClientDataPath) ? _settings.ClientDataPath : string.Empty, Filter = "WoW Crucible patch manifest (*.crucible-patch.json)|*.crucible-patch.json|JSON (*.json)|*.json" };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var manifest = PatchManifestService.Load(dialog.FileName);
+            _entries.Clear(); _entries.AddRange(manifest.Entries); _existingPatch = null; RefreshGrid();
+            _hint.Text = $"Loaded {manifest.Name}: {manifest.Entries.Count:N0} changed file(s), output {manifest.OutputFileName}.";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+
     private void AddFolder()
     {
         using var dialog = new FolderBrowserDialog { Description = "Select a folder tree to preserve inside the MPQ", UseDescriptionForTitle = true };
@@ -110,8 +138,8 @@ public sealed class PatchBuilderForm : Form
     {
         try
         {
-            var entries = _grid.Rows.Cast<DataGridViewRow>().Select(row => new PatchEntry(
-                Convert.ToString(row.Cells[0].Value)!, Convert.ToString(row.Cells[1].Value)!)).ToArray();
+            _grid.EndEdit();
+            var entries = EntriesFromGrid();
             var outputPath = _existingPatch;
             if (outputPath is null)
             {
@@ -128,6 +156,9 @@ public sealed class PatchBuilderForm : Form
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { Cursor = Cursors.Default; }
     }
+
+    private PatchEntry[] EntriesFromGrid() => _grid.Rows.Cast<DataGridViewRow>().Select(row => new PatchEntry(
+        Convert.ToString(row.Cells[0].Value)!, Convert.ToString(row.Cells[1].Value)!)).ToArray();
 
     private void OnDragEnter(object? sender, DragEventArgs e) => e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
     private void OnDragDrop(object? sender, DragEventArgs e) { if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths) AddPaths(paths); }

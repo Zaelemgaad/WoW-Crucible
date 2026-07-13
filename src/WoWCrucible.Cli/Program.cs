@@ -8,17 +8,39 @@ try
     {
         "dbc" => Dbc(args[1..]),
         "mpq" => Mpq(args[1..]),
+        "manifest" => Manifest(args[1..]),
         _ => Fail($"Unknown command: {args[0]}")
     };
 }
+
 catch (Exception ex)
 {
     Console.Error.WriteLine($"ERROR: {ex.Message}");
     return 1;
 }
 
+static int Manifest(string[] args)
+{
+    switch (args)
+    {
+        case ["create", var manifestPath, var outputFile, .. var inputs] when inputs.Length > 0:
+            PatchManifestService.Save(manifestPath, Path.GetFileNameWithoutExtension(manifestPath), outputFile, PatchInputMapper.Map(inputs)); return 0;
+        case ["build", var manifestPath, var outputDirectory]:
+            PatchManifestService.Build(manifestPath, outputDirectory); return 0;
+        default:
+            return Fail("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...>\n  wowcrucible manifest build <manifest.json> <output-folder>");
+    }
+}
+
 static int Dbc(string[] args)
 {
+    if (args.Length == 3 && args[0] == "validate")
+    {
+        var results = DbcCorpusValidator.Validate(args[1], args[2]);
+        foreach (var result in results) Console.WriteLine($"{(result.Skipped ? "SKIP" : result.Passed ? "PASS" : "FAIL")}\t{result.Rows}\t{result.Fields}\t{result.Path}\t{result.Message}");
+        Console.Error.WriteLine($"Validated {results.Count:N0} DBC paths: {results.Count(result => result.Passed && !result.Skipped):N0} passed, {results.Count(result => result.Skipped):N0} skipped, {results.Count(result => !result.Passed):N0} failed.");
+        return results.All(result => result.Passed) ? 0 : 1;
+    }
     if (args.Length != 2 || args[0] != "info") return Fail("Usage: wowcrucible dbc info <file.dbc>");
     var file = WdbcFile.Load(args[1]);
     Console.WriteLine($"Path\t{Path.GetFullPath(args[1])}");
@@ -57,7 +79,7 @@ static int Mpq(string[] args)
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  dbc info <file.dbc>\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <archive.mpq> <files/folders...>");
+    Console.WriteLine("WoW Crucible CLI\n\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder>\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...>\n  manifest build <manifest.json> <output-folder>");
     return 0;
 }
 

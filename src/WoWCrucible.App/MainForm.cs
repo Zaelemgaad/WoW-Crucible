@@ -49,9 +49,10 @@ public sealed class MainForm : Form
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("Build Patch MPQ", (_, _) => OpenPatchBuilder()));
         tools.Items.Add(Button("Browse/Extract MPQ", (_, _) => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }));
+        tools.Items.Add(Button("Layered DBCs", (_, _) => OpenLayeredDbcs()));
         tools.Items.Add(Button("Sync to Core Data", (_, _) => SyncToCoreData()));
         tools.Items.Add(Button("Open Logs", (_, _) => CrashLogger.OpenDirectory()));
-        tools.Items.Add(Button("Paths", (_, _) => { using var form = new SettingsForm(_settings); form.ShowDialog(this); }));
+        tools.Items.Add(Button("Paths", (_, _) => { using var form = new SettingsForm(_settings); if (form.ShowDialog(this) == DialogResult.OK) _schemaPath = FindSchemaPath(_settings.SchemaDefinitionPath); }));
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(new ToolStripLabel("Search all fields:"));
         tools.Items.Add(_search);
@@ -105,7 +106,7 @@ public sealed class MainForm : Form
                 OpenPatchBuilder(paths);
         };
 
-        _schemaPath = FindSchemaPath();
+        _schemaPath = FindSchemaPath(_settings.SchemaDefinitionPath);
         if (!string.IsNullOrWhiteSpace(initialFile) && File.Exists(initialFile))
             Shown += (_, _) =>
             {
@@ -134,6 +135,16 @@ public sealed class MainForm : Form
         var initial = droppedPaths ?? (_file is null ? null : new[] { _file.SourcePath });
         using var builder = new PatchBuilderForm(_settings, initial);
         builder.ShowDialog(this);
+    }
+
+    private void OpenLayeredDbcs()
+    {
+        using var layered = new LayeredDbcForm(_settings, _schemaPath, LoadFile, paths =>
+        {
+            using var builder = new PatchBuilderForm(_settings, paths);
+            builder.ShowDialog(this);
+        });
+        layered.ShowDialog(this);
     }
 
     private void SyncToCoreData()
@@ -517,13 +528,18 @@ public sealed class MainForm : Form
         }
     }
 
-    private static string? FindSchemaPath()
+    private static string? FindSchemaPath(string? configuredPath)
     {
+        if (!string.IsNullOrWhiteSpace(configuredPath) && File.Exists(configuredPath)) return Path.GetFullPath(configuredPath);
+        const string fileName = "WotLK 3.3.5 (12340).xml";
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
-            var candidate = Path.Combine(directory.FullName, "WDBXEditor", "WDBXEditor", "Definitions", "WotLK 3.3.5 (12340).xml");
-            if (File.Exists(candidate)) return candidate;
+            foreach (var relative in new[] { Path.Combine("Definitions", fileName), Path.Combine("WDBXEditor", "WDBXEditor", "Definitions", fileName), Path.Combine("WDBX (wow edit)", "Definitions", fileName) })
+            {
+                var candidate = Path.Combine(directory.FullName, relative);
+                if (File.Exists(candidate)) return candidate;
+            }
             directory = directory.Parent;
         }
         return null;

@@ -27,18 +27,25 @@ The client build is fixed, but server integration will not be tied to an old rep
 - Displays editable internal MPQ paths and preserves folder hierarchy.
 - Opens existing MPQ patches and safely adds or replaces files while keeping a `.bak` copy.
 - Remembers server `data\\dbc` and WoW client `Data` paths for future open, sync, and patch dialogs.
+- Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
 - Writes handled and fatal crash details to `%LOCALAPPDATA%\\WoWCrucible\\Logs` (also available through **Open Logs**).
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
 - Ships a scriptable `wowcrucible.exe` CLI for DBC information and MPQ list/extract/create/update operations.
+- Compares layered DBC directories as base-only, override-only, identical, or genuinely overridden, with added/removed/modified row and field counts.
+- Saves portable patch manifests and builds fresh, tiny MPQs containing only listed DBC/UI changes.
+- Refuses copy-update operations on archives larger than 2 GB; giant mod/client layers are immutable inputs, never working patch targets.
 
 ## Command line
 
 ```text
 wowcrucible dbc info Spell.dbc
+wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder
 wowcrucible mpq list patch.MPQ [filter]
 wowcrucible mpq extract patch.MPQ output-folder [filter]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
 wowcrucible mpq update patch-W.MPQ file-or-folder [...]
+wowcrucible manifest create classless.json patch-W.mpq changed-files-folder
+wowcrucible manifest build classless.json output-folder
 ```
 
 MPQ listing can only display paths known to the archive's internal `(listfile)`. WoW client and normal mod archives generally include one; hash-only unnamed entries can still exist but cannot be assigned their original names by any MPQ browser without an external listfile.
