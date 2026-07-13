@@ -9,6 +9,10 @@ var builtInSchema = DbcSchemaCatalog.CreateBuiltIn12340();
 var builtInSpellColumns = builtInSchema.GetColumns("Spell", 234);
 if (builtInSpellColumns[136].Name != "Name[enUS]" || builtInSpellColumns[233].Name != "SpellDifficultyID")
     throw new InvalidOperationException("Built-in Spell.dbc schema is incomplete.");
+if (builtInSchema.ResolveColumns("NotARealTable", 4).MatchKind != DbcSchemaMatchKind.MissingTableFallback ||
+    builtInSchema.ResolveColumns("Spell", 233).MatchKind != DbcSchemaMatchKind.FieldCountMismatchFallback ||
+    builtInSchema.ResolveColumns("Spell", 234).MatchKind != DbcSchemaMatchKind.NamedMatch)
+    throw new InvalidOperationException("Schema resolution did not expose named/fallback match status.");
 var schoolSemantic = DbcSemanticCatalog.Get("Spell", 225) ?? throw new InvalidOperationException("Spell school decoding is missing.");
 if (!schoolSemantic.Format(0x44).Contains("Fire") || !schoolSemantic.Format(0x44).Contains("Arcane") || schoolSemantic.Parse("Fire | Arcane") != 0x44)
     throw new InvalidOperationException("Spell school flag decoding/encoding failed.");
@@ -146,6 +150,51 @@ if (layers.Single(entry => entry.Name == "AnimationData.dbc").Status != DbcLayer
     throw new InvalidOperationException("Layer classification failed.");
 var layerDetail = DbcLayerComparer.CompareFiles(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns);
 if (layerDetail.ModifiedRows != 1 || layerDetail.ModifiedCells != 1) throw new InvalidOperationException("Detailed layered row comparison failed.");
+
+var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+try
+{
+    _ = DbcLayerComparer.CompareFiles(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns, cancelled.Token);
+    throw new InvalidOperationException("Cancelled layered comparison completed unexpectedly.");
+}
+catch (OperationCanceledException) { }
+
+var promotionDifferences = DbcPromotionService.GetDifferences(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns);
+if (promotionDifferences.Count != 1 || promotionDifferences[0].Id != WdbcFile.Load(castTimesSource).GetRaw(0, castColumns[0]))
+    throw new InvalidOperationException("ID-keyed promotion differences were incorrect.");
+var promotionOperation = new DbcPromotionOperation(promotionDifferences[0].Id, [promotionDifferences[0].ColumnName]);
+var promotionManifestPath = Path.Combine(layerRoot, "cast-times.crucible-promotion.json");
+DbcPromotionService.SaveManifest(promotionManifestPath, "SpellCastTimes", castColumns[0].Name, [promotionOperation]);
+var promotionManifest = DbcPromotionService.LoadManifest(promotionManifestPath);
+var promotedCastTimesPath = Path.Combine(layerRoot, "SpellCastTimes.promoted.dbc");
+DbcPromotionService.Apply(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), promotedCastTimesPath, castColumns, promotionManifest);
+var promotedCastTimes = WdbcFile.Load(promotedCastTimesPath);
+if (promotedCastTimes.GetRaw(0, castColumns[1]) != castTimesOverride.GetRaw(0, castColumns[1]))
+    throw new InvalidOperationException("Selected field promotion did not persist.");
+
+var semanticBasePath = Path.Combine(layerRoot, "AnimationData.semantic-base.dbc");
+var semanticOverridePath = Path.Combine(layerRoot, "AnimationData.semantic-override.dbc");
+var semanticBase = WdbcFile.Load(animationPath); semanticBase.SetDisplayValue(0, nameColumn, "Crucible_Same_Text"); semanticBase.Save(semanticBasePath, false);
+var semanticOverride = WdbcFile.Load(animationPath); semanticOverride.SetDisplayValue(1, nameColumn, "Crucible_Padding_Text"); semanticOverride.SetDisplayValue(0, nameColumn, "Crucible_Same_Text"); semanticOverride.Save(semanticOverridePath, false);
+if (WdbcFile.Load(semanticBasePath).GetRaw(0, nameColumn) == WdbcFile.Load(semanticOverridePath).GetRaw(0, nameColumn))
+    throw new InvalidOperationException("Semantic comparison fixture did not create distinct string offsets.");
+var semanticDetail = DbcLayerComparer.CompareFiles(semanticBasePath, semanticOverridePath, animationColumns);
+if (semanticDetail.ModifiedCells != 1) throw new InvalidOperationException("Layer comparison treated equal decoded strings at different offsets as changes.");
+var stringDifferences = DbcPromotionService.GetDifferences(semanticBasePath, semanticOverridePath, animationColumns);
+var changedString = stringDifferences.Single(difference => difference.Id == semanticOverride.GetRaw(1, idColumn) && difference.ColumnIndex == nameColumn.Index);
+var stringManifest = new DbcPromotionManifest(1, "AnimationData.semantic-base", idColumn.Name, [new(changedString.Id, [nameColumn.Name])]);
+// Manifest table names deliberately follow the selected base filename, allowing arbitrary working-copy names.
+var promotedAnimationPath = Path.Combine(layerRoot, "AnimationData.promoted.dbc");
+DbcPromotionService.Apply(semanticBasePath, semanticOverridePath, promotedAnimationPath, animationColumns, stringManifest);
+var promotedAnimation = WdbcFile.Load(promotedAnimationPath);
+if (promotedAnimation.GetString(promotedAnimation.GetRaw(1, nameColumn)) != "Crucible_Padding_Text")
+    throw new InvalidOperationException("Promoted string was not re-interned into the destination table.");
+
+var stagingRoot = Path.Combine(layerRoot, "my-staging-folder"); Directory.CreateDirectory(Path.Combine(stagingRoot, "Interface", "FrameXML"));
+File.WriteAllText(Path.Combine(stagingRoot, "Interface", "FrameXML", "Test.lua"), "-- test");
+var stagedEntry = PatchInputMapper.Map([stagingRoot]).Single();
+if (stagedEntry.ArchivePath != "Interface\\FrameXML\\Test.lua" || PatchInputMapper.AssessArchivePath(stagedEntry.ArchivePath).HasWarning)
+    throw new InvalidOperationException("Staging folder archive-root mapping failed.");
 
 var manifestPath = Path.Combine(layerRoot, "classless.crucible-patch.json");
 PatchManifestService.Save(manifestPath, "Classless test", "patch-X.mpq", PatchInputMapper.Map([Path.Combine(overrideLayer, "SpellCastTimes.dbc")]));

@@ -31,17 +31,21 @@ The client build is fixed, but server integration will not be tied to an old rep
 - Writes handled and fatal crash details to `%LOCALAPPDATA%\\WoWCrucible\\Logs` (also available through **Open Logs**).
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
 - Ships a scriptable `wowcrucible.exe` CLI for DBC information and MPQ list/extract/create/update operations.
-- Compares layered DBC directories as base-only, override-only, identical, or genuinely overridden, with added/removed/modified row and field counts.
+- Compares layered DBC directories as base-only, override-only, identical, or genuinely overridden, with cancellable semantic row/field comparison (decoded strings do not differ merely because their offsets moved).
+- Promotes selected fields or complete rows from an override DBC into an output DBC by record ID, safely re-interns strings, and saves/reapplies semantic promotion manifests.
 - Saves portable patch manifests and builds fresh, tiny MPQs containing only listed DBC/UI changes.
+- Treats an imported folder as the MPQ staging root and previews every editable source-to-archive mapping with suspicious-root warnings before building.
 - Refuses copy-update operations on archives larger than 2 GB; giant mod/client layers are immutable inputs, never working patch targets.
 
 ## Command line
 
 ```text
 wowcrucible dbc info Spell.dbc
-wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder
+wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder [--strict]
+wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).xml"
+wowcrucible dbc promote apply base\Spell.dbc override\Spell.dbc schema.xml selection.dbc-promotion.json output\Spell.dbc
 wowcrucible mpq list patch.MPQ [filter]
-wowcrucible mpq extract patch.MPQ output-folder [filter]
+wowcrucible mpq extract patch.MPQ output-folder [filter] [--quiet|--progress=N]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
 wowcrucible mpq update patch-W.MPQ file-or-folder [...]
 wowcrucible manifest create classless.json patch-W.mpq changed-files-folder

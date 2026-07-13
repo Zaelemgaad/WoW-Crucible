@@ -5,9 +5,16 @@ namespace WoWCrucible.Core;
 
 public sealed record PatchEntry(string SourcePath, string ArchivePath);
 public sealed record MpqFileEntry(string ArchivePath, long Size, long CompressedSize, uint Flags, uint Locale);
+public sealed record PatchPathAssessment(bool HasWarning, string Message);
 
 public static class PatchInputMapper
 {
+    private static readonly HashSet<string> KnownClientRoots = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "DBFilesClient", "Interface", "Character", "Creature", "World", "Textures", "Sound", "Fonts",
+        "Cameras", "Dungeons", "Environments", "Item", "Particles", "Spells", "Tileset", "XTextures"
+    };
+
     public static IReadOnlyList<PatchEntry> Map(IEnumerable<string> paths)
     {
         var result = new Dictionary<string, PatchEntry>(StringComparer.OrdinalIgnoreCase);
@@ -24,13 +31,14 @@ public static class PatchInputMapper
             }
             if (!Directory.Exists(fullPath)) continue;
 
-            var parent = Directory.GetParent(fullPath)?.FullName ?? fullPath;
+            var selectedRootName = Path.GetFileName(Path.TrimEndingDirectorySeparator(fullPath));
             foreach (var file in Directory.EnumerateFiles(fullPath, "*", SearchOption.AllDirectories))
             {
-                var relative = Path.GetRelativePath(parent, file);
+                var relative = Path.GetRelativePath(fullPath, file);
                 var parts = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                var dbcRoot = Array.FindIndex(parts, part => part.Equals("DBFilesClient", StringComparison.OrdinalIgnoreCase));
-                if (dbcRoot >= 0) relative = Path.Combine(parts[dbcRoot..]);
+                var knownRoot = Array.FindIndex(parts, part => KnownClientRoots.Contains(part));
+                if (knownRoot >= 0) relative = Path.Combine(parts[knownRoot..]);
+                else if (KnownClientRoots.Contains(selectedRootName)) relative = Path.Combine(selectedRootName, relative);
                 var archivePath = NormalizeArchivePath(relative);
                 result[archivePath] = new(Path.GetFullPath(file), archivePath);
             }
@@ -44,6 +52,15 @@ public static class PatchInputMapper
         if (string.IsNullOrWhiteSpace(normalized) || normalized.Split('\\').Any(part => part is "" or "." or ".."))
             throw new ArgumentException($"Invalid MPQ path: {path}", nameof(path));
         return normalized;
+    }
+
+    public static PatchPathAssessment AssessArchivePath(string path)
+    {
+        var normalized = NormalizeArchivePath(path);
+        var root = normalized.Split('\\', 2)[0];
+        if (KnownClientRoots.Contains(root)) return new(false, "Recognized client root");
+        if (!normalized.Contains('\\')) return new(true, "Top-level file; verify that WoW expects it at the MPQ root");
+        return new(true, $"Unrecognized client root '{root}'; verify the archive path");
     }
 }
 

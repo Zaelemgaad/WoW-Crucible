@@ -39,7 +39,9 @@ public sealed class PatchBuilderForm : Form
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Source", HeaderText = "Source file", ReadOnly = true, FillWeight = 58 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Archive", HeaderText = "Path inside MPQ", FillWeight = 42 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Archive", HeaderText = "Path inside MPQ (editable)", FillWeight = 34 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "PathStatus", HeaderText = "Path check", ReadOnly = true, FillWeight = 20 });
+        _grid.CellEndEdit += (_, _) => RefreshPathAssessments();
 
         Controls.Add(_grid);
         Controls.Add(_hint);
@@ -123,8 +125,8 @@ public sealed class PatchBuilderForm : Form
     {
         _grid.Rows.Clear();
         foreach (var entry in _entries.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase))
-            _grid.Rows.Add(entry.SourcePath, entry.ArchivePath);
-        _hint.Text = $"{_entries.Count:N0} file(s). Edit any internal path if needed, then build the patch MPQ.";
+            _grid.Rows.Add(entry.SourcePath, entry.ArchivePath, string.Empty);
+        RefreshPathAssessments();
     }
 
     private void RemoveSelected()
@@ -140,6 +142,13 @@ public sealed class PatchBuilderForm : Form
         {
             _grid.EndEdit();
             var entries = EntriesFromGrid();
+            var warnings = entries.Select(entry => (entry, check: PatchInputMapper.AssessArchivePath(entry.ArchivePath))).Where(item => item.check.HasWarning).ToArray();
+            if (warnings.Length > 0)
+            {
+                var examples = string.Join("\n", warnings.Take(6).Select(item => $"• {item.entry.ArchivePath}: {item.check.Message}"));
+                if (warnings.Length > 6) examples += $"\n• …and {warnings.Length - 6:N0} more";
+                if (MessageBox.Show(this, $"{warnings.Length:N0} archive path(s) need review:\n\n{examples}\n\nBuild anyway?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            }
             var outputPath = _existingPatch;
             if (outputPath is null)
             {
@@ -159,6 +168,28 @@ public sealed class PatchBuilderForm : Form
 
     private PatchEntry[] EntriesFromGrid() => _grid.Rows.Cast<DataGridViewRow>().Select(row => new PatchEntry(
         Convert.ToString(row.Cells[0].Value)!, Convert.ToString(row.Cells[1].Value)!)).ToArray();
+
+    private void RefreshPathAssessments()
+    {
+        var warnings = 0;
+        foreach (DataGridViewRow row in _grid.Rows)
+        {
+            try
+            {
+                var assessment = PatchInputMapper.AssessArchivePath(Convert.ToString(row.Cells[1].Value) ?? string.Empty);
+                row.Cells[2].Value = assessment.Message;
+                row.DefaultCellStyle.BackColor = assessment.HasWarning ? Color.MistyRose : _grid.DefaultCellStyle.BackColor;
+                if (assessment.HasWarning) warnings++;
+            }
+            catch (Exception ex)
+            {
+                row.Cells[2].Value = ex.Message;
+                row.DefaultCellStyle.BackColor = Color.MistyRose;
+                warnings++;
+            }
+        }
+        _hint.Text = $"{_grid.Rows.Count:N0} file(s), {warnings:N0} path warning(s). Review the complete source-to-MPQ mapping; internal paths are editable.";
+    }
 
     private void OnDragEnter(object? sender, DragEventArgs e) => e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
     private void OnDragDrop(object? sender, DragEventArgs e) { if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths) AddPaths(paths); }

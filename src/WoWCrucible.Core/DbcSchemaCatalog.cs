@@ -2,6 +2,12 @@ using System.Xml.Linq;
 
 namespace WoWCrucible.Core;
 
+public enum DbcSchemaMatchKind { NamedMatch, MissingTableFallback, FieldCountMismatchFallback }
+public sealed record DbcSchemaResolution(IReadOnlyList<DbcColumn> Columns, DbcSchemaMatchKind MatchKind, int? DefinedFieldCount)
+{
+    public bool UsedFallback => MatchKind != DbcSchemaMatchKind.NamedMatch;
+}
+
 public sealed class DbcSchemaCatalog
 {
     private readonly Dictionary<string, IReadOnlyList<DbcColumn>> _tables;
@@ -94,13 +100,17 @@ public sealed class DbcSchemaCatalog
     }
 
     public IReadOnlyList<DbcColumn> GetColumns(string tableName, int physicalFieldCount)
+        => ResolveColumns(tableName, physicalFieldCount).Columns;
+
+    public DbcSchemaResolution ResolveColumns(string tableName, int physicalFieldCount)
     {
         if (_tables.TryGetValue(tableName, out var defined) && defined.Count == physicalFieldCount)
-            return defined;
+            return new(defined, DbcSchemaMatchKind.NamedMatch, defined.Count);
 
-        return Enumerable.Range(0, physicalFieldCount)
+        var fallback = Enumerable.Range(0, physicalFieldCount)
             .Select(i => new DbcColumn(i, i * 4, 4, i == 0 ? "ID" : $"Field_{i}", DbcValueType.Raw32, i == 0))
             .ToArray();
+        return new(fallback, defined is null ? DbcSchemaMatchKind.MissingTableFallback : DbcSchemaMatchKind.FieldCountMismatchFallback, defined?.Count);
     }
 
     private static string LocaleName(int index) => index switch

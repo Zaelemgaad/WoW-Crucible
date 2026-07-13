@@ -26,7 +26,7 @@ public static class DbcLayerComparer
         return result;
     }
 
-    public static DbcRowComparison CompareFiles(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns)
+    public static DbcRowComparison CompareFiles(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns, CancellationToken cancellationToken = default)
     {
         var baseFile = WdbcFile.Load(basePath); var overrideFile = WdbcFile.Load(overridePath);
         if (baseFile.FieldCount != overrideFile.FieldCount || baseFile.RecordSize != overrideFile.RecordSize)
@@ -40,12 +40,20 @@ public static class DbcLayerComparer
         var modifiedRows = 0; long modifiedCells = 0;
         foreach (var id in baseRows.Keys.Intersect(overrideRows.Keys))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var changed = 0;
             foreach (var column in columns)
-                if (baseFile.GetRaw(baseRows[id], column) != overrideFile.GetRaw(overrideRows[id], column)) changed++;
+                if (!ValuesEqual(baseFile, baseRows[id], overrideFile, overrideRows[id], column)) changed++;
             if (changed > 0) { modifiedRows++; modifiedCells += changed; }
         }
         return new(added, removed, modifiedRows, modifiedCells);
+    }
+
+    private static bool ValuesEqual(WdbcFile left, int leftRow, WdbcFile right, int rightRow, DbcColumn column)
+    {
+        if (column.Type == DbcValueType.StringOffset)
+            return left.GetString(left.GetRaw(leftRow, column)).Equals(right.GetString(right.GetRaw(rightRow, column)), StringComparison.Ordinal);
+        return left.GetRaw(leftRow, column) == right.GetRaw(rightRow, column);
     }
 
     private static bool FilesEqual(string left, string right)
