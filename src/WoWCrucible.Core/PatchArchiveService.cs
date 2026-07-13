@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 namespace WoWCrucible.Core;
 
 public sealed record PatchEntry(string SourcePath, string ArchivePath);
+public sealed record MpqFileEntry(string ArchivePath, long Size, long CompressedSize, uint Flags, uint Locale);
 
 public static class PatchInputMapper
 {
@@ -95,6 +96,55 @@ public sealed class PatchArchiveService
         finally { Native.SFileCloseArchive(archive); }
     }
 
+    public IReadOnlyList<MpqFileEntry> ListFiles(string archivePath, string mask = "*")
+    {
+        archivePath = Path.GetFullPath(archivePath);
+        if (!Native.SFileOpenArchive(archivePath, 0, 0, out var archive)) ThrowNative("open the MPQ archive");
+        var result = new List<MpqFileEntry>();
+        try
+        {
+            var data = new Native.SFileFindData();
+            var find = Native.SFileFindFirstFile(archive, mask, ref data, null);
+            if (find == IntPtr.Zero) return result;
+            try
+            {
+                do
+                {
+                    if (!string.IsNullOrWhiteSpace(data.FileName))
+                        result.Add(new(data.FileName, data.FileSize, data.CompressedSize, data.FileFlags, data.Locale));
+                    data = new Native.SFileFindData();
+                } while (Native.SFileFindNextFile(find, ref data));
+            }
+            finally { Native.SFileFindClose(find); }
+        }
+        finally { Native.SFileCloseArchive(archive); }
+        return result.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public void Extract(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
+    {
+        archivePath = Path.GetFullPath(archivePath);
+        destinationRoot = Path.GetFullPath(destinationRoot);
+        Directory.CreateDirectory(destinationRoot);
+        var entries = files.ToArray();
+        if (!Native.SFileOpenArchive(archivePath, 0, 0, out var archive)) ThrowNative("open the MPQ archive");
+        try
+        {
+            for (var index = 0; index < entries.Length; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var internalPath = PatchInputMapper.NormalizeArchivePath(entries[index].ArchivePath);
+                var destination = Path.GetFullPath(Path.Combine(destinationRoot, internalPath.Replace('\\', Path.DirectorySeparatorChar)));
+                if (!destination.StartsWith(destinationRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"Unsafe archive path: {internalPath}");
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                if (!Native.SFileExtractFile(archive, internalPath, destination, 0)) ThrowNative($"extract '{internalPath}'");
+                progress?.Report((index + 1, entries.Length, internalPath));
+            }
+        }
+        finally { Native.SFileCloseArchive(archive); }
+    }
+
     public void Update(string archivePath, IEnumerable<PatchEntry> sourceEntries)
     {
         archivePath = Path.GetFullPath(archivePath);
@@ -135,24 +185,54 @@ public sealed class PatchArchiveService
 
     private static class Native
     {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+        internal struct SFileFindData
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string FileName;
+            public IntPtr PlainName;
+            public uint HashIndex;
+            public uint BlockIndex;
+            public uint FileSize;
+            public uint FileFlags;
+            public uint CompressedSize;
+            public uint FileTimeLo;
+            public uint FileTimeHi;
+            public uint Locale;
+        }
+
         [DllImport("StormLib.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
+        [return: MarshalAs(UnmanagedType.I1)]
         internal static extern bool SFileCreateArchive(string archiveName, uint createFlags, uint maxFileCount, out IntPtr archive);
 
         [DllImport("StormLib.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
+        [return: MarshalAs(UnmanagedType.I1)]
         internal static extern bool SFileOpenArchive(string archiveName, uint priority, uint flags, out IntPtr archive);
 
         [DllImport("StormLib.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
+        [return: MarshalAs(UnmanagedType.I1)]
         internal static extern bool SFileCloseArchive(IntPtr archive);
 
         [DllImport("StormLib.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
+        [return: MarshalAs(UnmanagedType.I1)]
         internal static extern bool SFileAddFileEx(IntPtr archive, string sourcePath, [MarshalAs(UnmanagedType.LPStr)] string archivePath, uint flags, uint compression, uint nextCompression);
 
         [DllImport("StormLib.dll", CharSet = CharSet.Ansi, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
+        [return: MarshalAs(UnmanagedType.I1)]
         internal static extern bool SFileHasFile(IntPtr archive, string archivePath);
+
+        [DllImport("StormLib.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+        internal static extern IntPtr SFileFindFirstFile(IntPtr archive, string mask, ref SFileFindData findData, [MarshalAs(UnmanagedType.LPTStr)] string? listFile);
+
+        [DllImport("StormLib.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static extern bool SFileFindNextFile(IntPtr find, ref SFileFindData findData);
+
+        [DllImport("StormLib.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static extern bool SFileFindClose(IntPtr find);
+
+        [DllImport("StormLib.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static extern bool SFileExtractFile(IntPtr archive, [MarshalAs(UnmanagedType.LPStr)] string internalPath, string destinationPath, uint searchScope);
     }
 }

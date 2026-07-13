@@ -106,7 +106,15 @@ var secondPatchEntry = PatchInputMapper.Map([files.First(path => Path.GetFileNam
 patchService.Update(mpqOutput, secondPatchEntry);
 if (!patchService.Contains(mpqOutput, "DBFilesClient\\AnimationData.dbc") || !patchService.Contains(mpqOutput, "DBFilesClient\\SpellCastTimes.dbc"))
     throw new InvalidOperationException("Updating an MPQ did not preserve its existing files.");
+var listed = patchService.ListFiles(mpqOutput);
+if (!listed.Any(entry => entry.ArchivePath.Equals("DBFilesClient\\AnimationData.dbc", StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("MPQ file enumeration did not find a known file.");
+var extractRoot = Path.Combine(Path.GetTempPath(), $"wow-crucible-extract-{Guid.NewGuid():N}");
+patchService.Extract(mpqOutput, extractRoot, listed.Where(entry => entry.ArchivePath.Equals("DBFilesClient\\SpellCastTimes.dbc", StringComparison.OrdinalIgnoreCase)));
+if (!File.Exists(Path.Combine(extractRoot, "DBFilesClient", "SpellCastTimes.dbc")))
+    throw new InvalidOperationException("MPQ extraction did not preserve the internal folder path.");
+Directory.Delete(extractRoot, true);
 File.Delete(mpqOutput);
 File.Delete(mpqOutput + ".bak");
 
-Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, and created/updated/reopened a patch MPQ.");
+Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, and created/listed/extracted/updated a patch MPQ.");

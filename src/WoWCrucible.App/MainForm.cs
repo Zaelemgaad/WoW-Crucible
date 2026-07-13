@@ -46,6 +46,7 @@ public sealed class MainForm : Form
         tools.Items.Add(Button("Delete Rows", (_, _) => DeleteRows()));
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("Build Patch MPQ", (_, _) => OpenPatchBuilder()));
+        tools.Items.Add(Button("Browse/Extract MPQ", (_, _) => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }));
         tools.Items.Add(Button("Sync to Core Data", (_, _) => SyncToCoreData()));
         tools.Items.Add(Button("Open Logs", (_, _) => CrashLogger.OpenDirectory()));
         tools.Items.Add(Button("Paths", (_, _) => { using var form = new SettingsForm(_settings); form.ShowDialog(this); }));
@@ -86,7 +87,11 @@ public sealed class MainForm : Form
         DragDrop += (_, e) =>
         {
             if (e.Data?.GetData(DataFormats.FileDrop) is not string[] { Length: > 0 } paths) return;
-            if (paths.All(path => File.Exists(path) && Path.GetExtension(path).Equals(".dbc", StringComparison.OrdinalIgnoreCase)))
+            if (paths.Length == 1 && Path.GetExtension(paths[0]).Equals(".mpq", StringComparison.OrdinalIgnoreCase))
+            {
+                using var browser = new MpqBrowserForm(_settings, paths[0]); browser.ShowDialog(this);
+            }
+            else if (paths.All(path => File.Exists(path) && Path.GetExtension(path).Equals(".dbc", StringComparison.OrdinalIgnoreCase)))
                 foreach (var path in paths) LoadFile(path);
             else
                 OpenPatchBuilder(paths);
@@ -94,7 +99,12 @@ public sealed class MainForm : Form
 
         _schemaPath = FindSchemaPath();
         if (!string.IsNullOrWhiteSpace(initialFile) && File.Exists(initialFile))
-            Shown += (_, _) => LoadFile(initialFile);
+            Shown += (_, _) =>
+            {
+                if (Path.GetExtension(initialFile).Equals(".mpq", StringComparison.OrdinalIgnoreCase))
+                { using var browser = new MpqBrowserForm(_settings, initialFile); browser.ShowDialog(this); }
+                else LoadFile(initialFile);
+            };
     }
 
     private static ToolStripButton Button(string text, EventHandler action)

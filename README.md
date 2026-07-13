@@ -27,6 +27,20 @@ The client build is fixed, but server integration will not be tied to an old rep
 - Opens existing MPQ patches and safely adds or replaces files while keeping a `.bak` copy.
 - Remembers server `data\\dbc` and WoW client `Data` paths for future open, sync, and patch dialogs.
 - Writes handled and fatal crash details to `%LOCALAPPDATA%\\WoWCrucible\\Logs` (also available through **Open Logs**).
+- Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
+- Ships a scriptable `wowcrucible.exe` CLI for DBC information and MPQ list/extract/create/update operations.
+
+## Command line
+
+```text
+wowcrucible dbc info Spell.dbc
+wowcrucible mpq list patch.MPQ [filter]
+wowcrucible mpq extract patch.MPQ output-folder [filter]
+wowcrucible mpq create patch-W.MPQ file-or-folder [...]
+wowcrucible mpq update patch-W.MPQ file-or-folder [...]
+```
+
+MPQ listing can only display paths known to the archive's internal `(listfile)`. WoW client and normal mod archives generally include one; hash-only unnamed entries can still exist but cannot be assigned their original names by any MPQ browser without an external listfile.
 - Maps standalone DBCs to `DBFilesClient\\<name>.dbc`.
 - Synchronizes a saved DBC into a selected server `data\\dbc` directory with backup.
 
