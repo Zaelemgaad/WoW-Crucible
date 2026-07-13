@@ -10,6 +10,7 @@ public sealed class PatchBuilderForm : Form
     private readonly AppSettings _settings;
     private string? _existingPatch;
     private string? _requiredClientExecutableSha256;
+    private PatchManifestPolicy? _policy;
 
     public PatchBuilderForm(AppSettings settings, IEnumerable<string>? initialPaths = null)
     {
@@ -20,13 +21,15 @@ public sealed class PatchBuilderForm : Form
         StartPosition = FormStartPosition.CenterParent;
         AllowDrop = true;
 
-        var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 46, Padding = new(8), WrapContents = false };
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 46, Padding = new(8), WrapContents = false, AutoScroll = true };
         bar.Controls.Add(MakeButton("Add Files", (_, _) => AddFiles()));
         bar.Controls.Add(MakeButton("Add Folder", (_, _) => AddFolder()));
         bar.Controls.Add(MakeButton("Open Existing MPQ", (_, _) => OpenExistingPatch()));
         bar.Controls.Add(MakeButton("Bind Client EXE", (_, _) => BindClientExecutable()));
+        bar.Controls.Add(MakeButton("Content Policy", (_, _) => EditPolicy()));
         bar.Controls.Add(MakeButton("Load Manifest", (_, _) => LoadManifest()));
         bar.Controls.Add(MakeButton("Save Manifest", (_, _) => SaveManifest()));
+        bar.Controls.Add(MakeButton("Validate MPQ", (_, _) => ValidateArchive()));
         bar.Controls.Add(MakeButton("Remove Selected", (_, _) => RemoveSelected()));
         bar.Controls.Add(MakeButton("Build MPQ", (_, _) => BuildPatch()));
 
@@ -87,7 +90,7 @@ public sealed class PatchBuilderForm : Form
             if (unboundGlueXml is not null && MessageBox.Show(this, unboundGlueXml.Message + "\n\nSave this unbound manifest anyway?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             using var dialog = new SaveFileDialog { InitialDirectory = Directory.Exists(_settings.ClientDataPath) ? _settings.ClientDataPath : string.Empty, Filter = "WoW Crucible patch manifest (*.crucible-patch.json)|*.crucible-patch.json|JSON (*.json)|*.json", FileName = "classless.crucible-patch.json" };
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            PatchManifestService.Save(dialog.FileName, Path.GetFileNameWithoutExtension(dialog.FileName), "patch-W.mpq", entries, _requiredClientExecutableSha256);
+            PatchManifestService.Save(dialog.FileName, Path.GetFileNameWithoutExtension(dialog.FileName), "patch-W.mpq", entries, _requiredClientExecutableSha256, _policy);
             _hint.Text = $"Saved manifest: {dialog.FileName}";
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -100,7 +103,7 @@ public sealed class PatchBuilderForm : Form
             using var dialog = new OpenFileDialog { InitialDirectory = Directory.Exists(_settings.ClientDataPath) ? _settings.ClientDataPath : string.Empty, Filter = "WoW Crucible patch manifest (*.crucible-patch.json)|*.crucible-patch.json|JSON (*.json)|*.json" };
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
             var manifest = PatchManifestService.Load(dialog.FileName);
-            _entries.Clear(); _entries.AddRange(manifest.Entries); _requiredClientExecutableSha256 = manifest.RequiredClientExecutableSha256; _existingPatch = null; RefreshGrid();
+            _entries.Clear(); _entries.AddRange(manifest.Entries); _requiredClientExecutableSha256 = manifest.RequiredClientExecutableSha256; _policy = manifest.Policy; _existingPatch = null; RefreshGrid();
             _hint.Text = $"Loaded {manifest.Name}: {manifest.Entries.Count:N0} changed file(s), output {manifest.OutputFileName}." + (_requiredClientExecutableSha256 is null ? string.Empty : " Client executable hash is bound.");
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -126,6 +129,29 @@ public sealed class PatchBuilderForm : Form
             _requiredClientExecutableSha256 = PatchManifestService.ComputeExecutableSha256(dialog.FileName);
             _settings.ClientExecutablePath = dialog.FileName; _settings.Save();
             _hint.Text = $"Bound manifests to {Path.GetFileName(dialog.FileName)} SHA-256 {_requiredClientExecutableSha256}.";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+
+    private void EditPolicy()
+    {
+        using var dialog = new ManifestPolicyForm(_policy);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        _policy = dialog.Policy;
+        _hint.Text = _policy is null ? "Manifest content policy cleared." : "Manifest content policy enabled; it will be enforced before save and build.";
+    }
+
+    private void ValidateArchive()
+    {
+        try
+        {
+            _grid.EndEdit();
+            using var dialog = new OpenFileDialog { InitialDirectory = Directory.Exists(_settings.ClientDataPath) ? _settings.ClientDataPath : string.Empty, Filter = "MPQ archives (*.MPQ)|*.MPQ|All files (*.*)|*.*" };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var manifest = new PatchManifest(3, "Current Patch Builder", Path.GetFileName(dialog.FileName), EntriesFromGrid(), _requiredClientExecutableSha256, _policy);
+            var validation = PatchManifestService.Validate(manifest, dialog.FileName);
+            if (validation.Passed) MessageBox.Show(this, $"Validation passed. The archive exactly matches all {manifest.Entries.Count:N0} manifest paths, source sizes, and content policies.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            else MessageBox.Show(this, string.Join("\n", validation.Errors.Take(20).Select(error => $"• {error.Message}")), $"Validation failed — {validation.Errors.Count:N0} error(s)", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
@@ -165,6 +191,8 @@ public sealed class PatchBuilderForm : Form
         {
             _grid.EndEdit();
             var entries = EntriesFromGrid();
+            var policyValidation = PatchManifestService.ValidateEntries(entries, _policy);
+            if (!policyValidation.Passed) { MessageBox.Show(this, string.Join("\n", policyValidation.Errors.Take(12).Select(error => $"• {error.Message}")), "Manifest policy failed", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
             var warnings = entries.Select(entry => (entry, check: PatchInputMapper.AssessArchivePath(entry.ArchivePath))).Where(item => item.check.HasWarning && !PatchInputMapper.NormalizeArchivePath(item.entry.ArchivePath).StartsWith("Interface\\GlueXML\\", StringComparison.OrdinalIgnoreCase)).ToArray();
             if (warnings.Length > 0)
             {

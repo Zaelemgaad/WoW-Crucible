@@ -24,11 +24,17 @@ static int Manifest(string[] args)
     if (args is ["create", var manifestPath, var outputFile, .. var rawInputs] && rawInputs.Length > 0)
     {
         var executableOption = rawInputs.FirstOrDefault(value => value.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase));
-        var inputs = rawInputs.Where(value => !value.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var allowed = rawInputs.Where(value => value.StartsWith("--allow=", StringComparison.OrdinalIgnoreCase)).Select(value => value[8..]).ToArray();
+        var forbidden = rawInputs.Where(value => value.StartsWith("--deny=", StringComparison.OrdinalIgnoreCase)).Select(value => value[7..]).ToArray();
+        var countOption = rawInputs.FirstOrDefault(value => value.StartsWith("--count=", StringComparison.OrdinalIgnoreCase));
+        var unknown = rawInputs.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--allow=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--deny=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--count=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown manifest option: {unknown[0]}");
+        var inputs = rawInputs.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
         if (inputs.Length == 0) return Fail("Add at least one file or folder to the manifest.");
         var entries = PatchInputMapper.Map(inputs);
         var hash = executableOption is null ? null : PatchManifestService.ComputeExecutableSha256(executableOption[13..]);
-        PatchManifestService.Save(manifestPath, Path.GetFileNameWithoutExtension(manifestPath), outputFile, entries, hash);
+        var policy = allowed.Length == 0 && forbidden.Length == 0 && countOption is null ? null : new PatchManifestPolicy(allowed, forbidden, countOption is null ? null : int.Parse(countOption[8..]));
+        PatchManifestService.Save(manifestPath, Path.GetFileNameWithoutExtension(manifestPath), outputFile, entries, hash, policy);
         PrintCompatibility(entries, hash);
         return 0;
     }
@@ -38,8 +44,17 @@ static int Manifest(string[] args)
             var manifest = PatchManifestService.Load(buildManifestPath);
             PrintCompatibility(manifest.Entries, manifest.RequiredClientExecutableSha256);
             PatchManifestService.Build(buildManifestPath, outputDirectory); return 0;
+        case ["list", var listManifestPath]:
+            var listManifest = PatchManifestService.Load(listManifestPath);
+            foreach (var entry in listManifest.Entries.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase)) Console.WriteLine($"{entry.SourcePath}\t{entry.ArchivePath}");
+            Console.Error.WriteLine($"Dry run: {listManifest.Entries.Count:N0} source-to-archive mapping(s), output {listManifest.OutputFileName}.");
+            return 0;
+        case ["validate", var validateManifestPath]:
+            return PrintManifestValidation(PatchManifestService.Validate(PatchManifestService.Load(validateManifestPath)));
+        case ["validate", var validateArchiveManifestPath, var archivePath]:
+            return PrintManifestValidation(PatchManifestService.Validate(PatchManifestService.Load(validateArchiveManifestPath), archivePath));
         default:
-            return Fail("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--client-exe=Wow.exe]\n  wowcrucible manifest build <manifest.json> <output-folder>");
+            return Fail("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>");
     }
 }
 
@@ -122,7 +137,7 @@ static int Mpq(string[] args)
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--client-exe=Wow.exe]\n  manifest build <manifest.json> <output-folder>");
+    Console.WriteLine("WoW Crucible CLI\n\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> <output-folder>");
     return 0;
 }
 
@@ -132,6 +147,14 @@ static void PrintCompatibility(IEnumerable<PatchEntry> entries, string? required
 {
     foreach (var issue in PatchManifestService.GetCompatibilityIssues(entries, requiredClientExecutableSha256))
         Console.Error.WriteLine($"{(issue.Code == "ProtectedGlueXmlUnbound" ? "WARNING" : "COMPAT")}: {issue.Message}");
+}
+
+static int PrintManifestValidation(PatchManifestValidationResult validation)
+{
+    foreach (var warning in validation.Warnings) Console.WriteLine($"WARN\t{warning.Code}\t{warning.ArchivePath}\t{warning.Message}");
+    foreach (var error in validation.Errors) Console.WriteLine($"FAIL\t{error.Code}\t{error.ArchivePath}\t{error.Message}");
+    Console.Error.WriteLine($"Manifest validation {(validation.Passed ? "passed" : "failed")}: {validation.Errors.Count:N0} error(s), {validation.Warnings.Count:N0} warning(s).");
+    return validation.Passed ? 0 : 1;
 }
 
 static string SchemaRequirementMessage(string tableName, int fields, DbcSchemaResolution resolution) => resolution.MatchKind == DbcSchemaMatchKind.MissingTableFallback

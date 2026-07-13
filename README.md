@@ -36,6 +36,7 @@ The client build is fixed, but server integration will not be tied to an old rep
 - Saves portable patch manifests and builds fresh, tiny MPQs containing only listed DBC/UI changes.
 - Treats an imported folder as the MPQ staging root and previews every editable source-to-archive mapping with suspicious-root warnings before building.
 - Detects protected `Interface\\GlueXML` changes, warns that stock clients may reject them through `GLUEXML.TOC.SIG`, and can bind a patch manifest to the SHA-256 of a known-compatible `Wow.exe`.
+- Enforces manifest allow/deny globs and exact entry counts, provides a dry-run source-to-archive listing, and verifies an existing MPQ for missing, unexpected, or size-mismatched content without rebuilding it.
 - Refuses copy-update operations on archives larger than 2 GB; giant mod/client layers are immutable inputs, never working patch targets.
 
 ## Command line
@@ -49,7 +50,9 @@ wowcrucible mpq list patch.MPQ [filter]
 wowcrucible mpq extract patch.MPQ output-folder [filter] [--quiet|--progress=N]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
 wowcrucible mpq update patch-W.MPQ file-or-folder [...]
-wowcrucible manifest create classless.json patch-W.mpq changed-files-folder [--client-exe=Wow.exe]
+wowcrucible manifest create classless.json patch-W.mpq changed-files-folder [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]
+wowcrucible manifest list classless.json
+wowcrucible manifest validate classless.json [existing-patch.mpq]
 wowcrucible manifest build classless.json output-folder
 ```
 
