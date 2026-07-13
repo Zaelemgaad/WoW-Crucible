@@ -21,14 +21,25 @@ catch (Exception ex)
 
 static int Manifest(string[] args)
 {
+    if (args is ["create", var manifestPath, var outputFile, .. var rawInputs] && rawInputs.Length > 0)
+    {
+        var executableOption = rawInputs.FirstOrDefault(value => value.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase));
+        var inputs = rawInputs.Where(value => !value.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (inputs.Length == 0) return Fail("Add at least one file or folder to the manifest.");
+        var entries = PatchInputMapper.Map(inputs);
+        var hash = executableOption is null ? null : PatchManifestService.ComputeExecutableSha256(executableOption[13..]);
+        PatchManifestService.Save(manifestPath, Path.GetFileNameWithoutExtension(manifestPath), outputFile, entries, hash);
+        PrintCompatibility(entries, hash);
+        return 0;
+    }
     switch (args)
     {
-        case ["create", var manifestPath, var outputFile, .. var inputs] when inputs.Length > 0:
-            PatchManifestService.Save(manifestPath, Path.GetFileNameWithoutExtension(manifestPath), outputFile, PatchInputMapper.Map(inputs)); return 0;
-        case ["build", var manifestPath, var outputDirectory]:
-            PatchManifestService.Build(manifestPath, outputDirectory); return 0;
+        case ["build", var buildManifestPath, var outputDirectory]:
+            var manifest = PatchManifestService.Load(buildManifestPath);
+            PrintCompatibility(manifest.Entries, manifest.RequiredClientExecutableSha256);
+            PatchManifestService.Build(buildManifestPath, outputDirectory); return 0;
         default:
-            return Fail("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...>\n  wowcrucible manifest build <manifest.json> <output-folder>");
+            return Fail("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--client-exe=Wow.exe]\n  wowcrucible manifest build <manifest.json> <output-folder>");
     }
 }
 
@@ -101,9 +112,9 @@ static int Mpq(string[] args)
                 return 0;
             }
         case "create" when args.Length >= 3:
-            service.Create(args[1], PatchInputMapper.Map(args[2..])); return 0;
+            var createEntries = PatchInputMapper.Map(args[2..]); PrintCompatibility(createEntries, null); service.Create(args[1], createEntries); return 0;
         case "update" when args.Length >= 3:
-            service.Update(args[1], PatchInputMapper.Map(args[2..])); return 0;
+            var updateEntries = PatchInputMapper.Map(args[2..]); PrintCompatibility(updateEntries, null); service.Update(args[1], updateEntries); return 0;
         default:
             return Fail("Usage:\n  wowcrucible mpq list <archive.mpq> [filter]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>");
     }
@@ -111,11 +122,17 @@ static int Mpq(string[] args)
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...>\n  manifest build <manifest.json> <output-folder>");
+    Console.WriteLine("WoW Crucible CLI\n\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--client-exe=Wow.exe]\n  manifest build <manifest.json> <output-folder>");
     return 0;
 }
 
 static int Fail(string message) { Console.Error.WriteLine(message); return 2; }
+
+static void PrintCompatibility(IEnumerable<PatchEntry> entries, string? requiredClientExecutableSha256)
+{
+    foreach (var issue in PatchManifestService.GetCompatibilityIssues(entries, requiredClientExecutableSha256))
+        Console.Error.WriteLine($"{(issue.Code == "ProtectedGlueXmlUnbound" ? "WARNING" : "COMPAT")}: {issue.Message}");
+}
 
 static string SchemaRequirementMessage(string tableName, int fields, DbcSchemaResolution resolution) => resolution.MatchKind == DbcSchemaMatchKind.MissingTableFallback
     ? $"A matching named schema is required; '{tableName}' is absent from the selected schema."

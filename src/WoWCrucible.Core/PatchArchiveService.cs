@@ -57,6 +57,8 @@ public static class PatchInputMapper
     public static PatchPathAssessment AssessArchivePath(string path)
     {
         var normalized = NormalizeArchivePath(path);
+        if (normalized.StartsWith("Interface\\GlueXML\\", StringComparison.OrdinalIgnoreCase) || normalized.Equals("Interface\\GlueXML", StringComparison.OrdinalIgnoreCase))
+            return new(true, "Protected login GlueXML requires a compatible build-12340 executable; stock Wow.exe may reject it via GLUEXML.TOC.SIG");
         var root = normalized.Split('\\', 2)[0];
         if (KnownClientRoots.Contains(root)) return new(false, "Recognized client root");
         if (!normalized.Contains('\\')) return new(true, "Top-level file; verify that WoW expects it at the MPQ root");

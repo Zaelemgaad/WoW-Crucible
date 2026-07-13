@@ -9,6 +9,7 @@ public sealed class PatchBuilderForm : Form
     private readonly List<PatchEntry> _entries = [];
     private readonly AppSettings _settings;
     private string? _existingPatch;
+    private string? _requiredClientExecutableSha256;
 
     public PatchBuilderForm(AppSettings settings, IEnumerable<string>? initialPaths = null)
     {
@@ -23,6 +24,7 @@ public sealed class PatchBuilderForm : Form
         bar.Controls.Add(MakeButton("Add Files", (_, _) => AddFiles()));
         bar.Controls.Add(MakeButton("Add Folder", (_, _) => AddFolder()));
         bar.Controls.Add(MakeButton("Open Existing MPQ", (_, _) => OpenExistingPatch()));
+        bar.Controls.Add(MakeButton("Bind Client EXE", (_, _) => BindClientExecutable()));
         bar.Controls.Add(MakeButton("Load Manifest", (_, _) => LoadManifest()));
         bar.Controls.Add(MakeButton("Save Manifest", (_, _) => SaveManifest()));
         bar.Controls.Add(MakeButton("Remove Selected", (_, _) => RemoveSelected()));
@@ -80,9 +82,12 @@ public sealed class PatchBuilderForm : Form
         try
         {
             _grid.EndEdit();
+            var entries = EntriesFromGrid();
+            var unboundGlueXml = PatchManifestService.GetCompatibilityIssues(entries, _requiredClientExecutableSha256).FirstOrDefault(issue => issue.Code == "ProtectedGlueXmlUnbound");
+            if (unboundGlueXml is not null && MessageBox.Show(this, unboundGlueXml.Message + "\n\nSave this unbound manifest anyway?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             using var dialog = new SaveFileDialog { InitialDirectory = Directory.Exists(_settings.ClientDataPath) ? _settings.ClientDataPath : string.Empty, Filter = "WoW Crucible patch manifest (*.crucible-patch.json)|*.crucible-patch.json|JSON (*.json)|*.json", FileName = "classless.crucible-patch.json" };
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            PatchManifestService.Save(dialog.FileName, Path.GetFileNameWithoutExtension(dialog.FileName), "patch-W.mpq", EntriesFromGrid());
+            PatchManifestService.Save(dialog.FileName, Path.GetFileNameWithoutExtension(dialog.FileName), "patch-W.mpq", entries, _requiredClientExecutableSha256);
             _hint.Text = $"Saved manifest: {dialog.FileName}";
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -95,8 +100,8 @@ public sealed class PatchBuilderForm : Form
             using var dialog = new OpenFileDialog { InitialDirectory = Directory.Exists(_settings.ClientDataPath) ? _settings.ClientDataPath : string.Empty, Filter = "WoW Crucible patch manifest (*.crucible-patch.json)|*.crucible-patch.json|JSON (*.json)|*.json" };
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
             var manifest = PatchManifestService.Load(dialog.FileName);
-            _entries.Clear(); _entries.AddRange(manifest.Entries); _existingPatch = null; RefreshGrid();
-            _hint.Text = $"Loaded {manifest.Name}: {manifest.Entries.Count:N0} changed file(s), output {manifest.OutputFileName}.";
+            _entries.Clear(); _entries.AddRange(manifest.Entries); _requiredClientExecutableSha256 = manifest.RequiredClientExecutableSha256; _existingPatch = null; RefreshGrid();
+            _hint.Text = $"Loaded {manifest.Name}: {manifest.Entries.Count:N0} changed file(s), output {manifest.OutputFileName}." + (_requiredClientExecutableSha256 is null ? string.Empty : " Client executable hash is bound.");
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
@@ -105,6 +110,24 @@ public sealed class PatchBuilderForm : Form
     {
         using var dialog = new FolderBrowserDialog { Description = "Select a folder tree to preserve inside the MPQ", UseDescriptionForTitle = true };
         if (dialog.ShowDialog(this) == DialogResult.OK) AddPaths([dialog.SelectedPath]);
+    }
+
+    private void BindClientExecutable()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "WoW executable (Wow.exe)|Wow.exe|Executables (*.exe)|*.exe",
+            FileName = File.Exists(_settings.ClientExecutablePath) ? Path.GetFileName(_settings.ClientExecutablePath) : "Wow.exe",
+            InitialDirectory = File.Exists(_settings.ClientExecutablePath) ? Path.GetDirectoryName(_settings.ClientExecutablePath) : (Directory.Exists(_settings.ClientDataPath) ? Directory.GetParent(_settings.ClientDataPath)?.FullName : string.Empty)
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            _requiredClientExecutableSha256 = PatchManifestService.ComputeExecutableSha256(dialog.FileName);
+            _settings.ClientExecutablePath = dialog.FileName; _settings.Save();
+            _hint.Text = $"Bound manifests to {Path.GetFileName(dialog.FileName)} SHA-256 {_requiredClientExecutableSha256}.";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
     private void AddPaths(IEnumerable<string> paths)
@@ -142,13 +165,16 @@ public sealed class PatchBuilderForm : Form
         {
             _grid.EndEdit();
             var entries = EntriesFromGrid();
-            var warnings = entries.Select(entry => (entry, check: PatchInputMapper.AssessArchivePath(entry.ArchivePath))).Where(item => item.check.HasWarning).ToArray();
+            var warnings = entries.Select(entry => (entry, check: PatchInputMapper.AssessArchivePath(entry.ArchivePath))).Where(item => item.check.HasWarning && !PatchInputMapper.NormalizeArchivePath(item.entry.ArchivePath).StartsWith("Interface\\GlueXML\\", StringComparison.OrdinalIgnoreCase)).ToArray();
             if (warnings.Length > 0)
             {
                 var examples = string.Join("\n", warnings.Take(6).Select(item => $"• {item.entry.ArchivePath}: {item.check.Message}"));
                 if (warnings.Length > 6) examples += $"\n• …and {warnings.Length - 6:N0} more";
                 if (MessageBox.Show(this, $"{warnings.Length:N0} archive path(s) need review:\n\n{examples}\n\nBuild anyway?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             }
+            var compatibility = PatchManifestService.GetCompatibilityIssues(entries, _requiredClientExecutableSha256);
+            var unboundGlueXml = compatibility.FirstOrDefault(issue => issue.Code == "ProtectedGlueXmlUnbound");
+            if (unboundGlueXml is not null && MessageBox.Show(this, unboundGlueXml.Message + "\n\nBuild without an executable binding anyway?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             var outputPath = _existingPatch;
             if (outputPath is null)
             {

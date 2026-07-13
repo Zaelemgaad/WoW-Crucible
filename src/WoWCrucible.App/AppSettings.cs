@@ -9,6 +9,7 @@ public sealed class AppSettings
 
     public string CoreDbcPath { get; set; } = string.Empty;
     public string ClientDataPath { get; set; } = string.Empty;
+    public string ClientExecutablePath { get; set; } = string.Empty;
     public string SchemaDefinitionPath { get; set; } = string.Empty;
     public string BaseDbcPath { get; set; } = string.Empty;
     public string OverrideDbcPath { get; set; } = string.Empty;

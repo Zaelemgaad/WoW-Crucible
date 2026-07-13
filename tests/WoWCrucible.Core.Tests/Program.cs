@@ -195,6 +195,18 @@ File.WriteAllText(Path.Combine(stagingRoot, "Interface", "FrameXML", "Test.lua")
 var stagedEntry = PatchInputMapper.Map([stagingRoot]).Single();
 if (stagedEntry.ArchivePath != "Interface\\FrameXML\\Test.lua" || PatchInputMapper.AssessArchivePath(stagedEntry.ArchivePath).HasWarning)
     throw new InvalidOperationException("Staging folder archive-root mapping failed.");
+var glueXmlSource = Path.Combine(stagingRoot, "Interface", "GlueXML", "CharacterCreate.lua"); Directory.CreateDirectory(Path.GetDirectoryName(glueXmlSource)!); File.WriteAllText(glueXmlSource, "-- protected test");
+var glueXmlEntry = new PatchEntry(glueXmlSource, "Interface\\GlueXML\\CharacterCreate.lua");
+if (!PatchInputMapper.AssessArchivePath(glueXmlEntry.ArchivePath).HasWarning || PatchManifestService.GetCompatibilityIssues([glueXmlEntry]).Single().Code != "ProtectedGlueXmlUnbound")
+    throw new InvalidOperationException("Protected GlueXML compatibility warning is missing.");
+var compatibleExecutable = Path.Combine(layerRoot, "Wow.exe"); File.WriteAllText(compatibleExecutable, "test executable fixture");
+var compatibleHash = PatchManifestService.ComputeExecutableSha256(compatibleExecutable);
+if (compatibleHash.Length != 64 || PatchManifestService.GetCompatibilityIssues([glueXmlEntry], compatibleHash).Single().Code != "ProtectedGlueXmlBound")
+    throw new InvalidOperationException("Protected GlueXML executable binding failed.");
+var glueManifestPath = Path.Combine(layerRoot, "glue.crucible-patch.json");
+PatchManifestService.Save(glueManifestPath, "Protected UI test", "patch-G.mpq", [glueXmlEntry], compatibleHash);
+if (PatchManifestService.Load(glueManifestPath).RequiredClientExecutableSha256 != compatibleHash)
+    throw new InvalidOperationException("Client executable hash did not survive manifest save/load.");
 
 var manifestPath = Path.Combine(layerRoot, "classless.crucible-patch.json");
 PatchManifestService.Save(manifestPath, "Classless test", "patch-X.mpq", PatchInputMapper.Map([Path.Combine(overrideLayer, "SpellCastTimes.dbc")]));
