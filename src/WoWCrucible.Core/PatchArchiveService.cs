@@ -135,7 +135,8 @@ public sealed class PatchArchiveService
                 cancellationToken.ThrowIfCancellationRequested();
                 var internalPath = PatchInputMapper.NormalizeArchivePath(entries[index].ArchivePath);
                 var destination = Path.GetFullPath(Path.Combine(destinationRoot, internalPath.Replace('\\', Path.DirectorySeparatorChar)));
-                if (!destination.StartsWith(destinationRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                var relativeDestination = Path.GetRelativePath(destinationRoot, destination);
+                if (relativeDestination.Equals("..", StringComparison.Ordinal) || relativeDestination.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
                     throw new InvalidOperationException($"Unsafe archive path: {internalPath}");
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
                 if (!Native.SFileExtractFile(archive, internalPath, destination, 0)) ThrowNative($"extract '{internalPath}'");

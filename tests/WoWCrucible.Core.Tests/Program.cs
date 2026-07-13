@@ -9,6 +9,16 @@ var builtInSchema = DbcSchemaCatalog.CreateBuiltIn12340();
 var builtInSpellColumns = builtInSchema.GetColumns("Spell", 234);
 if (builtInSpellColumns[136].Name != "Name[enUS]" || builtInSpellColumns[233].Name != "SpellDifficultyID")
     throw new InvalidOperationException("Built-in Spell.dbc schema is incomplete.");
+var schoolSemantic = DbcSemanticCatalog.Get("Spell", 225) ?? throw new InvalidOperationException("Spell school decoding is missing.");
+if (!schoolSemantic.Format(0x44).Contains("Fire") || !schoolSemantic.Format(0x44).Contains("Arcane") || schoolSemantic.Parse("Fire | Arcane") != 0x44)
+    throw new InvalidOperationException("Spell school flag decoding/encoding failed.");
+var inventorySemantic = DbcSemanticCatalog.Get("Item", 6) ?? throw new InvalidOperationException("Item inventory decoding is missing.");
+if (inventorySemantic.Format(17) != "Two-hand weapon [17]" || inventorySemantic.Parse("Two-hand weapon") != 17)
+    throw new InvalidOperationException("Item inventory enum decoding/encoding failed.");
+var attrSemantic = DbcSemanticCatalog.Get("Spell", 4) ?? throw new InvalidOperationException("Spell attribute decoding is missing.");
+const uint combinedAttributes = 0x80000048;
+if (attrSemantic.Parse(attrSemantic.Format(combinedAttributes)) != combinedAttributes)
+    throw new InvalidOperationException("Decoded spell flags did not round-trip without changing bits.");
 var files = Directory.EnumerateFiles(args[1], "*.dbc").ToArray();
 if (files.Length == 0) throw new InvalidOperationException("No DBC test files were found.");
 
@@ -77,6 +87,12 @@ var editedReload = WdbcFile.Load(editedOutput);
 if (editedReload.GetString(editedReload.GetRaw(clone, nameColumn)) != "WoWCrucible_Test_Ability_Æ")
     throw new InvalidOperationException("UTF-8 string edit did not survive save/reload.");
 File.Delete(editedOutput);
+var saveAs = WdbcFile.Load(animationPath);
+var saveAsOutput = Path.Combine(Path.GetTempPath(), $"wow-crucible-save-as-{Guid.NewGuid():N}.dbc");
+saveAs.SaveAs(saveAsOutput, false);
+if (!Path.GetFullPath(saveAsOutput).Equals(saveAs.SourcePath, StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Save As did not adopt the new document path.");
+File.Delete(saveAsOutput);
 
 var bulk = WdbcFile.Load(animationPath);
 var bulkColumns = schema.GetColumns("AnimationData", bulk.FieldCount);

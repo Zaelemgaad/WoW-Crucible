@@ -105,8 +105,17 @@ public sealed class DbcSchemaCatalog
 
     private static string LocaleName(int index) => index switch
     {
-        0 => "enUS", 1 => "koKR", 2 => "frFR", 3 => "deDE", 4 => "zhCN", 5 => "zhTW",
-        6 => "esES", 7 => "esMX", 8 => "ruRU", 9 => "ptBR", 10 => "itIT",
+        0 => "enUS",
+        1 => "koKR",
+        2 => "frFR",
+        3 => "deDE",
+        4 => "zhCN",
+        5 => "zhTW",
+        6 => "esES",
+        7 => "esMX",
+        8 => "ruRU",
+        9 => "ptBR",
+        10 => "itIT",
         _ => $"Locale{index}"
     };
 

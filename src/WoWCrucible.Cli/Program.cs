@@ -33,19 +33,19 @@ static int Mpq(string[] args)
     switch (args[0])
     {
         case "list" when args.Length is 2 or 3:
-        {
-            var query = args.Length == 3 ? args[2] : string.Empty;
-            foreach (var file in service.ListFiles(args[1]).Where(file => file.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase)))
-                Console.WriteLine($"{file.Size}\t{file.CompressedSize}\t{file.ArchivePath}");
-            return 0;
-        }
+            {
+                var query = args.Length == 3 ? args[2] : string.Empty;
+                foreach (var file in service.ListFiles(args[1]).Where(file => file.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase)))
+                    Console.WriteLine($"{file.Size}\t{file.CompressedSize}\t{file.ArchivePath}");
+                return 0;
+            }
         case "extract" when args.Length is 3 or 4:
-        {
-            var query = args.Length == 4 ? args[3] : string.Empty;
-            var files = service.ListFiles(args[1]).Where(file => file.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
-            service.Extract(args[1], args[2], files, new Progress<(int Done, int Total, string Path)>(p => Console.Error.WriteLine($"[{p.Done}/{p.Total}] {p.Path}")));
-            return 0;
-        }
+            {
+                var query = args.Length == 4 ? args[3] : string.Empty;
+                var files = service.ListFiles(args[1]).Where(file => file.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+                service.Extract(args[1], args[2], files, new ConsoleProgress());
+                return 0;
+            }
         case "create" when args.Length >= 3:
             service.Create(args[1], PatchInputMapper.Map(args[2..])); return 0;
         case "update" when args.Length >= 3:
@@ -62,3 +62,8 @@ static int Help()
 }
 
 static int Fail(string message) { Console.Error.WriteLine(message); return 2; }
+
+sealed class ConsoleProgress : IProgress<(int Done, int Total, string Path)>
+{
+    public void Report((int Done, int Total, string Path) value) => Console.Error.WriteLine($"[{value.Done}/{value.Total}] {value.Path}");
+}

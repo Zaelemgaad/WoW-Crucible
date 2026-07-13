@@ -11,6 +11,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _searchTimer = new() { Interval = 250 };
     private readonly EditHistory _history = new();
     private readonly ToolStripComboBox _openFiles = new() { AutoSize = false, Width = 210, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly ToolStripButton _decoded = new("Decoded: On") { CheckOnClick = true, Checked = true, DisplayStyle = ToolStripItemDisplayStyle.Text };
     private readonly List<(WdbcFile File, IReadOnlyList<DbcColumn> Columns)> _documents = [];
     private bool _activatingDocument;
     private readonly AppSettings _settings = AppSettings.Load();
@@ -37,6 +38,7 @@ public sealed class MainForm : Form
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("Undo", (_, _) => UndoEdit()));
         tools.Items.Add(Button("Redo", (_, _) => RedoEdit()));
+        tools.Items.Add(_decoded);
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("Spell Workspace", (_, _) => OpenSpellWorkspace()));
         tools.Items.Add(new ToolStripSeparator());
@@ -66,7 +68,12 @@ public sealed class MainForm : Form
         _grid.CellValuePushed += GridCellValuePushed;
         _grid.RowPostPaint += GridRowPostPaint;
         _grid.DataError += (_, e) => { e.ThrowException = false; ShowError(e.Exception); };
-        _grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0 && IsSpellFile) OpenSpellWorkspace(); };
+        _grid.CellDoubleClick += (_, e) =>
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
+            if (_decoded.Checked && EditDecodedValue(e.RowIndex, e.ColumnIndex)) return;
+            if (IsSpellFile) OpenSpellWorkspace();
+        };
 
         var statusStrip = new StatusStrip();
         statusStrip.Items.Add(_status);
@@ -76,6 +83,7 @@ public sealed class MainForm : Form
         tools.Dock = DockStyle.Top;
 
         _search.TextChanged += (_, _) => { _searchTimer.Stop(); _searchTimer.Start(); };
+        _decoded.CheckedChanged += (_, _) => { _decoded.Text = _decoded.Checked ? "Decoded: On" : "Decoded: Off"; _grid.Invalidate(); };
         _openFiles.SelectedIndexChanged += (_, _) =>
         {
             if (!_activatingDocument && _openFiles.SelectedIndex >= 0) ActivateDocument(_openFiles.SelectedIndex);
@@ -191,21 +199,26 @@ public sealed class MainForm : Form
         _activatingDocument = true;
         _openFiles.SelectedIndex = index;
         _activatingDocument = false;
-            _grid.Columns.Clear();
-            foreach (var column in _columns)
+        _grid.Columns.Clear();
+        foreach (var column in _columns)
+        {
+            var table = Path.GetFileNameWithoutExtension(_file.SourcePath);
+            var semantic = _file.RowCount > 0 ? DbcSemanticCatalog.Get(table, column.Index, _file, 0) : DbcSemanticCatalog.Get(table, column.Index);
+            _grid.Columns.Add(new DataGridViewTextBoxColumn
             {
-                _grid.Columns.Add(new DataGridViewTextBoxColumn
-                {
-                    Name = $"field{column.Index}", HeaderText = column.Name, Width = column.Type == DbcValueType.StringOffset ? 220 : 105,
-                    ReadOnly = false, SortMode = DataGridViewColumnSortMode.NotSortable
-                });
-            }
-            _grid.RowCount = _file.RowCount;
-            loadTimer?.Stop();
-            Text = $"WoW Crucible — {Path.GetFileName(_file.SourcePath)} · {_documents.Count:N0} open";
-            _status.Text = loadTimer is null
-                ? $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields"
-                : $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields · {_file.StringTableSize:N0} string bytes · loaded in {loadTimer.ElapsedMilliseconds:N0} ms";
+                Name = $"field{column.Index}",
+                HeaderText = semantic is null ? column.Name : $"{column.Name} — {semantic.Label}",
+                Width = semantic?.Kind == SemanticKind.Flags ? 380 : semantic is not null ? 240 : column.Type == DbcValueType.StringOffset ? 220 : 105,
+                ReadOnly = false,
+                SortMode = DataGridViewColumnSortMode.NotSortable
+            });
+        }
+        _grid.RowCount = _file.RowCount;
+        loadTimer?.Stop();
+        Text = $"WoW Crucible — {Path.GetFileName(_file.SourcePath)} · {_documents.Count:N0} open";
+        _status.Text = loadTimer is null
+            ? $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields"
+            : $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields · {_file.StringTableSize:N0} string bytes · loaded in {loadTimer.ElapsedMilliseconds:N0} ms";
     }
 
     private void CloseCurrentFile()
@@ -250,8 +263,12 @@ public sealed class MainForm : Form
             var columns = _columns;
             _status.Text = "Searching…";
             var timer = Stopwatch.StartNew();
+            var table = Path.GetFileNameWithoutExtension(file.SourcePath);
+            var decoded = _decoded.Checked;
+            var semanticColumns = decoded ? DbcSemanticCatalog.GetColumns(table).Where(index => index >= 0 && index < columns.Count).Select(index => columns[index]).ToArray() : [];
             var matches = await Task.Run(() => Enumerable.Range(0, file.RowCount).AsParallel().AsOrdered()
-                .Where(row => file.RowContains(row, query, columns)).ToArray());
+                .Where(row => file.RowContains(row, query, columns) || decoded && semanticColumns.Any(column =>
+                    DbcSemanticCatalog.Get(table, column.Index, file, row)?.Format(file.GetRaw(row, column)).Contains(query, StringComparison.OrdinalIgnoreCase) == true)).ToArray());
             if (!ReferenceEquals(file, _file) || query != _search.Text.Trim()) return;
             _visibleRows = matches;
             _grid.RowCount = matches.Length;
@@ -271,7 +288,18 @@ public sealed class MainForm : Form
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
             path = dialog.FileName;
         }
-        try { _file.Save(path); _status.Text = $"Saved {path} (backup: {path}.bak)"; }
+        try
+        {
+            if (saveAs)
+            {
+                _file.SaveAs(path);
+                var index = _openFiles.SelectedIndex;
+                if (index >= 0) _openFiles.Items[index] = Path.GetFileName(path);
+                Text = $"WoW Crucible — {Path.GetFileName(path)} · {_documents.Count:N0} open";
+            }
+            else _file.Save(path);
+            _status.Text = $"Saved {path} (backup: {path}.bak)";
+        }
         catch (Exception ex) { ShowError(ex); }
     }
 
@@ -399,7 +427,10 @@ public sealed class MainForm : Form
     private void GridCellValueNeeded(object? sender, DataGridViewCellValueEventArgs e)
     {
         if (_file is null || e.RowIndex < 0 || e.ColumnIndex < 0) return;
-        e.Value = _file.GetDisplayValue(SourceRow(e.RowIndex), _columns[e.ColumnIndex]);
+        var row = SourceRow(e.RowIndex);
+        var column = _columns[e.ColumnIndex];
+        var semantic = _decoded.Checked ? DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(_file.SourcePath), column.Index, _file, row) : null;
+        e.Value = semantic?.Format(_file.GetRaw(row, column)) ?? _file.GetDisplayValue(row, column);
     }
 
     private void GridCellValuePushed(object? sender, DataGridViewCellValueEventArgs e)
@@ -410,11 +441,27 @@ public sealed class MainForm : Form
             var row = SourceRow(e.RowIndex);
             var column = _columns[e.ColumnIndex];
             var before = _file.GetRaw(row, column);
-            _file.SetDisplayValue(row, column, e.Value);
+            var semantic = _decoded.Checked ? DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(_file.SourcePath), column.Index, _file, row) : null;
+            if (semantic is null) _file.SetDisplayValue(row, column, e.Value);
+            else _file.SetRaw(row, column, semantic.Parse(Convert.ToString(e.Value) ?? string.Empty));
             _history.Record(row, column, before, _file.GetRaw(row, column));
             _status.Text = "Modified — Ctrl+Z to undo, save to write changes";
         }
         catch (Exception ex) { ShowError(ex); _grid.InvalidateCell(e.ColumnIndex, e.RowIndex); }
+    }
+
+    private bool EditDecodedValue(int visibleRow, int columnIndex)
+    {
+        if (_file is null) return false;
+        var row = SourceRow(visibleRow); var column = _columns[columnIndex];
+        var semantic = DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(_file.SourcePath), column.Index, _file, row);
+        if (semantic is null) return false;
+        var before = _file.GetRaw(row, column);
+        using var dialog = new DecodedValueForm(semantic, before);
+        if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Value == before) return true;
+        _file.SetRaw(row, column, dialog.Value); _history.Record(row, column, before, dialog.Value);
+        _grid.InvalidateCell(columnIndex, visibleRow); _status.Text = $"Modified {semantic.Label} — Ctrl+Z to undo";
+        return true;
     }
 
     private void GridRowPostPaint(object? sender, DataGridViewRowPostPaintEventArgs e)

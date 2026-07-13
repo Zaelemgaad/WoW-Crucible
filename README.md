@@ -13,6 +13,7 @@ The client build is fixed, but server integration will not be tied to an old rep
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
 - Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.
 - Stages multiple open DBC files at once and switches between them without reloading.
+- Decodes known 3.3.5a enum and bit-flag fields into readable names, with raw mode and lossless enum/flag editors.
 - Resolves and safely extends DBC string tables.
 - Searches all fields in parallel.
 - Edits strings, bytes, integers, unsigned values, raw 32-bit values, and floats.

@@ -21,7 +21,7 @@ public sealed class WdbcFile
         _strings = strings;
     }
 
-    public string SourcePath { get; }
+    public string SourcePath { get; private set; }
     public int RowCount { get; private set; }
     public int FieldCount { get; }
     public int RecordSize { get; }
@@ -241,6 +241,12 @@ public sealed class WdbcFile
         }
         File.Move(temp, fullPath, true);
         IsDirty = false;
+    }
+
+    public void SaveAs(string path, bool createBackup = true)
+    {
+        Save(path, createBackup);
+        SourcePath = Path.GetFullPath(path);
     }
 
     private static int ReadPositive(ReadOnlySpan<byte> bytes, string name)
