@@ -10,6 +10,10 @@ public sealed class MainForm : Form
     private readonly ToolStripTextBox _search = new() { AutoSize = false, Width = 280 };
     private readonly System.Windows.Forms.Timer _searchTimer = new() { Interval = 250 };
     private readonly EditHistory _history = new();
+    private readonly ToolStripComboBox _openFiles = new() { AutoSize = false, Width = 210, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly List<(WdbcFile File, IReadOnlyList<DbcColumn> Columns)> _documents = [];
+    private bool _activatingDocument;
+    private readonly AppSettings _settings = AppSettings.Load();
     private WdbcFile? _file;
     private IReadOnlyList<DbcColumn> _columns = [];
     private int[]? _visibleRows;
@@ -25,7 +29,9 @@ public sealed class MainForm : Form
         KeyPreview = true;
 
         var tools = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new(6, 4, 6, 4) };
-        tools.Items.Add(Button("Open DBC", (_, _) => OpenFile()));
+        tools.Items.Add(Button("Open DBC(s)", (_, _) => OpenFile()));
+        tools.Items.Add(_openFiles);
+        tools.Items.Add(Button("Close DBC", (_, _) => CloseCurrentFile()));
         tools.Items.Add(Button("Save", (_, _) => SaveFile(false)));
         tools.Items.Add(Button("Save As", (_, _) => SaveFile(true)));
         tools.Items.Add(new ToolStripSeparator());
@@ -41,6 +47,8 @@ public sealed class MainForm : Form
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("Build Patch MPQ", (_, _) => OpenPatchBuilder()));
         tools.Items.Add(Button("Sync to Core Data", (_, _) => SyncToCoreData()));
+        tools.Items.Add(Button("Open Logs", (_, _) => CrashLogger.OpenDirectory()));
+        tools.Items.Add(Button("Paths", (_, _) => { using var form = new SettingsForm(_settings); form.ShowDialog(this); }));
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(new ToolStripLabel("Search all fields:"));
         tools.Items.Add(_search);
@@ -67,6 +75,10 @@ public sealed class MainForm : Form
         tools.Dock = DockStyle.Top;
 
         _search.TextChanged += (_, _) => { _searchTimer.Stop(); _searchTimer.Start(); };
+        _openFiles.SelectedIndexChanged += (_, _) =>
+        {
+            if (!_activatingDocument && _openFiles.SelectedIndex >= 0) ActivateDocument(_openFiles.SelectedIndex);
+        };
         _searchTimer.Tick += (_, _) => { _searchTimer.Stop(); ApplyFilter(); };
         FormClosing += OnFormClosing;
         KeyDown += OnShortcutKeyDown;
@@ -74,8 +86,8 @@ public sealed class MainForm : Form
         DragDrop += (_, e) =>
         {
             if (e.Data?.GetData(DataFormats.FileDrop) is not string[] { Length: > 0 } paths) return;
-            if (paths.Length == 1 && File.Exists(paths[0]) && Path.GetExtension(paths[0]).Equals(".dbc", StringComparison.OrdinalIgnoreCase))
-                LoadFile(paths[0]);
+            if (paths.All(path => File.Exists(path) && Path.GetExtension(path).Equals(".dbc", StringComparison.OrdinalIgnoreCase)))
+                foreach (var path in paths) LoadFile(path);
             else
                 OpenPatchBuilder(paths);
         };
@@ -94,14 +106,15 @@ public sealed class MainForm : Form
 
     private void OpenFile()
     {
-        using var dialog = new OpenFileDialog { Filter = "WoW database files (*.dbc)|*.dbc|All files (*.*)|*.*" };
-        if (dialog.ShowDialog(this) == DialogResult.OK) LoadFile(dialog.FileName);
+        using var dialog = new OpenFileDialog { Multiselect = true, InitialDirectory = Directory.Exists(_settings.CoreDbcPath) ? _settings.CoreDbcPath : string.Empty, Filter = "WoW database files (*.dbc)|*.dbc|All files (*.*)|*.*" };
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+            foreach (var path in dialog.FileNames) LoadFile(path);
     }
 
     private void OpenPatchBuilder(IEnumerable<string>? droppedPaths = null)
     {
         var initial = droppedPaths ?? (_file is null ? null : new[] { _file.SourcePath });
-        using var builder = new PatchBuilderForm(initial);
+        using var builder = new PatchBuilderForm(_settings, initial);
         builder.ShowDialog(this);
     }
 
@@ -115,7 +128,7 @@ public sealed class MainForm : Form
             if (save == DialogResult.Yes) SaveFile(false);
             if (_file.IsDirty) return;
         }
-        using var dialog = new FolderBrowserDialog { Description = "Select the core's data\\dbc directory", UseDescriptionForTitle = true };
+        using var dialog = new FolderBrowserDialog { Description = "Select the core's data\\dbc directory", UseDescriptionForTitle = true, SelectedPath = Directory.Exists(_settings.CoreDbcPath) ? _settings.CoreDbcPath : string.Empty };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         try
         {
@@ -138,6 +151,9 @@ public sealed class MainForm : Form
     {
         try
         {
+            path = Path.GetFullPath(path);
+            var existing = _documents.FindIndex(document => Path.GetFullPath(document.File.SourcePath).Equals(path, StringComparison.OrdinalIgnoreCase));
+            if (existing >= 0) { ActivateDocument(existing); return; }
             Cursor = Cursors.WaitCursor;
             var timer = Stopwatch.StartNew();
             var loaded = WdbcFile.Load(path);
@@ -145,12 +161,28 @@ public sealed class MainForm : Form
             var table = Path.GetFileNameWithoutExtension(path);
             var columns = schemas.GetColumns(table, loaded.FieldCount);
 
-            _file = loaded;
-            _history.Clear();
-            _columns = columns;
-            _visibleRows = null;
+            _documents.Add((loaded, columns));
+            _openFiles.Items.Add(Path.GetFileName(path));
+            ActivateDocument(_documents.Count - 1, timer);
+        }
+        catch (Exception ex) { ShowError(ex); }
+        finally { Cursor = Cursors.Default; }
+    }
+
+    private void ActivateDocument(int index, Stopwatch? loadTimer = null)
+    {
+        if (index < 0 || index >= _documents.Count) return;
+        var document = _documents[index];
+        _file = document.File;
+        _columns = document.Columns;
+        _history.Clear();
+        _visibleRows = null;
+        _search.Text = string.Empty;
+        _activatingDocument = true;
+        _openFiles.SelectedIndex = index;
+        _activatingDocument = false;
             _grid.Columns.Clear();
-            foreach (var column in columns)
+            foreach (var column in _columns)
             {
                 _grid.Columns.Add(new DataGridViewTextBoxColumn
                 {
@@ -158,13 +190,35 @@ public sealed class MainForm : Form
                     ReadOnly = false, SortMode = DataGridViewColumnSortMode.NotSortable
                 });
             }
-            _grid.RowCount = loaded.RowCount;
-            timer.Stop();
-            Text = $"WoW Crucible — {Path.GetFileName(path)}";
-            _status.Text = $"{loaded.RowCount:N0} rows · {loaded.FieldCount:N0} fields · {loaded.StringTableSize:N0} string bytes · loaded in {timer.ElapsedMilliseconds:N0} ms";
+            _grid.RowCount = _file.RowCount;
+            loadTimer?.Stop();
+            Text = $"WoW Crucible — {Path.GetFileName(_file.SourcePath)} · {_documents.Count:N0} open";
+            _status.Text = loadTimer is null
+                ? $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields"
+                : $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields · {_file.StringTableSize:N0} string bytes · loaded in {loadTimer.ElapsedMilliseconds:N0} ms";
+    }
+
+    private void CloseCurrentFile()
+    {
+        var index = _openFiles.SelectedIndex;
+        if (index < 0 || _file is null) return;
+        if (_file.IsDirty)
+        {
+            var result = MessageBox.Show(this, $"Save changes to {Path.GetFileName(_file.SourcePath)} before closing it?", "Unsaved changes", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+            if (result == DialogResult.Cancel) return;
+            if (result == DialogResult.Yes) SaveFile(false);
+            if (_file.IsDirty) return;
         }
-        catch (Exception ex) { ShowError(ex); }
-        finally { Cursor = Cursors.Default; }
+        _documents.RemoveAt(index);
+        _openFiles.Items.RemoveAt(index);
+        if (_documents.Count > 0) ActivateDocument(Math.Min(index, _documents.Count - 1));
+        else
+        {
+            _file = null; _columns = []; _visibleRows = null;
+            _grid.Columns.Clear(); _grid.RowCount = 0;
+            Text = "WoW Crucible — 3.3.5a Editor";
+            _status.Text = "No DBC open";
+        }
     }
 
     private async void ApplyFilter()
@@ -392,10 +446,18 @@ public sealed class MainForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (_file?.IsDirty != true) return;
-        var result = MessageBox.Show(this, "Save changes before closing?", "Unsaved changes", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+        var dirty = _documents.Where(document => document.File.IsDirty).ToArray();
+        if (dirty.Length == 0) return;
+        var result = MessageBox.Show(this, $"Save all {dirty.Length:N0} modified DBC file(s) before closing?", "Unsaved changes", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
         if (result == DialogResult.Cancel) e.Cancel = true;
-        else if (result == DialogResult.Yes) SaveFile(false);
+        else if (result == DialogResult.Yes)
+        {
+            foreach (var document in dirty)
+            {
+                try { document.File.Save(document.File.SourcePath); }
+                catch (Exception ex) { ShowError(ex); e.Cancel = true; return; }
+            }
+        }
     }
 
     private static string? FindSchemaPath()
@@ -410,5 +472,9 @@ public sealed class MainForm : Form
         return null;
     }
 
-    private void ShowError(Exception? exception) => MessageBox.Show(this, exception?.Message ?? "Unknown error", "WoW Crucible", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    private void ShowError(Exception? exception)
+    {
+        CrashLogger.Log("Handled UI error", exception);
+        MessageBox.Show(this, $"{exception?.Message ?? "Unknown error"}\n\nDetails were written to:\n{CrashLogger.LogDirectory}", "WoW Crucible", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
 }

@@ -12,6 +12,7 @@ The client build is fixed, but server integration will not be tied to an old rep
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
 - Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.
+- Stages multiple open DBC files at once and switches between them without reloading.
 - Resolves and safely extends DBC string tables.
 - Searches all fields in parallel.
 - Edits strings, bytes, integers, unsigned values, raw 32-bit values, and floats.
@@ -23,6 +24,9 @@ The client build is fixed, but server integration will not be tied to an old rep
 - Accepts DBC and patch-builder drag-and-drop.
 - Builds WotLK patch MPQs from edited DBCs or existing folder trees.
 - Displays editable internal MPQ paths and preserves folder hierarchy.
+- Opens existing MPQ patches and safely adds or replaces files while keeping a `.bak` copy.
+- Remembers server `data\\dbc` and WoW client `Data` paths for future open, sync, and patch dialogs.
+- Writes handled and fatal crash details to `%LOCALAPPDATA%\\WoWCrucible\\Logs` (also available through **Open Logs**).
 - Maps standalone DBCs to `DBFilesClient\\<name>.dbc`.
 - Synchronizes a saved DBC into a selected server `data\\dbc` directory with backup.
 

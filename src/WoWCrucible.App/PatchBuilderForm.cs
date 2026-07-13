@@ -7,9 +7,12 @@ public sealed class PatchBuilderForm : Form
     private readonly DataGridView _grid = new FastDataGridView();
     private readonly Label _hint = new();
     private readonly List<PatchEntry> _entries = [];
+    private readonly AppSettings _settings;
+    private string? _existingPatch;
 
-    public PatchBuilderForm(IEnumerable<string>? initialPaths = null)
+    public PatchBuilderForm(AppSettings settings, IEnumerable<string>? initialPaths = null)
     {
+        _settings = settings;
         Text = "WoW Crucible Patch MPQ Builder";
         Width = 1100;
         Height = 650;
@@ -19,6 +22,7 @@ public sealed class PatchBuilderForm : Form
         var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 46, Padding = new(8), WrapContents = false };
         bar.Controls.Add(MakeButton("Add Files", (_, _) => AddFiles()));
         bar.Controls.Add(MakeButton("Add Folder", (_, _) => AddFolder()));
+        bar.Controls.Add(MakeButton("Open Existing MPQ", (_, _) => OpenExistingPatch()));
         bar.Controls.Add(MakeButton("Remove Selected", (_, _) => RemoveSelected()));
         bar.Controls.Add(MakeButton("Build MPQ", (_, _) => BuildPatch()));
 
@@ -55,8 +59,16 @@ public sealed class PatchBuilderForm : Form
 
     private void AddFiles()
     {
-        using var dialog = new OpenFileDialog { Multiselect = true, Filter = "Patch files (*.dbc;*.blp;*.m2;*.wmo;*.adt)|*.dbc;*.blp;*.m2;*.wmo;*.adt|All files (*.*)|*.*" };
+        using var dialog = new OpenFileDialog { Multiselect = true, InitialDirectory = Directory.Exists(_settings.CoreDbcPath) ? _settings.CoreDbcPath : string.Empty, Filter = "Patch files (*.dbc;*.blp;*.m2;*.wmo;*.adt)|*.dbc;*.blp;*.m2;*.wmo;*.adt|All files (*.*)|*.*" };
         if (dialog.ShowDialog(this) == DialogResult.OK) AddPaths(dialog.FileNames);
+    }
+
+    private void OpenExistingPatch()
+    {
+        using var dialog = new OpenFileDialog { InitialDirectory = Directory.Exists(_settings.ClientDataPath) ? _settings.ClientDataPath : string.Empty, Filter = "MPQ patch (*.MPQ)|*.MPQ|All files (*.*)|*.*" };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        _existingPatch = dialog.FileName;
+        _hint.Text = $"Updating {Path.GetFileName(_existingPatch)}. Added files replace matching internal paths; all other existing files remain intact.";
     }
 
     private void AddFolder()
@@ -100,12 +112,18 @@ public sealed class PatchBuilderForm : Form
         {
             var entries = _grid.Rows.Cast<DataGridViewRow>().Select(row => new PatchEntry(
                 Convert.ToString(row.Cells[0].Value)!, Convert.ToString(row.Cells[1].Value)!)).ToArray();
-            using var dialog = new SaveFileDialog { Filter = "MPQ patch (*.MPQ)|*.MPQ", FileName = "patch-W.mpq" };
-            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var outputPath = _existingPatch;
+            if (outputPath is null)
+            {
+                using var dialog = new SaveFileDialog { InitialDirectory = Directory.Exists(_settings.ClientDataPath) ? _settings.ClientDataPath : string.Empty, Filter = "MPQ patch (*.MPQ)|*.MPQ", FileName = "patch-W.mpq" };
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                outputPath = dialog.FileName;
+            }
             Cursor = Cursors.WaitCursor;
-            new PatchArchiveService().Create(dialog.FileName, entries);
-            _hint.Text = $"Created {dialog.FileName} with {entries.Length:N0} file(s).";
-            MessageBox.Show(this, $"Patch created successfully:\n{dialog.FileName}", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            var service = new PatchArchiveService();
+            if (_existingPatch is null) service.Create(outputPath, entries); else service.Update(outputPath, entries);
+            _hint.Text = $"{(_existingPatch is null ? "Created" : "Updated")} {outputPath} with {entries.Length:N0} added/replaced file(s).";
+            MessageBox.Show(this, $"Patch {(_existingPatch is null ? "created" : "updated")} successfully:\n{outputPath}\n\nA .bak copy preserves the previous archive.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { Cursor = Cursors.Default; }

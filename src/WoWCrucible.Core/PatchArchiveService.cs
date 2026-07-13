@@ -95,6 +95,42 @@ public sealed class PatchArchiveService
         finally { Native.SFileCloseArchive(archive); }
     }
 
+    public void Update(string archivePath, IEnumerable<PatchEntry> sourceEntries)
+    {
+        archivePath = Path.GetFullPath(archivePath);
+        if (!File.Exists(archivePath)) throw new FileNotFoundException("The MPQ patch does not exist.", archivePath);
+        var entries = ValidateEntries(sourceEntries);
+        var tempPath = archivePath + ".tmp";
+        File.Copy(archivePath, tempPath, true);
+        IntPtr archive = IntPtr.Zero;
+        try
+        {
+            if (!Native.SFileOpenArchive(tempPath, 0, 0, out archive)) ThrowNative("open the MPQ archive for updating");
+            foreach (var entry in entries)
+                if (!Native.SFileAddFileEx(archive, entry.SourcePath, entry.ArchivePath, FileCompress | FileReplaceExisting, CompressionZlib, 0xFFFFFFFF))
+                    ThrowNative($"add '{entry.ArchivePath}'");
+            if (!Native.SFileCloseArchive(archive)) ThrowNative("finalize the updated MPQ archive");
+            archive = IntPtr.Zero;
+            File.Copy(archivePath, archivePath + ".bak", true);
+            File.Move(tempPath, archivePath, true);
+        }
+        finally
+        {
+            if (archive != IntPtr.Zero) Native.SFileCloseArchive(archive);
+            File.Delete(tempPath);
+        }
+    }
+
+    private static PatchEntry[] ValidateEntries(IEnumerable<PatchEntry> sourceEntries)
+    {
+        var entries = sourceEntries.Select(entry => entry with { SourcePath = Path.GetFullPath(entry.SourcePath), ArchivePath = PatchInputMapper.NormalizeArchivePath(entry.ArchivePath) }).ToArray();
+        if (entries.Length == 0) throw new InvalidOperationException("Add at least one file to the patch.");
+        if (entries.Any(entry => !File.Exists(entry.SourcePath))) throw new FileNotFoundException("One or more patch source files no longer exist.");
+        var duplicate = entries.GroupBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null) throw new InvalidOperationException($"Duplicate MPQ path: {duplicate.Key}");
+        return entries;
+    }
+
     private static void ThrowNative(string operation) => throw new Win32Exception(Marshal.GetLastWin32Error(), $"StormLib could not {operation}");
 
     private static class Native

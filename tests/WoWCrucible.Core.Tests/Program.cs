@@ -102,6 +102,11 @@ var patchService = new PatchArchiveService();
 patchService.Create(mpqOutput, mapped);
 if (!patchService.Contains(mpqOutput, "DBFilesClient\\AnimationData.dbc"))
     throw new InvalidOperationException("Created MPQ does not contain the mapped DBC path.");
+var secondPatchEntry = PatchInputMapper.Map([files.First(path => Path.GetFileName(path).Equals("SpellCastTimes.dbc", StringComparison.OrdinalIgnoreCase))]);
+patchService.Update(mpqOutput, secondPatchEntry);
+if (!patchService.Contains(mpqOutput, "DBFilesClient\\AnimationData.dbc") || !patchService.Contains(mpqOutput, "DBFilesClient\\SpellCastTimes.dbc"))
+    throw new InvalidOperationException("Updating an MPQ did not preserve its existing files.");
 File.Delete(mpqOutput);
+File.Delete(mpqOutput + ".bak");
 
-Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, and created/reopened a patch MPQ.");
+Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, and created/updated/reopened a patch MPQ.");
