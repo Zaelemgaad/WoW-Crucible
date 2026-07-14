@@ -6,8 +6,7 @@ namespace WoWCrucible.App;
 internal static class CrashLogger
 {
     private static readonly object Gate = new();
-    public static string LogDirectory { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WoWCrucible", "Logs");
+    public static string LogDirectory { get; } = ResolveLogDirectory();
 
     public static void Initialize()
     {
@@ -17,7 +16,7 @@ internal static class CrashLogger
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             Log("Fatal unhandled exception", e.ExceptionObject as Exception ?? new Exception(e.ExceptionObject?.ToString()));
         TaskScheduler.UnobservedTaskException += (_, e) => { Log("Unobserved task exception", e.Exception); e.SetObserved(); };
-        Log("Application started", null);
+        Log($"Application started · logs: {LogDirectory}", null);
     }
 
     public static void Log(string context, Exception? exception)
@@ -40,5 +39,21 @@ internal static class CrashLogger
     {
         Directory.CreateDirectory(LogDirectory);
         Process.Start(new ProcessStartInfo(LogDirectory) { UseShellExecute = true });
+    }
+
+    private static string ResolveLogDirectory()
+    {
+        var portable = Path.Combine(AppContext.BaseDirectory, "Logs");
+        try
+        {
+            Directory.CreateDirectory(portable);
+            var probe = Path.Combine(portable, $".write-test-{Environment.ProcessId}-{Guid.NewGuid():N}");
+            File.WriteAllText(probe, string.Empty); File.Delete(probe);
+            return portable;
+        }
+        catch
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WoWCrucible", "Logs");
+        }
     }
 }

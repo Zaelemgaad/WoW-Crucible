@@ -6,7 +6,7 @@ internal sealed class ItemCreatorForm : Form
 {
     private readonly DatabaseConnectionProfile? _profile;
     private readonly DatabaseTableCapability _table;
-    private readonly NumericUpDown _entry = Number(1, uint.MaxValue);
+    private readonly NumericUpDown _entry = Number(1, uint.MaxValue, 1);
     private readonly TextBox _name = new() { Dock = DockStyle.Fill, PlaceholderText = "New custom item" };
     private readonly ComboBox _class = Choice((0, "Consumable"), (1, "Container"), (2, "Weapon"), (3, "Gem"), (4, "Armor"), (5, "Reagent"), (6, "Projectile"), (7, "Trade Goods"), (9, "Recipe"), (11, "Quiver"), (12, "Quest"), (13, "Key"), (15, "Miscellaneous"), (16, "Glyph"));
     private readonly ComboBox _subclass = Choice((0, "Generic"));
@@ -159,7 +159,7 @@ internal sealed class ItemCreatorForm : Form
     }
 
     private static void AddPair(TableLayoutPanel table, string label, Control control, int column, int row) { table.Controls.Add(new Label { Text = label + ":", AutoSize = true, Anchor = AnchorStyles.Left }, column, row); table.Controls.Add(control, column + 1, row); }
-    private static NumericUpDown Number(decimal min, decimal max, decimal value = 0) => new() { Minimum = min, Maximum = max, Value = value, Dock = DockStyle.Fill, ThousandsSeparator = true };
+    private static NumericUpDown Number(decimal min, decimal max, decimal value = 0) => new() { Minimum = min, Maximum = max, Value = Math.Clamp(value, min, max), Dock = DockStyle.Fill, ThousandsSeparator = true };
     private static NumericUpDown DecimalNumber(decimal min, decimal max) => new() { Minimum = min, Maximum = max, DecimalPlaces = 2, Dock = DockStyle.Fill, ThousandsSeparator = true };
     private static ComboBox Choice(params (int Value, string Name)[] values) { var combo = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, DisplayMember = "Name", ValueMember = "Value" }; combo.DataSource = values.Select(value => new NamedValue(value.Value, value.Name)).ToList(); return combo; }
     private static ComboBox StatChoice() => Choice((0, "Mana (unused when value is 0)"), (1, "Health"), (3, "Agility"), (4, "Strength"), (5, "Intellect"), (6, "Spirit"), (7, "Stamina"), (12, "Defense rating"), (13, "Dodge rating"), (14, "Parry rating"), (15, "Block rating"), (16, "Melee hit rating"), (17, "Ranged hit rating"), (18, "Spell hit rating"), (19, "Melee critical rating"), (20, "Ranged critical rating"), (21, "Spell critical rating"), (22, "Melee hit avoidance"), (23, "Ranged hit avoidance"), (24, "Spell hit avoidance"), (25, "Melee critical avoidance"), (26, "Ranged critical avoidance"), (27, "Spell critical avoidance"), (28, "Melee haste rating"), (29, "Ranged haste rating"), (30, "Spell haste rating"), (31, "Hit rating"), (32, "Critical strike rating"), (33, "Hit avoidance rating"), (34, "Critical avoidance rating"), (35, "Resilience rating"), (36, "Haste rating"), (37, "Expertise rating"), (38, "Attack power"), (39, "Ranged attack power"), (40, "Feral attack power (legacy)"), (41, "Spell healing (legacy)"), (42, "Spell damage (legacy)"), (43, "Mana regeneration"), (44, "Armor penetration rating"), (45, "Spell power"), (46, "Health regeneration"), (47, "Spell penetration"), (48, "Block value"));

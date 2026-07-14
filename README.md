@@ -35,7 +35,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Opens existing MPQ patches and safely adds or replaces files while keeping a `.bak` copy.
 - Remembers server `data\\dbc` and WoW client `Data` paths for future open, sync, and patch dialogs.
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
-- Writes handled and fatal crash details to `%LOCALAPPDATA%\\WoWCrucible\\Logs` (also available through **Open Logs**).
+- Writes handled and fatal crash details to a portable `Logs` folder beside the application (also available through **Open Logs**), with `%LOCALAPPDATA%\\WoWCrucible\\Logs` as a fallback for read-only install locations.
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
 - Ships a scriptable `wowcrucible.exe` CLI for DBC information and MPQ list/extract/create/update operations.
 - Compares layered DBC directories as base-only, override-only, identical, or genuinely overridden, with cancellable semantic row/field comparison (decoded strings do not differ merely because their offsets moved).
