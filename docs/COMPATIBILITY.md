@@ -46,6 +46,8 @@ Generated operations target a capability model, not a guessed version number. Fo
 
 The application can now connect to a live MySQL/MariaDB world database and inspect selected content tables through `information_schema`. Connection passwords are session-only. The guided item creator is the first capability-aware writer: it previews/exports SQL, maps only columns proved to exist, refuses duplicate entry IDs, parameterizes values, and inserts within a transaction. Creature/NPC, vendor, loot, quest, race, and class creators will reuse the same inspection boundary.
 
+The **Detect Server Workspace** flow reads a live `worldserver.conf` to import `DataDir` and `WorldDatabaseInfo`. It ignores `.conf.dist` templates, never persists the detected password, and supports a Windows control/DBC folder whose launcher points to a WSL-hosted configuration. Selecting a source checkout is intentionally insufficient because its template credentials do not prove an installed server layout.
+
 If a required capability cannot be proven, WoW Crucible must stop that part of the operation and explain what is missing. It must not silently generate old-repack SQL.
 
 ## Content projects

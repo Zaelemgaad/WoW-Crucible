@@ -8,6 +8,7 @@ try
     {
         "dbc" => Dbc(args[1..]),
         "db" => Database(args[1..]).GetAwaiter().GetResult(),
+        "server" => Server(args[1..]).GetAwaiter().GetResult(),
         "mpq" => Mpq(args[1..]),
         "manifest" => Manifest(args[1..]),
         _ => Fail($"Unknown command: {args[0]}")
@@ -18,6 +19,23 @@ catch (Exception ex)
 {
     Console.Error.WriteLine($"ERROR: {ex.Message}");
     return 1;
+}
+
+static async Task<int> Server(string[] args)
+{
+    if (args is not [var action, var folder] || action is not ("detect" or "inspect")) return Fail("Usage: wowcrucible server <detect|inspect> <installed-server-folder>");
+    var workspace = await ServerWorkspaceDetector.DetectAsync(folder);
+    Console.WriteLine($"Root\t{workspace.RootPath}"); Console.WriteLine($"Core\t{workspace.CoreFamily}");
+    Console.WriteLine($"Config\t{workspace.ConfigLocation}"); Console.WriteLine($"DBC\t{workspace.DbcPath}");
+    Console.WriteLine($"WorldDatabase\t{workspace.WorldDatabase.Database}"); Console.WriteLine($"DatabaseEndpoint\t{workspace.WorldDatabase.Host}:{workspace.WorldDatabase.Port}");
+    Console.WriteLine($"DatabaseUser\t{workspace.WorldDatabase.User}"); Console.WriteLine($"Layout\t{(workspace.UsesWsl ? "WSL split" : "Native/local")}");
+    if (action == "inspect")
+    {
+        var capabilities = await new DatabaseCapabilityService().InspectAsync(workspace.WorldDatabase);
+        Console.WriteLine($"DatabaseServer\t{capabilities.ServerVersion}");
+        foreach (var table in capabilities.Tables.Values.OrderBy(table => table.Name)) Console.WriteLine($"TABLE\t{table.Name}\t{table.Columns.Count} columns");
+    }
+    return 0;
 }
 
 static async Task<int> Database(string[] args)
@@ -159,7 +177,7 @@ static int Mpq(string[] args)
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> <output-folder>");
+    Console.WriteLine("WoW Crucible CLI\n\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> <output-folder>");
     return 0;
 }
 

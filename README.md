@@ -12,6 +12,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
+- Detects an installed AzerothCore/TrinityCore workspace from its live `worldserver.conf`, automatically imports server DBC and world-database settings, and supports split Windows-folder/WSL-server launchers such as the bundled test workspace.
 - Provides a guided item/weapon/armor creator with named quality, slot, binding, and stat choices; previews or exports schema-aware SQL and can perform a parameterized transactional insert that refuses duplicate IDs.
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
@@ -50,6 +51,8 @@ wowcrucible dbc info Spell.dbc
 wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder [--strict] [--recursive]
 wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).xml"
 wowcrucible dbc promote apply base\Spell.dbc override\Spell.dbc schema.xml selection.dbc-promotion.json output\Spell.dbc
+wowcrucible server detect "C:\path\to\installed-server"
+wowcrucible server inspect "C:\path\to\installed-server"
 wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible mpq list patch.MPQ [filter]
 wowcrucible mpq extract patch.MPQ output-folder [filter] [--quiet|--progress=N]

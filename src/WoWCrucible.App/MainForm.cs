@@ -32,7 +32,7 @@ public sealed class MainForm : Form
         AllowDrop = true;
         KeyPreview = true;
 
-        _startCenter = new StartCenterControl(_settings, OpenGuidedSpellWorkspace, OpenItemCreator, ConnectDatabase, DatabaseStatus, OpenFile, () => OpenPatchBuilder(), () => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }, OpenLayeredDbcs, ConfigurePaths);
+        _startCenter = new StartCenterControl(_settings, OpenGuidedSpellWorkspace, OpenItemCreator, ImportServerWorkspace, ConnectDatabase, DatabaseStatus, OpenFile, () => OpenPatchBuilder(), () => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }, OpenLayeredDbcs, ConfigurePaths);
 
         var tools = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new(6, 4, 6, 4) };
         tools.Items.Add(Button("Home", (_, _) => ShowStartCenter()));
@@ -49,6 +49,7 @@ public sealed class MainForm : Form
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("Spell Workspace", (_, _) => OpenSpellWorkspace()));
         tools.Items.Add(Button("Item Creator", (_, _) => OpenItemCreator()));
+        tools.Items.Add(Button("Detect Server", (_, _) => ImportServerWorkspace()));
         tools.Items.Add(Button("Connect DB", (_, _) => ConnectDatabase()));
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("New Row", (_, _) => AddRow()));
@@ -155,6 +156,33 @@ public sealed class MainForm : Form
         _databaseProfile = form.Profile; _databaseCapabilities = form.Capabilities;
         _status.Text = $"Connected to {_databaseCapabilities.Database} · {_databaseCapabilities.Tables.Count} recognized content tables";
         _startCenter.RefreshReadiness();
+    }
+
+    private async void ImportServerWorkspace()
+    {
+        using var form = new ServerWorkspaceForm(_settings);
+        if (form.ShowDialog(this) != DialogResult.OK || form.Workspace is null) return;
+        var workspace = form.Workspace;
+        _settings.ServerRootPath = workspace.RootPath;
+        if (!string.IsNullOrWhiteSpace(workspace.DbcPath)) _settings.CoreDbcPath = workspace.DbcPath;
+        _settings.DatabaseHost = workspace.WorldDatabase.Host; _settings.DatabasePort = workspace.WorldDatabase.Port;
+        _settings.DatabaseUser = workspace.WorldDatabase.User; _settings.WorldDatabase = workspace.WorldDatabase.Database;
+        _settings.DatabaseSslMode = workspace.WorldDatabase.SslMode.ToString(); _settings.Save();
+        _databaseProfile = workspace.WorldDatabase; _databaseCapabilities = null; _startCenter.RefreshReadiness();
+        try
+        {
+            UseWaitCursor = true; _status.Text = $"Connecting to detected database {workspace.WorldDatabase.Database}…";
+            _databaseCapabilities = await new DatabaseCapabilityService().InspectAsync(workspace.WorldDatabase);
+            _status.Text = $"Server workspace ready · {_databaseCapabilities.Database} · {_databaseCapabilities.Tables.Count} recognized content tables";
+            _startCenter.RefreshReadiness();
+            MessageBox.Show(this, $"Server workspace configured.\n\nDBC folder: {(string.IsNullOrWhiteSpace(workspace.DbcPath) ? "not found" : workspace.DbcPath)}\nDatabase: {_databaseCapabilities.Database}\nCore: {workspace.CoreFamily}\n\nGuided creators can now deploy directly after showing a preview and asking for confirmation.", "Server Workspace Ready", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            _status.Text = "Server paths imported; database is not currently reachable";
+            MessageBox.Show(this, $"The server paths and non-secret connection details were imported, but the database could not be inspected:\n\n{ex.Message}\n\nStart MySQL/the server and run Detect Server again, or connect manually.", "Workspace Imported", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally { UseWaitCursor = false; }
     }
 
     private string? DatabaseStatus() => _databaseCapabilities is null ? null : $"{_databaseCapabilities.Database} on {_databaseProfile!.Host}:{_databaseProfile.Port} · MySQL {_databaseCapabilities.ServerVersion}";

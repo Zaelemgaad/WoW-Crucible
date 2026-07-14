@@ -9,7 +9,7 @@ internal sealed class StartCenterControl : UserControl
 
     private readonly Func<string?> _databaseStatus;
 
-    public StartCenterControl(AppSettings settings, Action editSpells, Action createItem, Action connectDatabase, Func<string?> databaseStatus, Action openDbcs, Action buildPatch, Action browseMpq, Action compareLayers, Action configurePaths)
+    public StartCenterControl(AppSettings settings, Action editSpells, Action createItem, Action detectServer, Action connectDatabase, Func<string?> databaseStatus, Action openDbcs, Action buildPatch, Action browseMpq, Action compareLayers, Action configurePaths)
     {
         _settings = settings; _databaseStatus = databaseStatus; Dock = DockStyle.Fill; AutoScroll = true; BackColor = Color.FromArgb(244, 246, 249);
         var content = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Dock = DockStyle.Top, Padding = new(36, 28, 36, 36), BackColor = BackColor };
@@ -28,9 +28,9 @@ internal sealed class StartCenterControl : UserControl
         advanced.Controls.Add(Card("Compare DBC layers", "Compare base and override directories, inspect semantic changes, then promote selected fields or rows by ID.", "Open Layer Comparison", compareLayers), 2, 0);
         content.Controls.Add(advanced);
         var workspace = CardRow();
-        workspace.Controls.Add(Card("Connect to a world database", "Connect for this session and inspect real table/column capabilities before any creator is allowed to write SQL.", "Connect and Inspect", () => { connectDatabase(); RefreshReadiness(); }), 0, 0);
-        workspace.Controls.Add(Card("Configure the workspace", "Select a client-build profile, server DBCs, client Data, schema, executable, and layer paths.", "Configure Workspace", () => { configurePaths(); RefreshReadiness(); }), 1, 0);
-        workspace.Controls.Add(Card("More guided creators", "Creatures, NPCs, vendors, loot, quests, races, and classes use the same capability system. Item creation is the first implemented server writer.", "Review Database", connectDatabase), 2, 0);
+        workspace.Controls.Add(Card("Detect your server automatically", "Choose the installed server folder. Crucible finds its live config, DBC directory, and world database—even for a Windows/WSL split layout.", "Detect Server Workspace", () => { detectServer(); RefreshReadiness(); }), 0, 0);
+        workspace.Controls.Add(Card("Connect manually", "Use explicit host, port, user, database, and session-only password when a server layout cannot be detected or the database is remote.", "Manual Database Connection", () => { connectDatabase(); RefreshReadiness(); }), 1, 0);
+        workspace.Controls.Add(Card("Configure individual paths", "Override the target profile, server DBCs, client Data, schema, executable, or layer paths individually.", "Advanced Workspace Settings", () => { configurePaths(); RefreshReadiness(); }), 2, 0);
         content.Controls.Add(workspace);
         content.Controls.Add(Heading("Workspace readiness"));
         var readinessBox = new Panel { AutoSize = true, Dock = DockStyle.Top, BackColor = Color.White, Padding = new(16), Margin = new(0, 0, 0, 12), BorderStyle = BorderStyle.FixedSingle };
@@ -42,6 +42,7 @@ internal sealed class StartCenterControl : UserControl
     public void RefreshReadiness()
     {
         _readiness.Controls.Clear(); _readiness.RowStyles.Clear(); _readiness.RowCount = 0;
+        AddReadiness("Detected server workspace", Directory.Exists(_settings.ServerRootPath), _settings.ServerRootPath, "Optional: choose the installed server folder to configure DBC and database paths automatically.");
         AddReadiness("Server DBC folder", Directory.Exists(_settings.CoreDbcPath), _settings.CoreDbcPath, "Set the current core's data\\dbc directory.");
         AddReadiness("Client Data folder", Directory.Exists(_settings.ClientDataPath), _settings.ClientDataPath, "Set the WoW client Data directory.");
         var profiles = TargetProfileCatalog.Load(); var target = TargetProfileCatalog.Find(profiles, _settings.SelectedTargetProfileId);

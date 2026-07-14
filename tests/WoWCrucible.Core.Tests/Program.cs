@@ -15,6 +15,22 @@ if (profilesWithCustom.Count != 5 || profilesWithCustom.Single(profile => profil
     throw new InvalidOperationException("External target profile loading failed.");
 Directory.Delete(customProfileDirectory, true);
 
+var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
+Directory.CreateDirectory(Path.Combine(serverFixture, "etc")); Directory.CreateDirectory(Path.Combine(serverFixture, "data", "dbc"));
+File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf"), """
+    # Parser must ignore comments and whitespace.
+    WorldDatabaseInfo = "localhost;3307;fixture_user;fixture_password;fixture_world"
+    DataDir = "./data"
+    """);
+var detectedServer = ServerWorkspaceDetector.DetectLocal(serverFixture);
+if (detectedServer.WorldDatabase.Host != "127.0.0.1" || detectedServer.WorldDatabase.Port != 3307 || detectedServer.WorldDatabase.Password != "fixture_password" ||
+    detectedServer.WorldDatabase.Database != "fixture_world" || !detectedServer.DbcPath.EndsWith(Path.Combine("data", "dbc")))
+    throw new InvalidOperationException("Native server workspace detection failed.");
+File.Delete(Path.Combine(serverFixture, "etc", "worldserver.conf")); File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf.dist"), "WorldDatabaseInfo = \"bad;3306;bad;bad;bad\"");
+try { _ = ServerWorkspaceDetector.DetectLocal(serverFixture); throw new InvalidOperationException("A .conf.dist template was accepted as a live server configuration."); }
+catch (FileNotFoundException) { }
+Directory.Delete(serverFixture, true);
+
 var azerothItemTable = new DatabaseTableCapability("item_template", ItemColumns("entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "delay", "MaxDurability", "description", "stat_type1", "stat_value1"));
 var trinityItemTable = new DatabaseTableCapability("item_template", ItemColumns("entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType", "ItemLevel", "StatsCount", "stat_type1", "stat_value1", "stat_type2", "stat_value2"));
 var itemDraft = new ItemDraft(900001, "Crucible's Blade", 2, 8, 123, 4, 17, 200, 80, 10000, 2500, 2, 0, 0, 120, 180, 2800, 120, "Adapter test", 4, 50, 7, 75);
