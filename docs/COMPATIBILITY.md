@@ -1,6 +1,21 @@
 # Compatibility contract
 
-WoW Crucible's client target is fixed: World of Warcraft 3.3.5a, build 12340. Server compatibility is deliberately not fixed to a bundled repack, database dump, or historical core revision.
+WoW Crucible's primary, verified client target is World of Warcraft 3.3.5a, build 12340. Client compatibility is profile-driven so community contributors can add targets without scattering build checks throughout the editor. Server compatibility is deliberately not fixed to a bundled repack, database dump, or historical core revision.
+
+## Client target profiles
+
+Built-in profiles currently describe:
+
+| Client | Build | Tier | Current boundary |
+|---|---:|---|---|
+| Classic 1.12.1 | 5875 | Schema ready | WDBC definition is available; full corpus round-trip validation is still required. |
+| The Burning Crusade 2.4.3 | 8606 | Schema ready | WDBC definition is available; full corpus round-trip validation is still required. |
+| Wrath of the Lich King 3.3.5a | 12340 | Verified | Primary tested WDBC and MPQ target. |
+| Cataclysm 4.3.4 | 15595 | Experimental | MPQ and WDBC-era files are understood, but DB2 editing is not implemented. |
+
+Each profile declares a stable ID, client build, schema filename, table formats, archive format, support tier, and notes. Additional JSON profiles can be placed in `%LOCALAPPDATA%\WoWCrucible\Profiles` or the application's `profiles` directory. A profile enables only capabilities implemented by the engine; selecting Cata does not mislabel a DB2 file as editable WDBC.
+
+Definition XML files provide names and types, but are not proof of safe round trips. A target moves to **Verified** only after its complete legal test corpus passes unmodified byte-for-byte round trips and representative edits.
 
 ## Supported server families
 
@@ -29,6 +44,8 @@ Before enabling server writes, a profile must collect:
 
 Generated operations target a capability model, not a guessed version number. For example, a spell workflow asks whether the selected profile supports `spell_proc`, which columns exist, and how that core represents ranks. The adapter then emits the appropriate SQL.
 
+The application can now connect to a live MySQL/MariaDB world database and inspect selected content tables through `information_schema`. Connection passwords are session-only. The guided item creator is the first capability-aware writer: it previews/exports SQL, maps only columns proved to exist, refuses duplicate entry IDs, parameterizes values, and inserts within a transaction. Creature/NPC, vendor, loot, quest, race, and class creators will reuse the same inspection boundary.
+
 If a required capability cannot be proven, WoW Crucible must stop that part of the operation and explain what is missing. It must not silently generate old-repack SQL.
 
 ## Content projects
@@ -37,7 +54,7 @@ A WoW Crucible project will keep portable content intent separate from deploymen
 
 ```text
 Portable content model
-    ├── Client build 12340 adapter → DBC changes and patch MPQ
+    ├── Selected client profile → supported DBC/DB2 changes and patch archive
     ├── Current AzerothCore adapter → revision-aware SQL/module changes
     └── Current TrinityCore 3.3.5 adapter → revision-aware SQL/core changes
 ```

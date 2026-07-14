@@ -3,13 +3,16 @@
 > [!WARNING]
 > WoW Crucible is in very early development. Back up your files and validate generated client/server changes before using them on a live project.
 
-WoW Crucible is an open-source content-authoring toolkit for World of Warcraft 3.3.5a (build 12340). The long-term goal is one coherent workflow for DBC editing, patch MPQ creation, spells, items, creatures, races, classes, and current AzerothCore/TrinityCore 3.3.5 integration.
+WoW Crucible is an open-source World of Warcraft content-authoring toolkit. Its primary verified target is 3.3.5a (build 12340), with an extensible target-profile system for Classic 1.12.1, TBC 2.4.3, experimental Cata 4.3.4, and future community targets. The long-term goal is one coherent workflow for DBC/DB2 editing, patch creation, spells, items, creatures, races, classes, and current server-core integration.
 
-The client build is fixed, but server integration will not be tied to an old repack. The compatibility contract targets current AzerothCore `master` and current TrinityCore branch `3.3.5` through separate capability-driven adapters. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+Client formats and server integration are separate: a client-build profile declares file/archive capabilities, while a live schema adapter targets what the selected server actually exposes. The verified server contract targets current AzerothCore `master` and current TrinityCore branch `3.3.5`. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ## What works today
 
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
+- Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
+- Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
+- Provides a guided item/weapon/armor creator with named quality, slot, binding, and stat choices; previews or exports schema-aware SQL and can perform a parameterized transactional insert that refuses duplicate IDs.
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
 - Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.
@@ -47,6 +50,7 @@ wowcrucible dbc info Spell.dbc
 wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder [--strict] [--recursive]
 wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).xml"
 wowcrucible dbc promote apply base\Spell.dbc override\Spell.dbc schema.xml selection.dbc-promotion.json output\Spell.dbc
+wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible mpq list patch.MPQ [filter]
 wowcrucible mpq extract patch.MPQ output-folder [filter] [--quiet|--progress=N]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
@@ -87,12 +91,11 @@ The corpus test runner accepts a WDBX 12340 definition XML and a directory conta
 
 ## Roadmap
 
-1. Bulk operations, validation, and project-wide ID allocation.
+1. Project-wide ID allocation, validation, and portable content projects.
 2. Expand the Spell Workspace with named flags, searchable references, and related-table navigation.
-3. CSV import/export and target-aware SQL generation.
-4. MPQ browsing and extraction.
-5. Current AzerothCore and TrinityCore 3.3.5 server profiles.
-6. Guided item, race, and class creation spanning required client and server records.
+3. Guided creature/NPC, vendor, loot, quest, race, and class creators on the live capability model.
+4. DB2 support and complete corpus verification for additional client profiles.
+5. Revision-aware AzerothCore and TrinityCore deployment adapters beyond generic live-schema mapping.
 
 ## Contributing
 

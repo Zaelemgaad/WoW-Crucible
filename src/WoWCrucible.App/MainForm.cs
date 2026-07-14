@@ -20,17 +20,19 @@ public sealed class MainForm : Form
     private IReadOnlyList<DbcColumn> _columns = [];
     private int[]? _visibleRows;
     private string? _schemaPath;
+    private DatabaseConnectionProfile? _databaseProfile;
+    private DatabaseCapabilities? _databaseCapabilities;
 
     public MainForm(string? initialFile)
     {
-        Text = "WoW Crucible — 3.3.5a Editor";
+        Text = "WoW Crucible";
         Width = 1500;
         Height = 900;
         StartPosition = FormStartPosition.CenterScreen;
         AllowDrop = true;
         KeyPreview = true;
 
-        _startCenter = new StartCenterControl(_settings, OpenGuidedSpellWorkspace, OpenFile, () => OpenPatchBuilder(), () => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }, OpenLayeredDbcs, ConfigurePaths);
+        _startCenter = new StartCenterControl(_settings, OpenGuidedSpellWorkspace, OpenItemCreator, ConnectDatabase, DatabaseStatus, OpenFile, () => OpenPatchBuilder(), () => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }, OpenLayeredDbcs, ConfigurePaths);
 
         var tools = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new(6, 4, 6, 4) };
         tools.Items.Add(Button("Home", (_, _) => ShowStartCenter()));
@@ -46,6 +48,8 @@ public sealed class MainForm : Form
         tools.Items.Add(_decoded);
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("Spell Workspace", (_, _) => OpenSpellWorkspace()));
+        tools.Items.Add(Button("Item Creator", (_, _) => OpenItemCreator()));
+        tools.Items.Add(Button("Connect DB", (_, _) => ConnectDatabase()));
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("New Row", (_, _) => AddRow()));
         tools.Items.Add(Button("Clone Row", (_, _) => CloneRow()));
@@ -113,7 +117,7 @@ public sealed class MainForm : Form
                 OpenPatchBuilder(paths);
         };
 
-        _schemaPath = FindSchemaPath(_settings.SchemaDefinitionPath);
+        _schemaPath = FindSchemaPath(_settings.SchemaDefinitionPath, CurrentTarget());
         if (!string.IsNullOrWhiteSpace(initialFile) && File.Exists(initialFile))
             Shown += (_, _) =>
             {
@@ -141,7 +145,26 @@ public sealed class MainForm : Form
     {
         using var form = new SettingsForm(_settings);
         if (form.ShowDialog(this) != DialogResult.OK) return;
-        _schemaPath = FindSchemaPath(_settings.SchemaDefinitionPath); _startCenter.RefreshReadiness();
+        _schemaPath = FindSchemaPath(_settings.SchemaDefinitionPath, CurrentTarget()); _startCenter.RefreshReadiness();
+    }
+
+    private void ConnectDatabase()
+    {
+        using var form = new DatabaseConnectionForm(_settings);
+        if (form.ShowDialog(this) != DialogResult.OK || form.Profile is null || form.Capabilities is null) return;
+        _databaseProfile = form.Profile; _databaseCapabilities = form.Capabilities;
+        _status.Text = $"Connected to {_databaseCapabilities.Database} · {_databaseCapabilities.Tables.Count} recognized content tables";
+        _startCenter.RefreshReadiness();
+    }
+
+    private string? DatabaseStatus() => _databaseCapabilities is null ? null : $"{_databaseCapabilities.Database} on {_databaseProfile!.Host}:{_databaseProfile.Port} · MySQL {_databaseCapabilities.ServerVersion}";
+
+    private void OpenItemCreator()
+    {
+        if (_databaseProfile is null || _databaseCapabilities is null) ConnectDatabase();
+        if (_databaseProfile is null || _databaseCapabilities is null) return;
+        if (_databaseCapabilities.FindTable("item_template") is null) { MessageBox.Show(this, "The connected world database has no item_template table. Check that you selected the world database, not auth or characters.", "Item Creator", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+        using var creator = new ItemCreatorForm(_databaseProfile, _databaseCapabilities); creator.ShowDialog(this);
     }
 
     private void ShowStartCenter()
@@ -564,14 +587,16 @@ public sealed class MainForm : Form
         }
     }
 
-    private static string? FindSchemaPath(string? configuredPath)
+    private TargetProfile CurrentTarget() { var profiles = TargetProfileCatalog.Load(); return TargetProfileCatalog.Find(profiles, _settings.SelectedTargetProfileId); }
+
+    private static string? FindSchemaPath(string? configuredPath, TargetProfile target)
     {
         if (!string.IsNullOrWhiteSpace(configuredPath) && File.Exists(configuredPath)) return Path.GetFullPath(configuredPath);
-        const string fileName = "WotLK 3.3.5 (12340).xml";
+        var fileName = target.SchemaFileName;
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
-            foreach (var relative in new[] { Path.Combine("Definitions", fileName), Path.Combine("WDBXEditor", "WDBXEditor", "Definitions", fileName), Path.Combine("WDBX (wow edit)", "Definitions", fileName) })
+            foreach (var relative in new[] { Path.Combine("Definitions", fileName), Path.Combine("WDBX.Editor", "Definitions", fileName), Path.Combine("WDBXEditor", "WDBXEditor", "Definitions", fileName), Path.Combine("WDBX (wow edit)", "Definitions", fileName) })
             {
                 var candidate = Path.Combine(directory.FullName, relative);
                 if (File.Exists(candidate)) return candidate;
