@@ -23,7 +23,45 @@ catch (Exception ex)
 
 static async Task<int> Server(string[] args)
 {
-    if (args is not [var action, var folder] || action is not ("detect" or "inspect")) return Fail("Usage: wowcrucible server <detect|inspect> <installed-server-folder>");
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ServerHelp();
+    if (args is ["bindings", var bindingFolder, .. var bindingOptions])
+    {
+        var source = Option(bindingOptions, "--source=");
+        var unknown = bindingOptions.Where(option => !option.StartsWith("--source=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown server bindings option: {unknown[0]}");
+        var bindingWorkspace = await ServerWorkspaceDetector.DetectAsync(bindingFolder);
+        foreach (var binding in ServerTableBindingCatalog.Resolve(bindingWorkspace.CoreFamily, source))
+            Console.WriteLine($"{binding.Consumption}\t{binding.DbcFileName}\t{binding.SqlTableName ?? "-"}\t{binding.KeyStrategy.Kind}\t{binding.Restart}\t{binding.Profile}\t{binding.SupportedRevision}");
+        return 0;
+    }
+    if (args is ["dbc-audit", var auditFolder, var dbcInput, var schemaPath, .. var auditOptions])
+    {
+        var source = Option(auditOptions, "--source="); var migration = Option(auditOptions, "--migration=");
+        var showAll = auditOptions.Any(option => option.Equals("--all", StringComparison.OrdinalIgnoreCase));
+        var unknown = auditOptions.Where(option => !option.StartsWith("--source=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--migration=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--all", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown server dbc-audit option: {unknown[0]}");
+        var auditWorkspace = await ServerWorkspaceDetector.DetectAsync(auditFolder);
+        var dbcPath = File.Exists(dbcInput) ? Path.GetFullPath(dbcInput) : Path.Combine(auditWorkspace.DbcPath, Path.GetFileName(dbcInput));
+        if (!File.Exists(dbcPath)) throw new FileNotFoundException("The DBC was not found in the detected server data folder.", dbcPath);
+        var dbc = WdbcFile.Load(dbcPath); var resolution = DbcSchemaCatalog.Load(schemaPath).ResolveColumns(Path.GetFileNameWithoutExtension(dbcPath), dbc.FieldCount);
+        if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(Path.GetFileNameWithoutExtension(dbcPath), dbc.FieldCount, resolution));
+        var binding = ServerTableBindingCatalog.ApplySchemaKey(ServerTableBindingCatalog.ResolveFile(auditWorkspace.CoreFamily, dbcPath, source), resolution);
+        PrintBinding(binding);
+        if (binding.Consumption != ServerTableConsumption.SqlOverlayed || binding.SqlTableName is null) return binding.Consumption == ServerTableConsumption.Unknown ? 1 : 0;
+        var capabilities = await new DatabaseCapabilityService().InspectAsync(auditWorkspace.WorldDatabase);
+        var table = capabilities.FindTable(binding.SqlTableName) ?? throw new InvalidDataException($"The live world database has no expected overlay table {binding.SqlTableName}.");
+        var audit = await new DbcSqlAuditService().AuditAsync(auditWorkspace.WorldDatabase, binding, dbcPath, resolution, table);
+        foreach (var row in audit.Rows.Where(row => showAll || row.Status != DbcSqlRowStatus.Same))
+            Console.WriteLine($"{row.Status}\t{row.Key}\t{row.Dimensions}\tDBC {FormatValues(row.DbcValues)}\tSQL {FormatValues(row.SqlValues)}");
+        Console.Error.WriteLine($"Audited {audit.Rows.Count:N0} effective rows: {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.Same):N0} same, {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.SqlOverridesDbc):N0} SQL override(s), {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.MissingSqlRow):N0} missing SQL, {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.MissingDbcRow):N0} missing DBC. Effective server values come from SQL when a row exists.");
+        if (migration is not null)
+        {
+            File.WriteAllText(migration, DbcSqlAuditService.CreateIdempotentMigration(audit));
+            Console.Error.WriteLine($"Wrote idempotent DBC-to-SQL migration preview: {Path.GetFullPath(migration)}");
+        }
+        return audit.MismatchCount == 0 ? 0 : 3;
+    }
+    if (args is not [var action, var folder] || action is not ("detect" or "inspect")) return ServerHelp(2);
     var workspace = await ServerWorkspaceDetector.DetectAsync(folder);
     Console.WriteLine($"Root\t{workspace.RootPath}"); Console.WriteLine($"Core\t{workspace.CoreFamily}");
     Console.WriteLine($"Config\t{workspace.ConfigLocation}"); Console.WriteLine($"DBC\t{workspace.DbcPath}");
@@ -34,12 +72,22 @@ static async Task<int> Server(string[] args)
         var capabilities = await new DatabaseCapabilityService().InspectAsync(workspace.WorldDatabase);
         Console.WriteLine($"DatabaseServer\t{capabilities.ServerVersion}");
         foreach (var table in capabilities.Tables.Values.OrderBy(table => table.Name)) Console.WriteLine($"TABLE\t{table.Name}\t{table.Columns.Count} columns");
+        foreach (var inspected in ServerTableBindingCatalog.AttachCapabilities(ServerTableBindingCatalog.BuiltIn(workspace.CoreFamily), capabilities).Where(item => item.Binding.Consumption == ServerTableConsumption.SqlOverlayed))
+            Console.WriteLine($"DBC_BINDING\t{inspected.Binding.DbcFileName}\t{inspected.Binding.SqlTableName}\t{(inspected.ExpectedSqlTablePresent ? "ready" : "MISSING SQL TABLE")}");
+        Console.Error.WriteLine($"Found {capabilities.DbcOverlayTables.Count:N0} live DBC SQL overlay table(s).");
     }
     return 0;
 }
 
+static int ServerHelp(int code = 0)
+{
+    var text = "Usage:\n  wowcrucible server detect <installed-server-folder>\n  wowcrucible server inspect <installed-server-folder>\n  wowcrucible server bindings <installed-server-folder> [--source=core-source]\n  wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=output.sql]";
+    if (code == 0) Console.WriteLine(text); else Console.Error.WriteLine(text); return code;
+}
+
 static async Task<int> Database(string[] args)
 {
+    if (args.Length > 0 && args[0] is "help" or "--help" or "-h") { Console.WriteLine("Usage: wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]"); return 0; }
     if (args is not ["inspect", var host, var portText, var user, var database, .. var options])
         return Fail("Usage: wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]");
     var unknown = options.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -58,6 +106,7 @@ static async Task<int> Database(string[] args)
 
 static int Manifest(string[] args)
 {
+    if (args.Length > 0 && args[0] is "help" or "--help" or "-h") return ManifestHelp();
     if (args is ["create", var manifestPath, var outputFile, .. var rawInputs] && rawInputs.Length > 0)
     {
         var executableOption = rawInputs.FirstOrDefault(value => value.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase));
@@ -91,12 +140,13 @@ static int Manifest(string[] args)
         case ["validate", var validateArchiveManifestPath, var archivePath]:
             return PrintManifestValidation(PatchManifestService.Validate(PatchManifestService.Load(validateArchiveManifestPath), archivePath));
         default:
-            return Fail("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>");
+            return ManifestHelp(2);
     }
 }
 
 static int Dbc(string[] args)
 {
+    if (args.Length > 0 && args[0] is "help" or "--help" or "-h") return DbcHelp();
     if (args is ["compare", var basePath, var overridePath, var schemaPath])
     {
         var tableName = Path.GetFileNameWithoutExtension(basePath);
@@ -130,7 +180,7 @@ static int Dbc(string[] args)
         Console.Error.WriteLine($"Validated {results.Count:N0} DBC paths: {results.Count(result => result.Passed && !result.Skipped && !result.Warning):N0} named-schema passes, {results.Count(result => result.Warning):N0} fallbacks, {results.Count(result => result.Skipped):N0} skipped, {results.Count(result => !result.Passed):N0} failed.");
         return results.All(result => result.Passed) && (!strict || results.All(result => !result.Warning)) ? 0 : 1;
     }
-    if (args.Length != 2 || args[0] != "info") return Fail("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml>\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>");
+    if (args.Length != 2 || args[0] != "info") return DbcHelp(2);
     var file = WdbcFile.Load(args[1]);
     Console.WriteLine($"Path\t{Path.GetFullPath(args[1])}");
     Console.WriteLine($"Rows\t{file.RowCount}"); Console.WriteLine($"Fields\t{file.FieldCount}"); Console.WriteLine($"StringBytes\t{file.StringTableSize}");
@@ -139,7 +189,8 @@ static int Dbc(string[] args)
 
 static int Mpq(string[] args)
 {
-    if (args.Length == 0) return Fail("Usage: wowcrucible mpq <list|extract|create|update> ...");
+    if (args.Length == 0) return MpqHelp(2);
+    if (args[0] is "help" or "--help" or "-h" || args.Length > 1 && args[1] is "--help" or "-h") return MpqHelp();
     var service = new PatchArchiveService();
     switch (args[0])
     {
@@ -175,13 +226,22 @@ static int Mpq(string[] args)
     }
 }
 
+static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
+static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml>\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>", code);
+static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>", code);
+static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLine(message); else Console.Error.WriteLine(message); return code; }
+
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> <output-folder>");
+    Console.WriteLine("WoW Crucible CLI\n\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  server bindings <installed-server-folder> [--source=core-source]\n  server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=output.sql]\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> <output-folder>");
     return 0;
 }
 
 static int Fail(string message) { Console.Error.WriteLine(message); return 2; }
+
+static string? Option(IEnumerable<string> options, string prefix) => options.FirstOrDefault(option => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))?[prefix.Length..];
+static string FormatValues(IReadOnlyDictionary<string, object?> values) => values.Count == 0 ? "<missing>" : string.Join(", ", values.Select(pair => $"{pair.Key}={Convert.ToString(pair.Value, System.Globalization.CultureInfo.InvariantCulture)}"));
+static void PrintBinding(ServerTableBinding binding) => Console.Error.WriteLine($"Binding: {binding.DbcFileName} · {binding.Consumption} · SQL {binding.SqlTableName ?? "none"} · key {binding.KeyStrategy.Kind} · deploy {binding.Destinations} · restart {binding.Restart} · {binding.Profile}{(binding.SourceBacked ? " (source-backed)" : " (built-in profile)")} · {binding.SupportedRevision}");
 
 static void PrintCompatibility(IEnumerable<PatchEntry> entries, string? requiredClientExecutableSha256)
 {

@@ -13,6 +13,8 @@ Client formats and server integration are separate: a client-build profile decla
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
 - Detects an installed AzerothCore/TrinityCore workspace from its live `worldserver.conf`, automatically imports server DBC and world-database settings, and supports split Windows-folder/WSL-server launchers such as the bundled test workspace.
+- Models core-specific DBC consumers, including AzerothCore SQL overlays and unused tables; an optional core-source path derives current mappings directly from `DBCStores.cpp` instead of relying on the built-in profile.
+- Audits a server DBC against its live SQL overlay, decodes known GT class/level rows, identifies the effective server value, and exports an idempotent DBC-to-SQL migration preview without modifying the database.
 - Provides an offline-capable guided item/weapon/armor creator with all ten stat slots and all five item-spell slots, named class/subclass/quality/slot/binding choices, a live WotLK-style tooltip, SQL preview/export, and schema-aware transactional insertion when a server is connected.
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
@@ -53,6 +55,8 @@ wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).x
 wowcrucible dbc promote apply base\Spell.dbc override\Spell.dbc schema.xml selection.dbc-promotion.json output\Spell.dbc
 wowcrucible server detect "C:\path\to\installed-server"
 wowcrucible server inspect "C:\path\to\installed-server"
+wowcrucible server bindings "C:\path\to\installed-server" [--source="C:\path\to\core-source"]
+wowcrucible server dbc-audit "C:\path\to\installed-server" gtRegenMPPerSpt.dbc schema.xml [--source="C:\path\to\core-source"] [--all] [--migration=sync.sql]
 wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible mpq list patch.MPQ [filter]
 wowcrucible mpq extract patch.MPQ output-folder [filter] [--quiet|--progress=N]
@@ -98,7 +102,7 @@ The corpus test runner accepts a WDBX 12340 definition XML and a directory conta
 2. Expand the Spell Workspace with named flags, searchable references, and related-table navigation.
 3. Guided creature/NPC, vendor, loot, quest, race, and class creators on the live capability model.
 4. DB2 support and complete corpus verification for additional client profiles.
-5. Revision-aware AzerothCore and TrinityCore deployment adapters beyond generic live-schema mapping.
+5. Expand the revision-aware AzerothCore/TrinityCore DBC binding and audit engine into transactional multi-destination deployment plans.
 
 ## Contributing
 

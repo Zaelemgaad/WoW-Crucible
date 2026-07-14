@@ -11,6 +11,7 @@ public sealed record DatabaseTableCapability(string Name, IReadOnlyList<Database
 public sealed record DatabaseCapabilities(string ServerVersion, string Database, IReadOnlyDictionary<string, DatabaseTableCapability> Tables)
 {
     public DatabaseTableCapability? FindTable(string name) => Tables.TryGetValue(name, out var table) ? table : null;
+    public IReadOnlyList<DatabaseTableCapability> DbcOverlayTables => Tables.Values.Where(table => table.Name.EndsWith("_dbc", StringComparison.OrdinalIgnoreCase)).OrderBy(table => table.Name, StringComparer.OrdinalIgnoreCase).ToArray();
 }
 
 public sealed class DatabaseCapabilityService
@@ -30,7 +31,8 @@ public sealed class DatabaseCapabilityService
                    COLUMN_DEFAULT, COLUMN_KEY, EXTRA, ORDINAL_POSITION
             FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = @database
-              AND TABLE_NAME IN ('item_template','creature_template','quest_template','npc_vendor','creature_loot_template','gameobject_template','spell_proc')
+              AND (TABLE_NAME IN ('item_template','creature_template','quest_template','npc_vendor','creature_loot_template','gameobject_template','spell_proc')
+                   OR TABLE_NAME LIKE '%\\_dbc')
             ORDER BY TABLE_NAME, ORDINAL_POSITION
             """;
         var columns = new Dictionary<string, List<DatabaseColumnCapability>>(StringComparer.OrdinalIgnoreCase);

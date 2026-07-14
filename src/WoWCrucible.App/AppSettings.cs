@@ -20,6 +20,7 @@ public sealed class AppSettings
     public string WorldDatabase { get; set; } = "acore_world";
     public string DatabaseSslMode { get; set; } = "Preferred";
     public string ServerRootPath { get; set; } = string.Empty;
+    public string CoreSourcePath { get; set; } = string.Empty;
 
     public static AppSettings Load()
     {

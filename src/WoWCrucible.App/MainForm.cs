@@ -23,6 +23,7 @@ public sealed class MainForm : Form
     private string? _schemaPath;
     private DatabaseConnectionProfile? _databaseProfile;
     private DatabaseCapabilities? _databaseCapabilities;
+    private ServerWorkspace? _serverWorkspace;
 
     public MainForm(string? initialFile)
     {
@@ -52,6 +53,7 @@ public sealed class MainForm : Form
         tools.Items.Add(Button("Item Creator", (_, _) => OpenItemCreator()));
         tools.Items.Add(Button("Detect Server", (_, _) => ImportServerWorkspace()));
         tools.Items.Add(Button("Connect DB", (_, _) => ConnectDatabase()));
+        tools.Items.Add(Button("Diagnose DBC/SQL", async (_, _) => await DiagnoseCurrentDbc()));
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("New Row", (_, _) => AddRow()));
         tools.Items.Add(Button("Clone Row", (_, _) => CloneRow()));
@@ -164,6 +166,7 @@ public sealed class MainForm : Form
         using var form = new ServerWorkspaceForm(_settings);
         if (form.ShowDialog(this) != DialogResult.OK || form.Workspace is null) return;
         var workspace = form.Workspace;
+        _serverWorkspace = workspace;
         _settings.ServerRootPath = workspace.RootPath;
         if (!string.IsNullOrWhiteSpace(workspace.DbcPath)) _settings.CoreDbcPath = workspace.DbcPath;
         _settings.DatabaseHost = workspace.WorldDatabase.Host; _settings.DatabasePort = workspace.WorldDatabase.Port;
@@ -187,6 +190,38 @@ public sealed class MainForm : Form
     }
 
     private string? DatabaseStatus() => _databaseCapabilities is null ? null : $"{_databaseCapabilities.Database} on {_databaseProfile!.Host}:{_databaseProfile.Port} · MySQL {_databaseCapabilities.ServerVersion}";
+
+    private async Task DiagnoseCurrentDbc()
+    {
+        if (_file is null) { MessageBox.Show(this, "Open the DBC you want to diagnose first.", "Diagnose DBC/SQL", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+        try
+        {
+            UseWaitCursor = true; _status.Text = "Resolving server consumers for the current DBC…";
+            var workspace = _serverWorkspace;
+            if (workspace is null && Directory.Exists(_settings.ServerRootPath)) workspace = await ServerWorkspaceDetector.DetectAsync(_settings.ServerRootPath);
+            if (workspace is null) { MessageBox.Show(this, "Detect an installed server workspace first. Crucible needs the core family, live DBC folder, and world database connection.", "Diagnose DBC/SQL", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+            _serverWorkspace = workspace;
+            var schema = _documents[_openFiles.SelectedIndex].Schema;
+            var binding = ServerTableBindingCatalog.ApplySchemaKey(ServerTableBindingCatalog.ResolveFile(workspace.CoreFamily, _file.SourcePath, Directory.Exists(_settings.CoreSourcePath) ? _settings.CoreSourcePath : null), schema);
+            if (binding.Consumption != ServerTableConsumption.SqlOverlayed || binding.SqlTableName is null)
+            {
+                MessageBox.Show(this, $"{Path.GetFileName(_file.SourcePath)}\n\nConsumption: {binding.Consumption}\nProfile: {binding.Profile}\nDeployment: {binding.Destinations}\nRestart: {binding.Restart}\n\n{(binding.Consumption == ServerTableConsumption.Unused ? "This core does not load this server DBC. A client patch may still consume it." : binding.Consumption == ServerTableConsumption.DbcLoaded ? "This core loads the server DBC directly and has no mapped SQL overlay." : "No trustworthy server binding is known. Select a source-backed profile through the CLI before deploying it.")}", "DBC Consumer Diagnosis", MessageBoxButtons.OK, binding.Consumption == ServerTableConsumption.Unused ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+                return;
+            }
+            var capabilities = _databaseCapabilities;
+            if (capabilities?.FindTable(binding.SqlTableName) is null)
+            {
+                _status.Text = $"Inspecting live SQL overlay {binding.SqlTableName}…";
+                capabilities = await new DatabaseCapabilityService().InspectAsync(workspace.WorldDatabase);
+                _databaseProfile = workspace.WorldDatabase; _databaseCapabilities = capabilities;
+            }
+            var table = capabilities.FindTable(binding.SqlTableName) ?? throw new InvalidDataException($"The live world database has no expected overlay table {binding.SqlTableName}.");
+            using var form = new DbcSqlAuditForm(workspace.WorldDatabase, binding, _file.SourcePath, schema, table);
+            form.ShowDialog(this);
+        }
+        catch (Exception ex) { ShowError(ex); }
+        finally { UseWaitCursor = false; }
+    }
 
     private void OpenItemCreator()
     {
