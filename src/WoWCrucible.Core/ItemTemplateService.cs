@@ -3,11 +3,14 @@ using MySqlConnector;
 
 namespace WoWCrucible.Core;
 
+public sealed record ItemStatDraft(int Type, int Value);
+public sealed record ItemSpellDraft(int SpellId, int Trigger, int Charges, float ProcPerMinute, int CooldownMs, int Category, int CategoryCooldownMs);
+
 public sealed record ItemDraft(
     uint Entry, string Name, int Class, int Subclass, uint DisplayId, int Quality, int InventoryType,
     uint ItemLevel, uint RequiredLevel, uint BuyPrice, uint SellPrice, uint Bonding, uint Flags,
     float Armor, float DamageMin, float DamageMax, uint Delay, uint MaxDurability, string Description,
-    int StatType1 = 0, int StatValue1 = 0, int StatType2 = 0, int StatValue2 = 0);
+    IReadOnlyList<ItemStatDraft>? Stats = null, IReadOnlyList<ItemSpellDraft>? Spells = null);
 
 public sealed record ItemWritePlan(string Table, IReadOnlyDictionary<string, object> Values, IReadOnlyList<string> OmittedFields)
 {
@@ -33,7 +36,9 @@ public static class ItemTemplateAdapter
 {
     public static DatabaseTableCapability CreatePortableTable()
     {
-        string[] names = ["entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description", "stat_type1", "stat_value1", "stat_type2", "stat_value2"];
+        var names = new List<string> { "entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description" };
+        for (var slot = 1; slot <= 10; slot++) { names.Add($"stat_type{slot}"); names.Add($"stat_value{slot}"); }
+        for (var slot = 1; slot <= 5; slot++) names.AddRange([$"spellid_{slot}", $"spelltrigger_{slot}", $"spellcharges_{slot}", $"spellppmRate_{slot}", $"spellcooldown_{slot}", $"spellcategory_{slot}", $"spellcategorycooldown_{slot}"]);
         return new("item_template", names.Select((name, index) => new DatabaseColumnCapability(name, name is "name" or "description" ? "varchar" : "int", name is "name" or "description" ? "varchar(255)" : "int", false, "0", name == "entry" ? "PRI" : string.Empty, string.Empty, index + 1)).ToArray());
     }
 
@@ -48,8 +53,7 @@ public static class ItemTemplateAdapter
             ("ItemLevel", draft.ItemLevel), ("RequiredLevel", draft.RequiredLevel), ("BuyPrice", draft.BuyPrice),
             ("SellPrice", draft.SellPrice), ("bonding", draft.Bonding), ("Flags", draft.Flags), ("armor", draft.Armor),
             ("dmg_min1", draft.DamageMin), ("dmg_max1", draft.DamageMax), ("dmg_type1", 0), ("delay", draft.Delay),
-            ("MaxDurability", draft.MaxDurability), ("description", draft.Description ?? string.Empty),
-            ("stat_type1", draft.StatType1), ("stat_value1", draft.StatValue1), ("stat_type2", draft.StatType2), ("stat_value2", draft.StatValue2)
+            ("MaxDurability", draft.MaxDurability), ("description", draft.Description ?? string.Empty)
         };
         var values = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         var omitted = new List<string>();
@@ -58,11 +62,31 @@ public static class ItemTemplateAdapter
             var column = table.Find(name);
             if (column is null) omitted.Add(name); else values[column.Name] = value;
         }
+        var stats = draft.Stats ?? [];
+        for (var slot = 1; slot <= 10; slot++)
+        {
+            var stat = slot <= stats.Count ? stats[slot - 1] : new ItemStatDraft(0, 0);
+            AddIfPresent(table, values, omitted, $"stat_type{slot}", stat.Type); AddIfPresent(table, values, omitted, $"stat_value{slot}", stat.Value);
+        }
+        var spells = draft.Spells ?? [];
+        for (var slot = 1; slot <= 5; slot++)
+        {
+            var spell = slot <= spells.Count ? spells[slot - 1] : new ItemSpellDraft(0, 0, 0, 0, -1, 0, -1);
+            AddIfPresent(table, values, omitted, $"spellid_{slot}", spell.SpellId); AddIfPresent(table, values, omitted, $"spelltrigger_{slot}", spell.Trigger);
+            AddIfPresent(table, values, omitted, $"spellcharges_{slot}", spell.Charges); AddIfPresent(table, values, omitted, $"spellppmRate_{slot}", spell.ProcPerMinute);
+            AddIfPresent(table, values, omitted, $"spellcooldown_{slot}", spell.CooldownMs); AddIfPresent(table, values, omitted, $"spellcategory_{slot}", spell.Category);
+            AddIfPresent(table, values, omitted, $"spellcategorycooldown_{slot}", spell.CategoryCooldownMs);
+        }
         var statCount = table.Find("StatsCount");
-        if (statCount is not null) values[statCount.Name] = (draft.StatType1 != 0 ? 1 : 0) + (draft.StatType2 != 0 ? 1 : 0);
+        if (statCount is not null) values[statCount.Name] = stats.Take(10).Count(stat => stat.Type != 0 || stat.Value != 0);
         foreach (var required in new[] { "entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType" })
             if (table.Find(required) is null) throw new NotSupportedException($"This item_template has no '{required}' column, so the item adapter cannot safely target it.");
         return new(table.Name, values, omitted);
+    }
+
+    private static void AddIfPresent(DatabaseTableCapability table, Dictionary<string, object> values, List<string> omitted, string name, object value)
+    {
+        var column = table.Find(name); if (column is null) omitted.Add(name); else values[column.Name] = value;
     }
 }
 

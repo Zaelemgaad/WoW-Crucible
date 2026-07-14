@@ -43,9 +43,10 @@ internal sealed class ItemTooltipControl : Control
             PairedLine(e.Graphics, $"{item.DamageMin:0.##} - {item.DamageMax:0.##} Damage", speed > 0 ? $"Speed {speed:0.00}" : string.Empty, ref y, x, width);
             if (speed > 0) Line(e.Graphics, $"({(item.DamageMin + item.DamageMax) / 2f / speed:0.0} damage per second)", _smallFont, Color.White, ref y, x, width);
         }
-        Stat(e.Graphics, item.StatType1, item.StatValue1, ref y, x, width); Stat(e.Graphics, item.StatType2, item.StatValue2, ref y, x, width);
+        foreach (var stat in (item.Stats ?? []).Take(10)) Stat(e.Graphics, stat.Type, stat.Value, ref y, x, width);
         if (item.RequiredLevel > 0) Line(e.Graphics, $"Requires Level {item.RequiredLevel}", _bodyFont, Color.White, ref y, x, width);
         if (item.MaxDurability > 0) Line(e.Graphics, $"Durability {item.MaxDurability} / {item.MaxDurability}", _bodyFont, Color.White, ref y, x, width);
+        foreach (var spell in (item.Spells ?? []).Take(5).Where(spell => spell.SpellId != 0)) Spell(e.Graphics, spell, ref y, x, width);
         if (!string.IsNullOrWhiteSpace(item.Description)) Line(e.Graphics, $"\"{item.Description.Trim()}\"", _bodyFont, Color.FromArgb(255, 255, 209, 0), ref y, x, width, 5);
         if (item.SellPrice > 0) DrawPrice(e.Graphics, item.SellPrice, ref y, x);
         Line(e.Graphics, $"Entry {item.Entry}  •  Display {item.DisplayId}", _smallFont, Color.FromArgb(255, 120, 120, 130), ref y, x, width, 0);
@@ -53,8 +54,19 @@ internal sealed class ItemTooltipControl : Control
 
     private void Stat(Graphics graphics, int type, int value, ref float y, float x, float width)
     {
-        if (type == 0 || value == 0) return; var sign = value > 0 ? "+" : string.Empty;
-        Line(graphics, $"{sign}{value} {StatName(type)}", _bodyFont, Color.FromArgb(255, 30, 255, 0), ref y, x, width);
+        if (value == 0) return; var sign = value > 0 ? "+" : string.Empty;
+        if (type is 0 or 1 or 3 or 4 or 5 or 6 or 7)
+            Line(graphics, $"{sign}{value} {StatName(type)}", _bodyFont, Color.White, ref y, x, width);
+        else
+            Line(graphics, SecondaryStatText(type, value), _bodyFont, Color.FromArgb(255, 30, 255, 0), ref y, x, width);
+    }
+
+    private void Spell(Graphics graphics, ItemSpellDraft spell, ref float y, float x, float width)
+    {
+        var prefix = spell.Trigger switch { 0 or 5 => "Use", 1 => "Equip", 2 => "Chance on hit", 4 => "Use", 6 => "Use", _ => "Effect" };
+        var text = spell.Trigger == 6 ? $"Use: Teaches spell #{spell.SpellId}." : $"{prefix}: Spell #{spell.SpellId}.";
+        if (spell.Charges != 0) text += $" ({Math.Abs(spell.Charges)} charge{(Math.Abs(spell.Charges) == 1 ? "" : "s")})";
+        Line(graphics, text, _bodyFont, Color.FromArgb(255, 30, 255, 0), ref y, x, width);
     }
 
     private void DrawPrice(Graphics graphics, uint copper, ref float y, float x)
@@ -80,9 +92,17 @@ internal sealed class ItemTooltipControl : Control
     }
 
     private void DrawCentered(Graphics graphics, string text, Rectangle bounds, Color color) { using var brush = new SolidBrush(color); using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center }; graphics.DrawString(text, _nameFont, brush, bounds, format); }
-    private static Color QualityColor(int quality) => quality switch { 0 => Color.FromArgb(157, 157, 157), 1 => Color.White, 2 => Color.FromArgb(30, 255, 0), 3 => Color.FromArgb(0, 112, 221), 4 => Color.FromArgb(163, 53, 238), 5 => Color.FromArgb(255, 128, 0), 7 => Color.FromArgb(0, 204, 255), _ => Color.White };
+    private static Color QualityColor(int quality) => quality switch { 0 => Color.FromArgb(157, 157, 157), 1 => Color.White, 2 => Color.FromArgb(30, 255, 0), 3 => Color.FromArgb(0, 112, 221), 4 => Color.FromArgb(163, 53, 238), 5 => Color.FromArgb(255, 128, 0), 6 => Color.FromArgb(230, 40, 30), 7 => Color.FromArgb(0, 204, 255), _ => Color.White };
     private static string BondingName(uint bonding) => bonding switch { 1 => "Binds when picked up", 2 => "Binds when equipped", 3 => "Binds when used", 4 or 5 => "Quest Item", _ => string.Empty };
-    private static string StatName(int type) => type switch { 3 => "Agility", 4 => "Strength", 5 => "Intellect", 6 => "Spirit", 7 => "Stamina", 12 => "Defense Rating", 31 => "Hit Rating", 32 => "Critical Strike Rating", 35 => "Resilience Rating", 36 => "Haste Rating", 37 => "Expertise Rating", 38 => "Attack Power", 45 => "Spell Power", _ => $"Stat {type}" };
+    private static string SecondaryStatText(int type, int value) => type switch
+    {
+        38 => $"Equip: Increases attack power by {value}.", 39 => $"Equip: Increases ranged attack power by {value}.",
+        43 => $"Equip: Restores {value} mana per 5 sec.", 45 => $"Equip: Increases spell power by {value}.",
+        46 => $"Equip: Restores {value} health per 5 sec.", 47 => $"Equip: Increases spell penetration by {value}.",
+        48 => $"Equip: Increases the block value of your shield by {value}.",
+        _ => $"Equip: Improves your {StatName(type).ToLowerInvariant()} by {value}."
+    };
+    private static string StatName(int type) => type switch { 0 => "Mana", 1 => "Health", 3 => "Agility", 4 => "Strength", 5 => "Intellect", 6 => "Spirit", 7 => "Stamina", 12 => "Defense Rating", 13 => "Dodge Rating", 14 => "Parry Rating", 15 => "Block Rating", 16 => "Melee Hit Rating", 17 => "Ranged Hit Rating", 18 => "Spell Hit Rating", 19 => "Melee Critical Strike Rating", 20 => "Ranged Critical Strike Rating", 21 => "Spell Critical Strike Rating", 22 => "Melee Hit Avoidance Rating", 23 => "Ranged Hit Avoidance Rating", 24 => "Spell Hit Avoidance Rating", 25 => "Melee Critical Avoidance Rating", 26 => "Ranged Critical Avoidance Rating", 27 => "Spell Critical Avoidance Rating", 28 => "Melee Haste Rating", 29 => "Ranged Haste Rating", 30 => "Spell Haste Rating", 31 => "Hit Rating", 32 => "Critical Strike Rating", 33 => "Hit Avoidance Rating", 34 => "Critical Avoidance Rating", 35 => "Resilience Rating", 36 => "Haste Rating", 37 => "Expertise Rating", 38 => "Attack Power", 39 => "Ranged Attack Power", 40 => "Feral Attack Power", 41 => "Spell Healing", 42 => "Spell Damage", 43 => "Mana per 5 sec", 44 => "Armor Penetration Rating", 45 => "Spell Power", 46 => "Health Regeneration", 47 => "Spell Penetration", 48 => "Block Value", _ => $"Stat {type}" };
 
     protected override void Dispose(bool disposing) { if (disposing) { _nameFont.Dispose(); _bodyFont.Dispose(); _smallFont.Dispose(); } base.Dispose(disposing); }
 }
