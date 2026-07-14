@@ -3,22 +3,36 @@ using System.Xml.Linq;
 namespace WoWCrucible.Core;
 
 public enum DbcSchemaMatchKind { NamedMatch, MissingTableFallback, FieldCountMismatchFallback }
-public sealed record DbcSchemaResolution(IReadOnlyList<DbcColumn> Columns, DbcSchemaMatchKind MatchKind, int? DefinedFieldCount)
+public enum DbcRecordKeyKind { PhysicalColumn, VirtualRowIndex, NoStableKey }
+public sealed record DbcRecordKeyStrategy(DbcRecordKeyKind Kind, int? ColumnIndex = null, uint VirtualStart = 0)
+{
+    public static DbcRecordKeyStrategy Physical(int columnIndex) => new(DbcRecordKeyKind.PhysicalColumn, columnIndex);
+    public static DbcRecordKeyStrategy Virtual(uint start = 0) => new(DbcRecordKeyKind.VirtualRowIndex, null, start);
+    public static DbcRecordKeyStrategy None { get; } = new(DbcRecordKeyKind.NoStableKey);
+    public string DisplayName(IReadOnlyList<DbcColumn> columns) => Kind switch
+    {
+        DbcRecordKeyKind.PhysicalColumn when ColumnIndex is >= 0 && ColumnIndex < columns.Count => columns[ColumnIndex.Value].Name,
+        DbcRecordKeyKind.VirtualRowIndex => "$row",
+        _ => "$none"
+    };
+}
+public sealed record DbcSchemaResolution(IReadOnlyList<DbcColumn> Columns, DbcSchemaMatchKind MatchKind, int? DefinedFieldCount, DbcRecordKeyStrategy KeyStrategy)
 {
     public bool UsedFallback => MatchKind != DbcSchemaMatchKind.NamedMatch;
 }
 
 public sealed class DbcSchemaCatalog
 {
-    private readonly Dictionary<string, IReadOnlyList<DbcColumn>> _tables;
+    private sealed record TableDefinition(IReadOnlyList<DbcColumn> Columns, DbcRecordKeyStrategy KeyStrategy);
+    private readonly Dictionary<string, TableDefinition> _tables;
 
-    private DbcSchemaCatalog(Dictionary<string, IReadOnlyList<DbcColumn>> tables) => _tables = tables;
+    private DbcSchemaCatalog(Dictionary<string, TableDefinition> tables) => _tables = tables;
 
     public static DbcSchemaCatalog CreateBuiltIn12340()
     {
-        var tables = new Dictionary<string, IReadOnlyList<DbcColumn>>(StringComparer.OrdinalIgnoreCase)
+        var tables = new Dictionary<string, TableDefinition>(StringComparer.OrdinalIgnoreCase)
         {
-            ["Spell"] = BuildSpellColumns()
+            ["Spell"] = PhysicalDefinition(BuildSpellColumns())
         };
         AddSimple(tables, "SpellCastTimes", "ID:int,Base:int,PerLevel:int,Minimum:int");
         AddSimple(tables, "SpellDuration", "ID:int,Duration:int,DurationPerLevel:int,MaxDuration:int");
@@ -32,7 +46,7 @@ public sealed class DbcSchemaCatalog
     {
         using var stream = File.OpenRead(path);
         var document = XDocument.Load(stream, LoadOptions.None);
-        var tables = new Dictionary<string, IReadOnlyList<DbcColumn>>(StringComparer.OrdinalIgnoreCase);
+        var tables = new Dictionary<string, TableDefinition>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var table in document.Root?.Elements("Table") ?? [])
         {
@@ -41,12 +55,16 @@ public sealed class DbcSchemaCatalog
                 continue;
 
             var columns = new List<DbcColumn>();
+            var hasGeneratedKey = false;
             var offset = 0;
             foreach (var field in table.Elements("Field"))
             {
                 // Some packed tables use a synthetic editor-only key which is not present in the file record.
                 if ((bool?)field.Attribute("AutoGenerate") == true)
+                {
+                    hasGeneratedKey = true;
                     continue;
+                }
                 var name = (string?)field.Attribute("Name") ?? $"Field_{columns.Count}";
                 var type = ((string?)field.Attribute("Type") ?? "int").ToLowerInvariant();
                 var count = (int?)field.Attribute("ArraySize") ?? 1;
@@ -93,7 +111,9 @@ public sealed class DbcSchemaCatalog
                 }
             }
 
-            tables[tableName] = columns;
+            var physicalKey = columns.FirstOrDefault(column => column.IsIndex);
+            var keyStrategy = hasGeneratedKey ? DbcRecordKeyStrategy.Virtual() : physicalKey is not null ? DbcRecordKeyStrategy.Physical(physicalKey.Index) : DbcRecordKeyStrategy.None;
+            tables[tableName] = new(columns, keyStrategy);
         }
 
         return new(tables);
@@ -104,13 +124,13 @@ public sealed class DbcSchemaCatalog
 
     public DbcSchemaResolution ResolveColumns(string tableName, int physicalFieldCount)
     {
-        if (_tables.TryGetValue(tableName, out var defined) && defined.Count == physicalFieldCount)
-            return new(defined, DbcSchemaMatchKind.NamedMatch, defined.Count);
+        if (_tables.TryGetValue(tableName, out var defined) && defined.Columns.Count == physicalFieldCount)
+            return new(defined.Columns, DbcSchemaMatchKind.NamedMatch, defined.Columns.Count, defined.KeyStrategy);
 
         var fallback = Enumerable.Range(0, physicalFieldCount)
             .Select(i => new DbcColumn(i, i * 4, 4, i == 0 ? "ID" : $"Field_{i}", DbcValueType.Raw32, i == 0))
             .ToArray();
-        return new(fallback, defined is null ? DbcSchemaMatchKind.MissingTableFallback : DbcSchemaMatchKind.FieldCountMismatchFallback, defined?.Count);
+        return new(fallback, defined is null ? DbcSchemaMatchKind.MissingTableFallback : DbcSchemaMatchKind.FieldCountMismatchFallback, defined?.Columns.Count, DbcRecordKeyStrategy.None);
     }
 
     private static string LocaleName(int index) => index switch
@@ -164,14 +184,17 @@ public sealed class DbcSchemaCatalog
         return columns;
     }
 
-    private static void AddSimple(Dictionary<string, IReadOnlyList<DbcColumn>> tables, string tableName, string specification)
+    private static TableDefinition PhysicalDefinition(IReadOnlyList<DbcColumn> columns) => new(columns, DbcRecordKeyStrategy.Physical(columns.First(column => column.IsIndex).Index));
+
+    private static void AddSimple(Dictionary<string, TableDefinition> tables, string tableName, string specification)
     {
         var fields = specification.Split(',');
-        tables[tableName] = fields.Select((field, index) =>
+        var columns = fields.Select((field, index) =>
         {
             var parts = field.Split(':');
             var type = parts[1] switch { "int" => DbcValueType.Int32, "float" => DbcValueType.Float32, "string" => DbcValueType.StringOffset, _ => DbcValueType.UInt32 };
             return new DbcColumn(index, index * 4, 4, parts[0], type, index == 0);
         }).ToArray();
+        tables[tableName] = PhysicalDefinition(columns);
     }
 }

@@ -8,12 +8,11 @@ public sealed record DbcPromotionManifest(int FormatVersion, string TableName, s
 
 public static class DbcPromotionService
 {
-    public static IReadOnlyList<DbcCellDifference> GetDifferences(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns, CancellationToken cancellationToken = default)
+    public static IReadOnlyList<DbcCellDifference> GetDifferences(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns, DbcRecordKeyStrategy keyStrategy, CancellationToken cancellationToken = default)
     {
         var baseFile = WdbcFile.Load(basePath); var overrideFile = WdbcFile.Load(overridePath);
         ValidateLayouts(baseFile, overrideFile, columns);
-        var key = columns.FirstOrDefault(column => column.IsIndex) ?? columns[0];
-        var baseRows = IndexRows(baseFile, key); var overrideRows = IndexRows(overrideFile, key);
+        var baseRows = DbcRecordIdentity.IndexRows(baseFile, columns, keyStrategy); var overrideRows = DbcRecordIdentity.IndexRows(overrideFile, columns, keyStrategy);
         var differences = new List<DbcCellDifference>();
         foreach (var (id, overrideRow) in overrideRows.OrderBy(pair => pair.Key))
         {
@@ -45,15 +44,15 @@ public static class DbcPromotionService
         return manifest;
     }
 
-    public static void Apply(string basePath, string overridePath, string outputPath, IReadOnlyList<DbcColumn> columns, DbcPromotionManifest manifest)
+    public static void Apply(string basePath, string overridePath, string outputPath, IReadOnlyList<DbcColumn> columns, DbcRecordKeyStrategy keyStrategy, DbcPromotionManifest manifest)
     {
         var tableName = Path.GetFileNameWithoutExtension(basePath);
         if (!tableName.Equals(manifest.TableName, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Manifest targets {manifest.TableName}, not {tableName}.");
         var baseFile = WdbcFile.Load(basePath); var overrideFile = WdbcFile.Load(overridePath);
         ValidateLayouts(baseFile, overrideFile, columns);
-        var key = columns.FirstOrDefault(column => column.IsIndex) ?? columns[0];
-        if (!key.Name.Equals(manifest.KeyColumn, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Manifest key is {manifest.KeyColumn}; current schema key is {key.Name}.");
-        var baseRows = IndexRows(baseFile, key); var overrideRows = IndexRows(overrideFile, key);
+        var keyName = keyStrategy.DisplayName(columns);
+        if (!keyName.Equals(manifest.KeyColumn, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Manifest key is {manifest.KeyColumn}; current schema key is {keyName}.");
+        var baseRows = DbcRecordIdentity.IndexRows(baseFile, columns, keyStrategy); var overrideRows = DbcRecordIdentity.IndexRows(overrideFile, columns, keyStrategy);
         var byName = columns.ToDictionary(column => column.Name, StringComparer.OrdinalIgnoreCase);
         foreach (var operation in manifest.Operations)
         {
@@ -62,20 +61,15 @@ public static class DbcPromotionService
             if (!baseRows.TryGetValue(operation.Id, out var destinationRow))
             {
                 if (!entireRow) throw new InvalidDataException($"Base is missing ID {operation.Id}; a partial-field promotion cannot create it.");
-                destinationRow = baseFile.AddBlankRow(); baseRows[operation.Id] = destinationRow;
+                if (keyStrategy.Kind == DbcRecordKeyKind.VirtualRowIndex && operation.Id != baseFile.RowCount + keyStrategy.VirtualStart)
+                    throw new InvalidDataException($"Virtual row {operation.Id} cannot be inserted into the middle of the table. Only the next row ({baseFile.RowCount + keyStrategy.VirtualStart}) can be appended safely.");
+                var physicalKey = DbcRecordIdentity.PhysicalColumn(columns, keyStrategy);
+                destinationRow = baseFile.AddBlankRow(physicalKey); baseRows[operation.Id] = destinationRow;
             }
             var selectedColumns = entireRow ? columns : operation.Columns.Select(name => byName.TryGetValue(name, out var column) ? column : throw new InvalidDataException($"Current schema has no column named '{name}'.")).ToArray();
             foreach (var column in selectedColumns) CopyValue(overrideFile, sourceRow, baseFile, destinationRow, column);
         }
         baseFile.Save(outputPath);
-    }
-
-    private static Dictionary<uint, int> IndexRows(WdbcFile file, DbcColumn key)
-    {
-        var result = new Dictionary<uint, int>();
-        for (var row = 0; row < file.RowCount; row++)
-            if (!result.TryAdd(file.GetRaw(row, key), row)) throw new InvalidDataException($"Duplicate key {file.GetRaw(row, key)} in {Path.GetFileName(file.SourcePath)}.");
-        return result;
     }
 
     private static void CopyValue(WdbcFile source, int sourceRow, WdbcFile destination, int destinationRow, DbcColumn column)

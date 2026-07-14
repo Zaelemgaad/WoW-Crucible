@@ -103,7 +103,7 @@ static int Dbc(string[] args)
         var sample = WdbcFile.Load(basePath);
         var resolution = DbcSchemaCatalog.Load(schemaPath).ResolveColumns(tableName, sample.FieldCount);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sample.FieldCount, resolution));
-        var differences = DbcPromotionService.GetDifferences(basePath, overridePath, resolution.Columns);
+        var differences = DbcPromotionService.GetDifferences(basePath, overridePath, resolution.Columns, resolution.KeyStrategy);
         foreach (var difference in differences) Console.WriteLine($"{difference.Id}\t{difference.ColumnName}\t{difference.BaseValue}\t{difference.OverrideValue}");
         Console.Error.WriteLine($"Found {differences.Count:N0} semantic field difference(s)/new row marker(s).");
         return 0;
@@ -114,7 +114,7 @@ static int Dbc(string[] args)
         var sample = WdbcFile.Load(promotionBasePath);
         var resolution = DbcSchemaCatalog.Load(promotionSchemaPath).ResolveColumns(tableName, sample.FieldCount);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sample.FieldCount, resolution));
-        DbcPromotionService.Apply(promotionBasePath, promotionOverridePath, outputPath, resolution.Columns, DbcPromotionService.LoadManifest(manifestPath));
+        DbcPromotionService.Apply(promotionBasePath, promotionOverridePath, outputPath, resolution.Columns, resolution.KeyStrategy, DbcPromotionService.LoadManifest(manifestPath));
         Console.Error.WriteLine($"Created promoted DBC: {Path.GetFullPath(outputPath)}");
         return 0;
     }

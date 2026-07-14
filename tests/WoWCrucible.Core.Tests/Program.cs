@@ -26,6 +26,14 @@ var detectedServer = ServerWorkspaceDetector.DetectLocal(serverFixture);
 if (detectedServer.WorldDatabase.Host != "127.0.0.1" || detectedServer.WorldDatabase.Port != 3307 || detectedServer.WorldDatabase.Password != "fixture_password" ||
     detectedServer.WorldDatabase.Database != "fixture_world" || !detectedServer.DbcPath.EndsWith(Path.Combine("data", "dbc")))
     throw new InvalidOperationException("Native server workspace detection failed.");
+Directory.CreateDirectory(Path.Combine(serverFixture, "configured-data", "dbc"));
+File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf"), """
+    WorldDatabaseInfo = "localhost;3307;fixture_user;fixture_password;fixture_world"
+    DataDir = "./configured-data"
+    """);
+var explicitlyConfiguredServer = ServerWorkspaceDetector.DetectLocal(serverFixture);
+if (!explicitlyConfiguredServer.DbcPath.EndsWith(Path.Combine("configured-data", "dbc")))
+    throw new InvalidOperationException("An incidental root data\\dbc incorrectly overrode the explicit DataDir setting.");
 File.Delete(Path.Combine(serverFixture, "etc", "worldserver.conf")); File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf.dist"), "WorldDatabaseInfo = \"bad;3306;bad;bad;bad\"");
 try { _ = ServerWorkspaceDetector.DetectLocal(serverFixture); throw new InvalidOperationException("A .conf.dist template was accepted as a live server configuration."); }
 catch (FileNotFoundException) { }
@@ -37,8 +45,11 @@ var itemDraft = new ItemDraft(900001, "Crucible's Blade", 2, 8, 123, 4, 17, 200,
 var azerothPlan = ItemTemplateAdapter.CreatePlan(itemDraft, azerothItemTable);
 var trinityPlan = ItemTemplateAdapter.CreatePlan(itemDraft, trinityItemTable);
 var portablePlan = ItemTemplateAdapter.CreatePlan(itemDraft, ItemTemplateAdapter.CreatePortableTable());
+var gapStatsPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(0, 0), new(7, 75)] }, trinityItemTable);
 if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Values["StatsCount"] is not 2 || trinityPlan.Values.ContainsKey("MaxDurability") || trinityPlan.Values["spellid_1"] is not 12345 || portablePlan.OmittedFields.Count != 0)
     throw new InvalidOperationException("Capability-aware item mapping or SQL escaping failed.");
+if (gapStatsPlan.Values["StatsCount"] is not 1 || gapStatsPlan.Values["stat_type1"] is not 7 || gapStatsPlan.Values["stat_value1"] is not 75 || gapStatsPlan.Values["stat_type2"] is not 0)
+    throw new InvalidOperationException("Trinity item stat slots were not compacted before StatsCount was calculated.");
 
 static IReadOnlyList<DatabaseColumnCapability> ItemColumns(params string[] names) => names.Select((name, index) => new DatabaseColumnCapability(name, "int", "int", false, "0", name == "entry" ? "PRI" : "", "", index + 1)).ToArray();
 
@@ -51,6 +62,8 @@ if (builtInSchema.ResolveColumns("NotARealTable", 4).MatchKind != DbcSchemaMatch
     builtInSchema.ResolveColumns("Spell", 233).MatchKind != DbcSchemaMatchKind.FieldCountMismatchFallback ||
     builtInSchema.ResolveColumns("Spell", 234).MatchKind != DbcSchemaMatchKind.NamedMatch)
     throw new InvalidOperationException("Schema resolution did not expose named/fallback match status.");
+if (builtInSchema.ResolveColumns("NotARealTable", 4).KeyStrategy.Kind != DbcRecordKeyKind.NoStableKey)
+    throw new InvalidOperationException("Fallback schemas still guess that the first physical value is a stable ID.");
 var schoolSemantic = DbcSemanticCatalog.Get("Spell", 225) ?? throw new InvalidOperationException("Spell school decoding is missing.");
 if (!schoolSemantic.Format(0x44).Contains("Fire") || !schoolSemantic.Format(0x44).Contains("Arcane") || schoolSemantic.Parse("Fire | Arcane") != 0x44)
     throw new InvalidOperationException("Spell school flag decoding/encoding failed.");
@@ -84,6 +97,34 @@ foreach (var path in files)
     loaded++;
 }
 
+var generatedKeyPath = files.First(path => Path.GetFileName(path).Equals("gtRegenMPPerSpt.dbc", StringComparison.OrdinalIgnoreCase));
+var generatedSchema = schema.ResolveColumns("gtRegenMPPerSpt", WdbcFile.Load(generatedKeyPath).FieldCount);
+if (generatedSchema.KeyStrategy.Kind != DbcRecordKeyKind.VirtualRowIndex || generatedSchema.Columns.Count != 1 || generatedSchema.Columns[0].Name != "Data")
+    throw new InvalidOperationException("AutoGenerate schema fields were not modeled as virtual row keys.");
+var generatedBasePath = Path.Combine(Path.GetTempPath(), $"crucible-gt-base-{Guid.NewGuid():N}.dbc");
+var generatedOverridePath = Path.Combine(Path.GetTempPath(), $"crucible-gt-override-{Guid.NewGuid():N}.dbc");
+File.Copy(generatedKeyPath, generatedBasePath);
+var generatedOverride = WdbcFile.Load(generatedKeyPath);
+var generatedData = generatedSchema.Columns[0];
+var originalRow900 = generatedOverride.GetRaw(900, generatedData);
+generatedOverride.SetRaw(900, generatedData, originalRow900 + 1);
+var appendedVirtualRow = generatedOverride.CloneRow(900);
+if (appendedVirtualRow != 1100 || generatedOverride.GetRaw(appendedVirtualRow, generatedData) != originalRow900 + 1)
+    throw new InvalidOperationException("Appending a generated-key GT row changed its physical Data value.");
+generatedOverride.Save(generatedOverridePath, false);
+var generatedComparison = DbcLayerComparer.CompareFiles(generatedBasePath, generatedOverridePath, generatedSchema.Columns, generatedSchema.KeyStrategy);
+if (generatedComparison.AddedRows != 1 || generatedComparison.ModifiedRows != 1 || generatedComparison.ModifiedCells != 1)
+    throw new InvalidOperationException("Generated-key GT rows were not compared by virtual row index.");
+var generatedDifferences = DbcPromotionService.GetDifferences(generatedBasePath, generatedOverridePath, generatedSchema.Columns, generatedSchema.KeyStrategy);
+if (!generatedDifferences.Any(difference => difference.Id == 900 && difference.ColumnName == "Data") || !generatedDifferences.Any(difference => difference.Id == 1100 && difference.ColumnIndex == -1))
+    throw new InvalidOperationException("Generated-key differences did not report row 900 and appended row 1100 by virtual ID.");
+File.Delete(generatedBasePath); File.Delete(generatedOverridePath);
+
+var physicalKeyPath = files.First(path => Path.GetFileName(path).Equals("gtOCTClassCombatRatingScalar.dbc", StringComparison.OrdinalIgnoreCase));
+var physicalSchema = schema.ResolveColumns("gtOCTClassCombatRatingScalar", WdbcFile.Load(physicalKeyPath).FieldCount);
+if (physicalSchema.KeyStrategy.Kind != DbcRecordKeyKind.PhysicalColumn || physicalSchema.KeyStrategy.ColumnIndex != 0)
+    throw new InvalidOperationException("A GT table with a real physical ID stopped using its ID column.");
+
 var spellPath = files.FirstOrDefault(path => Path.GetFileName(path).Equals("Spell.dbc", StringComparison.OrdinalIgnoreCase));
 long spellBulkCloneMilliseconds = -1;
 if (spellPath is not null)
@@ -105,7 +146,8 @@ if (spellPath is not null)
 
 var animationPath = files.First(path => Path.GetFileName(path).Equals("AnimationData.dbc", StringComparison.OrdinalIgnoreCase));
 var animation = WdbcFile.Load(animationPath);
-var animationColumns = schema.GetColumns("AnimationData", animation.FieldCount);
+var animationResolution = schema.ResolveColumns("AnimationData", animation.FieldCount);
+var animationColumns = animationResolution.Columns;
 var idColumn = animationColumns.First(column => column.IsIndex);
 var nameColumn = animationColumns.First(column => column.Type == DbcValueType.StringOffset);
 var originalRows = animation.RowCount;
@@ -180,24 +222,24 @@ var baseLayer = Path.Combine(layerRoot, "base"); var overrideLayer = Path.Combin
 File.Copy(animationPath, Path.Combine(baseLayer, "AnimationData.dbc")); File.Copy(animationPath, Path.Combine(overrideLayer, "AnimationData.dbc"));
 var castTimesSource = files.First(path => Path.GetFileName(path).Equals("SpellCastTimes.dbc", StringComparison.OrdinalIgnoreCase));
 File.Copy(castTimesSource, Path.Combine(baseLayer, "SpellCastTimes.dbc"));
-var castTimesOverride = WdbcFile.Load(castTimesSource); var castColumns = schema.GetColumns("SpellCastTimes", castTimesOverride.FieldCount);
+var castTimesOverride = WdbcFile.Load(castTimesSource); var castResolution = schema.ResolveColumns("SpellCastTimes", castTimesOverride.FieldCount); var castColumns = castResolution.Columns;
 castTimesOverride.SetRaw(0, castColumns[1], castTimesOverride.GetRaw(0, castColumns[1]) + 1); castTimesOverride.Save(Path.Combine(overrideLayer, "SpellCastTimes.dbc"), false);
 var durationSource = files.First(path => Path.GetFileName(path).Equals("SpellDuration.dbc", StringComparison.OrdinalIgnoreCase)); File.Copy(durationSource, Path.Combine(overrideLayer, "SpellDuration.dbc"));
 var layers = DbcLayerComparer.CompareDirectories(baseLayer, overrideLayer);
 if (layers.Single(entry => entry.Name == "AnimationData.dbc").Status != DbcLayerStatus.Identical || layers.Single(entry => entry.Name == "SpellCastTimes.dbc").Status != DbcLayerStatus.Overridden || layers.Single(entry => entry.Name == "SpellDuration.dbc").Status != DbcLayerStatus.OverrideOnly)
     throw new InvalidOperationException("Layer classification failed.");
-var layerDetail = DbcLayerComparer.CompareFiles(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns);
+var layerDetail = DbcLayerComparer.CompareFiles(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns, castResolution.KeyStrategy);
 if (layerDetail.ModifiedRows != 1 || layerDetail.ModifiedCells != 1) throw new InvalidOperationException("Detailed layered row comparison failed.");
 
 var cancelled = new CancellationTokenSource(); cancelled.Cancel();
 try
 {
-    _ = DbcLayerComparer.CompareFiles(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns, cancelled.Token);
+    _ = DbcLayerComparer.CompareFiles(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns, castResolution.KeyStrategy, cancelled.Token);
     throw new InvalidOperationException("Cancelled layered comparison completed unexpectedly.");
 }
 catch (OperationCanceledException) { }
 
-var promotionDifferences = DbcPromotionService.GetDifferences(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns);
+var promotionDifferences = DbcPromotionService.GetDifferences(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns, castResolution.KeyStrategy);
 if (promotionDifferences.Count != 1 || promotionDifferences[0].Id != WdbcFile.Load(castTimesSource).GetRaw(0, castColumns[0]))
     throw new InvalidOperationException("ID-keyed promotion differences were incorrect.");
 var promotionOperation = new DbcPromotionOperation(promotionDifferences[0].Id, [promotionDifferences[0].ColumnName]);
@@ -205,7 +247,7 @@ var promotionManifestPath = Path.Combine(layerRoot, "cast-times.crucible-promoti
 DbcPromotionService.SaveManifest(promotionManifestPath, "SpellCastTimes", castColumns[0].Name, [promotionOperation]);
 var promotionManifest = DbcPromotionService.LoadManifest(promotionManifestPath);
 var promotedCastTimesPath = Path.Combine(layerRoot, "SpellCastTimes.promoted.dbc");
-DbcPromotionService.Apply(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), promotedCastTimesPath, castColumns, promotionManifest);
+DbcPromotionService.Apply(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), promotedCastTimesPath, castColumns, castResolution.KeyStrategy, promotionManifest);
 var promotedCastTimes = WdbcFile.Load(promotedCastTimesPath);
 if (promotedCastTimes.GetRaw(0, castColumns[1]) != castTimesOverride.GetRaw(0, castColumns[1]))
     throw new InvalidOperationException("Selected field promotion did not persist.");
@@ -216,14 +258,14 @@ var semanticBase = WdbcFile.Load(animationPath); semanticBase.SetDisplayValue(0,
 var semanticOverride = WdbcFile.Load(animationPath); semanticOverride.SetDisplayValue(1, nameColumn, "Crucible_Padding_Text"); semanticOverride.SetDisplayValue(0, nameColumn, "Crucible_Same_Text"); semanticOverride.Save(semanticOverridePath, false);
 if (WdbcFile.Load(semanticBasePath).GetRaw(0, nameColumn) == WdbcFile.Load(semanticOverridePath).GetRaw(0, nameColumn))
     throw new InvalidOperationException("Semantic comparison fixture did not create distinct string offsets.");
-var semanticDetail = DbcLayerComparer.CompareFiles(semanticBasePath, semanticOverridePath, animationColumns);
+var semanticDetail = DbcLayerComparer.CompareFiles(semanticBasePath, semanticOverridePath, animationColumns, animationResolution.KeyStrategy);
 if (semanticDetail.ModifiedCells != 1) throw new InvalidOperationException("Layer comparison treated equal decoded strings at different offsets as changes.");
-var stringDifferences = DbcPromotionService.GetDifferences(semanticBasePath, semanticOverridePath, animationColumns);
+var stringDifferences = DbcPromotionService.GetDifferences(semanticBasePath, semanticOverridePath, animationColumns, animationResolution.KeyStrategy);
 var changedString = stringDifferences.Single(difference => difference.Id == semanticOverride.GetRaw(1, idColumn) && difference.ColumnIndex == nameColumn.Index);
 var stringManifest = new DbcPromotionManifest(1, "AnimationData.semantic-base", idColumn.Name, [new(changedString.Id, [nameColumn.Name])]);
 // Manifest table names deliberately follow the selected base filename, allowing arbitrary working-copy names.
 var promotedAnimationPath = Path.Combine(layerRoot, "AnimationData.promoted.dbc");
-DbcPromotionService.Apply(semanticBasePath, semanticOverridePath, promotedAnimationPath, animationColumns, stringManifest);
+DbcPromotionService.Apply(semanticBasePath, semanticOverridePath, promotedAnimationPath, animationColumns, animationResolution.KeyStrategy, stringManifest);
 var promotedAnimation = WdbcFile.Load(promotedAnimationPath);
 if (promotedAnimation.GetString(promotedAnimation.GetRaw(1, nameColumn)) != "Crucible_Padding_Text")
     throw new InvalidOperationException("Promoted string was not re-interned into the destination table.");

@@ -12,12 +12,13 @@ public sealed class MainForm : Form
     private readonly EditHistory _history = new();
     private readonly ToolStripComboBox _openFiles = new() { AutoSize = false, Width = 210, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ToolStripButton _decoded = new("Decoded: On") { CheckOnClick = true, Checked = true, DisplayStyle = ToolStripItemDisplayStyle.Text };
-    private readonly List<(WdbcFile File, IReadOnlyList<DbcColumn> Columns)> _documents = [];
+    private readonly List<(WdbcFile File, DbcSchemaResolution Schema)> _documents = [];
     private bool _activatingDocument;
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly StartCenterControl _startCenter;
     private WdbcFile? _file;
     private IReadOnlyList<DbcColumn> _columns = [];
+    private DbcRecordKeyStrategy _keyStrategy = DbcRecordKeyStrategy.None;
     private int[]? _visibleRows;
     private string? _schemaPath;
     private DatabaseConnectionProfile? _databaseProfile;
@@ -275,9 +276,9 @@ public sealed class MainForm : Form
             var loaded = WdbcFile.Load(path);
             var schemas = _schemaPath is null ? DbcSchemaCatalog.CreateBuiltIn12340() : DbcSchemaCatalog.Load(_schemaPath);
             var table = Path.GetFileNameWithoutExtension(path);
-            var columns = schemas.GetColumns(table, loaded.FieldCount);
+            var resolution = schemas.ResolveColumns(table, loaded.FieldCount);
 
-            _documents.Add((loaded, columns));
+            _documents.Add((loaded, resolution));
             _openFiles.Items.Add(Path.GetFileName(path));
             ActivateDocument(_documents.Count - 1, timer);
         }
@@ -290,7 +291,8 @@ public sealed class MainForm : Form
         if (index < 0 || index >= _documents.Count) return;
         var document = _documents[index];
         _file = document.File;
-        _columns = document.Columns;
+        _columns = document.Schema.Columns;
+        _keyStrategy = document.Schema.KeyStrategy;
         _history.Clear();
         _visibleRows = null;
         _search.Text = string.Empty;
@@ -315,9 +317,10 @@ public sealed class MainForm : Form
         _startCenter.Visible = false; _grid.Visible = true; _grid.BringToFront();
         loadTimer?.Stop();
         Text = $"WoW Crucible — {Path.GetFileName(_file.SourcePath)} · {_documents.Count:N0} open";
+        var identity = _keyStrategy.Kind == DbcRecordKeyKind.VirtualRowIndex ? " · virtual row keys" : _keyStrategy.Kind == DbcRecordKeyKind.NoStableKey ? " · no verified row key" : string.Empty;
         _status.Text = loadTimer is null
-            ? $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields"
-            : $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields · {_file.StringTableSize:N0} string bytes · loaded in {loadTimer.ElapsedMilliseconds:N0} ms";
+            ? $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields{identity}"
+            : $"{_file.RowCount:N0} rows · {_file.FieldCount:N0} fields · {_file.StringTableSize:N0} string bytes{identity} · loaded in {loadTimer.ElapsedMilliseconds:N0} ms";
     }
 
     private void CloseCurrentFile()
@@ -328,15 +331,14 @@ public sealed class MainForm : Form
         {
             var result = MessageBox.Show(this, $"Save changes to {Path.GetFileName(_file.SourcePath)} before closing it?", "Unsaved changes", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
             if (result == DialogResult.Cancel) return;
-            if (result == DialogResult.Yes) SaveFile(false);
-            if (_file.IsDirty) return;
+            if (result == DialogResult.Yes) { SaveFile(false); if (_file.IsDirty) return; }
         }
         _documents.RemoveAt(index);
         _openFiles.Items.RemoveAt(index);
         if (_documents.Count > 0) ActivateDocument(Math.Min(index, _documents.Count - 1));
         else
         {
-            _file = null; _columns = []; _visibleRows = null;
+            _file = null; _columns = []; _keyStrategy = DbcRecordKeyStrategy.None; _visibleRows = null;
             _grid.Columns.Clear(); _grid.RowCount = 0;
             ShowStartCenter();
         }
@@ -401,7 +403,7 @@ public sealed class MainForm : Form
         catch (Exception ex) { ShowError(ex); }
     }
 
-    private DbcColumn? IdColumn => _columns.FirstOrDefault(column => column.IsIndex) ?? _columns.FirstOrDefault();
+    private DbcColumn? IdColumn => DbcRecordIdentity.PhysicalColumn(_columns, _keyStrategy);
     private bool IsSpellFile => _file is not null && Path.GetFileNameWithoutExtension(_file.SourcePath).Equals("Spell", StringComparison.OrdinalIgnoreCase) && _file.FieldCount == 234;
 
     private void OpenSpellWorkspace()
@@ -431,11 +433,12 @@ public sealed class MainForm : Form
         if (_file is null) return;
         try
         {
+            RequireStructuralKey();
             ClearFilterForStructureChange();
             var row = _file.AddBlankRow(IdColumn);
             _history.Clear();
             RefreshRows(row);
-            _status.Text = $"Created row {row:N0} with the next available ID";
+            _status.Text = _keyStrategy.Kind == DbcRecordKeyKind.VirtualRowIndex ? $"Appended virtual row {row + _keyStrategy.VirtualStart:N0}" : $"Created row {row:N0} with the next available ID";
         }
         catch (Exception ex) { ShowError(ex); }
     }
@@ -445,12 +448,13 @@ public sealed class MainForm : Form
         if (_file is null || _grid.CurrentCell is null) return;
         try
         {
+            RequireStructuralKey();
             var source = SourceRow(_grid.CurrentCell.RowIndex);
             ClearFilterForStructureChange();
             var row = _file.CloneRow(source, IdColumn);
             _history.Clear();
             RefreshRows(row);
-            _status.Text = $"Cloned source row {source:N0} into row {row:N0} with a new ID";
+            _status.Text = _keyStrategy.Kind == DbcRecordKeyKind.VirtualRowIndex ? $"Cloned source row {source:N0} as appended virtual row {row + _keyStrategy.VirtualStart:N0}" : $"Cloned source row {source:N0} into row {row:N0} with a new ID";
         }
         catch (Exception ex) { ShowError(ex); }
     }
@@ -462,6 +466,7 @@ public sealed class MainForm : Form
         if (count is null) return;
         try
         {
+            RequireStructuralKey();
             var source = SourceRow(_grid.CurrentCell.RowIndex);
             ClearFilterForStructureChange();
             var firstRow = _file.CloneRows(source, count.Value, IdColumn);
@@ -489,6 +494,12 @@ public sealed class MainForm : Form
     {
         if (_file is null || _grid.SelectedCells.Count == 0) return;
         var rows = _grid.SelectedCells.Cast<DataGridViewCell>().Select(cell => SourceRow(cell.RowIndex)).Distinct().ToArray();
+        var orderedRows = rows.Order().ToArray();
+        var deletesOnlyTrailingRows = orderedRows.SequenceEqual(Enumerable.Range(_file.RowCount - rows.Length, rows.Length));
+        if (_keyStrategy.Kind == DbcRecordKeyKind.VirtualRowIndex && !deletesOnlyTrailingRows)
+        {
+            if (MessageBox.Show(this, "This table's IDs are its row positions. Deleting anything except trailing rows will renumber every following record and can break references.\n\nDelete and renumber anyway?", "Virtual row keys will change", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+        }
         if (MessageBox.Show(this, $"Delete {rows.Length:N0} selected row(s)?", "Delete rows", MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning) != DialogResult.Yes) return;
         try
@@ -500,6 +511,12 @@ public sealed class MainForm : Form
             _status.Text = $"Deleted {rows.Length:N0} row(s)";
         }
         catch (Exception ex) { ShowError(ex); }
+    }
+
+    private void RequireStructuralKey()
+    {
+        if (_keyStrategy.Kind == DbcRecordKeyKind.NoStableKey)
+            throw new InvalidOperationException("This table has no verified row-key strategy. Select a matching schema before adding or cloning records.");
     }
 
     private void ClearFilterForStructureChange()
@@ -564,7 +581,9 @@ public sealed class MainForm : Form
 
     private void GridRowPostPaint(object? sender, DataGridViewRowPostPaintEventArgs e)
     {
-        var text = SourceRow(e.RowIndex).ToString("N0");
+        var sourceRow = SourceRow(e.RowIndex);
+        var value = _keyStrategy.Kind == DbcRecordKeyKind.VirtualRowIndex ? sourceRow + _keyStrategy.VirtualStart : sourceRow;
+        var text = value.ToString("N0");
         TextRenderer.DrawText(e.Graphics, text, _grid.RowHeadersDefaultCellStyle.Font, e.RowBounds,
             _grid.RowHeadersDefaultCellStyle.ForeColor, TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
     }

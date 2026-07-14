@@ -62,10 +62,11 @@ public static class ItemTemplateAdapter
             var column = table.Find(name);
             if (column is null) omitted.Add(name); else values[column.Name] = value;
         }
-        var stats = draft.Stats ?? [];
+        // TrinityCore reads only the first StatsCount slots, so remove empty gaps before assigning slots.
+        var stats = (draft.Stats ?? []).Where(stat => stat.Type != 0 || stat.Value != 0).Take(10).ToArray();
         for (var slot = 1; slot <= 10; slot++)
         {
-            var stat = slot <= stats.Count ? stats[slot - 1] : new ItemStatDraft(0, 0);
+            var stat = slot <= stats.Length ? stats[slot - 1] : new ItemStatDraft(0, 0);
             AddIfPresent(table, values, omitted, $"stat_type{slot}", stat.Type); AddIfPresent(table, values, omitted, $"stat_value{slot}", stat.Value);
         }
         var spells = draft.Spells ?? [];
@@ -78,7 +79,7 @@ public static class ItemTemplateAdapter
             AddIfPresent(table, values, omitted, $"spellcategorycooldown_{slot}", spell.CategoryCooldownMs);
         }
         var statCount = table.Find("StatsCount");
-        if (statCount is not null) values[statCount.Name] = stats.Take(10).Count(stat => stat.Type != 0 || stat.Value != 0);
+        if (statCount is not null) values[statCount.Name] = stats.Length;
         foreach (var required in new[] { "entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType" })
             if (table.Find(required) is null) throw new NotSupportedException($"This item_template has no '{required}' column, so the item adapter cannot safely target it.");
         return new(table.Name, values, omitted);

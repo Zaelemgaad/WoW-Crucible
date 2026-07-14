@@ -36,7 +36,16 @@ internal sealed class DatabaseConnectionForm : Form
         table.Controls.Add(footer, 0, 7); table.SetColumnSpan(footer, 2); Controls.Add(table);
         _inspect.Click += Inspect;
         _use.Click += (_, _) => { SaveNonSecretSettings(); DialogResult = DialogResult.OK; Close(); };
+        _host.TextChanged += InvalidateInspection; _port.ValueChanged += InvalidateInspection; _user.TextChanged += InvalidateInspection;
+        _password.TextChanged += InvalidateInspection; _database.TextChanged += InvalidateInspection; _ssl.SelectedValueChanged += InvalidateInspection;
         AcceptButton = _inspect; CancelButton = footer.Controls[2] as Button;
+    }
+
+    private void InvalidateInspection(object? sender, EventArgs e)
+    {
+        if (!_inspect.Enabled) return;
+        Profile = null; Capabilities = null; _use.Enabled = false;
+        if (!string.IsNullOrWhiteSpace(_result.Text)) _result.Text = "Connection details changed. Test and inspect again before using them.";
     }
 
     private async void Inspect(object? sender, EventArgs e)

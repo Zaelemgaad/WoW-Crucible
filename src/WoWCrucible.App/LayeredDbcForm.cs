@@ -69,7 +69,7 @@ internal sealed class LayeredDbcForm : Form
             var schema = _schemaPath is null ? DbcSchemaCatalog.CreateBuiltIn12340() : DbcSchemaCatalog.Load(_schemaPath);
             var sample = WdbcFile.Load(entry.BasePath); var resolution = schema.ResolveColumns(Path.GetFileNameWithoutExtension(entry.Name), sample.FieldCount);
             if (resolution.UsedFallback) { MessageBox.Show(this, "Selective promotion requires a matching named schema. Fix/select the schema definition before promoting fields.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-            using var promotion = new DbcPromotionForm(entry.BasePath, entry.OverridePath, resolution.Columns, _openEffective);
+            using var promotion = new DbcPromotionForm(entry.BasePath, entry.OverridePath, resolution.Columns, resolution.KeyStrategy, _openEffective);
             promotion.ShowDialog(this);
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -84,8 +84,8 @@ internal sealed class LayeredDbcForm : Form
         {
             _status.Text = $"Comparing {entry.Name} rows…";
             var schema = _schemaPath is null ? DbcSchemaCatalog.CreateBuiltIn12340() : DbcSchemaCatalog.Load(_schemaPath);
-            var sample = WdbcFile.Load(entry.BasePath); var columns = schema.GetColumns(Path.GetFileNameWithoutExtension(entry.Name), sample.FieldCount);
-            var detail = await Task.Run(() => DbcLayerComparer.CompareFiles(entry.BasePath, entry.OverridePath, columns, token), token);
+            var sample = WdbcFile.Load(entry.BasePath); var resolution = schema.ResolveColumns(Path.GetFileNameWithoutExtension(entry.Name), sample.FieldCount);
+            var detail = await Task.Run(() => DbcLayerComparer.CompareFiles(entry.BasePath, entry.OverridePath, resolution.Columns, resolution.KeyStrategy, token), token);
             if (token.IsCancellationRequested || Selected?.Name != entry.Name) return;
             _status.Text = $"{entry.Name}: +{detail.AddedRows:N0} rows · -{detail.RemovedRows:N0} rows · {detail.ModifiedRows:N0} modified rows · {detail.ModifiedCells:N0} changed fields";
         }

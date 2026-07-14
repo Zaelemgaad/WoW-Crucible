@@ -7,15 +7,16 @@ internal sealed class DbcPromotionForm : Form
     private readonly string _basePath;
     private readonly string _overridePath;
     private readonly IReadOnlyList<DbcColumn> _columns;
+    private readonly DbcRecordKeyStrategy _keyStrategy;
     private readonly Action<string> _openOutput;
     private readonly DataGridView _grid = new FastDataGridView();
     private readonly Label _status = new() { Dock = DockStyle.Bottom, Height = 32, Padding = new(8) };
     private IReadOnlyList<DbcCellDifference> _differences = [];
     private CancellationTokenSource? _cancellation;
 
-    public DbcPromotionForm(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns, Action<string> openOutput)
+    public DbcPromotionForm(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns, DbcRecordKeyStrategy keyStrategy, Action<string> openOutput)
     {
-        _basePath = basePath; _overridePath = overridePath; _columns = columns; _openOutput = openOutput;
+        _basePath = basePath; _overridePath = overridePath; _columns = columns; _keyStrategy = keyStrategy; _openOutput = openOutput;
         Text = $"Promote override changes — {Path.GetFileName(basePath)}"; Width = 1250; Height = 760; StartPosition = FormStartPosition.CenterParent;
         var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 46, Padding = new(8), WrapContents = false };
         bar.Controls.Add(Button("Apply Selected Fields", (_, _) => Apply(CreateFieldOperations())));
@@ -45,7 +46,7 @@ internal sealed class DbcPromotionForm : Form
         try
         {
             UseWaitCursor = true; _status.Text = "Finding semantic cell differences…";
-            _differences = await Task.Run(() => DbcPromotionService.GetDifferences(_basePath, _overridePath, _columns, _cancellation.Token), _cancellation.Token);
+            _differences = await Task.Run(() => DbcPromotionService.GetDifferences(_basePath, _overridePath, _columns, _keyStrategy, _cancellation.Token), _cancellation.Token);
             _grid.RowCount = _differences.Count; _grid.Invalidate();
             _status.Text = $"{_differences.Count:N0} changed cells/new rows. Select entries to promote; the base file is never overwritten automatically.";
         }
@@ -70,16 +71,14 @@ internal sealed class DbcPromotionForm : Form
         if (operations.Length == 0) { _status.Text = "Select at least one changed field."; return; }
         using var dialog = new SaveFileDialog { Filter = "DBC promotion manifest (*.dbc-promotion.json)|*.dbc-promotion.json|JSON (*.json)|*.json", FileName = $"{Path.GetFileNameWithoutExtension(_basePath)}.dbc-promotion.json" };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        var key = _columns.FirstOrDefault(column => column.IsIndex) ?? _columns[0];
-        DbcPromotionService.SaveManifest(dialog.FileName, Path.GetFileNameWithoutExtension(_basePath), key.Name, operations);
+        DbcPromotionService.SaveManifest(dialog.FileName, Path.GetFileNameWithoutExtension(_basePath), _keyStrategy.DisplayName(_columns), operations);
         _status.Text = $"Saved repeatable promotion manifest: {dialog.FileName}";
     }
 
     private void Apply(DbcPromotionOperation[] operations)
     {
         if (operations.Length == 0) { _status.Text = "Select at least one changed field or row."; return; }
-        var key = _columns.FirstOrDefault(column => column.IsIndex) ?? _columns[0];
-        ApplyManifest(new(1, Path.GetFileNameWithoutExtension(_basePath), key.Name, operations));
+        ApplyManifest(new(1, Path.GetFileNameWithoutExtension(_basePath), _keyStrategy.DisplayName(_columns), operations));
     }
 
     private void ApplyExistingManifest()
@@ -94,7 +93,7 @@ internal sealed class DbcPromotionForm : Form
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         try
         {
-            DbcPromotionService.Apply(_basePath, _overridePath, dialog.FileName, _columns, manifest);
+            DbcPromotionService.Apply(_basePath, _overridePath, dialog.FileName, _columns, _keyStrategy, manifest);
             _status.Text = $"Created promoted DBC: {dialog.FileName}";
             if (MessageBox.Show(this, "Promotion applied successfully. Open the generated DBC in Crucible?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes) { _openOutput(dialog.FileName); Close(); }
         }

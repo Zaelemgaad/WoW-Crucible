@@ -100,8 +100,6 @@ public static partial class ServerWorkspaceDetector
 
     private static string ResolveDbcPath(string root, string configLocation, string? dataDir, bool usesWsl)
     {
-        var obvious = new[] { Path.Combine(root, "data", "dbc"), Path.Combine(root, "Data", "dbc"), Path.Combine(root, "dbc") }.FirstOrDefault(Directory.Exists);
-        if (obvious is not null) return Path.GetFullPath(obvious);
         if (!usesWsl && !string.IsNullOrWhiteSpace(dataDir))
         {
             var expanded = Environment.ExpandEnvironmentVariables(dataDir.Trim('"'));
@@ -109,6 +107,8 @@ public static partial class ServerWorkspaceDetector
             var candidate = Path.Combine(basePath, "dbc"); if (Directory.Exists(candidate)) return Path.GetFullPath(candidate);
             var configRelative = Path.Combine(Path.GetDirectoryName(configLocation)!, expanded, "dbc"); if (Directory.Exists(configRelative)) return Path.GetFullPath(configRelative);
         }
+        var obvious = new[] { Path.Combine(root, "data", "dbc"), Path.Combine(root, "Data", "dbc"), Path.Combine(root, "dbc") }.FirstOrDefault(Directory.Exists);
+        if (obvious is not null) return Path.GetFullPath(obvious);
         return string.Empty;
     }
 

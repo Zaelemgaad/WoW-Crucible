@@ -28,6 +28,12 @@ internal sealed class ServerWorkspaceForm : Form
         browse.Click += (_, _) => { using var dialog = new FolderBrowserDialog { Description = "Select the installed AzerothCore or TrinityCore server folder", UseDescriptionForTitle = true, SelectedPath = Directory.Exists(_folder.Text) ? _folder.Text : string.Empty }; if (dialog.ShowDialog(this) == DialogResult.OK) { _folder.Text = dialog.SelectedPath; Workspace = null; _apply.Enabled = false; } };
         _detect.Click += async (_, _) => await DetectAsync();
         _apply.Click += (_, _) => { DialogResult = DialogResult.OK; Close(); };
+        _folder.TextChanged += (_, _) =>
+        {
+            if (!_folder.Enabled) return;
+            Workspace = null; _apply.Enabled = false;
+            if (!string.IsNullOrWhiteSpace(_summary.Text)) _summary.Text = "Server folder changed. Detect the workspace again before applying it.";
+        };
     }
 
     private async Task DetectAsync()

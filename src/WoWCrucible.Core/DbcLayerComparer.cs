@@ -26,15 +26,14 @@ public static class DbcLayerComparer
         return result;
     }
 
-    public static DbcRowComparison CompareFiles(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns, CancellationToken cancellationToken = default)
+    public static DbcRowComparison CompareFiles(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns, DbcRecordKeyStrategy keyStrategy, CancellationToken cancellationToken = default)
     {
         var baseFile = WdbcFile.Load(basePath); var overrideFile = WdbcFile.Load(overridePath);
         if (baseFile.FieldCount != overrideFile.FieldCount || baseFile.RecordSize != overrideFile.RecordSize)
             throw new InvalidDataException("The base and override DBC layouts differ.");
         if (columns.Count != baseFile.FieldCount) throw new InvalidDataException("The selected schema does not match this DBC layout.");
-        var idColumn = columns.FirstOrDefault(column => column.IsIndex) ?? columns[0];
-        var baseRows = Enumerable.Range(0, baseFile.RowCount).ToDictionary(row => baseFile.GetRaw(row, idColumn));
-        var overrideRows = Enumerable.Range(0, overrideFile.RowCount).ToDictionary(row => overrideFile.GetRaw(row, idColumn));
+        var baseRows = DbcRecordIdentity.IndexRows(baseFile, columns, keyStrategy);
+        var overrideRows = DbcRecordIdentity.IndexRows(overrideFile, columns, keyStrategy);
         var added = overrideRows.Keys.Except(baseRows.Keys).Count();
         var removed = baseRows.Keys.Except(overrideRows.Keys).Count();
         var modifiedRows = 0; long modifiedCells = 0;
