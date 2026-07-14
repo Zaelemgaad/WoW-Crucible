@@ -13,7 +13,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
 - Detects an installed AzerothCore/TrinityCore workspace from its live `worldserver.conf`, automatically imports server DBC and world-database settings, and supports split Windows-folder/WSL-server launchers such as the bundled test workspace.
-- Provides a guided item/weapon/armor creator with named quality, slot, binding, and stat choices; previews or exports schema-aware SQL and can perform a parameterized transactional insert that refuses duplicate IDs.
+- Provides an offline-capable guided item/weapon/armor creator with named class, subclass, quality, slot, binding, and stat choices; renders a live in-game-style tooltip while editing, previews or exports SQL, and automatically enables schema-aware transactional insertion when a server is connected.
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
 - Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.

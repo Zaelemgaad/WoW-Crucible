@@ -31,6 +31,12 @@ public sealed record ItemWritePlan(string Table, IReadOnlyDictionary<string, obj
 
 public static class ItemTemplateAdapter
 {
+    public static DatabaseTableCapability CreatePortableTable()
+    {
+        string[] names = ["entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description", "stat_type1", "stat_value1", "stat_type2", "stat_value2"];
+        return new("item_template", names.Select((name, index) => new DatabaseColumnCapability(name, name is "name" or "description" ? "varchar" : "int", name is "name" or "description" ? "varchar(255)" : "int", false, "0", name == "entry" ? "PRI" : string.Empty, string.Empty, index + 1)).ToArray());
+    }
+
     public static ItemWritePlan CreatePlan(ItemDraft draft, DatabaseTableCapability table)
     {
         if (!table.Name.Equals("item_template", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("The selected table is not item_template.");

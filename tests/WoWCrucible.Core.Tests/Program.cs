@@ -36,7 +36,8 @@ var trinityItemTable = new DatabaseTableCapability("item_template", ItemColumns(
 var itemDraft = new ItemDraft(900001, "Crucible's Blade", 2, 8, 123, 4, 17, 200, 80, 10000, 2500, 2, 0, 0, 120, 180, 2800, 120, "Adapter test", 4, 50, 7, 75);
 var azerothPlan = ItemTemplateAdapter.CreatePlan(itemDraft, azerothItemTable);
 var trinityPlan = ItemTemplateAdapter.CreatePlan(itemDraft, trinityItemTable);
-if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Values["StatsCount"] is not 2 || trinityPlan.Values.ContainsKey("MaxDurability"))
+var portablePlan = ItemTemplateAdapter.CreatePlan(itemDraft, ItemTemplateAdapter.CreatePortableTable());
+if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Values["StatsCount"] is not 2 || trinityPlan.Values.ContainsKey("MaxDurability") || portablePlan.OmittedFields.Count != 0)
     throw new InvalidOperationException("Capability-aware item mapping or SQL escaping failed.");
 
 static IReadOnlyList<DatabaseColumnCapability> ItemColumns(params string[] names) => names.Select((name, index) => new DatabaseColumnCapability(name, "int", "int", false, "0", name == "entry" ? "PRI" : "", "", index + 1)).ToArray();

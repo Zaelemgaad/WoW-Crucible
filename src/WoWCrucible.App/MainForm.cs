@@ -189,10 +189,10 @@ public sealed class MainForm : Form
 
     private void OpenItemCreator()
     {
-        if (_databaseProfile is null || _databaseCapabilities is null) ConnectDatabase();
-        if (_databaseProfile is null || _databaseCapabilities is null) return;
-        if (_databaseCapabilities.FindTable("item_template") is null) { MessageBox.Show(this, "The connected world database has no item_template table. Check that you selected the world database, not auth or characters.", "Item Creator", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-        using var creator = new ItemCreatorForm(_databaseProfile, _databaseCapabilities); creator.ShowDialog(this);
+        var capabilities = _databaseCapabilities;
+        if (capabilities is not null && capabilities.FindTable("item_template") is null) { MessageBox.Show(this, "The connected world database has no item_template table. Check that you selected the world database, not auth or characters.", "Item Creator", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+        capabilities ??= new DatabaseCapabilities("Offline authoring", "Not connected", new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { ["item_template"] = ItemTemplateAdapter.CreatePortableTable() });
+        using var creator = new ItemCreatorForm(_databaseCapabilities is null ? null : _databaseProfile, capabilities); creator.ShowDialog(this);
     }
 
     private void ShowStartCenter()
