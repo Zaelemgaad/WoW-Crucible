@@ -9,6 +9,7 @@ The client build is fixed, but server integration will not be tied to an old rep
 
 ## What works today
 
+- Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
 - Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.

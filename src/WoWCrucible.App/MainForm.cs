@@ -15,6 +15,7 @@ public sealed class MainForm : Form
     private readonly List<(WdbcFile File, IReadOnlyList<DbcColumn> Columns)> _documents = [];
     private bool _activatingDocument;
     private readonly AppSettings _settings = AppSettings.Load();
+    private readonly StartCenterControl _startCenter;
     private WdbcFile? _file;
     private IReadOnlyList<DbcColumn> _columns = [];
     private int[]? _visibleRows;
@@ -29,7 +30,11 @@ public sealed class MainForm : Form
         AllowDrop = true;
         KeyPreview = true;
 
+        _startCenter = new StartCenterControl(_settings, OpenGuidedSpellWorkspace, OpenFile, () => OpenPatchBuilder(), () => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }, OpenLayeredDbcs, ConfigurePaths);
+
         var tools = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new(6, 4, 6, 4) };
+        tools.Items.Add(Button("Home", (_, _) => ShowStartCenter()));
+        tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(Button("Open DBC(s)", (_, _) => OpenFile()));
         tools.Items.Add(_openFiles);
         tools.Items.Add(Button("Close DBC", (_, _) => CloseCurrentFile()));
@@ -52,7 +57,7 @@ public sealed class MainForm : Form
         tools.Items.Add(Button("Layered DBCs", (_, _) => OpenLayeredDbcs()));
         tools.Items.Add(Button("Sync to Core Data", (_, _) => SyncToCoreData()));
         tools.Items.Add(Button("Open Logs", (_, _) => CrashLogger.OpenDirectory()));
-        tools.Items.Add(Button("Paths", (_, _) => { using var form = new SettingsForm(_settings); if (form.ShowDialog(this) == DialogResult.OK) _schemaPath = FindSchemaPath(_settings.SchemaDefinitionPath); }));
+        tools.Items.Add(Button("Paths", (_, _) => ConfigurePaths()));
         tools.Items.Add(new ToolStripSeparator());
         tools.Items.Add(new ToolStripLabel("Search all fields:"));
         tools.Items.Add(_search);
@@ -79,9 +84,11 @@ public sealed class MainForm : Form
         var statusStrip = new StatusStrip();
         statusStrip.Items.Add(_status);
         Controls.Add(_grid);
+        Controls.Add(_startCenter);
         Controls.Add(statusStrip);
         Controls.Add(tools);
         tools.Dock = DockStyle.Top;
+        _grid.Visible = false;
 
         _search.TextChanged += (_, _) => { _searchTimer.Stop(); _searchTimer.Start(); };
         _decoded.CheckedChanged += (_, _) => { _decoded.Text = _decoded.Checked ? "Decoded: On" : "Decoded: Off"; _grid.Invalidate(); };
@@ -128,6 +135,35 @@ public sealed class MainForm : Form
         using var dialog = new OpenFileDialog { Multiselect = true, InitialDirectory = Directory.Exists(_settings.CoreDbcPath) ? _settings.CoreDbcPath : string.Empty, Filter = "WoW database files (*.dbc)|*.dbc|All files (*.*)|*.*" };
         if (dialog.ShowDialog(this) == DialogResult.OK)
             foreach (var path in dialog.FileNames) LoadFile(path);
+    }
+
+    private void ConfigurePaths()
+    {
+        using var form = new SettingsForm(_settings);
+        if (form.ShowDialog(this) != DialogResult.OK) return;
+        _schemaPath = FindSchemaPath(_settings.SchemaDefinitionPath); _startCenter.RefreshReadiness();
+    }
+
+    private void ShowStartCenter()
+    {
+        _grid.Visible = false; _startCenter.Visible = true; _startCenter.BringToFront(); _startCenter.RefreshReadiness();
+        Text = _file is null ? "WoW Crucible — Start Center" : $"WoW Crucible — Home · {Path.GetFileName(_file.SourcePath)} remains open";
+        _status.Text = _documents.Count == 0 ? "Choose a workflow to begin" : $"{_documents.Count:N0} DBC file(s) remain staged";
+    }
+
+    private void OpenGuidedSpellWorkspace()
+    {
+        var path = Directory.Exists(_settings.CoreDbcPath) ? Path.Combine(_settings.CoreDbcPath, "Spell.dbc") : string.Empty;
+        if (!File.Exists(path))
+        {
+            using var dialog = new OpenFileDialog { InitialDirectory = Directory.Exists(_settings.CoreDbcPath) ? _settings.CoreDbcPath : string.Empty, Filter = "Spell.dbc|Spell.dbc|WoW database files (*.dbc)|*.dbc", FileName = "Spell.dbc", Title = "Select the build-12340 Spell.dbc" };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            path = dialog.FileName;
+        }
+        LoadFile(path);
+        if (!IsSpellFile) { MessageBox.Show(this, "The selected file is not a build-12340 Spell.dbc with 234 fields.", "WoW Crucible", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+        if (_grid.RowCount > 0 && _grid.ColumnCount > 0) _grid.CurrentCell = _grid[0, 0];
+        OpenSpellWorkspace();
     }
 
     private void OpenPatchBuilder(IEnumerable<string>? droppedPaths = null)
@@ -225,6 +261,7 @@ public sealed class MainForm : Form
             });
         }
         _grid.RowCount = _file.RowCount;
+        _startCenter.Visible = false; _grid.Visible = true; _grid.BringToFront();
         loadTimer?.Stop();
         Text = $"WoW Crucible — {Path.GetFileName(_file.SourcePath)} · {_documents.Count:N0} open";
         _status.Text = loadTimer is null
@@ -250,8 +287,7 @@ public sealed class MainForm : Form
         {
             _file = null; _columns = []; _visibleRows = null;
             _grid.Columns.Clear(); _grid.RowCount = 0;
-            Text = "WoW Crucible — 3.3.5a Editor";
-            _status.Text = "No DBC open";
+            ShowStartCenter();
         }
     }
 
