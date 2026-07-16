@@ -37,7 +37,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
 - Writes handled and fatal crash details to a portable `Logs` folder beside the application (also available through **Open Logs**), with `%LOCALAPPDATA%\\WoWCrucible\\Logs` as a fallback for read-only install locations.
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
-- Builds resumable client indexes with per-archive SHA-256 identities and reusable MPQ content catalogs, marks anonymous hash-only entries explicitly, recovers names from local/cross-client path corpora, and resumes indexed extraction without rescanning giant archives or rewriting already-complete files.
+- Builds resumable client indexes with per-archive SHA-256 identities and reusable MPQ content catalogs, detects active/inactive locales, backup/custom subdirectory scopes and renamed build-12340 executables, marks anonymous hash-only entries explicitly, recovers names from local/cross-client path corpora, and resumes indexed extraction without rescanning giant archives or rewriting already-complete files.
 - Ships a scriptable `wowcrucible.exe` CLI for DBC information and MPQ list/extract/create/update operations.
 - Compares layered DBC directories as base-only, override-only, identical, or genuinely overridden, with cancellable semantic row/field comparison (decoded strings do not differ merely because their offsets moved).
 - Promotes selected fields or complete rows from an override DBC into an output DBC by record ID, safely re-interns strings, and saves/reapplies semantic promotion manifests.
@@ -60,7 +60,7 @@ wowcrucible server inspect "C:\path\to\installed-server"
 wowcrucible server bindings "C:\path\to\installed-server" [--source="C:\path\to\core-source"]
 wowcrucible server dbc-audit "C:\path\to\installed-server" gtRegenMPPerSpt.dbc schema.xml [--source="C:\path\to\core-source"] [--all] [--migration=sync.sql]
 wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
-wowcrucible client index "C:\Games\WoW" client-index [--no-hash] [--listfile=known-paths.txt]
+wowcrucible client index "C:\Games\WoW" client-index [--no-hash] [--listfile=known-paths.txt] [--client-exe=Wow.exe]
 wowcrucible client corpus combined-paths.txt first-client-index second-client-index [...]
 wowcrucible client show client-index
 wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]
