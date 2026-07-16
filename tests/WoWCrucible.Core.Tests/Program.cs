@@ -255,6 +255,12 @@ File.Copy(mpqOutput, Path.Combine(clientData, "patch-test.mpq")); var clientInde
 var clientIndexer = new ClientArchiveIndexService(); var firstClientIndex = clientIndexer.Build(clientFixture, clientIndexDirectory, false); var secondClientIndex = clientIndexer.Build(clientFixture, clientIndexDirectory, false);
 if (!firstClientIndex.Complete || firstClientIndex.ActiveLocale != "enUS" || firstClientIndex.Archives.Count != 1 || firstClientIndex.Archives[0].Scope != ClientArchiveScope.RootData || firstClientIndex.Archives[0].PayloadFiles != 2 || firstClientIndex.Archives[0].MetadataFiles == 0 || firstClientIndex.Archives[0].AnonymousFiles != 0 || secondClientIndex.Archives[0] != firstClientIndex.Archives[0] || firstClientIndex.LooseFiles?.Single().Scope != ClientLooseFileScope.Configuration)
     throw new InvalidOperationException("Resumable structured client indexing failed.");
+if (File.Exists(Path.Combine(clientIndexDirectory, "client-index.partial.json")))
+    throw new InvalidOperationException("A completed client index left its partial refresh summary behind.");
+var simulatedPartialPath = Path.Combine(clientIndexDirectory, "client-index.partial.json");
+File.WriteAllText(simulatedPartialPath, System.Text.Json.JsonSerializer.Serialize(firstClientIndex with { Complete = false, CompletedArchives = 0, Archives = [] }));
+if (!ClientArchiveIndexService.Load(clientIndexDirectory).Complete) throw new InvalidOperationException("A partial refresh hid the last complete client index from readers.");
+File.Delete(simulatedPartialPath);
 var corpusPath = Path.Combine(clientFixture, "known-paths.txt");
 if (ClientArchiveIndexService.CreatePathCorpus([clientIndexDirectory], corpusPath) != 2)
     throw new InvalidOperationException("Client path corpus creation failed.");

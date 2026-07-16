@@ -29,7 +29,8 @@ public sealed class ClientArchiveIndexService
         if (!Directory.Exists(data)) throw new DirectoryNotFoundException($"Client has no Data directory: {clientRoot}");
         Directory.CreateDirectory(outputDirectory); Directory.CreateDirectory(Path.Combine(outputDirectory, "archives"));
         var summaryPath = Path.Combine(outputDirectory, "client-index.json");
-        var previous = TryLoad<ClientArchiveIndex>(summaryPath);
+        var partialPath = Path.Combine(outputDirectory, "client-index.partial.json");
+        var previous = TryLoad<ClientArchiveIndex>(partialPath) ?? TryLoad<ClientArchiveIndex>(summaryPath);
         var cached = (previous?.Archives ?? []).ToDictionary(archive => archive.RelativePath, StringComparer.OrdinalIgnoreCase);
         var archives = Directory.EnumerateFiles(data, "*.mpq", SearchOption.AllDirectories).Order(StringComparer.OrdinalIgnoreCase).ToArray();
         var summaries = new List<ClientArchiveSummary>(archives.Length);
@@ -60,7 +61,7 @@ public sealed class ClientArchiveIndexService
             {
                 summaries.Add(ToSummary(relative, scope, info, hash, contentFile, oldContent!.Files, null));
                 progress?.Report(new(index + 1, archives.Length, relative, "indexed", true));
-                SaveSummary(summaryPath, clientRoot, activeLocale, executable, summaries, archives.Length, false);
+                SaveSummary(partialPath, clientRoot, activeLocale, executable, summaries, archives.Length, false);
                 continue;
             }
 
@@ -76,17 +77,22 @@ public sealed class ClientArchiveIndexService
                 summaries.Add(new(relative, scope, info.Length, info.LastWriteTimeUtc.Ticks, hash, contentFile, 0, 0, 0, 0, ex.Message));
             }
             progress?.Report(new(index + 1, archives.Length, relative, "indexed", false));
-            SaveSummary(summaryPath, clientRoot, activeLocale, executable, summaries, archives.Length, false);
+            SaveSummary(partialPath, clientRoot, activeLocale, executable, summaries, archives.Length, false);
         }
 
         RecoverAnonymousNames(clientRoot, outputDirectory, archives, summaries, progress, cancellationToken, externalListFile);
         var looseFiles = IndexLooseFiles(clientRoot, outputDirectory, cancellationToken);
         var result = new ClientArchiveIndex(IndexFormatVersion, clientRoot, Path.GetFileName(Path.TrimEndingDirectorySeparator(clientRoot)), DateTimeOffset.UtcNow, true, summaries.Count, activeLocale, executable, summaries, looseFiles);
         WriteAtomic(summaryPath, result);
+        if (File.Exists(partialPath)) File.Delete(partialPath);
         return result;
     }
 
-    public static ClientArchiveIndex Load(string indexDirectory) => TryLoad<ClientArchiveIndex>(Path.Combine(Path.GetFullPath(indexDirectory), "client-index.json")) ?? throw new InvalidDataException("Client index is missing or invalid.");
+    public static ClientArchiveIndex Load(string indexDirectory)
+    {
+        var directory = Path.GetFullPath(indexDirectory);
+        return TryLoad<ClientArchiveIndex>(Path.Combine(directory, "client-index.json")) ?? TryLoad<ClientArchiveIndex>(Path.Combine(directory, "client-index.partial.json")) ?? throw new InvalidDataException("Client index is missing or invalid.");
+    }
 
     private static ClientExecutableIndex? IndexExecutable(string root, string? requestedPath)
     {
