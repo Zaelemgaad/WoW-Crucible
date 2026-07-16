@@ -54,6 +54,10 @@ if (gapStatsPlan.Values["StatsCount"] is not 1 || gapStatsPlan.Values["stat_type
 static IReadOnlyList<DatabaseColumnCapability> ItemColumns(params string[] names) => names.Select((name, index) => new DatabaseColumnCapability(name, "int", "int", false, "0", name == "entry" ? "PRI" : "", "", index + 1)).ToArray();
 
 var schema = DbcSchemaCatalog.Load(args[0]);
+var skillAbilitySchema = schema.ResolveColumns("SkillLineAbility", 14);
+var visualKitSchema = schema.ResolveColumns("SpellVisualKit", 38);
+if (skillAbilitySchema.UsedFallback || skillAbilitySchema.Columns[5].Name != "ExcludeRace" || skillAbilitySchema.Columns[13].Name != "CharacterPoints[1]" || visualKitSchema.UsedFallback || visualKitSchema.Columns[37].Name != "Flags")
+    throw new InvalidOperationException("Known build-12340 schema corrections were not applied.");
 var builtInSchema = DbcSchemaCatalog.CreateBuiltIn12340();
 var builtInSpellColumns = builtInSchema.GetColumns("Spell", 234);
 if (builtInSpellColumns[136].Name != "Name[enUS]" || builtInSpellColumns[233].Name != "SpellDifficultyID")

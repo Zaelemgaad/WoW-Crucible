@@ -63,7 +63,7 @@ wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCI
 wowcrucible client index "C:\Games\WoW" client-index [--no-hash] [--listfile=known-paths.txt]
 wowcrucible client corpus combined-paths.txt first-client-index second-client-index [...]
 wowcrucible client show client-index
-wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filter] [--resolved-only] [--overwrite] [--quiet]
+wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]
 wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json]
 wowcrucible mpq extract patch.MPQ output-folder [filter] [--quiet|--progress=N]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
@@ -74,7 +74,7 @@ wowcrucible manifest validate classless.json [existing-patch.mpq]
 wowcrucible manifest build classless.json output-folder
 ```
 
-An MPQ browser can only display names known to an internal or external `(listfile)`. Client indexing preserves every hash-only entry under its synthetic StormLib name, reports the unresolved count, and can retry name recovery from a corpus built across multiple clients. `--resolved-only` prevents synthetic names from being mistaken for reusable folder paths during extraction.
+An MPQ browser can only display names known to an internal or external `(listfile)`. Client indexing preserves every hash-only entry under its synthetic StormLib name, reports the unresolved count, and can retry name recovery from a corpus built across multiple clients. `--resolved-only` prevents synthetic names from being mistaken for reusable folder paths; `--anonymous-only` quarantines those unresolved payloads for signature/content inspection.
 - Maps standalone DBCs to `DBFilesClient\\<name>.dbc`.
 - Synchronizes a saved DBC into a selected server `data\\dbc` directory with backup.
 

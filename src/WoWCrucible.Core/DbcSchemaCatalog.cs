@@ -116,6 +116,8 @@ public sealed class DbcSchemaCatalog
             tables[tableName] = new(columns, keyStrategy);
         }
 
+        ApplyKnown12340Corrections(tables, document);
+
         return new(tables);
     }
 
@@ -185,6 +187,25 @@ public sealed class DbcSchemaCatalog
     }
 
     private static TableDefinition PhysicalDefinition(IReadOnlyList<DbcColumn> columns) => new(columns, DbcRecordKeyStrategy.Physical(columns.First(column => column.IsIndex).Index));
+
+    private static void ApplyKnown12340Corrections(Dictionary<string, TableDefinition> tables, XDocument document)
+    {
+        var isBuild12340 = document.Root?.Elements("Table").Any(table => (string?)table.Attribute("Build") == "12340") == true;
+        if (!isBuild12340) return;
+
+        // The commonly distributed WDBX 12340 XML omits the two exclusion masks and
+        // labels a non-existent trailing trade-skill field. TrinityCore's physical
+        // format and real stock files both contain these 14 cells.
+        AddSimple(tables, "SkillLineAbility", "ID:int,SkillLine:int,Spell:int,RaceMask:uint,ClassMask:uint,ExcludeRace:uint,ExcludeClass:uint,MinSkillLineRank:int,SupercededBySpell:int,AcquireMethod:int,TrivialSkillLineRankHigh:int,TrivialSkillLineRankLow:int,CharacterPoints[0]:int,CharacterPoints[1]:int");
+
+        // Stock build-12340 SpellVisualKit has the 37 defined cells plus a final
+        // flags cell. Preserve the imported names/types and append that missing cell.
+        if (tables.TryGetValue("SpellVisualKit", out var visualKit) && visualKit.Columns.Count == 37)
+        {
+            var columns = visualKit.Columns.Concat([new DbcColumn(37, 37 * 4, 4, "Flags", DbcValueType.UInt32)]).ToArray();
+            tables["SpellVisualKit"] = PhysicalDefinition(columns);
+        }
+    }
 
     private static void AddSimple(Dictionary<string, TableDefinition> tables, string tableName, string specification)
     {

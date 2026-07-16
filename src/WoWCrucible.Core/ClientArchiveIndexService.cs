@@ -162,7 +162,7 @@ public sealed class ClientArchiveIndexService
         return paths.Count;
     }
 
-    public static IndexedExtractionResult ExtractIndexed(string indexDirectory, string archiveRelativePath, string destinationRoot, string? filter = null, bool resolvedOnly = false, bool overwrite = false, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
+    public static IndexedExtractionResult ExtractIndexed(string indexDirectory, string archiveRelativePath, string destinationRoot, string? filter = null, bool resolvedOnly = false, bool anonymousOnly = false, bool overwrite = false, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
     {
         indexDirectory = Path.GetFullPath(indexDirectory);
         var index = Load(indexDirectory);
@@ -170,7 +170,8 @@ public sealed class ClientArchiveIndexService
             ?? throw new FileNotFoundException($"The client index has no archive named '{archiveRelativePath}'.");
         var content = TryLoad<ArchiveContentIndex>(Path.Combine(indexDirectory, summary.ContentIndexFile))
             ?? throw new InvalidDataException($"The content index for '{summary.RelativePath}' is missing or invalid.");
-        var entries = content.Files.Where(file => !file.IsMetadata && (!resolvedOnly || !IsAnonymous(file.ArchivePath)) && (string.IsNullOrEmpty(filter) || file.ArchivePath.Contains(filter, StringComparison.OrdinalIgnoreCase))).ToArray();
+        if (resolvedOnly && anonymousOnly) throw new ArgumentException("Resolved-only and anonymous-only extraction are mutually exclusive.");
+        var entries = content.Files.Where(file => !file.IsMetadata && (!resolvedOnly || !IsAnonymous(file.ArchivePath)) && (!anonymousOnly || IsAnonymous(file.ArchivePath)) && (string.IsNullOrEmpty(filter) || file.ArchivePath.Contains(filter, StringComparison.OrdinalIgnoreCase))).ToArray();
         var archivePath = Path.GetFullPath(Path.Combine(index.ClientRoot, summary.RelativePath));
         var relative = Path.GetRelativePath(index.ClientRoot, archivePath);
         if (relative.Equals("..", StringComparison.Ordinal) || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)) throw new InvalidDataException("The indexed archive path escapes the client root.");
