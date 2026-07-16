@@ -80,6 +80,18 @@ public static class ClientServerDeploymentPlanner
             }
 
             var clientPath = candidates[0]; var clientHash = candidateHashes[0];
+            serverFiles.TryGetValue(group.Key!, out var serverPath);
+            var serverHash = serverPath is null ? null : Hash(serverPath);
+            var binding = bindings.GetValueOrDefault(group.Key!) ?? (coreSourceRoot is not null
+                ? new(workspace.CoreFamily, "Current core source (absent from DBCStores)", group.Key!, Path.GetFileNameWithoutExtension(group.Key!), ServerTableConsumption.ClientOnly, null, DbcRecordKeyStrategy.None, RowDimensionKind.None, DeploymentDestination.ClientPatch, RestartRequirement.ClientRestart, true, "Selected source checkout")
+                : new(workspace.CoreFamily, $"{workspace.CoreFamily} profile (mapping unknown)", group.Key!, Path.GetFileNameWithoutExtension(group.Key!), ServerTableConsumption.Unknown, null, DbcRecordKeyStrategy.None, RowDimensionKind.None, DeploymentDestination.ClientPatch, RestartRequirement.ClientRestart, false, "No matching built-in binding"));
+            if (new FileInfo(clientPath).Length == 0 && serverHash is not null && clientHash.Equals(serverHash, StringComparison.OrdinalIgnoreCase))
+            {
+                entries.Add(new(group.Key!, clientPath, clientHash, 0, 0, serverPath, serverHash, ClientServerPlanStatus.Identical,
+                    binding.Consumption, binding.Destinations, binding.SqlTableName, binding.Restart, binding.Profile,
+                    binding.SupportedRevision, "Client and server contain the same intentional empty placeholder; no deployment is needed.", candidates.Length > 1 ? candidates : null));
+                continue;
+            }
             WdbcFile client;
             try { client = WdbcFile.Load(clientPath); }
             catch (Exception ex)
@@ -89,14 +101,6 @@ public static class ClientServerDeploymentPlanner
                     RestartRequirement.None, "Client extraction", "Invalid WDBC", ex.Message, candidates.Length > 1 ? candidates : null));
                 continue;
             }
-
-            serverFiles.TryGetValue(group.Key!, out var serverPath);
-            var serverHash = serverPath is null ? null : Hash(serverPath);
-            var binding = bindings.GetValueOrDefault(group.Key!) ?? new(workspace.CoreFamily,
-                coreSourceRoot is null ? $"{workspace.CoreFamily} profile (mapping unknown)" : "Current core source", group.Key!,
-                Path.GetFileNameWithoutExtension(group.Key!), ServerTableConsumption.Unknown, null, DbcRecordKeyStrategy.None,
-                RowDimensionKind.None, DeploymentDestination.ClientPatch, RestartRequirement.ClientRestart,
-                coreSourceRoot is not null, coreSourceRoot is null ? "No matching built-in binding" : "Selected source checkout");
 
             var status = Classify(binding, serverPath, clientHash, serverHash);
             entries.Add(new(group.Key!, clientPath, clientHash, client.RowCount, client.FieldCount, serverPath, serverHash, status,

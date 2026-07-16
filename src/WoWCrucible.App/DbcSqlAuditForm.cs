@@ -34,7 +34,7 @@ internal sealed class DbcSqlAuditForm : Form
             var row = _audit.Rows[e.RowIndex];
             e.Value = e.ColumnIndex switch { 0 => row.Status, 1 => row.Key, 2 => row.Dimensions, 3 => Format(row.DbcValues), 4 => Format(row.SqlValues), _ => null };
         };
-        _grid.RowPrePaint += (_, e) => { if (_audit is not null && _audit.Rows[e.RowIndex].Status != DbcSqlRowStatus.Same) _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = Color.MistyRose; };
+        _grid.RowPrePaint += (_, e) => { if (_audit is not null && _audit.Rows[e.RowIndex].Status is DbcSqlRowStatus.SqlOverridesDbc or DbcSqlRowStatus.MissingDbcRow) _grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = Color.MistyRose; };
         _export.Click += ExportMigration;
         Controls.Add(_grid); Controls.Add(_status); Controls.Add(top);
         Shown += async (_, _) => await AuditAsync(); FormClosing += (_, _) => _cancellation?.Cancel();
@@ -48,7 +48,7 @@ internal sealed class DbcSqlAuditForm : Form
             UseWaitCursor = true; _status.Text = $"Reading {_binding.SqlTableName} and comparing effective rows…";
             _audit = await new DbcSqlAuditService().AuditAsync(_profile, _binding, _dbcPath, _schema, _table, _cancellation.Token);
             _grid.RowCount = _audit.Rows.Count; _grid.Invalidate(); _export.Enabled = _audit.MismatchCount > 0;
-            _status.Text = $"{_audit.Rows.Count:N0} rows · {_audit.Rows.Count(row => row.Status == DbcSqlRowStatus.Same):N0} same · {_audit.Rows.Count(row => row.Status == DbcSqlRowStatus.SqlOverridesDbc):N0} SQL overrides · {_audit.Rows.Count(row => row.Status == DbcSqlRowStatus.MissingSqlRow):N0} missing SQL · effective server values come from SQL · {_binding.Restart}";
+            _status.Text = $"{_audit.Rows.Count:N0} rows · {_audit.Rows.Count(row => row.Status == DbcSqlRowStatus.Same):N0} SQL same · {_audit.Rows.Count(row => row.Status == DbcSqlRowStatus.SqlOverridesDbc):N0} SQL overrides · {_audit.Rows.Count(row => row.Status == DbcSqlRowStatus.DbcOnly):N0} DBC-only · SQL overrides only rows present in the overlay · {_binding.Restart}";
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { CrashLogger.Log("DBC/SQL audit failed", ex); MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }

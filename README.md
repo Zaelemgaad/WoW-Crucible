@@ -40,24 +40,31 @@ Client formats and server integration are separate: a client-build profile decla
 - Builds resumable client indexes with per-archive SHA-256 identities and reusable MPQ content catalogs, detects active/inactive locales, backup/custom subdirectory scopes and renamed build-12340 executables, marks anonymous hash-only entries explicitly, recovers names from local/cross-client path corpora, and resumes indexed extraction without rescanning giant archives or rewriting already-complete files.
 - Includes a visual Client Inspector for indexing/resuming a whole installation, color-coded archive scopes, loose runtime/config/AddOn inventory, plain-language compatibility guidance, content-category summaries, direct archive browsing, and provenance-preserving extraction.
 - Turns an extracted/effective client DBC directory into a reviewed client-to-server deployment plan: byte identity, row/field counts, current-core consumer, SQL-overlay warning, restart requirement, unresolved layer conflicts, portable JSON, and separate non-live staging trees for the patch and server DBC candidates.
-- Plans client fusion against an explicit stock/effective base, omits base-identical files, deduplicates identical candidates, blocks path conflicts until a source is selected, warns that conflicting DBCs need row/field promotion, and stages only resolved changes into a small patch manifest.
+- Plans client fusion against an explicit stock/effective base, omits base-identical files, deduplicates identical candidates, exports a reviewable plan, blocks path conflicts, recommends additive path/ID remapping instead of silent replacement, and stages only resolved changes into a small patch manifest.
 - Ships a scriptable `wowcrucible.exe` CLI for DBC information and MPQ list/extract/create/update operations.
 - Compares layered DBC directories as base-only, override-only, identical, or genuinely overridden, with cancellable semantic row/field comparison (decoded strings do not differ merely because their offsets moved).
 - Promotes selected fields or complete rows from an override DBC into an output DBC by record ID, safely re-interns strings, and saves/reapplies semantic promotion manifests.
+- Generates and applies additive-only DBC promotion manifests containing IDs absent from the baseline, preserving every existing record by construction.
+- Clones selected source records into newly allocated IDs with a hash-bound old-to-new mapping, enabling additive ports of conflicting records without overwriting baseline identities.
+- Follows a cloned record's foreign-key dependency, clones the referenced child records, and rewrites only the new parent records to the new child IDs.
 - Saves portable patch manifests and builds fresh, tiny MPQs containing only listed DBC/UI changes.
 - Treats an imported folder as the MPQ staging root and previews every editable source-to-archive mapping with suspicious-root warnings before building.
 - Detects protected `Interface\\GlueXML` changes, warns that stock clients may reject them through `GLUEXML.TOC.SIG`, and can bind a patch manifest to the SHA-256 of a known-compatible `Wow.exe`.
-- Enforces manifest allow/deny globs and exact entry counts, provides a dry-run source-to-archive listing, and verifies an existing MPQ for missing, unexpected, or size-mismatched content without rebuilding it.
+- Enforces manifest allow/deny/required globs and exact entry counts, provides a dry-run source-to-archive listing, and verifies an existing MPQ for missing, unexpected, or size-mismatched content without rebuilding it.
 - Refuses copy-update operations on archives larger than 2 GB; giant mod/client layers are immutable inputs, never working patch targets.
 
 ## Command line
 
 ```text
 wowcrucible dbc info Spell.dbc
+wowcrucible dbc rows CreatureModelData.dbc schema.xml 1332 1333 1334
+wowcrucible dbc find CreatureDisplayInfo.dbc schema.xml ModelID 6000 6001 6002 [--count|--limit=100]
 wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder [--strict] [--recursive]
 wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).xml"
 wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).xml" --summary
 wowcrucible dbc promote apply base\Spell.dbc override\Spell.dbc schema.xml selection.dbc-promotion.json output\Spell.dbc
+wowcrucible dbc promote additions base\CreatureModelData.dbc mod\CreatureModelData.dbc schema.xml additions.json output\CreatureModelData.dbc
+wowcrucible dbc clone-remap where base\CreatureDisplayInfo.dbc mod\CreatureDisplayInfo.dbc schema.xml ModelID 6000 6001 --manifest=display-map.json --output=merged\CreatureDisplayInfo.dbc
 wowcrucible server detect "C:\path\to\installed-server"
 wowcrucible server inspect "C:\path\to\installed-server"
 wowcrucible server bindings "C:\path\to\installed-server" [--source="C:\path\to\core-source"]
@@ -68,7 +75,7 @@ wowcrucible client extract client-index "Data\patch-W.MPQ" extracted "DBFilesCli
 wowcrucible client corpus combined-paths.txt first-client-index second-client-index [...]
 wowcrucible client show client-index
 wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]
-wowcrucible client fusion extracted-stock extracted-mod-a extracted-mod-b [--stage=fusion-review]
+wowcrucible client fusion extracted-stock extracted-mod-a extracted-mod-b [--output=fusion-plan.json] [--stage=fusion-review] [--all]
 wowcrucible server client-plan "C:\path\to\installed-server" extracted-effective-dbc [--source=core-source] [--output=plan.json] [--stage=server-review]
 wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json]
 wowcrucible mpq extract patch.MPQ output-folder [filter] [--quiet|--progress=N]

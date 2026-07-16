@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text.Json;
 
 namespace WoWCrucible.Core;
 
@@ -48,6 +49,14 @@ public static class ClientFusionPlanner
         return new(1, DateTimeOffset.UtcNow, baseRoot, normalizedSources, result);
     }
 
+    public static void Save(string path, ClientFusionPlan plan)
+    {
+        path = Path.GetFullPath(path); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = path + ".tmp";
+        File.WriteAllText(temporary, JsonSerializer.Serialize(plan, new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(temporary, path, true);
+    }
+
     public static ClientFusionStageResult Stage(string rootPath, ClientFusionPlan plan, IReadOnlyDictionary<string, string>? conflictSelections = null)
     {
         rootPath = Path.GetFullPath(rootPath); var filesRoot = Path.Combine(rootPath, "files"); Directory.CreateDirectory(filesRoot);
@@ -80,10 +89,10 @@ public static class ClientFusionPlanner
         {
             ClientFusionStatus.IdenticalToBase => "Same bytes as the selected base; omitted from the patch.",
             ClientFusionStatus.Added => "New path supplied by one source; safe to stage after compatibility review.",
-            ClientFusionStatus.Override => dbc ? "DBC overrides the base. Compare/promote rows and fields before accepting the whole table." : "Source overrides the base path; preview it before accepting.",
+            ClientFusionStatus.Override => dbc ? "DBC differs from base. Prefer adding new records or allocating/remapping IDs; replace existing records only by explicit review." : "Source uses a base path. Preserve both by renaming/repointing when possible; otherwise review the replacement explicitly.",
             ClientFusionStatus.IdenticalCandidates => "Multiple sources supply identical bytes; one deduplicated copy will be staged.",
-            ClientFusionStatus.Conflict when dbc => "Different DBCs target the same path. Merge records/fields in Layered DBCs, then use the merged output—do not rely on load order.",
-            _ => "Different files target the same client path. Choose the intended source explicitly."
+            ClientFusionStatus.Conflict when dbc => "Different DBCs target the same path. Add/remap compatible records into one merged table; do not choose a whole-file winner or rely on load order.",
+            _ => "Different files target the same client path. Prefer renaming the imported asset and repointing its references; selecting one source is an explicit replacement, not additive fusion."
         };
     }
 

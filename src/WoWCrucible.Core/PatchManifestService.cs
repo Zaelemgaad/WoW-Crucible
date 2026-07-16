@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 
 namespace WoWCrucible.Core;
 
-public sealed record PatchManifestPolicy(IReadOnlyList<string>? AllowedGlobs = null, IReadOnlyList<string>? ForbiddenGlobs = null, int? ExpectedEntryCount = null);
+public sealed record PatchManifestPolicy(IReadOnlyList<string>? AllowedGlobs = null, IReadOnlyList<string>? ForbiddenGlobs = null, int? ExpectedEntryCount = null, IReadOnlyList<string>? RequiredGlobs = null);
 public sealed record PatchManifest(int FormatVersion, string Name, string OutputFileName, IReadOnlyList<PatchEntry> Entries, string? RequiredClientExecutableSha256 = null, PatchManifestPolicy? Policy = null);
 public sealed record PatchCompatibilityIssue(string Code, string Message);
 public sealed record PatchManifestValidationIssue(string Code, string Message, string? ArchivePath = null);
@@ -89,6 +89,8 @@ public static class PatchManifestService
             if (normalizedPolicy?.ForbiddenGlobs is { Count: > 0 } forbidden && forbidden.Any(glob => GlobMatches(glob, item.Path)))
                 errors.Add(new("PathForbidden", $"Archive path '{item.Path}' matches a forbidden glob.", item.Path));
         }
+        foreach (var required in normalizedPolicy?.RequiredGlobs ?? [])
+            if (!normalized.Any(item => GlobMatches(required, item.Path))) errors.Add(new("RequiredPathMissing", $"Manifest contains no archive path matching required glob '{required}'.", required));
         return new(errors, warnings);
     }
 
@@ -122,7 +124,7 @@ public static class PatchManifestService
         if (policy is null) return null;
         if (policy.ExpectedEntryCount < 0) throw new InvalidDataException("Expected manifest entry count cannot be negative.");
         static string[] NormalizeGlobs(IReadOnlyList<string>? globs) => (globs ?? []).Select(glob => glob.Replace('/', '\\').Trim().TrimStart('\\')).Where(glob => glob.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        return new(NormalizeGlobs(policy.AllowedGlobs), NormalizeGlobs(policy.ForbiddenGlobs), policy.ExpectedEntryCount);
+        return new(NormalizeGlobs(policy.AllowedGlobs), NormalizeGlobs(policy.ForbiddenGlobs), policy.ExpectedEntryCount, NormalizeGlobs(policy.RequiredGlobs));
     }
 
     private static bool GlobMatches(string glob, string path)

@@ -22,7 +22,7 @@ internal sealed class ClientFusionForm : Form
         top.Controls.Add(new Label { Text = "Override sources", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1); top.Controls.Add(_sources, 1, 1);
         var sourceButtons = new FlowLayoutPanel { AutoSize = true }; sourceButtons.Controls.Add(Button("Add…", AddSource)); sourceButtons.Controls.Add(Button("Remove", RemoveSource)); top.Controls.Add(sourceButtons, 2, 1);
         var actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new(10, 0, 10, 8) };
-        _analyze.Click += async (_, _) => await Analyze(); actions.Controls.Add(_analyze); actions.Controls.Add(Button("Stage Resolved Patch…", Stage));
+        _analyze.Click += async (_, _) => await Analyze(); actions.Controls.Add(_analyze); actions.Controls.Add(Button("Export Plan…", ExportPlan)); actions.Controls.Add(Button("Stage Resolved Patch…", Stage));
 
         _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Client path", Width = 430, ReadOnly = true });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Result", Width = 150, ReadOnly = true });
@@ -91,5 +91,13 @@ internal sealed class ClientFusionForm : Form
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         try { var result = ClientFusionPlanner.Stage(dialog.SelectedPath, _plan, selections); _status.Text = $"Staged {result.StagedFiles:N0} changed files; omitted {result.SkippedBaseFiles:N0} base-identical files; {result.UnresolvedConflicts:N0} conflicts remain excluded. Manifest: {result.ManifestPath}"; }
         catch (Exception ex) { CrashLogger.Log("Client fusion staging failed", ex); MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    }
+
+    private void ExportPlan()
+    {
+        if (_plan is null) { _status.Text = "Analyze the fusion sources first."; return; }
+        using var dialog = new SaveFileDialog { Filter = "Crucible fusion plan (*.json)|*.json", FileName = "client-fusion-plan.json" };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        ClientFusionPlanner.Save(dialog.FileName, _plan); _status.Text = $"Fusion plan saved: {dialog.FileName}";
     }
 }

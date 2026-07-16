@@ -54,6 +54,7 @@ public static class PatchInputMapper
                 var knownRoot = Array.FindIndex(parts, part => KnownClientRoots.Contains(part));
                 if (knownRoot >= 0) relative = Path.Combine(parts[knownRoot..]);
                 else if (KnownClientRoots.Contains(selectedRootName)) relative = Path.Combine(selectedRootName, relative);
+                else if (Path.GetExtension(file).Equals(".dbc", StringComparison.OrdinalIgnoreCase)) relative = Path.Combine("DBFilesClient", Path.GetFileName(file));
                 var archivePath = NormalizeArchivePath(relative);
                 result.Add(new(Path.GetFullPath(file), archivePath));
             }

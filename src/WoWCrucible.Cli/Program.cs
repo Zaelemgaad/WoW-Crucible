@@ -27,17 +27,18 @@ static int Client(string[] args)
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ClientHelp();
     if (args is ["fusion", var baseRoot, .. var fusionInputs])
     {
-        var stage = Option(fusionInputs, "--stage=");
+        var stage = Option(fusionInputs, "--stage="); var output = Option(fusionInputs, "--output="); var showAll = fusionInputs.Contains("--all", StringComparer.OrdinalIgnoreCase);
         var sourcePaths = fusionInputs.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
-        var unknown = fusionInputs.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.StartsWith("--stage=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var unknown = fusionInputs.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.StartsWith("--stage=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !value.Equals("--all", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown client fusion option: {unknown[0]}");
         if (sourcePaths.Length == 0) return Fail("Client fusion requires at least one extracted/effective override source.");
         var sources = sourcePaths.Select((path, index) => new ClientFusionSource($"source-{index + 1}-{Path.GetFileName(Path.TrimEndingDirectorySeparator(path))}", path)).ToArray();
         var plan = ClientFusionPlanner.Analyze(baseRoot, sources, new ConsoleProgress(5));
-        foreach (var entry in plan.Entries.Where(entry => entry.Status != ClientFusionStatus.IdenticalToBase))
+        foreach (var entry in plan.Entries.Where(entry => showAll && entry.Status != ClientFusionStatus.IdenticalToBase || entry.Status == ClientFusionStatus.Conflict))
             Console.WriteLine($"{entry.Status}\t{entry.ArchivePath}\t{entry.Candidates.Count}\t{entry.Guidance}");
         var conflicts = plan.Entries.Count(entry => entry.Status == ClientFusionStatus.Conflict);
         Console.Error.WriteLine($"Fusion plan: {plan.Entries.Count(entry => entry.Status != ClientFusionStatus.IdenticalToBase):N0} changed path(s), {conflicts:N0} unresolved conflict(s), {plan.Entries.Count(entry => entry.Status == ClientFusionStatus.IdenticalToBase):N0} base-identical omission(s).");
+        if (output is not null) { ClientFusionPlanner.Save(output, plan); Console.Error.WriteLine($"Saved fusion plan: {Path.GetFullPath(output)}"); }
         if (stage is not null)
         {
             var result = ClientFusionPlanner.Stage(stage, plan);
@@ -87,7 +88,7 @@ static int Client(string[] args)
     return ClientHelp(2);
 }
 
-static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--stage=review-folder]", code);
+static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]", code);
 
 static async Task<int> Server(string[] args)
 {
@@ -124,8 +125,8 @@ static async Task<int> Server(string[] args)
     if (args is ["dbc-audit", var auditFolder, var dbcInput, var schemaPath, .. var auditOptions])
     {
         var source = Option(auditOptions, "--source="); var migration = Option(auditOptions, "--migration=");
-        var showAll = auditOptions.Any(option => option.Equals("--all", StringComparison.OrdinalIgnoreCase));
-        var unknown = auditOptions.Where(option => !option.StartsWith("--source=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--migration=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--all", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var showAll = auditOptions.Any(option => option.Equals("--all", StringComparison.OrdinalIgnoreCase)); var summaryOnly = auditOptions.Any(option => option.Equals("--summary", StringComparison.OrdinalIgnoreCase));
+        var unknown = auditOptions.Where(option => !option.StartsWith("--source=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--migration=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--all", StringComparison.OrdinalIgnoreCase) && !option.Equals("--summary", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown server dbc-audit option: {unknown[0]}");
         var auditWorkspace = await ServerWorkspaceDetector.DetectAsync(auditFolder);
         var dbcPath = File.Exists(dbcInput) ? Path.GetFullPath(dbcInput) : Path.Combine(auditWorkspace.DbcPath, Path.GetFileName(dbcInput));
@@ -138,9 +139,10 @@ static async Task<int> Server(string[] args)
         var capabilities = await new DatabaseCapabilityService().InspectAsync(auditWorkspace.WorldDatabase);
         var table = capabilities.FindTable(binding.SqlTableName) ?? throw new InvalidDataException($"The live world database has no expected overlay table {binding.SqlTableName}.");
         var audit = await new DbcSqlAuditService().AuditAsync(auditWorkspace.WorldDatabase, binding, dbcPath, resolution, table);
-        foreach (var row in audit.Rows.Where(row => showAll || row.Status != DbcSqlRowStatus.Same))
-            Console.WriteLine($"{row.Status}\t{row.Key}\t{row.Dimensions}\tDBC {FormatValues(row.DbcValues)}\tSQL {FormatValues(row.SqlValues)}");
-        Console.Error.WriteLine($"Audited {audit.Rows.Count:N0} effective rows: {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.Same):N0} same, {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.SqlOverridesDbc):N0} SQL override(s), {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.MissingSqlRow):N0} missing SQL, {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.MissingDbcRow):N0} missing DBC. Effective server values come from SQL when a row exists.");
+        if (!summaryOnly)
+            foreach (var row in audit.Rows.Where(row => showAll || row.Status != DbcSqlRowStatus.Same))
+                Console.WriteLine($"{row.Status}\t{row.Key}\t{row.Dimensions}\tDBC {FormatValues(row.DbcValues)}\tSQL {FormatValues(row.SqlValues)}");
+        Console.Error.WriteLine($"Audited {audit.Rows.Count:N0} effective rows: {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.Same):N0} same, {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.SqlOverridesDbc):N0} SQL override(s), {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.DbcOnly):N0} DBC-only, {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.MissingDbcRow):N0} SQL-only/missing DBC. SQL overrides only rows that actually exist in the overlay.");
         if (migration is not null)
         {
             File.WriteAllText(migration, DbcSqlAuditService.CreateIdempotentMigration(audit));
@@ -168,7 +170,7 @@ static async Task<int> Server(string[] args)
 
 static int ServerHelp(int code = 0)
 {
-    var text = "Usage:\n  wowcrucible server detect <installed-server-folder>\n  wowcrucible server inspect <installed-server-folder>\n  wowcrucible server bindings <installed-server-folder> [--source=core-source]\n  wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=output.sql]\n  wowcrucible server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=review-folder]";
+    var text = "Usage:\n  wowcrucible server detect <installed-server-folder>\n  wowcrucible server inspect <installed-server-folder>\n  wowcrucible server bindings <installed-server-folder> [--source=core-source]\n  wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all|--summary] [--migration=output.sql]\n  wowcrucible server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=review-folder]";
     if (code == 0) Console.WriteLine(text); else Console.Error.WriteLine(text); return code;
 }
 
@@ -199,14 +201,15 @@ static int Manifest(string[] args)
         var executableOption = rawInputs.FirstOrDefault(value => value.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase));
         var allowed = rawInputs.Where(value => value.StartsWith("--allow=", StringComparison.OrdinalIgnoreCase)).Select(value => value[8..]).ToArray();
         var forbidden = rawInputs.Where(value => value.StartsWith("--deny=", StringComparison.OrdinalIgnoreCase)).Select(value => value[7..]).ToArray();
+        var required = rawInputs.Where(value => value.StartsWith("--require=", StringComparison.OrdinalIgnoreCase)).Select(value => value[10..]).ToArray();
         var countOption = rawInputs.FirstOrDefault(value => value.StartsWith("--count=", StringComparison.OrdinalIgnoreCase));
-        var unknown = rawInputs.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--allow=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--deny=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--count=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var unknown = rawInputs.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--allow=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--deny=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--require=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--count=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown manifest option: {unknown[0]}");
         var inputs = rawInputs.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
         if (inputs.Length == 0) return Fail("Add at least one file or folder to the manifest.");
         var entries = PatchInputMapper.Map(inputs);
         var hash = executableOption is null ? null : PatchManifestService.ComputeExecutableSha256(executableOption[13..]);
-        var policy = allowed.Length == 0 && forbidden.Length == 0 && countOption is null ? null : new PatchManifestPolicy(allowed, forbidden, countOption is null ? null : int.Parse(countOption[8..]));
+        var policy = allowed.Length == 0 && forbidden.Length == 0 && required.Length == 0 && countOption is null ? null : new PatchManifestPolicy(allowed, forbidden, countOption is null ? null : int.Parse(countOption[8..]), required);
         PatchManifestService.Save(manifestPath, Path.GetFileNameWithoutExtension(manifestPath), outputFile, entries, hash, policy);
         PrintCompatibility(entries, hash);
         return 0;
@@ -234,6 +237,47 @@ static int Manifest(string[] args)
 static int Dbc(string[] args)
 {
     if (args.Length > 0 && args[0] is "help" or "--help" or "-h") return DbcHelp();
+    if (args is ["rows", var rowsPath, var rowsSchemaPath, .. var rawIds] && rawIds.Length > 0)
+    {
+        var rowsFile = WdbcFile.Load(rowsPath); var tableName = Path.GetFileNameWithoutExtension(rowsPath);
+        var resolution = DbcSchemaCatalog.Load(rowsSchemaPath).ResolveColumns(tableName, rowsFile.FieldCount);
+        if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, rowsFile.FieldCount, resolution));
+        var indexed = DbcRecordIdentity.IndexRows(rowsFile, resolution.Columns, resolution.KeyStrategy); var rows = new List<object>();
+        foreach (var rawId in rawIds)
+        {
+            if (!uint.TryParse(rawId, out var id)) return Fail($"Invalid row ID: {rawId}");
+            if (!indexed.TryGetValue(id, out var row)) { rows.Add(new { Id = id, Missing = true, Values = new Dictionary<string, object?>() }); continue; }
+            rows.Add(new { Id = id, Missing = false, Values = resolution.Columns.ToDictionary(column => column.Name, column => rowsFile.GetDisplayValue(row, column)) });
+        }
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(rows, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        return rows.Any() ? 0 : 3;
+    }
+    if (args is ["find", var findPath, var findSchemaPath, var findColumnName, .. var findValues] && findValues.Length > 0)
+    {
+        var countOnly = findValues.Contains("--count", StringComparer.OrdinalIgnoreCase);
+        var limitOption = findValues.FirstOrDefault(value => value.StartsWith("--limit=", StringComparison.OrdinalIgnoreCase));
+        var unknown = findValues.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.Equals("--count", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--limit=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown DBC find option: {unknown[0]}");
+        var requestedValues = findValues.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
+        if (requestedValues.Length == 0) return Fail("DBC find requires at least one value.");
+        var limit = limitOption is null ? int.MaxValue : int.Parse(limitOption[8..]);
+        if (limit < 1) return Fail("DBC find limit must be positive.");
+        var findFile = WdbcFile.Load(findPath); var tableName = Path.GetFileNameWithoutExtension(findPath);
+        var resolution = DbcSchemaCatalog.Load(findSchemaPath).ResolveColumns(tableName, findFile.FieldCount);
+        if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, findFile.FieldCount, resolution));
+        var column = resolution.Columns.FirstOrDefault(value => value.Name.Equals(findColumnName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidDataException($"{tableName} has no named column '{findColumnName}'.");
+        var wanted = requestedValues.ToHashSet(StringComparer.OrdinalIgnoreCase); var matches = new List<uint>();
+        foreach (var (id, row) in DbcRecordIdentity.IndexRows(findFile, resolution.Columns, resolution.KeyStrategy).OrderBy(pair => pair.Key))
+        {
+            var value = Convert.ToString(findFile.GetDisplayValue(row, column), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+            if (wanted.Contains(value)) matches.Add(id);
+        }
+        if (countOnly) Console.WriteLine(matches.Count);
+        else Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(matches.Take(limit), new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        Console.Error.WriteLine($"Found {matches.Count:N0} {tableName} record(s) whose {column.Name} matches {wanted.Count:N0} requested value(s).");
+        return matches.Count > 0 ? 0 : 3;
+    }
     if (args.Length is 4 or 5 && args[0] == "compare" && (args.Length == 4 || args[4] == "--summary"))
     {
         var basePath = args[1]; var overridePath = args[2]; var schemaPath = args[3];
@@ -262,6 +306,60 @@ static int Dbc(string[] args)
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sample.FieldCount, resolution));
         DbcPromotionService.Apply(promotionBasePath, promotionOverridePath, outputPath, resolution.Columns, resolution.KeyStrategy, DbcPromotionService.LoadManifest(manifestPath));
         Console.Error.WriteLine($"Created promoted DBC: {Path.GetFullPath(outputPath)}");
+        return 0;
+    }
+    if (args is ["promote", "additions", var additionsBasePath, var additionsOverridePath, var additionsSchemaPath, var additionsManifestPath, var additionsOutputPath])
+    {
+        var tableName = Path.GetFileNameWithoutExtension(additionsBasePath); var sample = WdbcFile.Load(additionsBasePath);
+        var resolution = DbcSchemaCatalog.Load(additionsSchemaPath).ResolveColumns(tableName, sample.FieldCount);
+        if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sample.FieldCount, resolution));
+        var manifest = DbcPromotionService.CreateAdditionsManifest(additionsBasePath, additionsOverridePath, resolution.Columns, resolution.KeyStrategy);
+        if (manifest.Operations.Count == 0) { Console.Error.WriteLine($"{tableName} contains no IDs absent from the base; no output was written."); return 3; }
+        DbcPromotionService.SaveManifest(additionsManifestPath, manifest);
+        DbcPromotionService.Apply(additionsBasePath, additionsOverridePath, additionsOutputPath, resolution.Columns, resolution.KeyStrategy, manifest);
+        Console.Error.WriteLine($"Added {manifest.Operations.Count:N0} previously absent {tableName} record(s) without modifying existing IDs. Manifest: {Path.GetFullPath(additionsManifestPath)}. Output: {Path.GetFullPath(additionsOutputPath)}");
+        return 0;
+    }
+    if (args is ["clone-remap", "where", var cloneBasePath, var cloneSourcePath, var cloneSchemaPath, var cloneColumnName, .. var cloneArguments])
+    {
+        var cloneManifestPath = Option(cloneArguments, "--manifest="); var cloneOutputPath = Option(cloneArguments, "--output="); var startText = Option(cloneArguments, "--start-id=");
+        if (cloneManifestPath is null || cloneOutputPath is null) return Fail("Clone/remap requires --manifest=plan.json and --output=merged.dbc.");
+        uint? startId = startText is null ? null : uint.TryParse(startText, out var parsedStart) ? parsedStart : throw new ArgumentException("Clone/remap start ID must be an unsigned integer.");
+        var values = cloneArguments.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var unknown = cloneArguments.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.StartsWith("--manifest=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--start-id=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown clone/remap option: {unknown[0]}");
+        if (values.Count == 0) return Fail("Clone/remap where requires at least one field value.");
+        var sourceFile = WdbcFile.Load(cloneSourcePath); var tableName = Path.GetFileNameWithoutExtension(cloneBasePath);
+        if (!tableName.Equals(Path.GetFileNameWithoutExtension(cloneSourcePath), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Base and source DBC table names differ.");
+        var resolution = DbcSchemaCatalog.Load(cloneSchemaPath).ResolveColumns(tableName, sourceFile.FieldCount);
+        if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sourceFile.FieldCount, resolution));
+        var column = resolution.Columns.FirstOrDefault(value => value.Name.Equals(cloneColumnName, StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidDataException($"{tableName} has no named column '{cloneColumnName}'.");
+        var sourceIds = DbcRecordIdentity.IndexRows(sourceFile, resolution.Columns, resolution.KeyStrategy).Where(pair => values.Contains(Convert.ToString(sourceFile.GetDisplayValue(pair.Value, column), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty)).Select(pair => pair.Key).ToArray();
+        var manifest = DbcCloneRemapService.CreateManifest(cloneBasePath, cloneSourcePath, resolution.Columns, resolution.KeyStrategy, sourceIds, startId);
+        DbcCloneRemapService.Save(cloneManifestPath, manifest); DbcCloneRemapService.Apply(cloneBasePath, cloneSourcePath, cloneOutputPath, resolution.Columns, resolution.KeyStrategy, manifest);
+        Console.Error.WriteLine($"Cloned {manifest.Entries.Count:N0} {tableName} record(s) into new IDs {manifest.Entries.Min(entry => entry.TargetId)}–{manifest.Entries.Max(entry => entry.TargetId)} without modifying existing IDs. Mapping: {Path.GetFullPath(cloneManifestPath)}");
+        return 0;
+    }
+    if (args is ["clone-dependency", var parentSourcePath, var parentMergedPath, var parentSchemaPath, var parentMapPath, var foreignColumnName, var childBasePath, var childSourcePath, var childSchemaPath, .. var dependencyOptions])
+    {
+        var childMapPath = Option(dependencyOptions, "--child-map="); var childOutputPath = Option(dependencyOptions, "--child-output="); var parentOutputPath = Option(dependencyOptions, "--parent-output=");
+        if (childMapPath is null || childOutputPath is null || parentOutputPath is null) return Fail("Clone dependency requires --child-map=, --child-output=, and --parent-output= paths.");
+        var unknown = dependencyOptions.Where(value => !value.StartsWith("--child-map=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--child-output=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--parent-output=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown clone-dependency option: {unknown[0]}");
+        var parentMap = DbcCloneRemapService.Load(parentMapPath); var parentSource = WdbcFile.Load(parentSourcePath); var parentTable = Path.GetFileNameWithoutExtension(parentSourcePath);
+        var parentResolution = DbcSchemaCatalog.Load(parentSchemaPath).ResolveColumns(parentTable, parentSource.FieldCount);
+        if (parentResolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(parentTable, parentSource.FieldCount, parentResolution));
+        var childBase = WdbcFile.Load(childBasePath); var childTable = Path.GetFileNameWithoutExtension(childBasePath);
+        var childResolution = DbcSchemaCatalog.Load(childSchemaPath).ResolveColumns(childTable, childBase.FieldCount);
+        if (childResolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(childTable, childBase.FieldCount, childResolution));
+        var referencedIds = DbcCloneRemapService.FindReferencedIds(parentSourcePath, parentResolution.Columns, parentResolution.KeyStrategy, parentMap.Entries.Select(entry => entry.SourceId), foreignColumnName);
+        var childSource = WdbcFile.Load(childSourcePath); var childBaseRows = DbcRecordIdentity.IndexRows(childBase, childResolution.Columns, childResolution.KeyStrategy); var childSourceRows = DbcRecordIdentity.IndexRows(childSource, childResolution.Columns, childResolution.KeyStrategy);
+        var changedReferencedIds = referencedIds.Where(id => childSourceRows.TryGetValue(id, out var sourceRow) && (!childBaseRows.TryGetValue(id, out var baseRow) || !DbcRowsEqual(childBase, baseRow, childSource, sourceRow, childResolution.Columns))).ToArray();
+        if (changedReferencedIds.Length == 0) throw new InvalidOperationException($"No referenced {childTable} records differ from the baseline; the cloned parent can keep its existing references.");
+        var childMap = DbcCloneRemapService.CreateManifest(childBasePath, childSourcePath, childResolution.Columns, childResolution.KeyStrategy, changedReferencedIds);
+        DbcCloneRemapService.Save(childMapPath, childMap); DbcCloneRemapService.Apply(childBasePath, childSourcePath, childOutputPath, childResolution.Columns, childResolution.KeyStrategy, childMap);
+        var changed = DbcCloneRemapService.ApplyReferenceMap(parentMergedPath, parentOutputPath, parentResolution.Columns, parentResolution.KeyStrategy, parentMap.Entries.Select(entry => entry.TargetId), foreignColumnName, childMap);
+        Console.Error.WriteLine($"Cloned {childMap.Entries.Count:N0} referenced {childTable} record(s) and rewrote {changed:N0} cloned {parentTable}.{foreignColumnName} reference(s). Baseline records were not modified.");
         return 0;
     }
     if (args.Length >= 3 && args[0] == "validate")
@@ -327,8 +425,8 @@ static int Mpq(string[] args)
     }
 }
 
-static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
-static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>", code);
+static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--require=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
+static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc rows <file.dbc> <schema.xml> <id>...\n  wowcrucible dbc find <file.dbc> <schema.xml> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc promote additions <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc clone-remap where <base.dbc> <source.dbc> <schema.xml> <column> <value>... --manifest=map.json --output=merged.dbc [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source.dbc> <parent-merged.dbc> <parent-schema.xml> <parent-map.json> <foreign-column> <child-base.dbc> <child-source.dbc> <child-schema.xml> --child-map=map.json --child-output=child.dbc --parent-output=parent.dbc", code);
 static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>", code);
 static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLine(message); else Console.Error.WriteLine(message); return code; }
 
@@ -361,6 +459,19 @@ static int PrintManifestValidation(PatchManifestValidationResult validation)
 static string SchemaRequirementMessage(string tableName, int fields, DbcSchemaResolution resolution) => resolution.MatchKind == DbcSchemaMatchKind.MissingTableFallback
     ? $"A matching named schema is required; '{tableName}' is absent from the selected schema."
     : $"A matching named schema is required; '{tableName}' defines {resolution.DefinedFieldCount} fields but the DBC contains {fields}.";
+
+static bool DbcRowsEqual(WdbcFile left, int leftRow, WdbcFile right, int rightRow, IReadOnlyList<DbcColumn> columns)
+{
+    foreach (var column in columns)
+    {
+        if (column.Type == DbcValueType.StringOffset)
+        {
+            if (!left.GetString(left.GetRaw(leftRow, column)).Equals(right.GetString(right.GetRaw(rightRow, column)), StringComparison.Ordinal)) return false;
+        }
+        else if (left.GetRaw(leftRow, column) != right.GetRaw(rightRow, column)) return false;
+    }
+    return true;
+}
 
 sealed class ConsoleProgress : IProgress<(int Done, int Total, string Path)>
 {

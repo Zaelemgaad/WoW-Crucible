@@ -8,6 +8,15 @@ public sealed record DbcPromotionManifest(int FormatVersion, string TableName, s
 
 public static class DbcPromotionService
 {
+    public static DbcPromotionManifest CreateAdditionsManifest(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns, DbcRecordKeyStrategy keyStrategy, CancellationToken cancellationToken = default)
+    {
+        if (keyStrategy.Kind == DbcRecordKeyKind.NoStableKey)
+            throw new InvalidOperationException("Additive promotion requires a physical ID or append-only virtual row key.");
+        var additions = GetDifferences(basePath, overridePath, columns, keyStrategy, cancellationToken)
+            .Where(difference => difference.ColumnIndex < 0).Select(difference => difference.Id).Distinct().Order().Select(id => new DbcPromotionOperation(id, ["*"])).ToArray();
+        return new(1, Path.GetFileNameWithoutExtension(basePath), keyStrategy.DisplayName(columns), additions);
+    }
+
     public static IReadOnlyList<DbcCellDifference> GetDifferences(string basePath, string overridePath, IReadOnlyList<DbcColumn> columns, DbcRecordKeyStrategy keyStrategy, CancellationToken cancellationToken = default)
     {
         var baseFile = WdbcFile.Load(basePath); var overrideFile = WdbcFile.Load(overridePath);
@@ -34,7 +43,15 @@ public static class DbcPromotionService
     public static void SaveManifest(string path, string tableName, string keyColumn, IEnumerable<DbcPromotionOperation> operations)
     {
         var manifest = new DbcPromotionManifest(1, tableName, keyColumn, operations.ToArray());
-        File.WriteAllText(path, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
+        SaveManifest(path, manifest);
+    }
+
+    public static void SaveManifest(string path, DbcPromotionManifest manifest)
+    {
+        path = Path.GetFullPath(path); Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = path + ".tmp";
+        File.WriteAllText(temporary, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(temporary, path, true);
     }
 
     public static DbcPromotionManifest LoadManifest(string path)

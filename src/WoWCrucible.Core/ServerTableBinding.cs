@@ -82,7 +82,9 @@ public static class ServerTableBindingCatalog
 
     public static ServerTableBinding ResolveFile(ServerCoreFamily family, string dbcFileName, string? sourceRoot = null)
         => Resolve(family, sourceRoot).FirstOrDefault(binding => binding.DbcFileName.Equals(Path.GetFileName(dbcFileName), StringComparison.OrdinalIgnoreCase))
-           ?? new(family, sourceRoot is null ? $"{family} profile (mapping unknown)" : "Current core source", Path.GetFileName(dbcFileName), Path.GetFileNameWithoutExtension(dbcFileName), ServerTableConsumption.Unknown, null, DbcRecordKeyStrategy.None, RowDimensionKind.None, DeploymentDestination.ClientPatch, RestartRequirement.ClientRestart, sourceRoot is not null, sourceRoot is null ? "No matching built-in binding" : "Selected source checkout");
+           ?? (sourceRoot is not null
+               ? new(family, "Current core source (absent from DBCStores)", Path.GetFileName(dbcFileName), Path.GetFileNameWithoutExtension(dbcFileName), ServerTableConsumption.ClientOnly, null, DbcRecordKeyStrategy.None, RowDimensionKind.None, DeploymentDestination.ClientPatch, RestartRequirement.ClientRestart, true, "Selected source checkout")
+               : new(family, $"{family} profile (mapping unknown)", Path.GetFileName(dbcFileName), Path.GetFileNameWithoutExtension(dbcFileName), ServerTableConsumption.Unknown, null, DbcRecordKeyStrategy.None, RowDimensionKind.None, DeploymentDestination.ClientPatch, RestartRequirement.ClientRestart, false, "No matching built-in binding"));
 
     public static IReadOnlyList<InspectedServerTableBinding> AttachCapabilities(IEnumerable<ServerTableBinding> bindings, DatabaseCapabilities capabilities)
         => bindings.Select(binding => new InspectedServerTableBinding(binding, binding.SqlTableName is null ? null : capabilities.FindTable(binding.SqlTableName))).ToArray();

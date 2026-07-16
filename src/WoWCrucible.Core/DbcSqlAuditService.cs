@@ -4,11 +4,11 @@ using MySqlConnector;
 
 namespace WoWCrucible.Core;
 
-public enum DbcSqlRowStatus { Same, SqlOverridesDbc, MissingSqlRow, MissingDbcRow }
+public enum DbcSqlRowStatus { Same, SqlOverridesDbc, DbcOnly, MissingSqlRow, MissingDbcRow }
 public sealed record DbcSqlAuditRow(uint Key, string Dimensions, DbcSqlRowStatus Status, IReadOnlyDictionary<string, object?> DbcValues, IReadOnlyDictionary<string, object?> SqlValues);
-public sealed record DbcSqlAuditResult(ServerTableBinding Binding, string DbcPath, string KeyColumnName, IReadOnlyList<DbcSqlAuditRow> Rows)
+public sealed record DbcSqlAuditResult(ServerTableBinding Binding, string DbcPath, string KeyColumnName, IReadOnlyList<DbcSqlAuditRow> Rows, IReadOnlyDictionary<string, string>? SqlColumnNames = null)
 {
-    public int MismatchCount => Rows.Count(row => row.Status != DbcSqlRowStatus.Same);
+    public int MismatchCount => Rows.Count(row => row.Status is DbcSqlRowStatus.SqlOverridesDbc or DbcSqlRowStatus.MissingDbcRow);
 }
 
 public sealed class DbcSqlAuditService
@@ -26,7 +26,7 @@ public sealed class DbcSqlAuditService
         if (file.FieldCount != schema.Columns.Count) throw new InvalidDataException("The selected schema does not match the DBC layout.");
         var sqlKeyName = schema.KeyStrategy.Kind == DbcRecordKeyKind.VirtualRowIndex ? "ID" : DbcRecordIdentity.PhysicalColumn(schema.Columns, schema.KeyStrategy)?.Name ?? throw new InvalidDataException("The physical key column is invalid.");
         var sqlKey = table.Find(sqlKeyName) ?? throw new InvalidDataException($"SQL overlay {table.Name} has no key column '{sqlKeyName}'.");
-        var mappedColumns = schema.Columns.Select(column => (Column: column, Sql: table.Find(column.Name))).Where(pair => !pair.Column.Name.Equals(sqlKeyName, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var mappedColumns = schema.Columns.Select(column => (Column: column, Sql: FindSqlColumn(table, column.Name))).Where(pair => !pair.Column.Name.Equals(sqlKeyName, StringComparison.OrdinalIgnoreCase)).ToArray();
         var missing = mappedColumns.Where(pair => pair.Sql is null).Select(pair => pair.Column.Name).ToArray();
         if (missing.Length > 0) throw new InvalidDataException($"SQL overlay {table.Name} is missing DBC field(s): {string.Join(", ", missing)}.");
 
@@ -45,7 +45,8 @@ public sealed class DbcSqlAuditService
             if (!sqlRows.TryAdd(key, values)) throw new InvalidDataException($"SQL overlay {table.Name} contains duplicate key {key}.");
         }
 
-        return Compare(binding, dbcPath, file, schema, sqlRows.ToDictionary(pair => pair.Key, pair => (IReadOnlyDictionary<string, object?>)pair.Value), cancellationToken);
+        var result = Compare(binding, dbcPath, file, schema, sqlRows.ToDictionary(pair => pair.Key, pair => (IReadOnlyDictionary<string, object?>)pair.Value), cancellationToken);
+        return result with { SqlColumnNames = mappedColumns.ToDictionary(pair => pair.Column.Name, pair => pair.Sql!.Name, StringComparer.OrdinalIgnoreCase) };
     }
 
     public static DbcSqlAuditResult Compare(ServerTableBinding binding, string dbcPath, WdbcFile file, DbcSchemaResolution schema, IReadOnlyDictionary<uint, IReadOnlyDictionary<string, object?>> sqlRows, CancellationToken cancellationToken = default)
@@ -62,7 +63,7 @@ public sealed class DbcSqlAuditService
             var dbcValues = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
             if (hasDbc)
                 foreach (var column in comparedColumns) dbcValues[column.Name] = file.GetDisplayValue(dbcRow, column);
-            var status = !hasDbc ? DbcSqlRowStatus.MissingDbcRow : !hasSql ? DbcSqlRowStatus.MissingSqlRow
+            var status = !hasDbc ? DbcSqlRowStatus.MissingDbcRow : !hasSql ? DbcSqlRowStatus.DbcOnly
                 : comparedColumns.All(column => sqlValues!.TryGetValue(column.Name, out var sqlValue) && Equivalent(dbcValues[column.Name], sqlValue, column.Type)) ? DbcSqlRowStatus.Same : DbcSqlRowStatus.SqlOverridesDbc;
             result.Add(new(key, binding.DescribeRow(key), status, dbcValues, sqlValues ?? new Dictionary<string, object?>()));
         }
@@ -72,13 +73,14 @@ public sealed class DbcSqlAuditService
     public static string CreateIdempotentMigration(DbcSqlAuditResult audit, IEnumerable<DbcSqlAuditRow>? selectedRows = null)
     {
         if (string.IsNullOrWhiteSpace(audit.Binding.SqlTableName)) throw new InvalidOperationException("This binding has no SQL table.");
-        var rows = (selectedRows ?? audit.Rows.Where(row => row.Status != DbcSqlRowStatus.Same)).Where(row => row.DbcValues.Count > 0).ToArray();
+        var rows = (selectedRows ?? audit.Rows.Where(row => row.Status == DbcSqlRowStatus.SqlOverridesDbc)).Where(row => row.DbcValues.Count > 0).ToArray();
         var columns = rows.SelectMany(row => row.DbcValues.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (rows.Length == 0 || columns.Length == 0) return "-- No DBC-to-SQL differences require migration.\n";
         var builder = new StringBuilder();
         builder.AppendLine($"-- WoW Crucible: synchronize {audit.Binding.DbcFileName} with {audit.Binding.SqlTableName}");
         builder.AppendLine($"-- Profile: {audit.Binding.Profile}; generated {DateTimeOffset.UtcNow:O}");
-        builder.Append($"INSERT INTO {Quote(audit.Binding.SqlTableName)} ({Quote(audit.KeyColumnName)},{string.Join(",", columns.Select(Quote))}) VALUES\n");
+        string SqlName(string dbcName) => audit.SqlColumnNames?.GetValueOrDefault(dbcName) ?? dbcName;
+        builder.Append($"INSERT INTO {Quote(audit.Binding.SqlTableName)} ({Quote(audit.KeyColumnName)},{string.Join(",", columns.Select(column => Quote(SqlName(column))))}) VALUES\n");
         for (var index = 0; index < rows.Length; index++)
         {
             var row = rows[index];
@@ -86,7 +88,7 @@ public sealed class DbcSqlAuditService
             builder.AppendLine(index == rows.Length - 1 ? string.Empty : ",");
         }
         builder.Append("ON DUPLICATE KEY UPDATE ");
-        builder.AppendLine(string.Join(",", columns.Select(column => $"{Quote(column)}=VALUES({Quote(column)})")) + ";");
+        builder.AppendLine(string.Join(",", columns.Select(column => $"{Quote(SqlName(column))}=VALUES({Quote(SqlName(column))})")) + ";");
         return builder.ToString();
     }
 
@@ -99,6 +101,15 @@ public sealed class DbcSqlAuditService
             DbcValueType.StringOffset => Convert.ToString(dbc, CultureInfo.InvariantCulture) == Convert.ToString(sql, CultureInfo.InvariantCulture),
             _ => Convert.ToDecimal(dbc, CultureInfo.InvariantCulture) == Convert.ToDecimal(sql, CultureInfo.InvariantCulture)
         };
+    }
+
+    private static DatabaseColumnCapability? FindSqlColumn(DatabaseTableCapability table, string dbcName)
+    {
+        var exact = table.Find(dbcName); if (exact is not null) return exact;
+        var opening = dbcName.LastIndexOf('[');
+        if (opening < 1 || !dbcName.EndsWith(']') || !int.TryParse(dbcName[(opening + 1)..^1], out var index)) return null;
+        var prefix = dbcName[..opening];
+        return table.Find($"{prefix}_{index + 1}") ?? table.Find($"{prefix}{index + 1}");
     }
 
     private static string Quote(string identifier) => $"`{identifier.Replace("`", "``")}`";
