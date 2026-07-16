@@ -261,8 +261,11 @@ if (ClientArchiveIndexService.CreatePathCorpus([clientIndexDirectory], corpusPat
 var indexedExtractRoot = Path.Combine(clientFixture, "indexed-extract");
 var indexedExtract = ClientArchiveIndexService.ExtractIndexed(clientIndexDirectory, "Data\\patch-test.mpq", indexedExtractRoot, "SpellCastTimes.dbc");
 var resumedExtract = ClientArchiveIndexService.ExtractIndexed(clientIndexDirectory, "Data\\patch-test.mpq", indexedExtractRoot, "SpellCastTimes.dbc");
+var globExtract = ClientArchiveIndexService.ExtractIndexed(clientIndexDirectory, "Data\\patch-test.mpq", Path.Combine(indexedExtractRoot, "glob"), "DBFilesClient\\*.dbc");
 if (indexedExtract.ExtractedFiles != 1 || resumedExtract.SkippedExistingFiles != 1 || !File.Exists(Path.Combine(indexedExtractRoot, "DBFilesClient", "SpellCastTimes.dbc")))
     throw new InvalidOperationException("Resumable indexed extraction failed.");
+if (globExtract.SelectedFiles != 2 || globExtract.ExtractedFiles != 2)
+    throw new InvalidOperationException("Indexed extraction path globs were treated as literal text.");
 Directory.Delete(clientFixture, true);
 var extractRoot = Path.Combine(Path.GetTempPath(), $"wow-crucible-extract-{Guid.NewGuid():N}");
 patchService.Extract(mpqOutput, extractRoot, listed.Where(entry => entry.ArchivePath.Equals("DBFilesClient\\SpellCastTimes.dbc", StringComparison.OrdinalIgnoreCase)));

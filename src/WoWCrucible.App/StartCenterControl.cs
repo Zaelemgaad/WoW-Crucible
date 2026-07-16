@@ -9,7 +9,7 @@ internal sealed class StartCenterControl : UserControl
 
     private readonly Func<string?> _databaseStatus;
 
-    public StartCenterControl(AppSettings settings, Action editSpells, Action createItem, Action detectServer, Action connectDatabase, Func<string?> databaseStatus, Action openDbcs, Action buildPatch, Action browseMpq, Action compareLayers, Action configurePaths)
+    public StartCenterControl(AppSettings settings, Action editSpells, Action createItem, Action detectServer, Action connectDatabase, Func<string?> databaseStatus, Action openDbcs, Action buildPatch, Action browseMpq, Action compareLayers, Action inspectClient, Action configurePaths)
     {
         _settings = settings; _databaseStatus = databaseStatus; Dock = DockStyle.Fill; AutoScroll = true; BackColor = Color.FromArgb(244, 246, 249);
         var content = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Dock = DockStyle.Top, Padding = new(36, 28, 36, 36), BackColor = BackColor };
@@ -27,6 +27,11 @@ internal sealed class StartCenterControl : UserControl
         advanced.Controls.Add(Card("Inspect an existing MPQ", "Search a patch without loading its contents, inspect internal paths, and extract selected files or the whole archive.", "Browse or Extract", browseMpq), 1, 0);
         advanced.Controls.Add(Card("Compare DBC layers", "Compare base and override directories, inspect semantic changes, then promote selected fields or rows by ID.", "Open Layer Comparison", compareLayers), 2, 0);
         content.Controls.Add(advanced);
+        var inspection = CardRow();
+        inspection.Controls.Add(Card("Inspect a complete client", "Index every MPQ once, separate active content from backups and other locales, identify custom layers, and extract without losing archive provenance.", "Open Client Inspector", inspectClient), 0, 0);
+        inspection.Controls.Add(Card("Understand compatibility", "See whether a layer contains known WotLK DBCs, UI code, protected login UI, media assets, unresolved paths, or loader-specific subdirectories.", "Inspect Client Layers", inspectClient), 1, 0);
+        inspection.Controls.Add(Card("Prepare a stock fusion", "Start from custom content only. Keep uncertain override layers separate until their load order and executable/server dependencies are proven.", "Review Client Content", inspectClient), 2, 0);
+        content.Controls.Add(inspection);
         var workspace = CardRow();
         workspace.Controls.Add(Card("Detect your server automatically", "Choose the installed server folder. Crucible finds its live config, DBC directory, and world database—even for a Windows/WSL split layout.", "Detect Server Workspace", () => { detectServer(); RefreshReadiness(); }), 0, 0);
         workspace.Controls.Add(Card("Connect manually", "Use explicit host, port, user, database, and session-only password when a server layout cannot be detected or the database is remote.", "Manual Database Connection", () => { connectDatabase(); RefreshReadiness(); }), 1, 0);

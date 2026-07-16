@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Enumeration;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -182,7 +183,7 @@ public sealed class ClientArchiveIndexService
         var content = TryLoad<ArchiveContentIndex>(Path.Combine(indexDirectory, summary.ContentIndexFile))
             ?? throw new InvalidDataException($"The content index for '{summary.RelativePath}' is missing or invalid.");
         if (resolvedOnly && anonymousOnly) throw new ArgumentException("Resolved-only and anonymous-only extraction are mutually exclusive.");
-        var entries = content.Files.Where(file => !file.IsMetadata && (!resolvedOnly || !IsAnonymous(file.ArchivePath)) && (!anonymousOnly || IsAnonymous(file.ArchivePath)) && (string.IsNullOrEmpty(filter) || file.ArchivePath.Contains(filter, StringComparison.OrdinalIgnoreCase))).ToArray();
+        var entries = content.Files.Where(file => !file.IsMetadata && (!resolvedOnly || !IsAnonymous(file.ArchivePath)) && (!anonymousOnly || IsAnonymous(file.ArchivePath)) && MatchesFilter(file.ArchivePath, filter)).ToArray();
         var archivePath = Path.GetFullPath(Path.Combine(index.ClientRoot, summary.RelativePath));
         var relative = Path.GetRelativePath(index.ClientRoot, archivePath);
         if (relative.Equals("..", StringComparison.Ordinal) || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)) throw new InvalidDataException("The indexed archive path escapes the client root.");
@@ -197,6 +198,17 @@ public sealed class ClientArchiveIndexService
         var path = Path.GetFullPath(Path.Combine(destinationRoot, entry.ArchivePath.Replace('\\', Path.DirectorySeparatorChar)));
         var relative = Path.GetRelativePath(destinationRoot, path);
         return !relative.Equals("..", StringComparison.Ordinal) && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) && File.Exists(path) && new FileInfo(path).Length == entry.Size;
+    }
+
+    private static bool MatchesFilter(string archivePath, string? filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter)) return true;
+        // FileSystemName treats backslashes as escape characters, so normalize archive paths to '/'.
+        var normalizedPath = archivePath.Replace('\\', '/');
+        var normalizedFilter = filter.Replace('\\', '/');
+        return normalizedFilter.IndexOfAny(['*', '?']) >= 0
+            ? FileSystemName.MatchesSimpleExpression(normalizedFilter, normalizedPath, ignoreCase: true)
+            : normalizedPath.Contains(normalizedFilter, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? DetectActiveLocale(string root)
