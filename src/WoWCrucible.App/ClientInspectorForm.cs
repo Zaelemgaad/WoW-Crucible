@@ -13,6 +13,7 @@ internal sealed class ClientInspectorForm : Form
     private readonly Label _progressText = new() { AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly ProgressBar _progress = new() { Dock = DockStyle.Fill };
     private readonly DataGridView _archives = new FastDataGridView { Dock = DockStyle.Fill, ReadOnly = true, MultiSelect = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None };
+    private readonly DataGridView _looseFiles = new FastDataGridView { Dock = DockStyle.Fill, ReadOnly = true, MultiSelect = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None };
     private readonly Button _indexButton = new() { Text = "Index or Resume", AutoSize = true };
     private readonly Button _cancelButton = new() { Text = "Cancel", AutoSize = true, Enabled = false };
     private ClientArchiveIndex? _loaded;
@@ -45,8 +46,17 @@ internal sealed class ClientInspectorForm : Form
         _archives.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Status", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 150 });
         _archives.SelectionChanged += async (_, _) => await ExplainSelection();
 
+        _looseFiles.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Scope", Width = 125 });
+        _looseFiles.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Loose file", Width = 560 });
+        _looseFiles.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Size", Width = 100 });
+        _looseFiles.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Identity", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 220 });
+        _looseFiles.SelectionChanged += (_, _) => ExplainLooseSelection();
+
         var info = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 500, Panel1MinSize = 250, Panel2MinSize = 120 };
-        info.Panel1.Controls.Add(_archives);
+        var inventoryTabs = new TabControl { Dock = DockStyle.Fill };
+        var archivesPage = new TabPage("MPQ archives"); archivesPage.Controls.Add(_archives);
+        var loosePage = new TabPage("Loose files"); loosePage.Controls.Add(_looseFiles);
+        inventoryTabs.TabPages.Add(archivesPage); inventoryTabs.TabPages.Add(loosePage); info.Panel1.Controls.Add(inventoryTabs);
         var lower = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, AutoScroll = true };
         lower.RowStyles.Add(new(SizeType.AutoSize)); lower.RowStyles.Add(new(SizeType.AutoSize));
         lower.Controls.Add(_summary, 0, 0); lower.Controls.Add(_guidance, 0, 1); info.Panel2.Controls.Add(lower);
@@ -103,7 +113,7 @@ internal sealed class ClientInspectorForm : Form
     private void LoadIndex(string directory)
     {
         _loaded = ClientArchiveIndexService.Load(directory); _index.Text = Path.GetFullPath(directory); _client.Text = _loaded.ClientRoot;
-        _archives.Rows.Clear();
+        _archives.Rows.Clear(); _looseFiles.Rows.Clear();
         foreach (var archive in _loaded.Archives.OrderBy(a => a.Scope).ThenBy(a => a.RelativePath, StringComparer.OrdinalIgnoreCase))
         {
             var row = _archives.Rows.Add(archive.Scope, archive.RelativePath, archive.PayloadFiles.ToString("N0"), archive.AnonymousFiles.ToString("N0"), FormatSize(archive.Length), FormatSize(archive.UncompressedBytes), archive.Error ?? (archive.Sha256 is null ? "Indexed · hash skipped" : "Indexed · SHA-256 ready"));
@@ -112,9 +122,17 @@ internal sealed class ClientInspectorForm : Form
             else if (archive.Scope == ClientArchiveScope.CustomSubdirectory) _archives.Rows[row].DefaultCellStyle.BackColor = Color.FromArgb(255, 247, 237);
             else if (archive.AnonymousFiles > 0) _archives.Rows[row].DefaultCellStyle.BackColor = Color.FromArgb(254, 242, 242);
         }
+        var loose = _loaded.LooseFiles ?? [];
+        foreach (var file in loose.OrderBy(f => f.Scope).ThenBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase))
+        {
+            var row = _looseFiles.Rows.Add(file.Scope, file.RelativePath, FormatSize(file.Length), file.Sha256 ?? "Metadata only");
+            _looseFiles.Rows[row].Tag = file;
+            if (file.Scope == ClientLooseFileScope.Volatile) _looseFiles.Rows[row].DefaultCellStyle.ForeColor = Color.Gray;
+            else if (file.Scope == ClientLooseFileScope.Runtime) _looseFiles.Rows[row].DefaultCellStyle.BackColor = Color.FromArgb(239, 246, 255);
+        }
         var active = _loaded.Archives.Count(a => a.Scope is not ClientArchiveScope.InactiveLocale and not ClientArchiveScope.Backup);
         var custom = _loaded.Archives.Count(a => a.Scope == ClientArchiveScope.CustomSubdirectory);
-        _summary.Text = $"{_loaded.Name} · {(_loaded.Complete ? "complete" : "resumable partial")} · {_loaded.Archives.Count:N0} MPQs ({active:N0} active, {custom:N0} loader-specific, {_loaded.Archives.Count - active:N0} excluded backup/inactive locale) · {_loaded.Archives.Sum(a => a.PayloadFiles):N0} indexed payloads · locale {_loaded.ActiveLocale ?? "not proven"} · executable {_loaded.Executable?.Path ?? "not detected"}.";
+        _summary.Text = $"{_loaded.Name} · {(_loaded.Complete ? "complete" : "resumable partial")} · {_loaded.Archives.Count:N0} MPQs ({active:N0} active, {custom:N0} loader-specific, {_loaded.Archives.Count - active:N0} excluded backup/inactive locale) · {_loaded.Archives.Sum(a => a.PayloadFiles):N0} indexed payloads · {loose.Count:N0} loose files ({loose.Count(f => f.Scope == ClientLooseFileScope.Runtime):N0} runtime, {loose.Count(f => f.Scope == ClientLooseFileScope.AddOn):N0} AddOn) · locale {_loaded.ActiveLocale ?? "not proven"} · executable {_loaded.Executable?.Path ?? "not detected"}.";
         _settings.ClientIndexPath = _index.Text; _settings.Save();
     }
 
@@ -145,6 +163,19 @@ internal sealed class ClientInspectorForm : Form
     {
         if (_loaded is null || _archives.SelectedRows.Count == 0 || _archives.SelectedRows[0].Tag is not ClientArchiveSummary archive) return;
         using var browser = new MpqBrowserForm(_settings, Path.Combine(_loaded.ClientRoot, archive.RelativePath)); browser.ShowDialog(this);
+    }
+
+    private void ExplainLooseSelection()
+    {
+        if (_looseFiles.SelectedRows.Count == 0 || _looseFiles.SelectedRows[0].Tag is not ClientLooseFileSummary file) return;
+        _guidance.Text = file.Scope switch
+        {
+            ClientLooseFileScope.Runtime => $"Runtime dependency: {file.RelativePath}. Keep executable/DLL identities with the client profile; custom rendering, launcher, or extension behavior may depend on this exact file. {(file.Sha256 is null ? "No content hash was recorded." : $"SHA-256 {file.Sha256}.")}",
+            ClientLooseFileScope.AddOn => $"Loose AddOn file: {file.RelativePath}. This is active outside the MPQ stack and can change UI or exchange data with server-side systems. Compare it separately from archived Interface files.",
+            ClientLooseFileScope.Configuration => $"Configuration file: {file.RelativePath}. It helps explain the active locale/client behavior but is installation- or user-specific and should not be copied into a public patch by default.",
+            ClientLooseFileScope.Volatile => $"Volatile/generated file: {file.RelativePath}. It is inventoried for completeness but excluded from reusable-content decisions by default.",
+            _ => $"Loose client file: {file.RelativePath}. It is outside the MPQ stack; inspect its role before declaring the client reproducible or portable."
+        };
     }
 
     private async Task ExtractSelected()

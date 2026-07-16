@@ -8,15 +8,17 @@ namespace WoWCrucible.Core;
 
 public sealed record ClientExecutableIndex(string Path, long Length, long LastWriteUtcTicks, string? FileVersion, string? ProductVersion, string Sha256);
 public enum ClientArchiveScope { RootData, ActiveLocale, InactiveLocale, Cache, CustomSubdirectory, Backup }
+public enum ClientLooseFileScope { Runtime, AddOn, Configuration, Volatile, Other }
+public sealed record ClientLooseFileSummary(string RelativePath, ClientLooseFileScope Scope, long Length, long LastWriteUtcTicks, string? Sha256);
 public sealed record ClientArchiveSummary(string RelativePath, ClientArchiveScope Scope, long Length, long LastWriteUtcTicks, string? Sha256, string ContentIndexFile, int PayloadFiles, int MetadataFiles, int AnonymousFiles, long UncompressedBytes, string? Error);
-public sealed record ClientArchiveIndex(int FormatVersion, string ClientRoot, string Name, DateTimeOffset UpdatedUtc, bool Complete, int CompletedArchives, string? ActiveLocale, ClientExecutableIndex? Executable, IReadOnlyList<ClientArchiveSummary> Archives);
+public sealed record ClientArchiveIndex(int FormatVersion, string ClientRoot, string Name, DateTimeOffset UpdatedUtc, bool Complete, int CompletedArchives, string? ActiveLocale, ClientExecutableIndex? Executable, IReadOnlyList<ClientArchiveSummary> Archives, IReadOnlyList<ClientLooseFileSummary>? LooseFiles);
 public sealed record ArchiveContentIndex(int FormatVersion, string RelativePath, long ArchiveLength, long ArchiveLastWriteUtcTicks, IReadOnlyList<MpqFileEntry> Files);
 public sealed record ClientIndexProgress(int CompletedArchives, int TotalArchives, string ArchivePath, string Stage, bool Cached);
 public sealed record IndexedExtractionResult(int SelectedFiles, int ExtractedFiles, int SkippedExistingFiles);
 
 public sealed class ClientArchiveIndexService
 {
-    private const int IndexFormatVersion = 2;
+    private const int IndexFormatVersion = 3;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     public ClientArchiveIndex Build(string clientRoot, string outputDirectory, bool hashArchives = true, IProgress<ClientIndexProgress>? progress = null, CancellationToken cancellationToken = default, string? externalListFile = null, string? executablePath = null)
@@ -78,7 +80,8 @@ public sealed class ClientArchiveIndexService
         }
 
         RecoverAnonymousNames(clientRoot, outputDirectory, archives, summaries, progress, cancellationToken, externalListFile);
-        var result = new ClientArchiveIndex(IndexFormatVersion, clientRoot, Path.GetFileName(Path.TrimEndingDirectorySeparator(clientRoot)), DateTimeOffset.UtcNow, true, summaries.Count, activeLocale, executable, summaries);
+        var looseFiles = IndexLooseFiles(clientRoot, outputDirectory, cancellationToken);
+        var result = new ClientArchiveIndex(IndexFormatVersion, clientRoot, Path.GetFileName(Path.TrimEndingDirectorySeparator(clientRoot)), DateTimeOffset.UtcNow, true, summaries.Count, activeLocale, executable, summaries, looseFiles);
         WriteAtomic(summaryPath, result);
         return result;
     }
@@ -98,6 +101,42 @@ public sealed class ClientArchiveIndexService
         if (!File.Exists(path)) throw new FileNotFoundException("The selected client executable was not found.", path);
         var info = new FileInfo(path); var version = FileVersionInfo.GetVersionInfo(path);
         return new(Path.GetRelativePath(root, path), info.Length, info.LastWriteTimeUtc.Ticks, version.FileVersion, version.ProductVersion, HashFile(path, CancellationToken.None));
+    }
+
+    private static IReadOnlyList<ClientLooseFileSummary> IndexLooseFiles(string root, string outputDirectory, CancellationToken cancellationToken)
+    {
+        var data = Path.GetFullPath(Path.Combine(root, "Data"));
+        var output = Path.GetFullPath(outputDirectory);
+        var files = new List<ClientLooseFileSummary>();
+        var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        foreach (var path in Directory.EnumerateFiles(root, "*", options))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var full = Path.GetFullPath(path);
+            if (IsWithin(full, data) || IsWithin(full, output)) continue;
+            var relative = Path.GetRelativePath(root, full).Replace('/', Path.DirectorySeparatorChar);
+            var info = new FileInfo(full); var scope = ClassifyLooseFile(relative);
+            var hash = scope == ClientLooseFileScope.Runtime && info.Length <= 256L * 1024 * 1024 ? HashFile(full, cancellationToken) : null;
+            files.Add(new(relative, scope, info.Length, info.LastWriteTimeUtc.Ticks, hash));
+        }
+        return files.OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static ClientLooseFileScope ClassifyLooseFile(string relativePath)
+    {
+        var parts = relativePath.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        var first = parts.FirstOrDefault() ?? string.Empty;
+        if (first.Equals("Interface", StringComparison.OrdinalIgnoreCase) && parts.Length > 1 && parts[1].Equals("AddOns", StringComparison.OrdinalIgnoreCase)) return ClientLooseFileScope.AddOn;
+        if (first.Equals("WTF", StringComparison.OrdinalIgnoreCase) || Path.GetExtension(relativePath).Equals(".wtf", StringComparison.OrdinalIgnoreCase)) return ClientLooseFileScope.Configuration;
+        if (first.Equals("Cache", StringComparison.OrdinalIgnoreCase) || first.Equals("Errors", StringComparison.OrdinalIgnoreCase) || first.Equals("Logs", StringComparison.OrdinalIgnoreCase) || first.Equals("Screenshots", StringComparison.OrdinalIgnoreCase) || new[] { ".log", ".dmp" }.Contains(Path.GetExtension(relativePath), StringComparer.OrdinalIgnoreCase)) return ClientLooseFileScope.Volatile;
+        if (parts.Length == 1 && new[] { ".exe", ".dll", ".asi" }.Contains(Path.GetExtension(relativePath), StringComparer.OrdinalIgnoreCase)) return ClientLooseFileScope.Runtime;
+        return ClientLooseFileScope.Other;
+    }
+
+    private static bool IsWithin(string path, string directory)
+    {
+        var relative = Path.GetRelativePath(directory, path);
+        return relative.Equals(".", StringComparison.Ordinal) || !relative.Equals("..", StringComparison.Ordinal) && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
     }
 
     private static ClientArchiveSummary ToSummary(string relative, ClientArchiveScope scope, FileInfo info, string? hash, string contentFile, IReadOnlyList<MpqFileEntry> files, string? error)
@@ -246,7 +285,7 @@ public sealed class ClientArchiveIndexService
     private static bool IsLocaleName(string? value) => value is { Length: 4 } && char.IsLower(value[0]) && char.IsLower(value[1]) && char.IsUpper(value[2]) && char.IsUpper(value[3]);
 
     private static void SaveSummary(string path, string root, string? activeLocale, ClientExecutableIndex? executable, IReadOnlyList<ClientArchiveSummary> archives, int totalArchives, bool complete)
-        => WriteAtomic(path, new ClientArchiveIndex(IndexFormatVersion, root, Path.GetFileName(Path.TrimEndingDirectorySeparator(root)), DateTimeOffset.UtcNow, complete && archives.Count == totalArchives, archives.Count, activeLocale, executable, archives));
+        => WriteAtomic(path, new ClientArchiveIndex(IndexFormatVersion, root, Path.GetFileName(Path.TrimEndingDirectorySeparator(root)), DateTimeOffset.UtcNow, complete && archives.Count == totalArchives, archives.Count, activeLocale, executable, archives, null));
 
     private static string HashFile(string path, CancellationToken cancellationToken)
     {
