@@ -4,8 +4,16 @@ using System.Runtime.InteropServices;
 namespace WoWCrucible.Core;
 
 public sealed record PatchEntry(string SourcePath, string ArchivePath);
-public sealed record MpqFileEntry(string ArchivePath, long Size, long CompressedSize, uint Flags, uint Locale);
+public sealed record MpqFileEntry(string ArchivePath, long Size, long CompressedSize, uint Flags, uint Locale)
+{
+    public bool IsMetadata => MpqPathClassifier.IsMetadata(ArchivePath);
+}
 public sealed record PatchPathAssessment(bool HasWarning, string Message);
+
+public static class MpqPathClassifier
+{
+    public static bool IsMetadata(string path) => path.Equals("(listfile)", StringComparison.OrdinalIgnoreCase) || path.Equals("(attributes)", StringComparison.OrdinalIgnoreCase) || path.Equals("(signature)", StringComparison.OrdinalIgnoreCase);
+}
 
 public static class PatchInputMapper
 {
@@ -116,15 +124,17 @@ public sealed class PatchArchiveService
         finally { Native.SFileCloseArchive(archive); }
     }
 
-    public IReadOnlyList<MpqFileEntry> ListFiles(string archivePath, string mask = "*")
+    public IReadOnlyList<MpqFileEntry> ListFiles(string archivePath, string mask = "*", string? externalListFile = null)
     {
         archivePath = Path.GetFullPath(archivePath);
+        externalListFile = string.IsNullOrWhiteSpace(externalListFile) ? null : Path.GetFullPath(externalListFile);
+        if (externalListFile is not null && !File.Exists(externalListFile)) throw new FileNotFoundException("The external MPQ listfile was not found.", externalListFile);
         if (!Native.SFileOpenArchive(archivePath, 0, 0, out var archive)) ThrowNative("open the MPQ archive");
         var result = new List<MpqFileEntry>();
         try
         {
             var data = new Native.SFileFindData();
-            var find = Native.SFileFindFirstFile(archive, mask, ref data, null);
+            var find = Native.SFileFindFirstFile(archive, mask, ref data, externalListFile);
             if (find == IntPtr.Zero) return result;
             try
             {

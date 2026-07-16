@@ -54,7 +54,7 @@ public static class PatchManifestService
             if (errors.Any(error => error.Code is "InvalidArchivePath" or "DuplicateArchivePath")) return new(errors, warnings);
             var expected = manifest.Entries.GroupBy(entry => PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
             var actual = new PatchArchiveService().ListFiles(archivePath)
-                .Where(entry => !IsMetadataPath(entry.ArchivePath)).GroupBy(entry => PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+                .Where(entry => !entry.IsMetadata).GroupBy(entry => PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
             foreach (var path in expected.Keys.Except(actual.Keys, StringComparer.OrdinalIgnoreCase)) errors.Add(new("MissingArchiveEntry", $"Archive is missing manifest path '{path}'.", path));
             foreach (var path in actual.Keys.Except(expected.Keys, StringComparer.OrdinalIgnoreCase)) errors.Add(new("UnexpectedArchiveEntry", $"Archive contains unexpected path '{path}'.", path));
             foreach (var path in expected.Keys.Intersect(actual.Keys, StringComparer.OrdinalIgnoreCase))
@@ -145,5 +145,4 @@ public static class PatchManifestService
         return Regex.IsMatch(path, pattern.ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
-    private static bool IsMetadataPath(string path) => path.Equals("(listfile)", StringComparison.OrdinalIgnoreCase) || path.Equals("(attributes)", StringComparison.OrdinalIgnoreCase) || path.Equals("(signature)", StringComparison.OrdinalIgnoreCase);
 }

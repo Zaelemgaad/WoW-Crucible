@@ -34,7 +34,7 @@ public sealed class WdbcFile
         Span<byte> header = stackalloc byte[HeaderSize];
         stream.ReadExactly(header);
         if (!header[..4].SequenceEqual("WDBC"u8))
-            throw new InvalidDataException("This file is not a 3.3.5a WDBC file.");
+            throw new InvalidDataException("This table does not use the WDBC container. DB2/WDB2 files require a matching expansion parser and schema profile.");
 
         var rows = ReadNonNegative(header[4..8], "row count");
         var fields = ReadPositive(header[8..12], "field count");

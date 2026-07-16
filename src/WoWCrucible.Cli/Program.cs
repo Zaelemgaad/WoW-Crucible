@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using WoWCrucible.Core;
 
 if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return Help();
@@ -9,17 +10,61 @@ try
         "dbc" => Dbc(args[1..]),
         "db" => Database(args[1..]).GetAwaiter().GetResult(),
         "server" => Server(args[1..]).GetAwaiter().GetResult(),
+        "client" => Client(args[1..]),
         "mpq" => Mpq(args[1..]),
         "manifest" => Manifest(args[1..]),
         _ => Fail($"Unknown command: {args[0]}")
     };
 }
-
 catch (Exception ex)
 {
     Console.Error.WriteLine($"ERROR: {ex.Message}");
     return 1;
 }
+
+static int Client(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ClientHelp();
+    if (args is ["index", var clientRoot, var outputDirectory, .. var options])
+    {
+        var unknown = options.Where(option => !option.Equals("--no-hash", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown client index option: {unknown[0]}");
+        var progress = new ClientIndexConsoleProgress();
+        var listFile = Option(options, "--listfile=");
+        var index = new ClientArchiveIndexService().Build(clientRoot, outputDirectory, !options.Contains("--no-hash", StringComparer.OrdinalIgnoreCase), progress, externalListFile: listFile);
+        Console.Error.WriteLine($"Indexed {index.Archives.Count:N0} MPQs for {index.Name}: {index.Archives.Sum(archive => archive.PayloadFiles):N0} payload paths, {index.Archives.Sum(archive => archive.AnonymousFiles):N0} unresolved name(s), {index.Archives.Count(archive => archive.Error is not null):N0} archive error(s). Index: {Path.GetFullPath(outputDirectory)}");
+        return index.Archives.Any(archive => archive.Error is not null) ? 1 : 0;
+    }
+    if (args is ["corpus", var outputFile, .. var indexDirectories] && indexDirectories.Length > 0)
+    {
+        var count = ClientArchiveIndexService.CreatePathCorpus(indexDirectories, outputFile);
+        Console.Error.WriteLine($"Wrote {count:N0} distinct known MPQ paths to {Path.GetFullPath(outputFile)}");
+        return 0;
+    }
+    if (args is ["extract", var extractIndexDirectory, var archiveRelativePath, var destination, .. var extractOptions])
+    {
+        var quiet = extractOptions.Contains("--quiet", StringComparer.OrdinalIgnoreCase);
+        var resolvedOnly = extractOptions.Contains("--resolved-only", StringComparer.OrdinalIgnoreCase);
+        var overwrite = extractOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
+        var unknown = extractOptions.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--quiet", StringComparison.OrdinalIgnoreCase) && !option.Equals("--resolved-only", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown client extract option: {unknown[0]}");
+        var filters = extractOptions.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray();
+        if (filters.Length > 1) return Fail("Client extract accepts at most one path filter.");
+        var started = Stopwatch.StartNew();
+        var result = ClientArchiveIndexService.ExtractIndexed(extractIndexDirectory, archiveRelativePath, destination, filters.FirstOrDefault(), resolvedOnly, overwrite, quiet ? null : new ConsoleProgress(100));
+        Console.Error.WriteLine($"Selected {result.SelectedFiles:N0} indexed file(s); extracted {result.ExtractedFiles:N0}, resumed past {result.SkippedExistingFiles:N0} existing file(s) in {started.Elapsed.TotalSeconds:0.00}s. Destination: {Path.GetFullPath(destination)}");
+        return 0;
+    }
+    if (args is ["show", var showIndexDirectory])
+    {
+        var index = ClientArchiveIndexService.Load(showIndexDirectory);
+        Console.WriteLine($"Client\t{index.Name}\nRoot\t{index.ClientRoot}\nComplete\t{index.Complete}\nArchives\t{index.CompletedArchives}\nExecutable\t{index.Executable?.FileVersion ?? "missing"}\nExecutableSha256\t{index.Executable?.Sha256 ?? "missing"}\nPayloadPaths\t{index.Archives.Sum(archive => archive.PayloadFiles)}\nAnonymousPaths\t{index.Archives.Sum(archive => archive.AnonymousFiles)}\nArchiveErrors\t{index.Archives.Count(archive => archive.Error is not null)}");
+        return 0;
+    }
+    return ClientHelp(2);
+}
+
+static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [filter] [--resolved-only] [--overwrite] [--quiet]\n  wowcrucible client show <index-directory>", code);
 
 static async Task<int> Server(string[] args)
 {
@@ -147,14 +192,23 @@ static int Manifest(string[] args)
 static int Dbc(string[] args)
 {
     if (args.Length > 0 && args[0] is "help" or "--help" or "-h") return DbcHelp();
-    if (args is ["compare", var basePath, var overridePath, var schemaPath])
+    if (args.Length is 4 or 5 && args[0] == "compare" && (args.Length == 4 || args[4] == "--summary"))
     {
+        var basePath = args[1]; var overridePath = args[2]; var schemaPath = args[3];
         var tableName = Path.GetFileNameWithoutExtension(basePath);
         var sample = WdbcFile.Load(basePath);
         var resolution = DbcSchemaCatalog.Load(schemaPath).ResolveColumns(tableName, sample.FieldCount);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sample.FieldCount, resolution));
         var differences = DbcPromotionService.GetDifferences(basePath, overridePath, resolution.Columns, resolution.KeyStrategy);
-        foreach (var difference in differences) Console.WriteLine($"{difference.Id}\t{difference.ColumnName}\t{difference.BaseValue}\t{difference.OverrideValue}");
+        if (args.Length == 5)
+        {
+            var overrideFile = WdbcFile.Load(overridePath);
+            var baseIds = DbcRecordIdentity.IndexRows(sample, resolution.Columns, resolution.KeyStrategy).Keys;
+            var overrideIds = DbcRecordIdentity.IndexRows(overrideFile, resolution.Columns, resolution.KeyStrategy).Keys.ToHashSet();
+            var removedRows = baseIds.Count(id => !overrideIds.Contains(id));
+            Console.WriteLine($"{tableName}\t{sample.RowCount}\t{overrideFile.RowCount}\t{differences.Select(difference => difference.Id).Distinct().Count()}\t{differences.Count}\t{differences.Count(difference => difference.ColumnIndex < 0)}\t{removedRows}");
+        }
+        else foreach (var difference in differences) Console.WriteLine($"{difference.Id}\t{difference.ColumnName}\t{difference.BaseValue}\t{difference.OverrideValue}");
         Console.Error.WriteLine($"Found {differences.Count:N0} semantic field difference(s)/new row marker(s).");
         return 0;
     }
@@ -194,11 +248,16 @@ static int Mpq(string[] args)
     var service = new PatchArchiveService();
     switch (args[0])
     {
-        case "list" when args.Length is 2 or 3:
+        case "list" when args.Length >= 2:
             {
-                var query = args.Length == 3 ? args[2] : string.Empty;
-                foreach (var file in service.ListFiles(args[1]).Where(file => file.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase)))
-                    Console.WriteLine($"{file.Size}\t{file.CompressedSize}\t{file.ArchivePath}");
+                var options = args[2..]; var query = options.FirstOrDefault(option => !option.StartsWith("--", StringComparison.Ordinal)) ?? string.Empty;
+                var contentOnly = options.Any(option => option.Equals("--content-only", StringComparison.OrdinalIgnoreCase));
+                var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+                var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--content-only", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (unknown.Length > 0) return Fail($"Unknown list option: {unknown[0]}");
+                var files = service.ListFiles(args[1]).Where(file => (!contentOnly || !file.IsMetadata) && file.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(files, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                else foreach (var file in files) Console.WriteLine($"{file.Size}\t{file.CompressedSize}\t{file.ArchivePath}");
                 return 0;
             }
         case "extract" when args.Length >= 3:
@@ -227,13 +286,13 @@ static int Mpq(string[] args)
 }
 
 static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
-static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml>\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>", code);
-static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>", code);
+static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>", code);
+static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>", code);
 static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLine(message); else Console.Error.WriteLine(message); return code; }
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  server bindings <installed-server-folder> [--source=core-source]\n  server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=output.sql]\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml>\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> <output-folder>");
+    Console.WriteLine("WoW Crucible CLI\n\n  client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt]\n  client corpus <output-listfile> <index-directory>...\n  client extract <index-directory> <archive-relative-path> <folder> [filter] [--resolved-only] [--overwrite] [--quiet]\n  client show <index-directory>\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  server bindings <installed-server-folder> [--source=core-source]\n  server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=output.sql]\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter] [--content-only] [--format=json]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> output-folder");
     return 0;
 }
 
@@ -273,4 +332,9 @@ sealed class ConsoleProgress : IProgress<(int Done, int Total, string Path)>
         _lastPercentage = percentage;
         Console.Error.WriteLine($"[{percentage,3}%] {value.Done:N0}/{value.Total:N0} · {value.Path}");
     }
+}
+
+sealed class ClientIndexConsoleProgress : IProgress<ClientIndexProgress>
+{
+    public void Report(ClientIndexProgress value) => Console.Error.WriteLine($"[{value.CompletedArchives:N0}/{value.TotalArchives:N0}] {value.Stage}{(value.Cached ? " (cached)" : string.Empty)} · {value.ArchivePath}");
 }

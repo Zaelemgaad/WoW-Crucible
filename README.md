@@ -37,6 +37,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
 - Writes handled and fatal crash details to a portable `Logs` folder beside the application (also available through **Open Logs**), with `%LOCALAPPDATA%\\WoWCrucible\\Logs` as a fallback for read-only install locations.
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
+- Builds resumable client indexes with per-archive SHA-256 identities and reusable MPQ content catalogs, marks anonymous hash-only entries explicitly, recovers names from local/cross-client path corpora, and resumes indexed extraction without rescanning giant archives or rewriting already-complete files.
 - Ships a scriptable `wowcrucible.exe` CLI for DBC information and MPQ list/extract/create/update operations.
 - Compares layered DBC directories as base-only, override-only, identical, or genuinely overridden, with cancellable semantic row/field comparison (decoded strings do not differ merely because their offsets moved).
 - Promotes selected fields or complete rows from an override DBC into an output DBC by record ID, safely re-interns strings, and saves/reapplies semantic promotion manifests.
@@ -52,13 +53,18 @@ Client formats and server integration are separate: a client-build profile decla
 wowcrucible dbc info Spell.dbc
 wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder [--strict] [--recursive]
 wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).xml"
+wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).xml" --summary
 wowcrucible dbc promote apply base\Spell.dbc override\Spell.dbc schema.xml selection.dbc-promotion.json output\Spell.dbc
 wowcrucible server detect "C:\path\to\installed-server"
 wowcrucible server inspect "C:\path\to\installed-server"
 wowcrucible server bindings "C:\path\to\installed-server" [--source="C:\path\to\core-source"]
 wowcrucible server dbc-audit "C:\path\to\installed-server" gtRegenMPPerSpt.dbc schema.xml [--source="C:\path\to\core-source"] [--all] [--migration=sync.sql]
 wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
-wowcrucible mpq list patch.MPQ [filter]
+wowcrucible client index "C:\Games\WoW" client-index [--no-hash] [--listfile=known-paths.txt]
+wowcrucible client corpus combined-paths.txt first-client-index second-client-index [...]
+wowcrucible client show client-index
+wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filter] [--resolved-only] [--overwrite] [--quiet]
+wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json]
 wowcrucible mpq extract patch.MPQ output-folder [filter] [--quiet|--progress=N]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
 wowcrucible mpq update patch-W.MPQ file-or-folder [...]
@@ -68,7 +74,7 @@ wowcrucible manifest validate classless.json [existing-patch.mpq]
 wowcrucible manifest build classless.json output-folder
 ```
 
-MPQ listing can only display paths known to the archive's internal `(listfile)`. WoW client and normal mod archives generally include one; hash-only unnamed entries can still exist but cannot be assigned their original names by any MPQ browser without an external listfile.
+An MPQ browser can only display names known to an internal or external `(listfile)`. Client indexing preserves every hash-only entry under its synthetic StormLib name, reports the unresolved count, and can retry name recovery from a corpus built across multiple clients. `--resolved-only` prevents synthetic names from being mistaken for reusable folder paths during extraction.
 - Maps standalone DBCs to `DBFilesClient\\<name>.dbc`.
 - Synchronizes a saved DBC into a selected server `data\\dbc` directory with backup.
 
