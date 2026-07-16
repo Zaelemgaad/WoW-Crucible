@@ -34,6 +34,8 @@ internal sealed class ClientInspectorForm : Form
         var actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new(10, 0, 10, 8) };
         _indexButton.Click += async (_, _) => await BuildIndex(); _cancelButton.Click += (_, _) => _operation?.Cancel();
         actions.Controls.Add(_indexButton); actions.Controls.Add(_cancelButton); actions.Controls.Add(Button("Open Archive", OpenSelectedArchive)); actions.Controls.Add(Button("Extract Selected…", async () => await ExtractSelected()));
+        actions.Controls.Add(Button("Plan Client → Server", () => { using var form = new ClientServerPlanForm(_settings); form.ShowDialog(this); }));
+        actions.Controls.Add(Button("Plan Client Fusion", () => { using var form = new ClientFusionForm(_settings); form.ShowDialog(this); }));
         var progressRow = new TableLayoutPanel { Dock = DockStyle.Top, Height = 34, ColumnCount = 2, Padding = new(10, 2, 10, 2) };
         progressRow.ColumnStyles.Add(new(SizeType.Percent, 100)); progressRow.ColumnStyles.Add(new(SizeType.AutoSize)); progressRow.Controls.Add(_progress, 0, 0); progressRow.Controls.Add(_progressText, 1, 0);
 

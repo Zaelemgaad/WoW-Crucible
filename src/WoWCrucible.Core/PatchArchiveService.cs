@@ -26,6 +26,13 @@ public static class PatchInputMapper
     public static IReadOnlyList<PatchEntry> Map(IEnumerable<string> paths)
     {
         var result = new Dictionary<string, PatchEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in MapCandidates(paths)) result[entry.ArchivePath] = entry;
+        return result.Values.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public static IReadOnlyList<PatchEntry> MapCandidates(IEnumerable<string> paths)
+    {
+        var result = new List<PatchEntry>();
         foreach (var input in paths)
         {
             var fullPath = Path.GetFullPath(input);
@@ -34,7 +41,7 @@ public static class PatchInputMapper
                 var archivePath = Path.GetExtension(fullPath).Equals(".dbc", StringComparison.OrdinalIgnoreCase)
                     ? $"DBFilesClient\\{Path.GetFileName(fullPath)}"
                     : Path.GetFileName(fullPath);
-                result[archivePath] = new(fullPath, archivePath);
+                result.Add(new(fullPath, archivePath));
                 continue;
             }
             if (!Directory.Exists(fullPath)) continue;
@@ -48,10 +55,10 @@ public static class PatchInputMapper
                 if (knownRoot >= 0) relative = Path.Combine(parts[knownRoot..]);
                 else if (KnownClientRoots.Contains(selectedRootName)) relative = Path.Combine(selectedRootName, relative);
                 var archivePath = NormalizeArchivePath(relative);
-                result[archivePath] = new(Path.GetFullPath(file), archivePath);
+                result.Add(new(Path.GetFullPath(file), archivePath));
             }
         }
-        return result.Values.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
+        return result.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ThenBy(entry => entry.SourcePath, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     public static string NormalizeArchivePath(string path)
