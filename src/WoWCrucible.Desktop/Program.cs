@@ -7,7 +7,7 @@ class Program
     [STAThread]
     public static void Main(string[] args)
     {
-        DesktopCrashLogger.Initialize();
+        DesktopCrashLogger.Initialize(args);
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
@@ -15,5 +15,5 @@ class Program
         => AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .WithInterFont()
-            .LogToTrace();
+            .LogToTrace(DesktopCrashLogger.IsDevbugEnabled ? Avalonia.Logging.LogEventLevel.Verbose : Avalonia.Logging.LogEventLevel.Warning);
 }

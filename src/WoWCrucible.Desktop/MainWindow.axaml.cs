@@ -32,6 +32,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        DevbugModeToggle.IsChecked = DesktopCrashLogger.IsDevbugEnabled;
+        DesktopCrashLogger.Debug("UI", "main-window-created", ("devbug", DesktopCrashLogger.IsDevbugEnabled));
         DbcView.SelectionChanged += (_, selection) => ShowSelection(selection);
         DbcView.CellEditRequested += async (_, selection) => await EditCellAsync(selection);
         DbcView.RenderMeasured += (_, measurement) =>
@@ -48,8 +50,18 @@ public partial class MainWindow : Window
         Closing += WindowClosing;
     }
 
+    private void DevbugModeChanged(object? sender, RoutedEventArgs e)
+    {
+        var enabled = DevbugModeToggle.IsChecked == true;
+        DesktopCrashLogger.SetDevbugMode(enabled);
+        StatusText.Text = enabled
+            ? $"Devbug Mode enabled · live terminal + {DesktopCrashLogger.DebugLogPath}"
+            : "Devbug Mode disabled · normal mode only records failures";
+    }
+
     public Task LoadPathAsync(string path)
     {
+        DesktopCrashLogger.Debug("FILE", "load-path-requested", ("path", path));
         var extension = Path.GetExtension(path);
         return extension.Equals(".dbc", StringComparison.OrdinalIgnoreCase)
             ? LoadDbcAsync(path)
@@ -77,9 +89,10 @@ public partial class MainWindow : Window
     {
         path = Path.GetFullPath(path);
         var existing = _documents.FindIndex(document => document.FullPath.Equals(path, StringComparison.OrdinalIgnoreCase));
-        if (existing >= 0) { ActivateDocument(existing); return; }
+        if (existing >= 0) { DesktopCrashLogger.Debug("DBC", "open-reused-staged-document", ("path", path), ("tab", existing)); ActivateDocument(existing); return; }
         SetBusy($"Loading {Path.GetFileName(path)}…");
         var stopwatch = Stopwatch.StartNew();
+        DesktopCrashLogger.Debug("DBC", "open-start", ("path", path), ("bytes", new FileInfo(path).Length));
         try
         {
             var session = await Task.Run(() =>
@@ -93,6 +106,7 @@ public partial class MainWindow : Window
             _documents.Add(session);
             ActivateDocument(_documents.Count - 1);
             StatusText.Text = $"Loaded {session.File.RowCount:N0} records in {stopwatch.Elapsed.TotalMilliseconds:0} ms · {_documents.Count:N0} staged file(s)";
+            DesktopCrashLogger.Debug("DBC", "open-success", ("path", path), ("rows", session.File.RowCount), ("fields", session.File.FieldCount), ("schema", session.Schema.MatchKind), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (Exception exception)
         {
@@ -107,6 +121,7 @@ public partial class MainWindow : Window
         if (index < 0 || index >= _documents.Count) return;
         _activeDocument = index;
         var document = _documents[index];
+        DesktopCrashLogger.Debug("DBC", "document-activated", ("path", document.FullPath), ("tab", index), ("dirty", document.File.IsDirty));
         SearchBox.Text = string.Empty;
         DbcView.SetDocument(document.File, document.Schema.Columns, Path.GetFileNameWithoutExtension(document.File.SourcePath), DecodedToggle.IsChecked == true);
         WelcomePanel.IsVisible = false;
@@ -169,12 +184,15 @@ public partial class MainWindow : Window
             }
         }
         SetBusy("Saving table atomically with backup…");
+        var stopwatch = Stopwatch.StartNew();
+        DesktopCrashLogger.Debug("DBC", "save-start", ("source", document.FullPath), ("destination", path), ("save_as", saveAs), ("dirty", document.File.IsDirty));
         try
         {
             if (saveAs) await Task.Run(() => document.File.SaveAs(path, true));
             else await Task.Run(() => document.File.Save(path, true));
             RefreshTabs();
             StatusText.Text = $"Saved {path} · previous file retained as .bak";
+            DesktopCrashLogger.Debug("DBC", "save-success", ("path", path), ("rows", document.File.RowCount), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds), ("backup", path + ".bak"));
             return true;
         }
         catch (Exception exception)
@@ -198,6 +216,7 @@ public partial class MainWindow : Window
             if (choice == SaveChoice.Save && !await SaveCurrentAsync(false)) return;
         }
         _documents.RemoveAt(_activeDocument);
+        DesktopCrashLogger.Debug("DBC", "document-closed", ("path", document.FullPath), ("remaining", _documents.Count));
         if (_documents.Count > 0) ActivateDocument(Math.Min(_activeDocument, _documents.Count - 1));
         else
         {
@@ -243,9 +262,11 @@ public partial class MainWindow : Window
             RefreshTabs();
             ShowSelection(selection with { Value = Convert.ToString(document.File.GetDisplayValue(selection.Row, selection.Column), CultureInfo.InvariantCulture) ?? string.Empty });
             StatusText.Text = before == after ? "Value was unchanged" : $"Modified {selection.Column.Name} · Ctrl+Z to undo";
+            DesktopCrashLogger.Debug("DBC", "cell-edit", ("path", document.FullPath), ("row", selection.Row), ("column", selection.Column.Name), ("before_raw", before), ("after_raw", after), ("changed", before != after));
         }
         catch (Exception exception)
         {
+            DesktopCrashLogger.Log("DBC cell edit rejected", exception);
             await ShowErrorAsync("Invalid cell value", exception.Message);
         }
     }
@@ -260,6 +281,7 @@ public partial class MainWindow : Window
         var edit = document.History.Undo(document.File);
         if (edit is null) { StatusText.Text = "Nothing to undo in this DBC"; return; }
         DbcView.RefreshDocument(edit.Row); RefreshTabs(); StatusText.Text = $"Undid {edit.Description}";
+        DesktopCrashLogger.Debug("DBC", "undo", ("path", document.FullPath), ("row", edit.Row), ("description", edit.Description));
     }
 
     private void Redo()
@@ -269,6 +291,7 @@ public partial class MainWindow : Window
         var edit = document.History.Redo(document.File);
         if (edit is null) { StatusText.Text = "Nothing to redo in this DBC"; return; }
         DbcView.RefreshDocument(edit.Row); RefreshTabs(); StatusText.Text = $"Redid {edit.Description}";
+        DesktopCrashLogger.Debug("DBC", "redo", ("path", document.FullPath), ("row", edit.Row), ("description", edit.Description));
     }
 
     private void AddRowClick(object? sender, RoutedEventArgs e) => AddRow();
@@ -291,8 +314,9 @@ public partial class MainWindow : Window
             document.History.Clear();
             DbcView.RefreshDocument(row); RefreshTabs();
             StatusText.Text = $"Created row {row + 1:N0} with the next available identity";
+            DesktopCrashLogger.Debug("DBC", "row-added", ("path", document.FullPath), ("row", row), ("new_row_count", document.File.RowCount));
         }
-        catch (Exception exception) { _ = ShowErrorAsync("Could not add row", exception.Message); }
+        catch (Exception exception) { DesktopCrashLogger.Log("DBC row add failed", exception); _ = ShowErrorAsync("Could not add row", exception.Message); }
     }
 
     private void CloneRows(int count)
@@ -308,8 +332,9 @@ public partial class MainWindow : Window
             document.History.Clear();
             DbcView.RefreshDocument(first); RefreshTabs();
             StatusText.Text = $"Created {count:N0} clone(s) in one batch, starting at row {first + 1:N0}";
+            DesktopCrashLogger.Debug("DBC", "rows-cloned", ("path", document.FullPath), ("source_row", source), ("count", count), ("first_new_row", first), ("new_row_count", document.File.RowCount));
         }
-        catch (Exception exception) { _ = ShowErrorAsync("Could not clone row", exception.Message); }
+        catch (Exception exception) { DesktopCrashLogger.Log("DBC row clone failed", exception); _ = ShowErrorAsync("Could not clone row", exception.Message); }
     }
 
     private async void DeleteRowClick(object? sender, RoutedEventArgs e)
@@ -326,6 +351,7 @@ public partial class MainWindow : Window
         DbcView.RefreshDocument(Math.Min(row, Math.Max(0, document.File.RowCount - 1)));
         RefreshTabs();
         StatusText.Text = $"Deleted row {row + 1:N0}";
+        DesktopCrashLogger.Debug("DBC", "row-deleted", ("path", document.FullPath), ("row", row), ("new_row_count", document.File.RowCount));
     }
 
     private static void RequireStructuralKey(DbcDocumentSession document)
@@ -363,6 +389,8 @@ public partial class MainWindow : Window
         }
         try
         {
+            var stopwatch = Stopwatch.StartNew();
+            DesktopCrashLogger.Debug("DBC", "search-start", ("path", document.FullPath), ("query", query), ("rows", document.File.RowCount));
             await Task.Delay(180, token);
             SetBusy($"Searching {document.File.RowCount:N0} records…");
             var decoded = DecodedToggle.IsChecked == true;
@@ -375,8 +403,9 @@ public partial class MainWindow : Window
             if (token.IsCancellationRequested || !ReferenceEquals(document, Current)) return;
             DbcView.SetFilteredRows(rows);
             StatusText.Text = $"{rows.Length:N0} of {document.File.RowCount:N0} records match “{query}”";
+            DesktopCrashLogger.Debug("DBC", "search-success", ("path", document.FullPath), ("query", query), ("matches", rows.Length), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) { DesktopCrashLogger.Debug("DBC", "search-cancelled", ("path", document.FullPath), ("query", query)); }
     }
 
     private async void OpenM2Click(object? sender, RoutedEventArgs e)
@@ -393,6 +422,8 @@ public partial class MainWindow : Window
     private async Task LoadM2Async(string path)
     {
         SetBusy($"Reading {Path.GetFileName(path)}…");
+        var stopwatch = Stopwatch.StartNew();
+        DesktopCrashLogger.Debug("MODEL", "preview-start", ("path", path), ("bytes", new FileInfo(path).Length));
         try
         {
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path));
@@ -402,6 +433,7 @@ public partial class MainWindow : Window
             InspectorSummary.Text = $"{geometry.Vertices.Count:N0} vertices · {geometry.TriangleIndices.Count / 3:N0} triangles";
             InspectorDetail.Text = $"Model     {geometry.ModelPath}\nSkin      {geometry.SkinPath}\nMinimum   {geometry.Minimum}\nMaximum   {geometry.Maximum}";
             StatusText.Text = "Native model ready · drag to rotate · wheel to zoom";
+            DesktopCrashLogger.Debug("MODEL", "preview-success", ("path", path), ("skin", geometry.SkinPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (Exception exception)
         {
@@ -484,7 +516,7 @@ public partial class MainWindow : Window
                 foreach (var document in dirty)
                 {
                     try { await Task.Run(() => document.File.Save(document.File.SourcePath, true)); }
-                    catch (Exception exception) { await ShowErrorAsync("Could not save all DBCs", exception.Message); return; }
+                    catch (Exception exception) { DesktopCrashLogger.Log("Shutdown DBC save failed", exception); await ShowErrorAsync("Could not save all DBCs", exception.Message); return; }
                 }
             }
             _closingApproved = true;
@@ -551,7 +583,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WoWCrucible", "settings.json");
+            var settingsPath = CruciblePaths.SettingsFileForRead;
             if (File.Exists(settingsPath))
             {
                 using var document = JsonDocument.Parse(File.ReadAllText(settingsPath));

@@ -1,11 +1,11 @@
 using System.Text.Json;
+using WoWCrucible.Core;
 
 namespace WoWCrucible.App;
 
 public sealed class AppSettings
 {
-    private static readonly string SettingsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WoWCrucible", "settings.json");
+    private static string SettingsPath => CruciblePaths.SettingsFile;
 
     public string CoreDbcPath { get; set; } = string.Empty;
     public string ClientDataPath { get; set; } = string.Empty;
@@ -25,7 +25,13 @@ public sealed class AppSettings
 
     public static AppSettings Load()
     {
-        try { return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new() : new(); }
+        try
+        {
+            var readPath = CruciblePaths.SettingsFileForRead;
+            var settings = File.Exists(readPath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(readPath)) ?? new() : new();
+            if (!readPath.Equals(SettingsPath, StringComparison.OrdinalIgnoreCase) && File.Exists(readPath)) settings.Save();
+            return settings;
+        }
         catch (Exception ex) { CrashLogger.Log("Could not load settings", ex); return new(); }
     }
 

@@ -28,5 +28,9 @@
           Link="docs\CLI-REFERENCE.md"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\docs\DEVBUG-MODE.md"
+          Link="docs\DEVBUG-MODE.md"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -39,7 +39,8 @@ Client formats and server integration are separate: a client-build profile decla
 - Installs verified patch MPQs into a selected client and deletes that client's exact `Cache` folder only after a successful update; GUI builds written directly into the configured client `Data` folder do the same automatically.
 - Remembers server `data\\dbc` and WoW client `Data` paths for future open, sync, and patch dialogs.
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
-- Writes handled and fatal crash details to a portable `Logs` folder beside the application (also available through **Open Logs**), with `%LOCALAPPDATA%\\WoWCrucible\\Logs` as a fallback for read-only install locations.
+- Keeps normal use silent: no startup, success, or activity logs, with only unhandled fatal diagnostics retained when possible. Opt-in **Devbug Mode** adds a live structured terminal and detailed asynchronous session log, retains only the newest three sessions, and never records database passwords. See [docs/DEVBUG-MODE.md](docs/DEVBUG-MODE.md).
+- Houses Crucible-owned settings, profiles, and logs in organized folders beside the executable. Read-only installations fall back to `%LOCALAPPDATA%\\WoWCrucible`, and every Devbug session identifies the effective data root.
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
 - Builds content-first asset libraries where patch provenance is inserted immediately before each file, keeping different patches' versions of the same Character/UI/World directory adjacent instead of burying them under separate archive trees.
 - Visually compares archive and Loose PNG assets by content directory rather than filename: fast catalog indexing, path/source/name filters, selectable filename/source/file-size sorting, cancellable SHA-256 plus byte-for-byte exact-copy grouping and collapsing, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions and provenance, and direct Explorer reveal. Duplicate inspection never deletes files.
@@ -118,6 +119,8 @@ Specialized editors will follow the principles in [docs/UX-PRINCIPLES.md](docs/U
 Requirements: Windows x64 and the .NET 10 SDK.
 
 The new high-performance Avalonia desktop is available as an active migration preview. It has a static themed workspace, multi-file DBC staging, per-document undo/redo, guided decoded cell editing, safe row add/clone/bulk-clone/delete actions, background loading/search, a direct-rendered virtual WDBC viewport, and an interactive native M2/SKIN mesh preview. The established application remains available while the remaining workflows reach full feature parity.
+
+Turn on **DEVBUG ON** in the header for persistent diagnostic mode, or launch once with `--devbug`. Normal mode creates no routine logs. Devbug logs and its live terminal use structured action/result entries and retain only the newest three sessions.
 
 ```powershell
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj

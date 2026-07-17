@@ -84,7 +84,7 @@ public static class TargetProfileCatalog
 
     private static IEnumerable<string> CandidateDirectories(string? userDirectory, string? applicationDirectory)
     {
-        yield return userDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WoWCrucible", "Profiles");
+        yield return userDirectory ?? CruciblePaths.ProfilesDirectory;
         yield return applicationDirectory ?? Path.Combine(AppContext.BaseDirectory, "profiles");
     }
 

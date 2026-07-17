@@ -121,12 +121,15 @@ internal sealed class AssetComparisonWindow : Window
     {
         _status.Text = "Reading the catalog and grouping PNGs by content directory…";
         var libraryRoot = _library.Text ?? string.Empty;
+        var stopwatch = Stopwatch.StartNew();
+        DesktopCrashLogger.Debug("ASSET", "index-start", ("library", libraryRoot));
         try
         {
             _index = await Task.Run(() => AssetComparisonService.BuildIndex(libraryRoot));
             FilterDirectories();
             _status.Text = $"Indexed {_index.TotalPngFiles:N0} PNGs across {_index.Directories.Count:N0} content directories.";
             DesktopCrashLogger.Log($"Asset comparison indexed {_index.TotalPngFiles:N0} PNGs across {_index.Directories.Count:N0} content directories from {libraryRoot}", null);
+            DesktopCrashLogger.Debug("ASSET", "index-success", ("library", libraryRoot), ("pngs", _index.TotalPngFiles), ("directories", _index.Directories.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (Exception exception) { DesktopCrashLogger.Log("Asset comparison indexing failed", exception); _status.Text = exception.Message; }
     }
@@ -142,12 +145,14 @@ internal sealed class AssetComparisonWindow : Window
         if (_index is null || _directories.SelectedItem is not AssetComparisonDirectory directory) return;
         _duplicateScanCancellation?.Cancel();
         _folderTitle.Text = string.IsNullOrEmpty(directory.LogicalPath) ? "(archive root)" : directory.LogicalPath; _status.Text = "Reading direct PNG variants…";
+        var stopwatch = Stopwatch.StartNew();
         _folderEntries = await Task.Run(() => AssetComparisonService.GetDirectoryPngs(_index, directory.LogicalPath));
         _loadedModelGeometry = null; _modelView.ClearGeometry(); _folderModels = await Task.Run(() => AssetComparisonService.GetDirectoryModels(_index, directory.LogicalPath)); _modelPicker.ItemsSource = _folderModels; _modelPicker.SelectedIndex = _folderModels.Count > 0 ? 0 : -1;
         _modelStatus.Text = _folderModels.Count == 0 ? "No M2 + SKIN pair exists directly in this content path." : $"{_folderModels.Count:N0} model source(s) available. Select a texture card to track the candidate material beside the live model.";
         _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase); _collapseDuplicates.IsChecked = false; _collapseDuplicates.IsEnabled = false;
         var sources = new[] { "All patch sources" }.Concat(_folderEntries.Select(entry => entry.Provenance).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase)).ToArray();
         _settingSourceFilter = true; _sourceFilter.ItemsSource = sources; _sourceFilter.SelectedIndex = 0; _settingSourceFilter = false; await FilterFilesAsync();
+        DesktopCrashLogger.Debug("ASSET", "directory-selected", ("path", directory.LogicalPath), ("pngs", _folderEntries.Count), ("sources", sources.Length - 1), ("models", _folderModels.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
     }
 
     private async Task FilterFilesAsync()
@@ -163,6 +168,7 @@ internal sealed class AssetComparisonWindow : Window
             _ => filtered.OrderBy(entry => entry.Provenance, StringComparer.OrdinalIgnoreCase).ThenBy(entry => entry.FileName, StringComparer.OrdinalIgnoreCase)
         };
         _filteredEntries = filtered.ToArray();
+        DesktopCrashLogger.Debug("ASSET", "filter-applied", ("query", query), ("source", source), ("sort", _sort.SelectedItem), ("collapse_exact", _collapseDuplicates.IsChecked), ("matches", _filteredEntries.Count));
         _page = 0; await RenderPageAsync();
     }
 
@@ -184,7 +190,8 @@ internal sealed class AssetComparisonWindow : Window
         foreach (var item in images)
         {
             try { var bitmap = await Task.Run(() => { token.ThrowIfCancellationRequested(); using var stream = File.OpenRead(item.Entry.FullPath); return Bitmap.DecodeToWidth(stream, 148, BitmapInterpolationMode.MediumQuality); }, token); if (!token.IsCancellationRequested) { item.Image.Source = bitmap; _thumbnailBitmaps.Add(bitmap); } else bitmap.Dispose(); }
-            catch (OperationCanceledException) { break; } catch { }
+            catch (OperationCanceledException) { break; }
+            catch (Exception exception) { DesktopCrashLogger.Log($"Asset thumbnail decode failed: {item.Entry.FullPath}", exception); }
         }
     }
 
@@ -215,9 +222,12 @@ internal sealed class AssetComparisonWindow : Window
         if (_previewMode.SelectedIndex != 1) return;
         if (_modelPicker.SelectedItem is not AssetComparisonModel model) { _modelStatus.Text = "No M2 + SKIN pair exists directly in this content path."; return; }
         _modelStatus.Text = $"Loading {model.FileName}…";
+        var stopwatch = Stopwatch.StartNew();
+        DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
         try
         {
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath)); _loadedModelGeometry = geometry; _modelView.SetGeometry(geometry); UpdateModelStatus();
+            DesktopCrashLogger.Debug("MODEL", "comparison-preview-success", ("model", model.ModelPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("texture_slots", geometry.TextureSlots.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (Exception exception) { DesktopCrashLogger.Log("Comparison model preview failed", exception); _modelStatus.Text = exception.Message; }
     }
@@ -235,6 +245,8 @@ internal sealed class AssetComparisonWindow : Window
         var entries = _folderEntries; if (entries.Count < 2) { _status.Text = "This path has fewer than two PNGs to compare."; return; }
         _duplicateScanCancellation?.Cancel(); _duplicateScanCancellation?.Dispose(); _duplicateScanCancellation = new(); var token = _duplicateScanCancellation.Token;
         _scanDuplicates.IsEnabled = false; _status.Text = $"Hashing same-size candidates across {entries.Count:N0} PNGs…";
+        var stopwatch = Stopwatch.StartNew();
+        DesktopCrashLogger.Debug("ASSET", "exact-copy-scan-start", ("path", _folderTitle.Text), ("entries", entries.Count));
         try
         {
             var groups = await Task.Run(() => AssetComparisonService.FindExactDuplicates(entries, token), token);
@@ -242,6 +254,7 @@ internal sealed class AssetComparisonWindow : Window
             _duplicateByPath = groups.SelectMany(group => group.Entries.Select(entry => (entry.FullPath, Group: group))).ToDictionary(pair => pair.FullPath, pair => pair.Group, StringComparer.OrdinalIgnoreCase);
             _collapseDuplicates.IsEnabled = groups.Count > 0; await FilterFilesAsync();
             _status.Text = groups.Count == 0 ? "No byte-identical PNGs exist in this content path." : $"Found {groups.Count:N0} exact-content group(s), {groups.Sum(group => group.Entries.Count - 1):N0} redundant copy/copies, and {FormatBytes(groups.Sum(group => group.RecoverableBytes))} potentially recoverable.";
+            DesktopCrashLogger.Debug("ASSET", "exact-copy-scan-success", ("groups", groups.Count), ("redundant_copies", groups.Sum(group => group.Entries.Count - 1)), ("recoverable_bytes", groups.Sum(group => group.RecoverableBytes)), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (OperationCanceledException) { }
         catch (Exception exception) { DesktopCrashLogger.Log("Exact asset duplicate scan failed", exception); _status.Text = exception.Message; }
