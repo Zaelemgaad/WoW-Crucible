@@ -33,7 +33,11 @@ internal sealed class AssetComparisonWindow : Window
 
     public AssetComparisonWindow(string? libraryRoot = null)
     {
-        if (!string.IsNullOrWhiteSpace(libraryRoot)) { _library.Text = libraryRoot; Opened += async (_, _) => await LoadIndexAsync(); }
+        if (!string.IsNullOrWhiteSpace(libraryRoot)) _library.Text = libraryRoot;
+        Opened += async (_, _) =>
+        {
+            if (!string.IsNullOrWhiteSpace(_library.Text) && Directory.Exists(_library.Text)) await LoadIndexAsync();
+        };
         Title = "WoW Crucible — Visual Asset Comparison"; Width = 1580; Height = 940; MinWidth = 1120; MinHeight = 700; WindowStartupLocation = WindowStartupLocation.CenterOwner;
         _directories.ItemTemplate = new FuncDataTemplate<AssetComparisonDirectory>((item, _) => new Grid
         {
@@ -96,7 +100,14 @@ internal sealed class AssetComparisonWindow : Window
     private async Task LoadIndexAsync()
     {
         _status.Text = "Reading the catalog and grouping PNGs by content directory…";
-        try { _index = await Task.Run(() => AssetComparisonService.BuildIndex(_library.Text ?? string.Empty)); FilterDirectories(); _status.Text = $"Indexed {_index.TotalPngFiles:N0} PNGs across {_index.Directories.Count:N0} content directories."; }
+        var libraryRoot = _library.Text ?? string.Empty;
+        try
+        {
+            _index = await Task.Run(() => AssetComparisonService.BuildIndex(libraryRoot));
+            FilterDirectories();
+            _status.Text = $"Indexed {_index.TotalPngFiles:N0} PNGs across {_index.Directories.Count:N0} content directories.";
+            DesktopCrashLogger.Log($"Asset comparison indexed {_index.TotalPngFiles:N0} PNGs across {_index.Directories.Count:N0} content directories from {libraryRoot}", null);
+        }
         catch (Exception exception) { DesktopCrashLogger.Log("Asset comparison indexing failed", exception); _status.Text = exception.Message; }
     }
 
@@ -159,7 +170,14 @@ internal sealed class AssetComparisonWindow : Window
     private void ApplyZoom() { for (var index = 0; index < 2; index++) if (_comparisonBitmaps[index] is { } bitmap) { _comparisonImages[index].Width = bitmap.PixelSize.Width * _zoom; _comparisonImages[index].Height = bitmap.PixelSize.Height * _zoom; } }
     private void SyncScroll(int source) { if (_syncingScroll) return; _syncingScroll = true; _comparisonScrolls[source == 0 ? 1 : 0].Offset = _comparisonScrolls[source].Offset; _syncingScroll = false; }
     private void RevealSlot(int slot) { if (_comparisonImages[slot].Tag is not AssetComparisonEntry entry) return; Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { "/select,", entry.FullPath } }); }
-    private async Task BrowseLibraryAsync() { var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Select Crucible asset library", AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) _library.Text = path; }
+    private async Task BrowseLibraryAsync()
+    {
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Select Crucible asset library", AllowMultiple = false });
+        var path = folders.FirstOrDefault()?.TryGetLocalPath();
+        if (path is null) return;
+        _library.Text = path;
+        await LoadIndexAsync();
+    }
     private void DisposeImages() { _thumbnailCancellation?.Cancel(); foreach (var bitmap in _thumbnailBitmaps) bitmap.Dispose(); foreach (var bitmap in _comparisonBitmaps) bitmap?.Dispose(); }
     private static Button AccentButton(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
     private static T WithColumn<T>(T control, int column) where T : Control { Grid.SetColumn(control, column); return control; }
