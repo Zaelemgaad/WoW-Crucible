@@ -65,6 +65,8 @@ wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).x
 wowcrucible dbc promote apply base\Spell.dbc override\Spell.dbc schema.xml selection.dbc-promotion.json output\Spell.dbc
 wowcrucible dbc promote additions base\CreatureModelData.dbc mod\CreatureModelData.dbc schema.xml additions.json output\CreatureModelData.dbc
 wowcrucible dbc clone-remap where base\CreatureDisplayInfo.dbc mod\CreatureDisplayInfo.dbc schema.xml ModelID 6000 6001 --manifest=display-map.json --output=merged\CreatureDisplayInfo.dbc
+wowcrucible dbc copy-row base\CharSections.dbc source\CharSections.dbc schema.xml 4946 9000000 output\CharSections.dbc --set=VariationIndex=16
+wowcrucible dbc set-row merged\CreatureDisplayInfo.dbc schema.xml 38924 output\CreatureDisplayInfo.dbc --set=ExtendedDisplayInfoID=9000000
 wowcrucible server detect "C:\path\to\installed-server"
 wowcrucible server inspect "C:\path\to\installed-server"
 wowcrucible server bindings "C:\path\to\installed-server" [--source="C:\path\to\core-source"]

@@ -353,6 +353,15 @@ var referenceOutputPath = Path.Combine(layerRoot, "SpellCastTimes.reference-rema
 if (DbcCloneRemapService.ApplyReferenceMap(cloneOutputPath, referenceOutputPath, castColumns, castResolution.KeyStrategy, [cloneManifest.Entries[0].TargetId], castColumns[1].Name, referenceMap) != 1 ||
     WdbcFile.Load(referenceOutputPath).GetRaw(cloneRows[cloneManifest.Entries[0].TargetId], castColumns[1]) != clonedBaseValue + 1)
     throw new InvalidOperationException("Foreign-key remapping modified neither the selected cloned record nor its intended field.");
+var copiedRowPath = Path.Combine(layerRoot, "SpellCastTimes.copy-row.dbc");
+DbcRowMutationService.CopyRow(castTimesSource, Path.Combine(overrideLayer, "SpellCastTimes.dbc"), copiedRowPath, castColumns, castResolution.KeyStrategy, sourceCastId, 9_000_000, new Dictionary<string, string> { [castColumns[1].Name] = "123" });
+var copiedRows = DbcRecordIdentity.IndexRows(WdbcFile.Load(copiedRowPath), castColumns, castResolution.KeyStrategy);
+if (!copiedRows.ContainsKey(9_000_000) || WdbcFile.Load(copiedRowPath).GetRaw(copiedRows[9_000_000], castColumns[1]) != 123)
+    throw new InvalidOperationException("Additive row copy with a field override failed.");
+var setRowPath = Path.Combine(layerRoot, "SpellCastTimes.set-row.dbc");
+DbcRowMutationService.SetRow(copiedRowPath, setRowPath, castColumns, castResolution.KeyStrategy, 9_000_000, new Dictionary<string, string> { [castColumns[1].Name] = "456" });
+if (WdbcFile.Load(setRowPath).GetRaw(copiedRows[9_000_000], castColumns[1]) != 456)
+    throw new InvalidOperationException("Selected row mutation failed.");
 
 var semanticBasePath = Path.Combine(layerRoot, "AnimationData.semantic-base.dbc");
 var semanticOverridePath = Path.Combine(layerRoot, "AnimationData.semantic-override.dbc");
