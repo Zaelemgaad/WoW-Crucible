@@ -120,10 +120,14 @@ The corpus test runner accepts a WDBX 12340 definition XML and a directory conta
 ## Roadmap
 
 1. Project-wide ID allocation, validation, and portable content projects.
-2. Expand the Spell Workspace with named flags, searchable references, and related-table navigation.
-3. Guided creature/NPC, vendor, loot, quest, race, and class creators on the live capability model.
-4. DB2 support and complete corpus verification for additional client profiles.
-5. Expand the revision-aware AzerothCore/TrinityCore DBC binding and audit engine into transactional multi-destination deployment plans.
+2. Add a WoWDBDefs DBD provider and cross-check it against WDBX definitions per target build.
+3. Add BLP preview/conversion plus recursive M2/WMO/ADT asset dependency validation.
+4. Expand the Spell Workspace with named flags, searchable references, related-table navigation, and optional project-local SQLite bulk editing.
+5. Guided creature/NPC appearance import, gameobject generation, vendor, loot, quest, race, and class creators on the live capability model.
+6. CASC/DB2 support and complete corpus verification for additional client profiles.
+7. Expand the revision-aware AzerothCore/TrinityCore DBC binding and audit engine into transactional multi-destination deployment plans.
+
+The detailed decisions from legacy and newly added local tools are recorded in [the reference-tool audit](docs/REFERENCE-TOOL-AUDIT.md).
 
 ## Contributing
 
