@@ -18,7 +18,10 @@ wowcrucible asset workspace <new-output-folder> <files/folders...>
 wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]
 wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]
 wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]
+wowcrucible asset library-layout <library-folder> [--apply]
 wowcrucible asset library-status <library-folder>
+wowcrucible asset compare-folders <library-folder> [path-filter]
+wowcrucible asset compare-files <library-folder> <logical-directory>
 ```
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
@@ -36,6 +39,12 @@ wowcrucible asset library-status "G:\Crucible-Extras-Processed"
 Stopping `library-run` does not discard completed work. Run the same command again to resume past existing extraction/conversion outputs.
 
 Use `library-repair` after upgrading the converter or after opening a library created by an older Crucible build. It never re-extracts MPQs; it retries only BLPs whose matching PNG is absent, refreshes the per-provenance failure lists, and rebuilds the catalog.
+
+Archive libraries use a content-first comparison layout. For example, `Archives\patch-Y-id\Content\Character\BloodElf\Female\hair.png` becomes `Archives\Content\Character\BloodElf\Female\patch-Y-id\hair.png`, placing every patch's version of the same content directory beside the others. `library-layout` is a non-mutating conflict/count dry run by default; add `--apply` to perform the resumable same-volume migration and rebuild the catalog. Existing destinations are never overwritten.
+
+Comparison is directory-first because expansions frequently rename equivalent assets. `compare-folders` searches logical content paths and reports PNG/source counts; `compare-files` lists every direct PNG from every provenance folder in the selected path without requiring filenames to match. The Avalonia **Assets & compare** workspace exposes the same model visually with paged, lazy thumbnails and two comparison slots.
+
+Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`. Selecting `Character\BloodElf\Female`, for example, shows all direct PNGs under every patch folder there; it does not guess that differently named files are equivalent.
 
 ## DBC information, validation, comparison, and editing
 

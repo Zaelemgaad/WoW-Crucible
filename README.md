@@ -41,6 +41,8 @@ Client formats and server integration are separate: a client-build profile decla
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
 - Writes handled and fatal crash details to a portable `Logs` folder beside the application (also available through **Open Logs**), with `%LOCALAPPDATA%\\WoWCrucible\\Logs` as a fallback for read-only install locations.
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
+- Builds content-first asset libraries where patch provenance is inserted immediately before each file, keeping different patches' versions of the same Character/UI/World directory adjacent instead of burying them under separate archive trees.
+- Visually compares PNG assets by content directory rather than filename: fast catalog indexing, path/source/name filters, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions and provenance, and direct Explorer reveal.
 - Builds resumable client indexes with per-archive SHA-256 identities and reusable MPQ content catalogs, detects active/inactive locales, backup/custom subdirectory scopes and renamed build-12340 executables, marks anonymous hash-only entries explicitly, recovers names from local/cross-client path corpora, and resumes indexed extraction without rescanning giant archives or rewriting already-complete files.
 - Includes a visual Client Inspector for indexing/resuming a whole installation, color-coded archive scopes, loose runtime/config/AddOn inventory, plain-language compatibility guidance, content-category summaries, direct archive browsing, and provenance-preserving extraction.
 - Turns an extracted/effective client DBC directory into a reviewed client-to-server deployment plan: byte identity, row/field counts, current-core consumer, SQL-overlay warning, restart requirement, unresolved layer conflicts, portable JSON, and separate non-live staging trees for the patch and server DBC candidates.
@@ -122,6 +124,12 @@ Open a DBC or WotLK M2 directly in the Avalonia preview:
 
 ```powershell
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- "C:\path\to\Spell.dbc"
+```
+
+Open the visual asset comparison workspace directly:
+
+```powershell
+dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- "--asset-compare=G:\Crucible-Extras-Processed"
 ```
 
 Run the established WinForms application:

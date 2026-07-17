@@ -412,6 +412,7 @@ public partial class MainWindow : Window
 
     private void OpenLogsClick(object? sender, RoutedEventArgs e) => DesktopCrashLogger.OpenDirectory();
     private async void OpenItemWorkbenchClick(object? sender, RoutedEventArgs e) => await new ItemWorkbenchWindow().ShowDialog(this);
+    private async void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => await new AssetComparisonWindow().ShowDialog(this);
     private async void OpenCliGuideClick(object? sender, RoutedEventArgs e)
     {
         var path = Path.Combine(AppContext.BaseDirectory, "docs", "CLI-REFERENCE.md");

@@ -42,7 +42,7 @@
                     <Button HorizontalContentAlignment="Left" Content="▦  DBC tables" />
                     <Button HorizontalContentAlignment="Left" Content="◈  Items &amp; sets" Click="OpenItemWorkbenchClick" />
                     <Button HorizontalContentAlignment="Left" Content="◇  MPQ patches" />
-                    <Button HorizontalContentAlignment="Left" Content="⬡  Assets &amp; models" />
+                    <Button HorizontalContentAlignment="Left" Content="⬡  Assets &amp; compare" Click="OpenAssetComparisonClick" />
                     <Button HorizontalContentAlignment="Left" Content="⚙  Server &amp; SQL" />
                 </StackPanel>
                 <Border Grid.Row="3" Padding="10" CornerRadius="6" Background="#131925" BorderBrush="#273044" BorderThickness="1">

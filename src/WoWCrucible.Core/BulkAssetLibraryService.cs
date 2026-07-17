@@ -11,6 +11,7 @@ public sealed record BulkAssetLibraryPlan(string SourceRoot, string LibraryRoot,
 public sealed record BulkAssetLibraryCheckpoint(DateTimeOffset UpdatedUtc, IReadOnlyList<string> CompletedArchiveIds, IReadOnlyDictionary<string, string> Failures, int ConvertedPngFiles);
 public sealed record BulkAssetLibraryRunResult(int CompletedArchives, int FailedArchives, int CopiedLooseBlps, int ConvertedPngs, int ConversionFailures, string CatalogPath, string CheckpointPath);
 public sealed record BulkAssetConversionRepairResult(int NewlyConvertedPngs, int RemainingFailures, string CatalogPath, string CheckpointPath);
+public sealed record BulkAssetLayoutResult(bool Applied, int SourceFolders, long Files, long Bytes, long MovedFiles, int Conflicts, string CatalogPath);
 
 public static class BulkAssetLibraryService
 {
@@ -70,7 +71,7 @@ public static class BulkAssetLibraryService
         {
             cancellationToken.ThrowIfCancellationRequested(); done++;
             if (completed.Contains(archive.Identity)) continue;
-            var contentRoot = ArchiveContentRoot(plan.LibraryRoot, archive); Directory.CreateDirectory(contentRoot);
+            var contentRoot = ArchiveStagingRoot(plan.LibraryRoot, archive); Directory.CreateDirectory(contentRoot);
             try
             {
                 progress?.Report(("Extract", done, eligible.Length, archive.RelativePath));
@@ -80,6 +81,8 @@ public static class BulkAssetLibraryService
                     extractionFailure: (entry, exception) => rejectedEntries.Add($"{entry.ArchivePath}: {exception.Message}"));
                 var conversion = await ConvertBlpsAsync(contentRoot, converterPath, conversionWorkers, cancellationToken);
                 converted += conversion.Converted; conversionFailures += conversion.Failed;
+                var relocation = RelocateContent(plan.LibraryRoot, ArchiveFolderName(archive), contentRoot, true, cancellationToken);
+                if (relocation.Conflicts > 0) throw new IOException($"Content-first relocation found {relocation.Conflicts:N0} existing destination conflict(s); nothing was overwritten.");
                 completed.Add(archive.Identity);
                 if (rejectedEntries.Count == 0) failures.Remove(archive.Identity);
                 else failures[archive.Identity] = $"{rejectedEntries.Count:N0} entry failure(s): {string.Join(" | ", rejectedEntries.Take(10))}";
@@ -101,12 +104,11 @@ public static class BulkAssetLibraryService
         var plan = LoadPlan(libraryRoot); converterPath = Path.GetFullPath(converterPath);
         if (!File.Exists(converterPath)) throw new FileNotFoundException("The BLP converter does not exist.", converterPath);
         conversionWorkers = Math.Clamp(conversionWorkers, 1, 16);
-        var roots = plan.Archives.Where(archive => archive.Eligible && archive.Error is null)
-            .Select(archive => (archive.RelativePath, Root: ArchiveContentRoot(plan.LibraryRoot, archive))).Where(entry => Directory.Exists(entry.Root)).ToArray();
+        var roots = ConversionRoots(plan.LibraryRoot).ToArray();
         var converted = 0; var failed = 0;
         for (var index = 0; index < roots.Length; index++)
         {
-            cancellationToken.ThrowIfCancellationRequested(); progress?.Report(("Repair PNGs", index + 1, roots.Length + 1, roots[index].RelativePath));
+            cancellationToken.ThrowIfCancellationRequested(); progress?.Report(("Repair PNGs", index + 1, roots.Length + 1, roots[index].Label));
             var result = await ConvertBlpsAsync(roots[index].Root, converterPath, conversionWorkers, cancellationToken); converted += result.Converted; failed += result.Failed;
         }
         progress?.Report(("Repair PNGs", roots.Length + 1, roots.Length + 1, "Loose files"));
@@ -117,6 +119,25 @@ public static class BulkAssetLibraryService
             .Count(path => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase) && File.Exists(Path.ChangeExtension(path, ".png")));
         WriteCheckpoint(checkpointPath, (prior?.CompletedArchiveIds ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase), new Dictionary<string, string>(prior?.Failures ?? new Dictionary<string, string>()), matchingPngs);
         return new(converted, failed, WriteCatalog(plan), checkpointPath);
+    }
+
+    public static BulkAssetLayoutResult MigrateToContentFirstLayout(string libraryRoot, bool apply,
+        IProgress<(long Done, long Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
+    {
+        var plan = LoadPlan(libraryRoot); var archivesRoot = Path.Combine(plan.LibraryRoot, "Archives");
+        if (!Directory.Exists(archivesRoot)) return new(apply, 0, 0, 0, 0, 0, Path.Combine(plan.LibraryRoot, "asset-catalog.csv"));
+        var sources = LegacyArchiveRoots(archivesRoot).ToArray(); long files = 0; long bytes = 0;
+        foreach (var source in sources)
+            foreach (var file in Directory.EnumerateFiles(source.ContentRoot, "*", SearchOption.AllDirectories)) { files++; bytes += new FileInfo(file).Length; }
+        long done = 0; long moved = 0; var conflicts = 0;
+        foreach (var source in sources)
+        {
+            var relocation = RelocateContent(plan.LibraryRoot, source.ArchiveFolder, source.ContentRoot, apply, cancellationToken,
+                path => { done++; if ((done & 4095) == 0 || done == files) progress?.Report((done, files, path)); });
+            moved += relocation.MovedFiles; conflicts += relocation.Conflicts;
+        }
+        var catalog = apply ? WriteCatalog(plan) : Path.Combine(plan.LibraryRoot, "asset-catalog.csv");
+        return new(apply, sources.Length, files, bytes, moved, conflicts, catalog);
     }
 
     private static int CopyLooseBlps(BulkAssetLibraryPlan plan, IProgress<(string Stage, int Done, int Total, string Path)>? progress, CancellationToken cancellationToken)
@@ -191,7 +212,7 @@ public static class BulkAssetLibraryService
             foreach (var file in Directory.EnumerateFiles(plan.LibraryRoot, "*", SearchOption.AllDirectories).Where(file => !file.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)))
             {
                 var relative = Path.GetRelativePath(plan.LibraryRoot, file); var extension = Path.GetExtension(file).TrimStart('.').ToUpperInvariant();
-                var source = relative.StartsWith($"Loose{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase) ? "loose" : relative.Split(Path.DirectorySeparatorChar).Skip(1).FirstOrDefault() ?? "library";
+                var source = CatalogSource(relative);
                 writer.WriteLine($"{Csv(Classify(relative))},{Csv(extension)},{Csv(source)},{Csv(relative)},{new FileInfo(file).Length}");
             }
         }
@@ -213,7 +234,55 @@ public static class BulkAssetLibraryService
     }
 
     private static bool Contains(string value, params string[] fragments) => fragments.Any(fragment => value.Contains(fragment, StringComparison.OrdinalIgnoreCase));
-    private static string ArchiveContentRoot(string libraryRoot, BulkAssetArchivePlan archive) => Path.Combine(libraryRoot, "Archives", $"{SafeName(Path.GetFileNameWithoutExtension(archive.RelativePath))}-{archive.Identity}", "Content");
+    private static string CatalogSource(string relative)
+    {
+        var parts = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (parts.Length > 1 && parts[0].Equals("Loose", StringComparison.OrdinalIgnoreCase)) return "loose";
+        if (parts.Length > 3 && parts[0].Equals("Archives", StringComparison.OrdinalIgnoreCase) && parts[1].Equals("Content", StringComparison.OrdinalIgnoreCase))
+            return parts[^2];
+        return parts.Length > 1 && parts[0].Equals("Archives", StringComparison.OrdinalIgnoreCase) ? parts[1] : "library";
+    }
+
+    private static string ArchiveFolderName(BulkAssetArchivePlan archive) => $"{SafeName(Path.GetFileNameWithoutExtension(archive.RelativePath))}-{archive.Identity}";
+    private static string ArchiveStagingRoot(string libraryRoot, BulkAssetArchivePlan archive) => Path.Combine(libraryRoot, ".staging", "Archives", ArchiveFolderName(archive), "Content");
+
+    private static IEnumerable<(string ArchiveFolder, string ContentRoot)> LegacyArchiveRoots(string archivesRoot) => Directory.EnumerateDirectories(archivesRoot)
+        .Where(path => !Path.GetFileName(path).Equals("Content", StringComparison.OrdinalIgnoreCase))
+        .Select(path => (Path.GetFileName(path), Path.Combine(path, "Content"))).Where(entry => Directory.Exists(entry.Item2));
+
+    private static IEnumerable<(string Label, string Root)> ConversionRoots(string libraryRoot)
+    {
+        var archivesRoot = Path.Combine(libraryRoot, "Archives"); var contentFirst = Path.Combine(archivesRoot, "Content");
+        if (Directory.Exists(contentFirst)) yield return ("Content-first archive library", contentFirst);
+        if (Directory.Exists(archivesRoot)) foreach (var legacy in LegacyArchiveRoots(archivesRoot)) yield return (legacy.ArchiveFolder, legacy.ContentRoot);
+    }
+
+    private static (long MovedFiles, int Conflicts) RelocateContent(string libraryRoot, string archiveFolder, string sourceRoot, bool apply,
+        CancellationToken cancellationToken, Action<string>? visited = null)
+    {
+        var destinationRoot = Path.Combine(libraryRoot, "Archives", "Content"); long moved = 0; var conflicts = 0;
+        foreach (var source in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories).ToArray())
+        {
+            cancellationToken.ThrowIfCancellationRequested(); var relative = Path.GetRelativePath(sourceRoot, source); var relativeDirectory = Path.GetDirectoryName(relative);
+            var destinationDirectory = string.IsNullOrEmpty(relativeDirectory) ? Path.Combine(destinationRoot, archiveFolder) : Path.Combine(destinationRoot, relativeDirectory, archiveFolder);
+            var destination = Path.GetFullPath(Path.Combine(destinationDirectory, Path.GetFileName(relative))); EnsureInside(destinationRoot, destination); visited?.Invoke(relative);
+            if (File.Exists(destination)) { conflicts++; continue; }
+            if (!apply) continue;
+            Directory.CreateDirectory(destinationDirectory); File.Move(source, destination, false); moved++;
+        }
+        if (apply && conflicts == 0) RemoveEmptyDirectories(sourceRoot, libraryRoot);
+        return (moved, conflicts);
+    }
+
+    private static void RemoveEmptyDirectories(string root, string libraryRoot)
+    {
+        EnsureInside(libraryRoot, root);
+        foreach (var directory in Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories).OrderByDescending(path => path.Length))
+            if (!Directory.EnumerateFileSystemEntries(directory).Any()) Directory.Delete(directory, false);
+        if (Directory.Exists(root) && !Directory.EnumerateFileSystemEntries(root).Any()) Directory.Delete(root, false);
+        var parent = Path.GetDirectoryName(root);
+        if (parent is not null && Directory.Exists(parent) && !Directory.EnumerateFileSystemEntries(parent).Any()) Directory.Delete(parent, false);
+    }
     private static string SafeName(string value) { var invalid = Path.GetInvalidFileNameChars().ToHashSet(); var clean = new string(value.Select(character => invalid.Contains(character) ? '_' : character).ToArray()).Trim(); return clean.Length > 60 ? clean[..60] : clean; }
     private static string Identity(string relativePath, long bytes, long ticks) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{relativePath.ToUpperInvariant()}|{bytes}|{ticks}")))[..12].ToLowerInvariant();
     private static string Csv(string value) => '"' + value.Replace("\"", "\"\"") + '"';

@@ -56,6 +56,16 @@ static int Asset(string[] args)
         Console.Error.WriteLine($"Asset conversion repair complete: {result.NewlyConvertedPngs:N0} newly recovered PNG(s), {result.RemainingFailures:N0} genuinely unsupported BLP(s).\nCatalog: {result.CatalogPath}\nCheckpoint: {result.CheckpointPath}");
         return result.RemainingFailures == 0 ? 0 : 3;
     }
+    if (args is ["library-layout", var layoutLibraryRoot, .. var layoutOptions])
+    {
+        var apply = layoutOptions.Any(option => option.Equals("--apply", StringComparison.OrdinalIgnoreCase));
+        var unknown = layoutOptions.Where(option => !option.Equals("--apply", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset library-layout option: {unknown[0]}");
+        var progress = new Progress<(long Done, long Total, string Path)>(value => Console.Error.WriteLine($"Layout\t{value.Done:N0}/{value.Total:N0}\t{value.Path}"));
+        var result = BulkAssetLibraryService.MigrateToContentFirstLayout(layoutLibraryRoot, apply, progress);
+        Console.Error.WriteLine($"Content-first layout {(result.Applied ? "migration" : "dry run")}: {result.SourceFolders:N0} provenance folder(s), {result.Files:N0} file(s), {result.Bytes / (1024d * 1024 * 1024):0.##} GiB, {result.MovedFiles:N0} moved, {result.Conflicts:N0} conflict(s).{(result.Applied ? $"\nCatalog: {result.CatalogPath}" : "\nRun again with --apply after reviewing this result.")}");
+        return result.Conflicts == 0 ? 0 : 3;
+    }
     if (args is ["library-status", var statusLibraryRoot])
     {
         var plan = BulkAssetLibraryService.LoadPlan(statusLibraryRoot);
@@ -64,6 +74,19 @@ static int Asset(string[] args)
         Console.WriteLine($"Source\t{plan.SourceRoot}\nLibrary\t{plan.LibraryRoot}\nEligibleArchives\t{plan.Archives.Count(archive => archive.Eligible && archive.Error is null)}\nCompletedArchives\t{checkpoint?.CompletedArchiveIds.Count ?? 0}\nSkippedArchives\t{plan.Archives.Count(archive => !archive.Eligible)}\nArchiveEntries\t{plan.Archives.Sum(archive => archive.Entries)}\nBLPs\t{plan.LooseBlpFiles + plan.Archives.Sum(archive => archive.BlpFiles)}\nConvertedPNGs\t{checkpoint?.ConvertedPngFiles ?? 0}\nEntryOrArchiveFailures\t{checkpoint?.Failures.Count ?? 0}\nCheckpoint\t{(File.Exists(checkpointPath) ? checkpointPath : "not started")}");
         if (checkpoint is not null) foreach (var failure in checkpoint.Failures) Console.WriteLine($"FAILURE\t{failure.Key}\t{failure.Value}");
         return checkpoint?.Failures.Count > 0 ? 3 : 0;
+    }
+    if (args is ["compare-folders", var comparisonLibrary, .. var comparisonFilter])
+    {
+        var query = string.Join(' ', comparisonFilter); var index = AssetComparisonService.BuildIndex(comparisonLibrary);
+        foreach (var directory in index.Directories.Where(directory => query.Length == 0 || directory.LogicalPath.Contains(query, StringComparison.OrdinalIgnoreCase)))
+            Console.WriteLine($"{directory.PngFiles}\t{directory.ProvenanceSources}\t{directory.LogicalPath}");
+        Console.Error.WriteLine($"Indexed {index.TotalPngFiles:N0} PNGs in {index.Directories.Count:N0} content directories. Results are grouped by directory, never by filename."); return 0;
+    }
+    if (args is ["compare-files", var fileComparisonLibrary, var logicalDirectory])
+    {
+        var index = AssetComparisonService.BuildIndex(fileComparisonLibrary); var entries = AssetComparisonService.GetDirectoryPngs(index, logicalDirectory);
+        foreach (var entry in entries) Console.WriteLine($"{entry.Provenance}\t{entry.FileName}\t{entry.Bytes}\t{entry.FullPath}");
+        Console.Error.WriteLine($"Found {entries.Count:N0} direct PNG(s) from {entries.Select(entry => entry.Provenance).Distinct(StringComparer.OrdinalIgnoreCase).Count():N0} source(s) in '{logicalDirectory}'."); return 0;
     }
     if (args is ["inspect", .. var inspectInputs] && inspectInputs.Length > 0)
     {
@@ -91,7 +114,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-status <library-folder>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Client(string[] args)
 {

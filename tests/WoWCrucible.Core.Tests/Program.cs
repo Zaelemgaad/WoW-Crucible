@@ -60,6 +60,19 @@ var nativeWorkspace = NativeAssetConversionService.CreateWorkspace([wotlkModel, 
 if (nativeWorkspace.CompatibleAssets != 1 || nativeWorkspace.ConversionRequired != 1 || !File.Exists(Path.Combine(conversionWorkspacePath, "conversion-report.json")) ||
     Directory.EnumerateFiles(Path.Combine(conversionWorkspacePath, "source"), "fixture.m2", SearchOption.AllDirectories).Count() != 1)
     throw new InvalidOperationException("Native conversion workspace did not preserve immutable hashed inputs and report compatibility.");
+var comparisonRoot = Path.Combine(assetFixture, "comparison-library");
+var oldLegacy = Path.Combine(comparisonRoot, "Archives", "patch-old-a1", "Content", "Character", "BloodElf", "Female");
+var newLegacy = Path.Combine(comparisonRoot, "Archives", "patch-new-b2", "Content", "Character", "BloodElf", "Female"); Directory.CreateDirectory(oldLegacy); Directory.CreateDirectory(newLegacy);
+File.WriteAllText(Path.Combine(oldLegacy, "old-expansion-name.png"), "old"); File.WriteAllText(Path.Combine(newLegacy, "completely-renamed.png"), "new");
+File.WriteAllText(Path.Combine(comparisonRoot, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(comparisonRoot, comparisonRoot, 1, DateTimeOffset.UtcNow, 0, [])));
+var layoutDryRun = BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, false); var layoutApplied = BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, true);
+if (layoutDryRun.Files != 2 || layoutDryRun.Conflicts != 0 || layoutApplied.MovedFiles != 2 || BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, false).SourceFolders != 0)
+    throw new InvalidOperationException("Content-first layout migration was destructive, conflicting, or not resumable.");
+var comparisonIndex = AssetComparisonService.BuildIndex(comparisonRoot); var comparisonEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, @"Character\BloodElf\Female");
+if (comparisonIndex.TotalPngFiles != 2 || comparisonIndex.Directories.Single().ProvenanceSources != 2 || comparisonEntries.Count != 2 || comparisonEntries.Select(entry => entry.FileName).Distinct().Count() != 2)
+    throw new InvalidOperationException("Directory-first visual comparison incorrectly required matching asset filenames.");
+try { _ = AssetComparisonService.GetDirectoryPngs(comparisonIndex, ".."); throw new InvalidOperationException("Asset comparison accepted a path outside its content root."); }
+catch (InvalidOperationException exception) when (exception.Message.Contains("escaped")) { }
 Directory.Delete(assetFixture, true); Directory.Delete(conversionWorkspacePath, true);
 
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));
