@@ -89,6 +89,34 @@ The July 2026 workspace review covered the added Amaroth Toolpack directories pl
 - MPQEditor, MyWarCraftStudio, and the many generic DBC/CSV editors are behavior references; Crucible already owns the safer archive and table workflows.
 - The toolpack `Wow.exe` is build 12340 and claims removed UI checks. Its SHA-256 is `E463C25FA6D49D2D2057FB0252BC8B8E0BDD9DDD30CAD940F91CC7AFA9847855`. Treat it as a user-supplied compatibility candidate: back up the selected executable, record its hash in the patch manifest, and never commit or redistribute it.
 
+### Additional standalone roots reviewed July 17, 2026
+
+#### Coffee
+
+`Coffee` is a 2016 preservation repository containing 4,156 files (about 459 MiB) across ADT, BLP, DBC, M2, MPQ, WDB, WDL, WDT, and WMO categories. Its own README says that most material was authored by other people, complete credits are unavailable, and the tools are probably obsolete. Some individual subprojects have licenses, but there is no umbrella license that makes the entire collection safe to copy or redistribute.
+
+Use Coffee as format and workflow archaeology only. Source from a particular subproject may be studied or reused only after its individual origin and license are verified. Its strongest contribution is the breadth of map edge cases: holes, water, terrain offsets, WDT creation, reference repair, ground doodads, zone data, model collision, and import/export scripts. Those cases should become fixtures for Crucible's future asset validators rather than bundled executables.
+
+#### Noggit Studio 3.2614
+
+The standalone `Noggit 3.2614` directory is an unsigned, binary-only-in-this-workspace RelWithDebInfo build from July 2018 using Qt 5.9. The executable identifies itself as `Noggit Studio - 3.2614`, has SHA-256 `DE5274C20747059AC95D99BEEB65EA9013B1CD6A9273F648F570399D27DEE618`, and exposes project settings for separate game/project paths, imports, a WMV log, and optional MySQL fields; this particular binary says MySQL support was not compiled in.
+
+Noggit remains the right class of external application for interactive terrain, texture, water, object, zone, minimap, horizon, and UID work. Crucible should not recreate its 3D editor. Instead, a map project should prepare an isolated project tree, inventory affected ADT/WDT/WDL and referenced assets before launch, launch a user-selected Noggit executable, then hash/diff and validate outputs before patch staging. Never point an untested old Noggit build directly at the only copy of a client or project.
+
+#### MultiConverter 3.6.2
+
+The local MultiConverter source targets .NET Core 3.1 and explicitly converts modern assets down toward WoW 3.3.5a. Its documented support is M2 from BFA/Shadowlands and WMO from BFA; ADT and WDT are not claimed as supported even though unfinished converter code exists. The UI recursively accepts drag-and-drop input and overwrites files in place. The M2 path strips modern chunks, remaps some animation IDs, adjusts cameras/skins/render flags, and currently zeros particle count/offset. Its listfile/bootstrap logic also depends on old `wow.tools` and Battle.net endpoints and may no longer initialize. The repository contains no top-level license, so its code cannot be copied into Crucible without permission or later license clarification.
+
+MultiConverter is still a valuable optional conversion backend for the planned Legion-to-WotLK workflow, but only through a guarded external adapter:
+
+1. Copy selected source assets and their `.skin`/animation/texture dependencies into a conversion staging directory; never give it originals.
+2. Record input hashes and converter executable/source identity, inject a user-selected current listfile, and disable its updater/network bootstrap where possible.
+3. Run one conversion job at a time with captured stdout/stderr and an explicit timeout/cancel path.
+4. Parse and validate the resulting M2/WMO structures, list removed or downgraded features (especially particles), and compare dependency closure before accepting output.
+5. Preserve source-relative paths and feed only approved results into a tiny manifest-driven MPQ.
+
+This adapter design should be converter-neutral so maintained tools can replace MultiConverter without changing Crucible projects.
+
 ### Explicitly reject
 
 - Do not integrate listfile removal/obfuscation (`FuckItUp.exe`). It defeats provenance, inspection, interoperability, and recovery.
@@ -102,11 +130,12 @@ The July 2026 workspace review covered the added Amaroth Toolpack directories pl
 1. DBD build/profile parser plus WDBX-vs-DBD schema cross-checking.
 2. BLP preview/conversion adapter and asset validation in the client inspector.
 3. Recursive M2/WMO/ADT dependency graph feeding required manifest paths.
-4. Guided NPC appearance import and additive display/extra/SQL planning.
-5. Bulk gameobject generation from indexed model paths.
-6. Project-local SQLite staging for spell/table bulk editing.
-7. CASC indexing provider for supported post-WotLK source profiles.
-8. Light/map project visualization and guarded external authoring-tool launch profiles.
+4. Guarded, staging-only external converter profiles with hash/diff validation and captured logs.
+5. Guided NPC appearance import and additive display/extra/SQL planning.
+6. Bulk gameobject generation from indexed model paths.
+7. Project-local SQLite staging for spell/table bulk editing.
+8. CASC indexing provider for supported post-WotLK source profiles.
+9. Light/map project visualization and guarded Noggit/external authoring-tool launch profiles.
 
 ## Product model
 
