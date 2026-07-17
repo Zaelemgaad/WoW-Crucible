@@ -107,6 +107,20 @@ Specialized editors will follow the principles in [docs/UX-PRINCIPLES.md](docs/U
 
 Requirements: Windows x64 and the .NET 10 SDK.
 
+The new high-performance Avalonia desktop is available as an early migration preview. It has a static themed workspace, background DBC loading/search, a direct-rendered virtual WDBC viewport, and an interactive native M2/SKIN mesh preview. The established application remains available while full feature parity is migrated.
+
+```powershell
+dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj
+```
+
+Open a DBC or WotLK M2 directly in the Avalonia preview:
+
+```powershell
+dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- "C:\path\to\Spell.dbc"
+```
+
+Run the established WinForms application:
+
 ```powershell
 dotnet run --project src/WoWCrucible.App/WoWCrucible.App.csproj
 ```
