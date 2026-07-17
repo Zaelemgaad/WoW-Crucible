@@ -4,6 +4,19 @@ using System.Diagnostics;
 if (args.Length != 2)
     throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
 
+var deploymentFixture = Path.Combine(Path.GetTempPath(), $"crucible-client-deploy-{Guid.NewGuid():N}");
+var deploymentData = Path.Combine(deploymentFixture, "Data"); var deploymentCache = Path.Combine(deploymentFixture, "Cache", "WDB", "enUS");
+Directory.CreateDirectory(deploymentData); Directory.CreateDirectory(deploymentCache);
+File.WriteAllText(Path.Combine(deploymentCache, "creaturecache.wdb"), "stale");
+var patchDeploymentSource = Path.Combine(Path.GetTempPath(), $"patch-test-{Guid.NewGuid():N}.MPQ"); File.WriteAllText(patchDeploymentSource, "new patch");
+var deployed = ClientPatchDeploymentService.Install(patchDeploymentSource, deploymentFixture, "patch-Z.MPQ");
+if (Directory.Exists(Path.Combine(deploymentFixture, "Cache")) || File.ReadAllText(deployed.InstalledPath) != "new patch" || !deployed.Cache.Existed)
+    throw new InvalidOperationException("Client patch deployment did not atomically install the patch and invalidate Cache.");
+Directory.CreateDirectory(Path.Combine(deploymentFixture, "Cache"));
+if (!ClientPatchDeploymentService.InvalidateCache(deploymentFixture).Existed || Directory.Exists(Path.Combine(deploymentFixture, "Cache")))
+    throw new InvalidOperationException("Explicit client cache invalidation failed.");
+Directory.Delete(deploymentFixture, true); File.Delete(patchDeploymentSource);
+
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));
 if (targetProfiles.Count != 4 || TargetProfileCatalog.Find(targetProfiles, null).ClientBuild != 12340 ||
     targetProfiles.Single(profile => profile.ClientBuild == 15595).SupportTier != TargetSupportTier.Experimental)

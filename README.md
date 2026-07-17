@@ -33,6 +33,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Builds WotLK patch MPQs from edited DBCs or existing folder trees.
 - Displays editable internal MPQ paths and preserves folder hierarchy.
 - Opens existing MPQ patches and safely adds or replaces files while keeping a `.bak` copy.
+- Installs verified patch MPQs into a selected client and deletes that client's exact `Cache` folder only after a successful update; GUI builds written directly into the configured client `Data` folder do the same automatically.
 - Remembers server `data\\dbc` and WoW client `Data` paths for future open, sync, and patch dialogs.
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
 - Writes handled and fatal crash details to a portable `Logs` folder beside the application (also available through **Open Logs**), with `%LOCALAPPDATA%\\WoWCrucible\\Logs` as a fallback for read-only install locations.
@@ -72,6 +73,8 @@ wowcrucible server inspect "C:\path\to\installed-server"
 wowcrucible server bindings "C:\path\to\installed-server" [--source="C:\path\to\core-source"]
 wowcrucible server dbc-audit "C:\path\to\installed-server" gtRegenMPPerSpt.dbc schema.xml [--source="C:\path\to\core-source"] [--all] [--migration=sync.sql]
 wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
+wowcrucible client install-patch patch-Z.MPQ "C:\Games\WoW" [--name=patch-Z.MPQ]
+wowcrucible client clear-cache "C:\Games\WoW"
 wowcrucible client index "C:\Games\WoW" client-index [--no-hash] [--listfile=known-paths.txt] [--client-exe=Wow.exe]
 wowcrucible client extract client-index "Data\patch-W.MPQ" extracted "DBFilesClient\*.dbc" --resolved-only
 wowcrucible client corpus combined-paths.txt first-client-index second-client-index [...]

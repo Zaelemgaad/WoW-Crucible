@@ -25,6 +25,23 @@ catch (Exception ex)
 static int Client(string[] args)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ClientHelp();
+    if (args is ["install-patch", var sourcePatch, var installClientRoot, .. var installOptions])
+    {
+        var targetName = Option(installOptions, "--name=");
+        var unknown = installOptions.Where(option => !option.StartsWith("--name=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown client patch install option: {unknown[0]}");
+        var result = ClientPatchDeploymentService.Install(sourcePatch, installClientRoot, targetName);
+        Console.Error.WriteLine($"Installed {result.InstalledPath}\nSHA-256 {result.Sha256}\nBackup: {result.BackupPath ?? "not needed"}\nCache: {(result.Cache.Existed ? $"deleted {result.Cache.DeletedFiles:N0} file(s), {result.Cache.DeletedBytes:N0} bytes" : "already absent")}");
+        return 0;
+    }
+    if (args is ["clear-cache", var cacheClientRoot])
+    {
+        var result = ClientPatchDeploymentService.InvalidateCache(cacheClientRoot);
+        Console.Error.WriteLine(result.Existed
+            ? $"Deleted {result.CachePath} ({result.DeletedFiles:N0} file(s), {result.DeletedBytes:N0} bytes)."
+            : $"Client cache is already absent: {result.CachePath}");
+        return 0;
+    }
     if (args is ["fusion", var baseRoot, .. var fusionInputs])
     {
         var stage = Option(fusionInputs, "--stage="); var output = Option(fusionInputs, "--output="); var showAll = fusionInputs.Contains("--all", StringComparer.OrdinalIgnoreCase);
@@ -88,7 +105,7 @@ static int Client(string[] args)
     return ClientHelp(2);
 }
 
-static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]", code);
+static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  wowcrucible client clear-cache <client-root>\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]", code);
 
 static async Task<int> Server(string[] args)
 {
@@ -453,7 +470,7 @@ static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLin
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  client corpus <output-listfile> <index-directory>...\n  client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]\n  client show <index-directory>\n  client fusion <base-root> <override-root>... [--stage=review-folder]\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  server bindings <installed-server-folder> [--source=core-source]\n  server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=output.sql]\n  server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=review-folder]\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter] [--content-only] [--format=json]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> output-folder");
+    Console.WriteLine("WoW Crucible CLI\n\n  client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  client clear-cache <client-root>\n  client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  client corpus <output-listfile> <index-directory>...\n  client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]\n  client show <index-directory>\n  client fusion <base-root> <override-root>... [--stage=review-folder]\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  server bindings <installed-server-folder> [--source=core-source]\n  server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=output.sql]\n  server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=review-folder]\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter] [--content-only] [--format=json]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> output-folder");
     return 0;
 }
 

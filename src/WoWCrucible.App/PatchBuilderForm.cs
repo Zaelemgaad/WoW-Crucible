@@ -213,8 +213,18 @@ public sealed class PatchBuilderForm : Form
             Cursor = Cursors.WaitCursor;
             var service = new PatchArchiveService();
             if (_existingPatch is null) service.Create(outputPath, entries); else service.Update(outputPath, entries);
-            _hint.Text = $"{(_existingPatch is null ? "Created" : "Updated")} {outputPath} with {entries.Length:N0} added/replaced file(s).";
-            MessageBox.Show(this, $"Patch {(_existingPatch is null ? "created" : "updated")} successfully:\n{outputPath}\n\nA .bak copy preserves the previous archive.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            ClientCacheInvalidationResult? cache = null;
+            if (ClientPatchDeploymentService.IsInsideClientData(outputPath, _settings.ClientDataPath))
+            {
+                var clientRoot = Directory.GetParent(Path.GetFullPath(_settings.ClientDataPath))?.FullName
+                    ?? throw new InvalidDataException("The configured client Data folder has no client root.");
+                cache = ClientPatchDeploymentService.InvalidateCache(clientRoot);
+            }
+            var cacheText = cache is null ? "The output is outside the configured client Data folder; no client cache was changed."
+                : cache.Existed ? $"Deleted the client Cache folder ({cache.DeletedFiles:N0} file(s), {cache.DeletedBytes:N0} bytes)."
+                : "The client Cache folder was already absent.";
+            _hint.Text = $"{(_existingPatch is null ? "Created" : "Updated")} {outputPath} with {entries.Length:N0} added/replaced file(s). {cacheText}";
+            MessageBox.Show(this, $"Patch {(_existingPatch is null ? "created" : "updated")} successfully:\n{outputPath}\n\n{cacheText}\n\nA .bak copy preserves the previous archive.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { Cursor = Cursors.Default; }
