@@ -3,7 +3,7 @@ using System.Numerics;
 namespace WoWCrucible.Core;
 
 public sealed record M2TextureSlot(int Index, uint Type, uint Flags, string? EmbeddedPath);
-public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadOnlyList<Vector3> Vertices, IReadOnlyList<Vector3> Normals, IReadOnlyList<int> TriangleIndices, Vector3 Minimum, Vector3 Maximum, IReadOnlyList<M2TextureSlot> TextureSlots);
+public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadOnlyList<Vector3> Vertices, IReadOnlyList<Vector3> Normals, IReadOnlyList<Vector2> TextureCoordinates, IReadOnlyList<int> TriangleIndices, Vector3 Minimum, Vector3 Maximum, IReadOnlyList<M2TextureSlot> TextureSlots);
 
 public static class M2PreviewGeometryService
 {
@@ -22,14 +22,15 @@ public static class M2PreviewGeometryService
         var vertexCount = CheckedCount(ReadUInt(model, 0x3C), MaximumVertices, "M2 vertex");
         var vertexOffset = CheckedOffset(ReadUInt(model, 0x40), "M2 vertex");
         RequireRange(model, vertexOffset, vertexCount, VertexStride, "M2 vertices");
-        var vertices = new Vector3[vertexCount]; var normals = new Vector3[vertexCount];
+        var vertices = new Vector3[vertexCount]; var normals = new Vector3[vertexCount]; var textureCoordinates = new Vector2[vertexCount];
         var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity);
         for (var index = 0; index < vertexCount; index++)
         {
             var offset = vertexOffset + index * VertexStride;
             var vertex = ReadVector(model, offset); var normal = ReadVector(model, offset + 20);
             if (!Finite(vertex) || !Finite(normal)) throw new InvalidDataException($"M2 vertex {index:N0} contains a non-finite coordinate.");
-            vertices[index] = vertex; normals[index] = normal; minimum = Vector3.Min(minimum, vertex); maximum = Vector3.Max(maximum, vertex);
+            var uv = new Vector2(BitConverter.ToSingle(model, offset + 32), BitConverter.ToSingle(model, offset + 36));
+            vertices[index] = vertex; normals[index] = normal; textureCoordinates[index] = Finite(uv) ? uv : Vector2.Zero; minimum = Vector3.Min(minimum, vertex); maximum = Vector3.Max(maximum, vertex);
         }
 
         var textureSlots = ReadTextureSlots(model);
@@ -50,7 +51,7 @@ public static class M2PreviewGeometryService
             if (vertexIndex >= vertices.Length) throw new InvalidDataException($"SKIN lookup {lookupIndex:N0} references M2 vertex {vertexIndex:N0}, but only {vertices.Length:N0} vertices exist.");
             triangles[index] = vertexIndex;
         }
-        return new(modelPath, skinPath, vertices, normals, triangles, minimum, maximum, textureSlots);
+        return new(modelPath, skinPath, vertices, normals, textureCoordinates, triangles, minimum, maximum, textureSlots);
     }
 
     private static IReadOnlyList<M2TextureSlot> ReadTextureSlots(byte[] model)
@@ -95,5 +96,6 @@ public static class M2PreviewGeometryService
     private static ushort ReadUShort(byte[] data, int offset) => BitConverter.ToUInt16(data, offset);
     private static Vector3 ReadVector(byte[] data, int offset) => new(BitConverter.ToSingle(data, offset), BitConverter.ToSingle(data, offset + 4), BitConverter.ToSingle(data, offset + 8));
     private static bool Finite(Vector3 value) => float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
+    private static bool Finite(Vector2 value) => float.IsFinite(value.X) && float.IsFinite(value.Y);
     private static string FourCc(byte[] data, int offset) => System.Text.Encoding.ASCII.GetString(data, offset, 4);
 }

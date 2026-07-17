@@ -24,6 +24,11 @@ internal sealed class AssetComparisonWindow : Window
     private readonly CheckBox _collapseDuplicates = new() { Content = "Collapse exact copies", IsEnabled = false };
     private readonly ComboBox _previewMode = new() { MinWidth = 165, ItemsSource = new[] { "Image comparison", "Live model preview" }, SelectedIndex = 0 };
     private readonly ComboBox _modelPicker = new() { MinWidth = 300 };
+    private readonly TextBox _modelSearch = new() { PlaceholderText = "Filter discovered M2 models…" };
+    private readonly ComboBox _modelFilter = new() { MinWidth = 150, ItemsSource = new[] { "Ready models", "All models" }, SelectedIndex = 0 };
+    private readonly TextBox _assetCategory = new() { Text = "Unsorted", MinWidth = 115, PlaceholderText = "Category" };
+    private readonly TextBox _assetNotes = new() { MinWidth = 180, PlaceholderText = "Optional decision notes" };
+    private readonly TextBlock _projectStatus = new() { Foreground = Brush.Parse("#99A5B8"), VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _modelStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8") };
     private readonly M2PreviewView _modelView = new();
     private readonly WrapPanel _cards = new() { Orientation = Orientation.Horizontal, ItemWidth = 176, ItemHeight = 206 };
@@ -38,7 +43,8 @@ internal sealed class AssetComparisonWindow : Window
     private readonly List<Bitmap> _thumbnailBitmaps = [];
     private AssetComparisonIndex? _index; private IReadOnlyList<AssetComparisonEntry> _folderEntries = []; private IReadOnlyList<AssetComparisonEntry> _filteredEntries = [];
     private IReadOnlyDictionary<string, AssetComparisonDuplicateGroup> _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase);
-    private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
+    private IReadOnlyList<AssetComparisonModel> _allModels = []; private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
+    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project;
     private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter;
 
     public AssetComparisonWindow(string? libraryRoot = null)
@@ -61,6 +67,7 @@ internal sealed class AssetComparisonWindow : Window
         _fileSearch.TextChanged += async (_, _) => await FilterFilesAsync(); _sourceFilter.SelectionChanged += async (_, _) => { if (!_settingSourceFilter) await FilterFilesAsync(); };
         _sort.SelectionChanged += async (_, _) => await FilterFilesAsync(); _collapseDuplicates.Click += async (_, _) => await FilterFilesAsync(); _scanDuplicates.Click += async (_, _) => await ScanDuplicatesAsync();
         _previewMode.SelectionChanged += async (_, _) => await ChangePreviewModeAsync(); _modelPicker.SelectionChanged += async (_, _) => await LoadSelectedModelAsync();
+        _modelSearch.TextChanged += (_, _) => FilterModels(); _modelFilter.SelectionChanged += (_, _) => FilterModels();
         for (var index = 0; index < 2; index++) { var slot = index; _slotButtons[index].Click += (_, _) => SetActiveSlot(slot); }
         SetActiveSlot(0); Content = BuildLayout(); Closed += (_, _) => DisposeImages();
     }
@@ -80,7 +87,14 @@ internal sealed class AssetComparisonWindow : Window
         var next = new Button { Content = "Next →" }; next.Click += async (_, _) => { if ((_page + 1) * PageSize < _filteredEntries.Count) { _page++; await RenderPageAsync(); } };
         var duplicateTools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _scanDuplicates, _collapseDuplicates } };
         var filters = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { _fileSearch, WithColumn(_sourceFilter, 1), WithColumn(_sort, 2) } };
-        var middleHeader = new StackPanel { Spacing = 8, Margin = new Thickness(10, 10, 10, 4), Children = { _folderTitle, new TextBlock { Text = "Every PNG directly in this content directory is shown from archive patches and Loose content. Filenames do not need to match.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8793A7"), FontSize = 11 }, filters, duplicateTools } };
+        var keeper = AccentButton("KEEP"); keeper.Click += async (_, _) => await RecordCurrentAsync(AssetDecision.Keeper);
+        var alternative = new Button { Content = "Alternative" }; alternative.Click += async (_, _) => await RecordCurrentAsync(AssetDecision.Alternative);
+        var reject = new Button { Content = "Reject" }; reject.Click += async (_, _) => await RecordCurrentAsync(AssetDecision.Rejected);
+        var review = new Button { Content = "Review later" }; review.Click += async (_, _) => await RecordCurrentAsync(AssetDecision.Review);
+        var stage = new Button { Content = "Stage keepers…" }; stage.Click += async (_, _) => await StageKeepersAsync();
+        var revealProject = new Button { Content = "Reveal project" }; revealProject.Click += (_, _) => RevealProject();
+        var projectTools = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Children = { keeper, alternative, reject, review, _assetCategory, _assetNotes, stage, revealProject, _projectStatus } };
+        var middleHeader = new StackPanel { Spacing = 8, Margin = new Thickness(10, 10, 10, 4), Children = { _folderTitle, new TextBlock { Text = "Every PNG directly in this content directory is shown from archive patches and Loose content. Choose a card, then record it in the persistent Definitive Set below.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8793A7"), FontSize = 11 }, filters, duplicateTools, projectTools } };
         var pager = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(10, 5), Children = { previous, next, _pageStatus } };
         var middle = new Grid { RowDefinitions = new("Auto,*,Auto") }; middle.Children.Add(middleHeader);
         var cardScroll = new ScrollViewer { Content = _cards, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Margin = new Thickness(8) };
@@ -110,7 +124,9 @@ internal sealed class AssetComparisonWindow : Window
             Grid.SetRow(imageBorder, 1); Grid.SetColumn(imageBorder, index); grid.Children.Add(imageBorder);
         }
         _imageComparisonPane = grid;
-        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "MODEL FROM THIS CONTENT PATH", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, _modelPicker, _modelStatus } };
+        var previousModel = new Button { Content = "← Model" }; previousModel.Click += (_, _) => MoveModel(-1); var nextModel = new Button { Content = "Model →" }; nextModel.Click += (_, _) => MoveModel(1);
+        var modelFilters = new Grid { ColumnDefinitions = new("*,Auto,Auto,Auto"), ColumnSpacing = 7, Children = { _modelSearch, WithColumn(_modelFilter, 1), WithColumn(previousModel, 2), WithColumn(nextModel, 3) } };
+        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _modelStatus } };
         var modelPane = new Grid { RowDefinitions = new("Auto,*"), IsVisible = false, Children = { modelHeader } };
         var modelBorder = new Border { Background = Brush.Parse("#090D14"), BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Child = _modelView }; Grid.SetRow(modelBorder, 1); modelPane.Children.Add(modelBorder); _modelPreviewPane = modelPane;
         var previewHost = new Grid { Children = { grid, modelPane } };
@@ -126,6 +142,7 @@ internal sealed class AssetComparisonWindow : Window
         try
         {
             _index = await Task.Run(() => AssetComparisonService.BuildIndex(libraryRoot));
+            _projectPath = DefinitiveAssetProjectService.DefaultPath(libraryRoot); _project = DefinitiveAssetProjectService.LoadOrCreate(_projectPath, libraryRoot); UpdateProjectStatus();
             FilterDirectories();
             _status.Text = $"Indexed {_index.TotalPngFiles:N0} PNGs across {_index.Directories.Count:N0} content directories.";
             DesktopCrashLogger.Log($"Asset comparison indexed {_index.TotalPngFiles:N0} PNGs across {_index.Directories.Count:N0} content directories from {libraryRoot}", null);
@@ -147,8 +164,8 @@ internal sealed class AssetComparisonWindow : Window
         _folderTitle.Text = string.IsNullOrEmpty(directory.LogicalPath) ? "(archive root)" : directory.LogicalPath; _status.Text = "Reading direct PNG variants…";
         var stopwatch = Stopwatch.StartNew();
         _folderEntries = await Task.Run(() => AssetComparisonService.GetDirectoryPngs(_index, directory.LogicalPath));
-        _loadedModelGeometry = null; _modelView.ClearGeometry(); _folderModels = await Task.Run(() => AssetComparisonService.GetDirectoryModels(_index, directory.LogicalPath)); _modelPicker.ItemsSource = _folderModels; _modelPicker.SelectedIndex = _folderModels.Count > 0 ? 0 : -1;
-        _modelStatus.Text = _folderModels.Count == 0 ? "No M2 + SKIN pair exists directly in this content path." : $"{_folderModels.Count:N0} model source(s) available. Select a texture card to track the candidate material beside the live model.";
+        _loadedModelGeometry = null; _modelView.ClearGeometry(); _modelView.SetTexture(null); var discovered = await Task.Run(() => AssetComparisonService.GetRelevantModels(_index, directory.LogicalPath)); _allModels = discovered.Models; _modelDiscoveryScope = discovered.DiscoveryScope; FilterModels();
+        _modelStatus.Text = _allModels.Count == 0 ? "No M2 files were found in this path or its parent content paths." : $"Discovered {_allModels.Count:N0} M2 file(s) under '{_modelDiscoveryScope}', including {_allModels.Count(model => model.Compatibility == AssetModelCompatibility.Ready):N0} ready for live preview.";
         _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase); _collapseDuplicates.IsChecked = false; _collapseDuplicates.IsEnabled = false;
         var sources = new[] { "All patch sources" }.Concat(_folderEntries.Select(entry => entry.Provenance).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase)).ToArray();
         _settingSourceFilter = true; _sourceFilter.ItemsSource = sources; _sourceFilter.SelectedIndex = 0; _settingSourceFilter = false; await FilterFilesAsync();
@@ -180,9 +197,9 @@ internal sealed class AssetComparisonWindow : Window
         foreach (var entry in page)
         {
             var image = new Image { Width = 148, Height = 148, Stretch = Stretch.Uniform };
-            var duplicateText = _duplicateByPath.TryGetValue(entry.FullPath, out var duplicate) ? $" · {duplicate.Entries.Count:N0} exact copies" : string.Empty;
+            var duplicateText = _duplicateByPath.TryGetValue(entry.FullPath, out var duplicate) ? $" · {duplicate.Entries.Count:N0} exact copies" : string.Empty; var decision = DecisionFor(entry.FullPath); var decisionText = decision is null ? string.Empty : $" · {decision}";
             var card = new Button { Width = 170, Height = 200, Margin = new Thickness(3), Padding = new Thickness(7), HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch,
-                Content = new StackPanel { Spacing = 4, Children = { image, new TextBlock { Text = entry.FileName, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 11 }, new TextBlock { Text = $"{entry.Provenance} · {FormatBytes(entry.Bytes)}{duplicateText}", TextTrimming = TextTrimming.CharacterEllipsis, Foreground = Brush.Parse("#C58A2B"), FontSize = 10 } } } };
+                Content = new StackPanel { Spacing = 4, Children = { image, new TextBlock { Text = entry.FileName, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 11 }, new TextBlock { Text = $"{entry.Provenance} · {FormatBytes(entry.Bytes)}{duplicateText}{decisionText}", TextTrimming = TextTrimming.CharacterEllipsis, Foreground = Brush.Parse("#C58A2B"), FontSize = 10 } } } };
             card.Click += async (_, _) => await SelectComparisonAsync(entry); _cards.Children.Add(card); images.Add((image, entry));
         }
         _pageStatus.Text = _filteredEntries.Count == 0 ? "No PNGs match." : $"{_page * PageSize + 1:N0}–{_page * PageSize + page.Length:N0} of {_filteredEntries.Count:N0}";
@@ -197,7 +214,7 @@ internal sealed class AssetComparisonWindow : Window
 
     private async Task SelectComparisonAsync(AssetComparisonEntry entry)
     {
-        _selectedTexture = entry; UpdateModelStatus();
+        _selectedTexture = entry; _modelView.SetTexture(entry.FullPath); UpdateModelStatus();
         var slot = _activeSlot; try
         {
             var bitmap = await Task.Run(() => new Bitmap(entry.FullPath)); _comparisonBitmaps[slot]?.Dispose(); _comparisonBitmaps[slot] = bitmap; _comparisonImages[slot].Source = bitmap;
@@ -220,7 +237,8 @@ internal sealed class AssetComparisonWindow : Window
     private async Task LoadSelectedModelAsync()
     {
         if (_previewMode.SelectedIndex != 1) return;
-        if (_modelPicker.SelectedItem is not AssetComparisonModel model) { _modelStatus.Text = "No M2 + SKIN pair exists directly in this content path."; return; }
+        if (_modelPicker.SelectedItem is not AssetComparisonModel model) { _modelStatus.Text = "No model matches the current model filter."; return; }
+        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _modelView.ClearGeometry(); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
         _modelStatus.Text = $"Loading {model.FileName}…";
         var stopwatch = Stopwatch.StartNew();
         DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
@@ -237,7 +255,7 @@ internal sealed class AssetComparisonWindow : Window
         if (_modelPicker.SelectedItem is not AssetComparisonModel model) return;
         var texture = _selectedTexture is null ? "No texture card selected." : $"Selected texture candidate: {_selectedTexture.Provenance} · {_selectedTexture.FileName}";
         var slots = _loadedModelGeometry is null ? "Texture slots: load pending." : _loadedModelGeometry.TextureSlots.Count == 0 ? "Texture slots: none declared." : "Texture slots: " + string.Join(", ", _loadedModelGeometry.TextureSlots.Select(slot => $"{slot.Index}:{TextureTypeName(slot.Type)}{(string.IsNullOrWhiteSpace(slot.EmbeddedPath) ? string.Empty : $"={slot.EmbeddedPath}")}"));
-        _modelStatus.Text = $"Model: {model.Provenance} · {model.FileName}\n{texture}\n{slots}\nGeometry is live. Exact replaceable-slot and CharSections compositing is still required before this can claim pixel-accurate in-game material binding.";
+        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{texture}\n{slots}\nGeometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
     }
 
     private async Task ScanDuplicatesAsync()
@@ -265,6 +283,74 @@ internal sealed class AssetComparisonWindow : Window
     private void ApplyZoom() { for (var index = 0; index < 2; index++) if (_comparisonBitmaps[index] is { } bitmap) { _comparisonImages[index].Width = bitmap.PixelSize.Width * _zoom; _comparisonImages[index].Height = bitmap.PixelSize.Height * _zoom; } }
     private void SyncScroll(int source) { if (_syncingScroll) return; _syncingScroll = true; _comparisonScrolls[source == 0 ? 1 : 0].Offset = _comparisonScrolls[source].Offset; _syncingScroll = false; }
     private void RevealSlot(int slot) { if (_comparisonImages[slot].Tag is not AssetComparisonEntry entry) return; Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { "/select,", entry.FullPath } }); }
+    private void FilterModels()
+    {
+        var query = _modelSearch.Text?.Trim() ?? string.Empty; IEnumerable<AssetComparisonModel> models = _allModels;
+        if (_modelFilter.SelectedIndex == 0) models = models.Where(model => model.Compatibility == AssetModelCompatibility.Ready);
+        if (query.Length > 0) models = models.Where(model => model.FileName.Contains(query, StringComparison.OrdinalIgnoreCase) || model.Provenance.Contains(query, StringComparison.OrdinalIgnoreCase) || model.LogicalPath.Contains(query, StringComparison.OrdinalIgnoreCase));
+        _folderModels = models.ToArray(); _modelPicker.ItemsSource = _folderModels; _modelPicker.SelectedIndex = _folderModels.Count > 0 ? 0 : -1;
+    }
+
+    private void MoveModel(int offset)
+    {
+        if (_folderModels.Count == 0) return; _modelPicker.SelectedIndex = Math.Clamp(_modelPicker.SelectedIndex + offset, 0, _folderModels.Count - 1);
+    }
+
+    private async Task RecordCurrentAsync(AssetDecision decision)
+    {
+        if (_project is null || _projectPath is null) { _status.Text = "Index an asset library before recording decisions."; return; }
+        var category = _assetCategory.Text ?? "Unsorted"; var notes = _assetNotes.Text ?? string.Empty;
+        try
+        {
+            _status.Text = $"Recording {decision} decision and hashing its deployable source file(s)…";
+            if (_previewMode.SelectedIndex == 1)
+            {
+                if (_modelPicker.SelectedItem is not AssetComparisonModel model) { _status.Text = "Select a model first."; return; }
+                _project = await Task.Run(() => DefinitiveAssetProjectService.RecordModel(_projectPath, _project, model, decision, category, notes));
+                _status.Text = $"Recorded {decision}: {model.Provenance} · {model.FileName} plus its SKIN/animation dependencies.";
+            }
+            else
+            {
+                if (_selectedTexture is null) { _status.Text = "Select a texture card first."; return; }
+                var selected = _selectedTexture; _project = await Task.Run(() => DefinitiveAssetProjectService.RecordTexture(_projectPath, _project, selected, decision, category, notes));
+                _status.Text = $"Recorded {decision}: {selected.Provenance} · {selected.FileName}. The deployable BLP is tracked instead of its PNG preview.";
+            }
+            _assetNotes.Text = string.Empty; UpdateProjectStatus(); await RenderPageAsync();
+            DesktopCrashLogger.Debug("ASSET-PROJECT", "decision-recorded", ("decision", decision), ("entries", _project.Entries.Count), ("project", _projectPath));
+        }
+        catch (Exception exception) { DesktopCrashLogger.Log("Definitive Set decision failed", exception); _status.Text = exception.Message; }
+    }
+
+    private async Task StageKeepersAsync()
+    {
+        if (_project is null || _projectPath is null) { _status.Text = "No Definitive Set project is loaded."; return; }
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose a parent folder for the staged Definitive Set", AllowMultiple = false });
+        var selected = folders.FirstOrDefault()?.TryGetLocalPath(); if (selected is null) return;
+        var output = Path.Combine(selected, "Crucible-Definitive-Stage");
+        try
+        {
+            _status.Text = "Verifying keeper hashes and staging the exact client paths…";
+            var project = _project; var projectPath = _projectPath; var result = await Task.Run(() => DefinitiveAssetProjectService.StageKeepers(projectPath, project, output));
+            _status.Text = $"Staged {result.Files:N0} keeper file(s), {FormatBytes(result.Bytes)}. Manifest: {result.ManifestPath}";
+            Process.Start(new ProcessStartInfo("explorer.exe", result.RootPath) { UseShellExecute = true });
+        }
+        catch (Exception exception) { DesktopCrashLogger.Log("Definitive Set staging failed", exception); _status.Text = exception.Message; }
+    }
+
+    private void UpdateProjectStatus()
+    {
+        if (_project is null) { _projectStatus.Text = "No project"; return; }
+        var groups = _project.Entries.GroupBy(entry => entry.GroupId).ToArray();
+        _projectStatus.Text = $"{groups.Count(group => group.Any(entry => entry.Decision == AssetDecision.Keeper)):N0} keep · {groups.Count(group => group.Any(entry => entry.Decision == AssetDecision.Alternative)):N0} alt · {groups.Count(group => group.All(entry => entry.Decision == AssetDecision.Rejected)):N0} reject";
+    }
+
+    private AssetDecision? DecisionFor(string previewPath) => _project?.Entries.Where(entry => entry.PreviewPath.Equals(previewPath, StringComparison.OrdinalIgnoreCase)).OrderBy(entry => entry.Kind).Select(entry => (AssetDecision?)entry.Decision).FirstOrDefault();
+    private void RevealProject()
+    {
+        if (_projectPath is null) return; var directory = Path.GetDirectoryName(_projectPath)!; Directory.CreateDirectory(directory);
+        if (File.Exists(_projectPath)) Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { "/select,", _projectPath } });
+        else Process.Start(new ProcessStartInfo("explorer.exe", directory) { UseShellExecute = true });
+    }
     private async Task BrowseLibraryAsync()
     {
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Select Crucible asset library", AllowMultiple = false });

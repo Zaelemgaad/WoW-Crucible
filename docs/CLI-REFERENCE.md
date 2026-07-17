@@ -25,6 +25,9 @@ wowcrucible asset library-layout <library-folder> [--apply]
 wowcrucible asset library-status <library-folder>
 wowcrucible asset compare-folders <library-folder> [path-filter]
 wowcrucible asset compare-files <library-folder> <logical-directory>
+wowcrucible asset models <library-folder> <logical-directory>
+wowcrucible asset definitive-status <library-folder>
+wowcrucible asset definitive-stage <library-folder> <output-folder>
 ```
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
@@ -52,6 +55,10 @@ Comparison is directory-first because expansions frequently rename equivalent as
 Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`. Selecting `Character\BloodElf\Female`, for example, shows all direct PNGs under every archive patch folder plus direct PNGs from the matching `Loose\Content` path; it does not guess that differently named files are equivalent. Loose-only paths also appear in the same navigator with `Loose` as their source.
 
 The visual workspace can sort cards by source/name, filename, or file size in either direction. `Scan exact copies` first narrows candidates by byte length, verifies SHA-256, and finally performs a streaming byte-for-byte comparison. It only labels exact groups and enables a collapsed comparison view; it never deletes source or processed assets. The preview-pane selector can switch from synchronized left/right images to any WotLK M2 + SKIN pair discovered directly in the selected content path. The embedded model view is live and rotatable, but it deliberately reports texture binding as unresolved until replaceable M2 texture slots and `CharSections` compositing have been resolved; a raw face or skin fragment is not falsely stretched across an entire model.
+
+The automatic model browser searches recursively below the selected content path. When a texture-only descendant contains no M2, it walks to the nearest parent with models, so selecting `Character\BloodElf\Female\Hair` can expose models stored at `Character\BloodElf\Female`. Models are labeled Ready, Missing Skin, Requires Conversion, or Invalid before loading. Ready models can be searched, switched with previous/next controls, and previewed with the currently selected PNG as a live UV-mapped material candidate.
+
+Keep/Alternative/Reject/Review decisions are saved under `Projects\Definitive-Set.crucible-assets.json` inside the selected library. PNGs are previews only: when the matching BLP exists, the project records and hashes that deployable BLP. Model keeper groups include the M2 plus matching SKIN and external ANIM companions. `definitive-stage` or the **Stage keepers** button re-verifies every hash, preserves logical client paths, and emits `definitive-set.crucible-patch.json`; it never modifies or deletes the processed source library.
 
 ## DBC information, validation, comparison, and editing
 

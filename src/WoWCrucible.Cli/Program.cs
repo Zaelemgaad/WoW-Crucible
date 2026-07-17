@@ -107,6 +107,23 @@ static int Asset(string[] args)
         foreach (var entry in entries) Console.WriteLine($"{entry.Provenance}\t{entry.FileName}\t{entry.Bytes}\t{entry.FullPath}");
         Console.Error.WriteLine($"Found {entries.Count:N0} direct PNG(s) from {entries.Select(entry => entry.Provenance).Distinct(StringComparer.OrdinalIgnoreCase).Count():N0} source(s) in '{logicalDirectory}'."); return 0;
     }
+    if (args is ["models", var modelLibrary, var modelLogicalDirectory])
+    {
+        var index = AssetComparisonService.BuildIndex(modelLibrary); var discovery = AssetComparisonService.GetRelevantModels(index, modelLogicalDirectory);
+        foreach (var model in discovery.Models) Console.WriteLine($"{model.Compatibility}\t{model.Version?.ToString() ?? "-"}\t{model.Provenance}\t{model.LogicalPath}\t{model.FileName}\t{model.SkinPath ?? "-"}\t{model.Status}");
+        Console.Error.WriteLine($"Discovered {discovery.Models.Count:N0} M2 model(s), {discovery.Models.Count(model => model.Compatibility == AssetModelCompatibility.Ready):N0} ready, using nearest content scope '{discovery.DiscoveryScope}'."); return discovery.Models.Any(model => model.Compatibility == AssetModelCompatibility.Ready) ? 0 : 3;
+    }
+    if (args is ["definitive-status", var projectLibrary])
+    {
+        var projectPath = DefinitiveAssetProjectService.DefaultPath(projectLibrary); var project = DefinitiveAssetProjectService.LoadOrCreate(projectPath, projectLibrary);
+        foreach (var group in project.Entries.GroupBy(entry => entry.GroupId)) { var first = group.First(); Console.WriteLine($"{first.Decision}\t{first.Category}\t{group.Count()}\t{first.Provenance}\t{first.ArchivePath}\t{first.Notes}"); }
+        Console.Error.WriteLine($"Definitive Set: {project.Entries.Count:N0} file record(s) across {project.Entries.Select(entry => entry.GroupId).Distinct().Count():N0} decision group(s).\nProject: {projectPath}"); return 0;
+    }
+    if (args is ["definitive-stage", var stageLibrary, var definitiveOutput])
+    {
+        var projectPath = DefinitiveAssetProjectService.DefaultPath(stageLibrary); var project = DefinitiveAssetProjectService.LoadOrCreate(projectPath, stageLibrary); var result = DefinitiveAssetProjectService.StageKeepers(projectPath, project, definitiveOutput);
+        Console.Error.WriteLine($"Staged {result.Files:N0} keeper file(s), {result.Bytes:N0} bytes.\nManifest: {result.ManifestPath}"); return 0;
+    }
     if (args is ["inspect", .. var inspectInputs] && inspectInputs.Length > 0)
     {
         foreach (var input in inspectInputs)
@@ -133,7 +150,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Client(string[] args)
 {

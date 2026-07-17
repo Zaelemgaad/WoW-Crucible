@@ -78,9 +78,15 @@ var matchingDirectory = comparisonIndex.Directories.Single(directory => director
 var looseOnlyEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, @"ExtendedSkins\Character\Human\Female");
 var exactDuplicates = AssetComparisonService.FindExactDuplicates(comparisonEntries);
 var comparisonModels = AssetComparisonService.GetDirectoryModels(comparisonIndex, @"Character\BloodElf\Female");
+var ancestorModels = AssetComparisonService.GetRelevantModels(comparisonIndex, @"Character\BloodElf\Female\Hair");
 if (comparisonIndex.TotalPngFiles != 5 || matchingDirectory.ProvenanceSources != 3 || comparisonEntries.Count != 4 || comparisonEntries.Select(entry => entry.FileName).Distinct().Count() != 4 ||
-    looseOnlyEntries.Count != 1 || looseOnlyEntries[0].Provenance != "Loose" || exactDuplicates.Count != 1 || exactDuplicates[0].Entries.Count != 2 || exactDuplicates[0].RecoverableBytes != 3 || comparisonModels.Count != 1)
+    looseOnlyEntries.Count != 1 || looseOnlyEntries[0].Provenance != "Loose" || exactDuplicates.Count != 1 || exactDuplicates[0].Entries.Count != 2 || exactDuplicates[0].RecoverableBytes != 3 || comparisonModels.Count != 1 || comparisonModels[0].Compatibility != AssetModelCompatibility.Ready || ancestorModels.DiscoveryScope != @"Character\BloodElf\Female" || ancestorModels.Models.Count != 1)
     throw new InvalidOperationException("Directory-first visual comparison did not merge matching Loose content or preserve Loose-only paths.");
+var definitivePath = DefinitiveAssetProjectService.DefaultPath(comparisonRoot); var definitive = DefinitiveAssetProjectService.LoadOrCreate(definitivePath, comparisonRoot);
+definitive = DefinitiveAssetProjectService.RecordTexture(definitivePath, definitive, comparisonEntries[0], AssetDecision.Keeper, "Race", "fixture keeper");
+var definitiveStage = DefinitiveAssetProjectService.StageKeepers(definitivePath, definitive, Path.Combine(assetFixture, "definitive-stage"));
+if (definitive.Entries.Count != 1 || definitiveStage.Files != 1 || !File.Exists(definitiveStage.ManifestPath) || !PatchManifestService.Validate(PatchManifestService.Load(definitiveStage.ManifestPath)).Passed)
+    throw new InvalidOperationException("The persistent Definitive Set did not record, hash, stage, and manifest a keeper.");
 try { _ = AssetComparisonService.GetDirectoryPngs(comparisonIndex, ".."); throw new InvalidOperationException("Asset comparison accepted a path outside its content root."); }
 catch (InvalidOperationException exception) when (exception.Message.Contains("escaped")) { }
 var extractedImport = Path.Combine(assetFixture, "manual-extraction"); Directory.CreateDirectory(Path.Combine(extractedImport, "Interface", "FrameXML"));

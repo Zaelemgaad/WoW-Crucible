@@ -5,9 +5,10 @@ namespace WoWCrucible.Core;
 
 public sealed record AssetComparisonDirectory(string LogicalPath, int PngFiles, int ProvenanceSources);
 public sealed record AssetComparisonEntry(string LogicalPath, string Provenance, string FileName, string FullPath, long Bytes);
-public sealed record AssetComparisonModel(string Provenance, string FileName, string ModelPath, string SkinPath)
+public enum AssetModelCompatibility { Ready, MissingSkin, RequiresConversion, Invalid }
+public sealed record AssetComparisonModel(string LogicalPath, string Provenance, string FileName, string ModelPath, string? SkinPath, AssetModelCompatibility Compatibility, uint? Version, string Status)
 {
-    public override string ToString() => $"{Provenance} · {FileName}";
+    public override string ToString() => $"{(Compatibility == AssetModelCompatibility.Ready ? "READY" : Compatibility.ToString().ToUpperInvariant())} · {Provenance} · {FileName}{(string.IsNullOrEmpty(LogicalPath) ? string.Empty : $" · {LogicalPath}")}";
 }
 public sealed record AssetComparisonDuplicateGroup(string Sha256, long Bytes, IReadOnlyList<AssetComparisonEntry> Entries)
 {
@@ -90,17 +91,25 @@ public static class AssetComparisonService
     }
 
     public static IReadOnlyList<AssetComparisonModel> GetDirectoryModels(AssetComparisonIndex index, string logicalPath)
+        => GetRelevantModels(index, logicalPath).Models;
+
+    public static (string DiscoveryScope, IReadOnlyList<AssetComparisonModel> Models) GetRelevantModels(AssetComparisonIndex index, string logicalPath, CancellationToken cancellationToken = default)
     {
-        var result = new List<AssetComparisonModel>();
-        var directory = Path.GetFullPath(Path.Combine(index.ContentRoot, logicalPath)); EnsureInside(index.ContentRoot, directory);
-        if (Directory.Exists(directory))
-            foreach (var provenanceDirectory in Directory.EnumerateDirectories(directory)) AddModels(result, Path.GetFileName(provenanceDirectory), provenanceDirectory);
-        if (index.LooseContentRoot is { } looseRoot)
+        logicalPath = logicalPath.Trim('\\', '/');
+        foreach (var scope in LogicalAncestors(logicalPath))
         {
-            var looseDirectory = Path.GetFullPath(Path.Combine(looseRoot, logicalPath)); EnsureInside(looseRoot, looseDirectory);
-            if (Directory.Exists(looseDirectory)) AddModels(result, "Loose", looseDirectory);
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = new List<AssetComparisonModel>();
+            var directory = Path.GetFullPath(Path.Combine(index.ContentRoot, scope)); EnsureInside(index.ContentRoot, directory);
+            if (Directory.Exists(directory)) AddArchiveModels(result, index.ContentRoot, scope, directory, cancellationToken);
+            if (index.LooseContentRoot is { } looseRoot)
+            {
+                var looseDirectory = Path.GetFullPath(Path.Combine(looseRoot, scope)); EnsureInside(looseRoot, looseDirectory);
+                if (Directory.Exists(looseDirectory)) AddLooseModels(result, looseRoot, looseDirectory, cancellationToken);
+            }
+            if (result.Count > 0) return (scope, result.OrderBy(model => model.Compatibility).ThenBy(model => model.Provenance, StringComparer.OrdinalIgnoreCase).ThenBy(model => model.LogicalPath, StringComparer.OrdinalIgnoreCase).ThenBy(model => model.FileName, StringComparer.OrdinalIgnoreCase).ToArray());
         }
-        return result.OrderBy(model => model.Provenance, StringComparer.OrdinalIgnoreCase).ThenBy(model => model.FileName, StringComparer.OrdinalIgnoreCase).ToArray();
+        return (logicalPath, []);
     }
 
     private static void ReadCatalog(string catalog, Dictionary<string, (int Files, HashSet<string> Sources)> counts, CancellationToken cancellationToken)
@@ -137,13 +146,61 @@ public static class AssetComparisonService
         var info = new FileInfo(file); result.Add(new(logicalPath, provenance, info.Name, info.FullName, info.Length));
     }
 
-    private static void AddModels(List<AssetComparisonModel> result, string provenance, string directory)
+    private static void AddArchiveModels(List<AssetComparisonModel> result, string contentRoot, string scope, string directory, CancellationToken cancellationToken)
     {
-        foreach (var modelPath in Directory.EnumerateFiles(directory, "*.m2", SearchOption.TopDirectoryOnly))
+        foreach (var modelPath in Directory.EnumerateFiles(directory, "*.m2", SearchOption.AllDirectories))
         {
-            var stem = Path.GetFileNameWithoutExtension(modelPath);
-            var skinPath = Directory.EnumerateFiles(directory, stem + "*.skin", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
-            if (skinPath is not null) result.Add(new(provenance, Path.GetFileName(modelPath), modelPath, skinPath));
+            cancellationToken.ThrowIfCancellationRequested();
+            var relative = Path.GetRelativePath(contentRoot, modelPath); var parts = relative.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2) continue;
+            var provenance = parts[^2]; var logical = parts.Length == 2 ? string.Empty : string.Join(Path.DirectorySeparatorChar, parts[..^2]);
+            result.Add(ProbeModel(logical, provenance, modelPath));
+        }
+    }
+
+    private static void AddLooseModels(List<AssetComparisonModel> result, string looseRoot, string directory, CancellationToken cancellationToken)
+    {
+        foreach (var modelPath in Directory.EnumerateFiles(directory, "*.m2", SearchOption.AllDirectories))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            result.Add(ProbeModel(Path.GetDirectoryName(Path.GetRelativePath(looseRoot, modelPath)) ?? string.Empty, "Loose", modelPath));
+        }
+    }
+
+    private static AssetComparisonModel ProbeModel(string logicalPath, string provenance, string modelPath)
+    {
+        try
+        {
+            using var stream = new FileStream(modelPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.SequentialScan);
+            Span<byte> header = stackalloc byte[8]; if (stream.Read(header) != header.Length) return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, null, AssetModelCompatibility.Invalid, null, "M2 header is truncated.");
+            var magic = Encoding.ASCII.GetString(header[..4]); var version = BitConverter.ToUInt32(header[4..]);
+            var directory = Path.GetDirectoryName(modelPath)!; var stem = Path.GetFileNameWithoutExtension(modelPath);
+            var skins = Directory.EnumerateFiles(directory, stem + "*.skin", SearchOption.TopDirectoryOnly).OrderBy(path => path.EndsWith("00.skin", StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+            var skin = skins.FirstOrDefault(IsSkin);
+            if (magic == "MD21") return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.RequiresConversion, version, "Modern chunked MD21 model; convert it to Wrath before preview/deployment.");
+            if (magic != "MD20") return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.Invalid, version, $"Invalid M2 signature '{magic}'.");
+            if (version != 264) return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.RequiresConversion, version, $"M2 version {version}; Wrath preview requires version 264.");
+            return skin is null
+                ? new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, null, AssetModelCompatibility.MissingSkin, version, $"Wrath M2 is valid but no matching {stem}00.skin is available.")
+                : new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.Ready, version, $"Wrath M2 version 264 with {Path.GetFileName(skin)}.");
+        }
+        catch (Exception exception) { return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, null, AssetModelCompatibility.Invalid, null, exception.Message); }
+    }
+
+    private static bool IsSkin(string path)
+    {
+        try { using var stream = File.OpenRead(path); Span<byte> magic = stackalloc byte[4]; return stream.Read(magic) == 4 && Encoding.ASCII.GetString(magic) == "SKIN"; }
+        catch { return false; }
+    }
+
+    private static IEnumerable<string> LogicalAncestors(string path)
+    {
+        var current = path;
+        while (true)
+        {
+            yield return current;
+            if (string.IsNullOrEmpty(current)) yield break;
+            var parent = Path.GetDirectoryName(current); if (parent is null || parent.Equals(current, StringComparison.OrdinalIgnoreCase)) yield break; current = parent;
         }
     }
 
