@@ -1,27 +1,34 @@
 using System.Diagnostics;
 using WoWCrucible.Core;
 
-if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return Help();
+var devbugRequested = args.Any(argument => argument.Equals("--devbug", StringComparison.OrdinalIgnoreCase));
+var commandArguments = args.Where(argument => !argument.Equals("--devbug", StringComparison.OrdinalIgnoreCase)).ToArray();
+using var devbug = CliDevbugSession.TryStart(devbugRequested, args);
+var exitCode = 0;
 
 try
 {
-    return args[0].ToLowerInvariant() switch
+    exitCode = commandArguments.Length == 0 || commandArguments[0] is "help" or "--help" or "-h" ? Help() : commandArguments[0].ToLowerInvariant() switch
     {
-        "dbc" => Dbc(args[1..]),
-        "db" => Database(args[1..]).GetAwaiter().GetResult(),
-        "server" => Server(args[1..]).GetAwaiter().GetResult(),
-        "client" => Client(args[1..]),
-        "asset" => Asset(args[1..]),
-        "mpq" => Mpq(args[1..]),
-        "manifest" => Manifest(args[1..]),
-        _ => Fail($"Unknown command: {args[0]}")
+        "dbc" => Dbc(commandArguments[1..]),
+        "db" => Database(commandArguments[1..]).GetAwaiter().GetResult(),
+        "server" => Server(commandArguments[1..]).GetAwaiter().GetResult(),
+        "client" => Client(commandArguments[1..]),
+        "asset" => Asset(commandArguments[1..]),
+        "mpq" => Mpq(commandArguments[1..]),
+        "manifest" => Manifest(commandArguments[1..]),
+        _ => Fail($"Unknown command: {commandArguments[0]}")
     };
 }
 catch (Exception ex)
 {
     Console.Error.WriteLine($"ERROR: {ex.Message}");
-    return 1;
+    devbug?.RecordException(ex);
+    exitCode = 1;
 }
+
+devbug?.Complete(exitCode);
+return exitCode;
 
 static int Asset(string[] args)
 {
@@ -640,7 +647,7 @@ static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLin
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, audit item acquisition paths, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
+    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, audit item acquisition paths, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 

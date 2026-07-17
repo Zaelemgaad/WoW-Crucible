@@ -3,7 +3,7 @@ namespace WoWCrucible.Core;
 public static class CruciblePaths
 {
     private const string ProductFolder = "WoWCrucible";
-    public static string ApplicationDirectory { get; } = Path.GetFullPath(AppContext.BaseDirectory);
+    public static string ApplicationDirectory { get; } = ResolveApplicationDirectory();
     public static string DataRoot { get; } = ResolveDataRoot();
     public static bool IsPortable => DataRoot.Equals(ApplicationDirectory, StringComparison.OrdinalIgnoreCase);
     public static string SettingsDirectory => Path.Combine(DataRoot, "Settings");
@@ -16,6 +16,16 @@ public static class CruciblePaths
     public static string LegacySettingsFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), ProductFolder, "settings.json");
 
     public static string SettingsFileForRead => File.Exists(SettingsFile) ? SettingsFile : LegacySettingsFile;
+
+    private static string ResolveApplicationDirectory()
+    {
+        var processPath = Environment.ProcessPath;
+        var entryName = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name;
+        if (!string.IsNullOrWhiteSpace(processPath) && !string.IsNullOrWhiteSpace(entryName)
+            && Path.GetFileNameWithoutExtension(processPath).Equals(entryName, StringComparison.OrdinalIgnoreCase))
+            return Path.GetFullPath(Path.GetDirectoryName(processPath)!);
+        return Path.GetFullPath(AppContext.BaseDirectory);
+    }
 
     private static string ResolveDataRoot()
     {

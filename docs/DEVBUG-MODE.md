@@ -17,6 +17,15 @@ Enable **DEVBUG ON** in the desktop header. The choice persists in `Settings\des
 WoWCrucible.Desktop-latest.exe --devbug
 ```
 
+For any CLI command, put `--devbug` anywhere on the command line. The clearest form is before the command group:
+
+```powershell
+.\wowcrucible.exe --devbug mpq list "G:\patch-H.MPQ"
+.\wowcrucible.exe --devbug dbc validate schema.xml dbc-folder --recursive
+```
+
+The CLI continues printing normally and mirrors its output, errors, sanitized arguments, duration, exit code, and full unexpected exception details into `Logs\Debug\WoWCrucible-CLI-Devbug-*.log`. It does not open another terminal because the CLI already runs inside one. The newest three CLI Devbug sessions are retained independently from desktop sessions. Database password environment-variable values are never read into the log.
+
 Crucible opens a live terminal and writes the same structured events to `Logs\Debug\WoWCrucible-Devbug-<timestamp>-p<process>.log`. Events contain:
 
 - millisecond timestamp and local UTC offset;
