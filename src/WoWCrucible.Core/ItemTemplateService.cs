@@ -10,7 +10,7 @@ public sealed record ItemDraft(
     uint Entry, string Name, int Class, int Subclass, uint DisplayId, int Quality, int InventoryType,
     uint ItemLevel, uint RequiredLevel, uint BuyPrice, uint SellPrice, uint Bonding, uint Flags,
     float Armor, float DamageMin, float DamageMax, uint Delay, uint MaxDurability, string Description,
-    IReadOnlyList<ItemStatDraft>? Stats = null, IReadOnlyList<ItemSpellDraft>? Spells = null);
+    IReadOnlyList<ItemStatDraft>? Stats = null, IReadOnlyList<ItemSpellDraft>? Spells = null, uint ItemSetId = 0);
 
 public sealed record ItemWritePlan(string Table, IReadOnlyDictionary<string, object> Values, IReadOnlyList<string> OmittedFields)
 {
@@ -36,7 +36,7 @@ public static class ItemTemplateAdapter
 {
     public static DatabaseTableCapability CreatePortableTable()
     {
-        var names = new List<string> { "entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description" };
+        var names = new List<string> { "entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description", "itemset" };
         for (var slot = 1; slot <= 10; slot++) { names.Add($"stat_type{slot}"); names.Add($"stat_value{slot}"); }
         for (var slot = 1; slot <= 5; slot++) names.AddRange([$"spellid_{slot}", $"spelltrigger_{slot}", $"spellcharges_{slot}", $"spellppmRate_{slot}", $"spellcooldown_{slot}", $"spellcategory_{slot}", $"spellcategorycooldown_{slot}"]);
         return new("item_template", names.Select((name, index) => new DatabaseColumnCapability(name, name is "name" or "description" ? "varchar" : "int", name is "name" or "description" ? "varchar(255)" : "int", false, "0", name == "entry" ? "PRI" : string.Empty, string.Empty, index + 1)).ToArray());
@@ -53,7 +53,7 @@ public static class ItemTemplateAdapter
             ("ItemLevel", draft.ItemLevel), ("RequiredLevel", draft.RequiredLevel), ("BuyPrice", draft.BuyPrice),
             ("SellPrice", draft.SellPrice), ("bonding", draft.Bonding), ("Flags", draft.Flags), ("armor", draft.Armor),
             ("dmg_min1", draft.DamageMin), ("dmg_max1", draft.DamageMax), ("dmg_type1", 0), ("delay", draft.Delay),
-            ("MaxDurability", draft.MaxDurability), ("description", draft.Description ?? string.Empty)
+            ("MaxDurability", draft.MaxDurability), ("description", draft.Description ?? string.Empty), ("itemset", draft.ItemSetId)
         };
         var values = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         var omitted = new List<string>();

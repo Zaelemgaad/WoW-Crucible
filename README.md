@@ -12,6 +12,9 @@ Client formats and server integration are separate: a client-build profile decla
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
+- Searches the live world schema for items with no known vendor, loot, quest, starting-item, profession, fishing, or spell-loot acquisition path; the result is searchable in the Avalonia item workbench and exportable from the CLI.
+- Clones a complete item to a new ID transactionally, preserving every current/custom `item_template` column and locale row, with optional item-set reassignment and strict no-overwrite behavior.
+- Inspects and clones `ItemSet.dbc` rows with explicit member-ID remapping, resolves set-bonus spell names, and edits all eight bonus slots into a separate output DBC.
 - Detects an installed AzerothCore/TrinityCore workspace from its live `worldserver.conf`, automatically imports server DBC and world-database settings, and supports split Windows-folder/WSL-server launchers such as the bundled test workspace.
 - Models core-specific DBC consumers, including AzerothCore SQL overlays and unused tables; an optional core-source path derives current mappings directly from `DBCStores.cpp` instead of relying on the built-in profile.
 - Audits a server DBC against its live SQL overlay, decodes known GT class/level rows, identifies the effective server value, and exports an idempotent DBC-to-SQL migration preview without modifying the database.
@@ -42,7 +45,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Includes a visual Client Inspector for indexing/resuming a whole installation, color-coded archive scopes, loose runtime/config/AddOn inventory, plain-language compatibility guidance, content-category summaries, direct archive browsing, and provenance-preserving extraction.
 - Turns an extracted/effective client DBC directory into a reviewed client-to-server deployment plan: byte identity, row/field counts, current-core consumer, SQL-overlay warning, restart requirement, unresolved layer conflicts, portable JSON, and separate non-live staging trees for the patch and server DBC candidates.
 - Plans client fusion against an explicit stock/effective base, omits base-identical files, deduplicates identical candidates, exports a reviewable plan, blocks path conflicts, recommends additive path/ID remapping instead of silent replacement, and stages only resolved changes into a small patch manifest.
-- Ships a scriptable `wowcrucible.exe` CLI for DBC information and MPQ list/extract/create/update operations.
+- Ships a scriptable `wowcrucible.exe` CLI across DBC, MPQ, manifests, clients, installed servers, live database items, item sets, and resumable bulk asset-library workflows, plus built-in group help and a complete shipped reference.
 - Compares layered DBC directories as base-only, override-only, identical, or genuinely overridden, with cancellable semantic row/field comparison (decoded strings do not differ merely because their offsets moved).
 - Promotes selected fields or complete rows from an override DBC into an output DBC by record ID, safely re-interns strings, and saves/reapplies semantic promotion manifests.
 - Generates and applies additive-only DBC promotion manifests containing IDs absent from the baseline, preserving every existing record by construction.
@@ -57,6 +60,8 @@ Client formats and server integration are separate: a client-build profile decla
 - Embeds the first native 3D preview stage directly in Crucible: validated WotLK MD20 vertices plus companion SKIN topology are rendered as an interactive shaded mesh with drag rotation and wheel zoom in both the asset converter and Item Creator. Display-ID/MPQ resolution, BLP textures, render passes, geosets, equipment, animation, and particles remain explicit next stages.
 
 ## Command line
+
+See the complete copy-paste-oriented [CLI reference](docs/CLI-REFERENCE.md) for command groups, options, exit codes, safety behavior, and resumable bulk asset-library processing.
 
 ```text
 wowcrucible asset inspect modern-model.m2 [building.wmo ...]

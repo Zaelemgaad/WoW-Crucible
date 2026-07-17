@@ -24,6 +24,7 @@
                     <Button Content="Save As" Click="SaveAsClick" />
                     <Button Content="Close" Click="CloseDocumentClick" />
                     <Button Content="Logs" Click="OpenLogsClick" />
+                    <Button Content="CLI Guide" Click="OpenCliGuideClick" />
                     <TextBox x:Name="SearchBox" Width="220" PlaceholderText="Search loaded table…" TextChanged="SearchChanged" />
                 </StackPanel>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
@@ -39,6 +40,7 @@
                 <TextBlock Text="WORKSPACE" Foreground="#7F8A9F" FontSize="10" FontWeight="Bold" Margin="6,4,0,9" />
                 <StackPanel Grid.Row="1" Spacing="4">
                     <Button HorizontalContentAlignment="Left" Content="▦  DBC tables" />
+                    <Button HorizontalContentAlignment="Left" Content="◈  Items &amp; sets" Click="OpenItemWorkbenchClick" />
                     <Button HorizontalContentAlignment="Left" Content="◇  MPQ patches" />
                     <Button HorizontalContentAlignment="Left" Content="⬡  Assets &amp; models" />
                     <Button HorizontalContentAlignment="Left" Content="⚙  Server &amp; SQL" />

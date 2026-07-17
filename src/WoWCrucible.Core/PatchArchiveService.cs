@@ -172,12 +172,17 @@ public sealed class PatchArchiveService
         return result.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    public void Extract(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
+    public void Extract(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default,
+        bool overwriteExisting = true, bool preserveLocaleVariants = false, Action<MpqFileEntry, Exception>? extractionFailure = null)
     {
         archivePath = Path.GetFullPath(archivePath);
         destinationRoot = Path.GetFullPath(destinationRoot);
         Directory.CreateDirectory(destinationRoot);
         var entries = files.ToArray();
+        var duplicatePaths = preserveLocaleVariants
+            ? entries.GroupBy(entry => PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : [];
+        var occurrences = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         if (!Native.SFileOpenArchive(archivePath, 0, 0, out var archive)) ThrowNative("open the MPQ archive");
         try
         {
@@ -185,13 +190,26 @@ public sealed class PatchArchiveService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var internalPath = PatchInputMapper.NormalizeArchivePath(entries[index].ArchivePath);
-                var destination = Path.GetFullPath(Path.Combine(destinationRoot, internalPath.Replace('\\', Path.DirectorySeparatorChar)));
+                var outputPath = internalPath;
+                if (duplicatePaths.Contains(internalPath))
+                {
+                    occurrences.TryGetValue(internalPath, out var occurrence); occurrences[internalPath] = ++occurrence;
+                    var extension = Path.GetExtension(internalPath); var stem = internalPath[..^extension.Length];
+                    outputPath = $"{stem}.locale-{entries[index].Locale:X4}.variant-{occurrence:D2}{extension}";
+                    Native.SFileSetLocale(entries[index].Locale);
+                }
+                var destination = Path.GetFullPath(Path.Combine(destinationRoot, outputPath.Replace('\\', Path.DirectorySeparatorChar)));
                 var relativeDestination = Path.GetRelativePath(destinationRoot, destination);
                 if (relativeDestination.Equals("..", StringComparison.Ordinal) || relativeDestination.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
                     throw new InvalidOperationException($"Unsafe archive path: {internalPath}");
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                if (!Native.SFileExtractFile(archive, internalPath, destination, 0)) ThrowNative($"extract '{internalPath}'");
-                progress?.Report((index + 1, entries.Length, internalPath));
+                if (!overwriteExisting && File.Exists(destination)) { progress?.Report((index + 1, entries.Length, outputPath)); continue; }
+                if (!Native.SFileExtractFile(archive, internalPath, destination, 0))
+                {
+                    try { ThrowNative($"extract '{internalPath}'"); }
+                    catch (Exception exception) when (extractionFailure is not null) { extractionFailure(entries[index], exception); }
+                }
+                progress?.Report((index + 1, entries.Length, outputPath));
             }
         }
         finally { Native.SFileCloseArchive(archive); }
@@ -288,5 +306,8 @@ public sealed class PatchArchiveService
         [DllImport("StormLib.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.I1)]
         internal static extern bool SFileExtractFile(IntPtr archive, [MarshalAs(UnmanagedType.LPStr)] string internalPath, string destinationPath, uint searchScope);
+
+        [DllImport("StormLib.dll", SetLastError = true)]
+        internal static extern uint SFileSetLocale(uint locale);
     }
 }

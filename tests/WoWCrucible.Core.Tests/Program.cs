@@ -103,8 +103,9 @@ var itemDraft = new ItemDraft(900001, "Crucible's Blade", 2, 8, 123, 4, 17, 200,
 var azerothPlan = ItemTemplateAdapter.CreatePlan(itemDraft, azerothItemTable);
 var trinityPlan = ItemTemplateAdapter.CreatePlan(itemDraft, trinityItemTable);
 var portablePlan = ItemTemplateAdapter.CreatePlan(itemDraft, ItemTemplateAdapter.CreatePortableTable());
+var itemSetPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { ItemSetId = 4321 }, ItemTemplateAdapter.CreatePortableTable());
 var gapStatsPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(0, 0), new(7, 75)] }, trinityItemTable);
-if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Values["StatsCount"] is not 2 || trinityPlan.Values.ContainsKey("MaxDurability") || trinityPlan.Values["spellid_1"] is not 12345 || portablePlan.OmittedFields.Count != 0)
+if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Values["StatsCount"] is not 2 || trinityPlan.Values.ContainsKey("MaxDurability") || trinityPlan.Values["spellid_1"] is not 12345 || portablePlan.OmittedFields.Count != 0 || itemSetPlan.Values["itemset"] is not 4321u)
     throw new InvalidOperationException("Capability-aware item mapping or SQL escaping failed.");
 if (gapStatsPlan.Values["StatsCount"] is not 1 || gapStatsPlan.Values["stat_type1"] is not 7 || gapStatsPlan.Values["stat_value1"] is not 75 || gapStatsPlan.Values["stat_type2"] is not 0)
     throw new InvalidOperationException("Trinity item stat slots were not compacted before StatsCount was calculated.");

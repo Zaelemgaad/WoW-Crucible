@@ -26,6 +26,35 @@ catch (Exception ex)
 static int Asset(string[] args)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["library-plan", var sourceRoot, var libraryRoot, .. var planOptions])
+    {
+        var maxText = Option(planOptions, "--max-gb=") ?? "2";
+        var unknown = planOptions.Where(option => !option.StartsWith("--max-gb=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset library-plan option: {unknown[0]}");
+        var maximum = checked((long)(double.Parse(maxText, System.Globalization.CultureInfo.InvariantCulture) * 1024 * 1024 * 1024));
+        var plan = BulkAssetLibraryService.CreatePlan(sourceRoot, libraryRoot, maximum, new Progress<(int Done, int Total, string Path)>(value => Console.Error.WriteLine($"Plan {value.Done:N0}/{value.Total:N0}\t{value.Path}")));
+        Console.Error.WriteLine($"Asset library plan: {plan.Archives.Count(archive => archive.Eligible):N0} eligible archive(s), {plan.Archives.Count(archive => !archive.Eligible):N0} skipped by size, {plan.Archives.Sum(archive => archive.Entries):N0} archive entries, {plan.LooseBlpFiles + plan.Archives.Sum(archive => archive.BlpFiles):N0} BLP file(s).\nPlan: {Path.Combine(plan.LibraryRoot, "asset-library-plan.json")}");
+        return plan.Archives.Any(archive => archive.Error is not null) ? 3 : 0;
+    }
+    if (args is ["library-run", var runLibraryRoot, var converterPath, .. var runOptions])
+    {
+        var workersText = Option(runOptions, "--workers=") ?? "6";
+        var unknown = runOptions.Where(option => !option.StartsWith("--workers=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset library-run option: {unknown[0]}");
+        var progress = new Progress<(string Stage, int Done, int Total, string Path)>(value => Console.Error.WriteLine($"{value.Stage}\t{value.Done:N0}/{value.Total:N0}\t{value.Path}"));
+        var result = BulkAssetLibraryService.RunAsync(runLibraryRoot, converterPath, int.Parse(workersText, System.Globalization.CultureInfo.InvariantCulture), progress).GetAwaiter().GetResult();
+        Console.Error.WriteLine($"Asset library complete: {result.CompletedArchives:N0} archive(s), {result.CopiedLooseBlps:N0} loose BLP copy/copies, {result.ConvertedPngs:N0} PNG conversion(s), {result.FailedArchives:N0} archive failure(s), {result.ConversionFailures:N0} conversion failure(s).\nCatalog: {result.CatalogPath}\nCheckpoint: {result.CheckpointPath}");
+        return result.FailedArchives == 0 && result.ConversionFailures == 0 ? 0 : 3;
+    }
+    if (args is ["library-status", var statusLibraryRoot])
+    {
+        var plan = BulkAssetLibraryService.LoadPlan(statusLibraryRoot);
+        var checkpointPath = Path.Combine(Path.GetFullPath(statusLibraryRoot), "asset-library-checkpoint.json");
+        var checkpoint = File.Exists(checkpointPath) ? System.Text.Json.JsonSerializer.Deserialize<BulkAssetLibraryCheckpoint>(File.ReadAllText(checkpointPath)) : null;
+        Console.WriteLine($"Source\t{plan.SourceRoot}\nLibrary\t{plan.LibraryRoot}\nEligibleArchives\t{plan.Archives.Count(archive => archive.Eligible && archive.Error is null)}\nCompletedArchives\t{checkpoint?.CompletedArchiveIds.Count ?? 0}\nSkippedArchives\t{plan.Archives.Count(archive => !archive.Eligible)}\nArchiveEntries\t{plan.Archives.Sum(archive => archive.Entries)}\nBLPs\t{plan.LooseBlpFiles + plan.Archives.Sum(archive => archive.BlpFiles)}\nConvertedPNGs\t{checkpoint?.ConvertedPngFiles ?? 0}\nEntryOrArchiveFailures\t{checkpoint?.Failures.Count ?? 0}\nCheckpoint\t{(File.Exists(checkpointPath) ? checkpointPath : "not started")}");
+        if (checkpoint is not null) foreach (var failure in checkpoint.Failures) Console.WriteLine($"FAILURE\t{failure.Key}\t{failure.Value}");
+        return checkpoint?.Failures.Count > 0 ? 3 : 0;
+    }
     if (args is ["inspect", .. var inspectInputs] && inspectInputs.Length > 0)
     {
         foreach (var input in inspectInputs)
@@ -52,7 +81,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-status <library-folder>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Client(string[] args)
 {
@@ -225,22 +254,49 @@ static int ServerHelp(int code = 0)
 
 static async Task<int> Database(string[] args)
 {
-    if (args.Length > 0 && args[0] is "help" or "--help" or "-h") { Console.WriteLine("Usage: wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]"); return 0; }
-    if (args is not ["inspect", var host, var portText, var user, var database, .. var options])
-        return Fail("Usage: wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]");
-    var unknown = options.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase)).ToArray();
-    if (unknown.Length > 0) return Fail($"Unknown database option: {unknown[0]}");
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return DatabaseHelp();
+    if (args.Length < 5) return DatabaseHelp(2);
+    var operation = args[0]; var host = args[1]; var portText = args[2]; var user = args[3]; var database = args[4];
     if (!uint.TryParse(portText, out var port) || port is 0 or > 65535) return Fail("Database port must be from 1 to 65535.");
-    var passwordEnvironment = options.FirstOrDefault(option => option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase))?[15..] ?? "WOW_CRUCIBLE_DB_PASSWORD";
+    var rawOptions = args[5..];
+    var passwordEnvironment = rawOptions.FirstOrDefault(option => option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase))?[15..] ?? "WOW_CRUCIBLE_DB_PASSWORD";
+    var sslText = rawOptions.FirstOrDefault(option => option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase))?[6..] ?? "Preferred";
     var password = Environment.GetEnvironmentVariable(passwordEnvironment);
     if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
-    var sslText = options.FirstOrDefault(option => option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase))?[6..] ?? "Preferred";
     if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
-    var capabilities = await new DatabaseCapabilityService().InspectAsync(new(host, port, user, password, database, ssl));
-    Console.WriteLine($"Server\t{capabilities.ServerVersion}"); Console.WriteLine($"Database\t{capabilities.Database}");
-    foreach (var table in capabilities.Tables.Values.OrderBy(table => table.Name)) Console.WriteLine($"TABLE\t{table.Name}\t{table.Columns.Count} columns");
-    return capabilities.Tables.Count > 0 ? 0 : 1;
+    var profile = new DatabaseConnectionProfile(host, port, user, password, database, ssl);
+    if (operation.Equals("inspect", StringComparison.OrdinalIgnoreCase))
+    {
+        var unknown = rawOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown database option: {unknown[0]}");
+        var capabilities = await new DatabaseCapabilityService().InspectAsync(profile);
+        Console.WriteLine($"Server\t{capabilities.ServerVersion}"); Console.WriteLine($"Database\t{capabilities.Database}");
+        foreach (var table in capabilities.Tables.Values.OrderBy(table => table.Name)) Console.WriteLine($"TABLE\t{table.Name}\t{table.Columns.Count} columns");
+        return capabilities.Tables.Count > 0 ? 0 : 1;
+    }
+    if (operation.Equals("item-audit", StringComparison.OrdinalIgnoreCase))
+    {
+        var output = Option(rawOptions, "--output="); var unknown = rawOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown item-audit option: {unknown[0]}");
+        var audit = await new ItemCatalogService().AuditAsync(profile);
+        foreach (var item in audit.NoKnownAcquisitionPath) Console.WriteLine($"{item.Entry}\t{item.Quality}\t{item.ItemLevel}\t{item.ItemSetId}\t{item.Name}");
+        if (output is not null) File.WriteAllText(output, System.Text.Json.JsonSerializer.Serialize(audit, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        Console.Error.WriteLine($"Item acquisition audit: {audit.NoKnownAcquisitionPath.Count:N0} of {audit.TotalItems:N0} item(s) have no known path across {audit.CheckedSources.Count:N0} available source table(s). Missing source families: {string.Join(", ", audit.MissingSources)}{(output is null ? string.Empty : $". Report: {Path.GetFullPath(output)}")}");
+        return 0;
+    }
+    if (operation.Equals("item-clone", StringComparison.OrdinalIgnoreCase) && args.Length >= 7 && uint.TryParse(args[5], out var sourceEntry) && uint.TryParse(args[6], out var newEntry))
+    {
+        var cloneOptions = args[7..]; var suffix = Option(cloneOptions, "--suffix=") ?? " Variant"; var setText = Option(cloneOptions, "--itemset=");
+        var unknown = cloneOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--suffix=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--itemset=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown item-clone option: {unknown[0]}");
+        uint? itemSet = setText is null ? null : uint.Parse(setText, System.Globalization.CultureInfo.InvariantCulture);
+        var result = await new ItemCatalogService().CloneAsync(profile, sourceEntry, newEntry, suffix, itemSet);
+        Console.WriteLine($"Source\t{result.SourceEntry}\t{result.SourceName}\nClone\t{result.NewEntry}\t{result.NewName}\nItemSet\t{result.ItemSetId}\nColumns\t{result.CopiedColumns}\nLocaleRows\t{result.CopiedLocaleRows}"); return 0;
+    }
+    return DatabaseHelp(2);
 }
+
+static int DatabaseHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db item-audit <host> <port> <user> <database> [--password-env=NAME] [--output=report.json]\n  wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=\" Variant\"] [--itemset=ID]\n\nPasswords are read from WOW_CRUCIBLE_DB_PASSWORD by default and are never accepted as command arguments.", code);
 
 static int Manifest(string[] args)
 {
@@ -286,6 +342,31 @@ static int Manifest(string[] args)
 static int Dbc(string[] args)
 {
     if (args.Length > 0 && args[0] is "help" or "--help" or "-h") return DbcHelp();
+    if (args is ["itemset", "inspect", var itemSetPath, var itemSetSchema, var itemSetIdText, .. var itemSetOptions] && uint.TryParse(itemSetIdText, out var itemSetId))
+    {
+        var spellPath = Option(itemSetOptions, "--spell="); var unknown = itemSetOptions.Where(option => !option.StartsWith("--spell=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown itemset inspect option: {unknown[0]}");
+        var set = ItemSetDbcService.Inspect(itemSetPath, itemSetSchema, itemSetId, spellPath);
+        Console.WriteLine($"ID\t{set.Id}\nName\t{set.Name}\nRequiredSkill\t{set.RequiredSkill}\nRequiredSkillRank\t{set.RequiredSkillRank}\nItems\t{string.Join(",", set.ItemIds)}");
+        foreach (var effect in set.Effects) Console.WriteLine($"EFFECT\t{effect.Slot}\t{effect.RequiredItems}\t{effect.SpellId}\t{effect.SpellName ?? "unknown spell"}"); return 0;
+    }
+    if (args is ["itemset", "clone", var cloneItemSetPath, var cloneItemSetSchema, var cloneItemSetOutput, var sourceSetText, var newSetText, .. var itemSetCloneOptions] && uint.TryParse(sourceSetText, out var sourceSet) && uint.TryParse(newSetText, out var newSet))
+    {
+        var mapText = Option(itemSetCloneOptions, "--map=") ?? throw new ArgumentException("Item-set cloning requires --map=old:new,old:new for every member."); var suffix = Option(itemSetCloneOptions, "--suffix=") ?? " Variant";
+        var unknown = itemSetCloneOptions.Where(option => !option.StartsWith("--map=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--suffix=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown itemset clone option: {unknown[0]}");
+        var map = mapText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(pair => pair.Split(':')).ToDictionary(pair => uint.Parse(pair[0]), pair => uint.Parse(pair[1]));
+        var result = ItemSetDbcService.Clone(cloneItemSetPath, cloneItemSetSchema, cloneItemSetOutput, sourceSet, newSet, map, suffix);
+        Console.Error.WriteLine($"Cloned item set {result.SourceSetId} to {result.NewSetId} '{result.Name}' with {result.ItemIdMap.Count:N0} remapped member(s): {result.OutputPath}"); return 0;
+    }
+    if (args is ["itemset", "effects", var effectItemSetPath, var effectItemSetSchema, var effectItemSetOutput, var effectSetText, .. var effectOptions] && uint.TryParse(effectSetText, out var effectSet))
+    {
+        var unknown = effectOptions.Where(option => !option.StartsWith("--effect=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown itemset effects option: {unknown[0]}");
+        var effects = effectOptions.Where(option => option.StartsWith("--effect=", StringComparison.OrdinalIgnoreCase)).Select((option, index) =>
+        {
+            var pair = option[9..].Split(':'); if (pair.Length != 2) throw new ArgumentException("Each --effect must be required-items:spell-id."); return new ItemSetEffect(index + 1, uint.Parse(pair[0]), uint.Parse(pair[1]), null);
+        }).ToArray();
+        ItemSetDbcService.SetEffects(effectItemSetPath, effectItemSetSchema, effectItemSetOutput, effectSet, effects); Console.Error.WriteLine($"Wrote {effects.Length:N0} item-set effect slot(s) for set {effectSet}: {Path.GetFullPath(effectItemSetOutput)}"); return 0;
+    }
     if (args is ["rows", var rowsPath, var rowsSchemaPath, .. var rawIds] && rawIds.Length > 0)
     {
         var rowsFile = WdbcFile.Load(rowsPath); var tableName = Path.GetFileNameWithoutExtension(rowsPath);
@@ -496,13 +577,13 @@ static int Mpq(string[] args)
 }
 
 static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--require=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
-static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc rows <file.dbc> <schema.xml> <id>...\n  wowcrucible dbc find <file.dbc> <schema.xml> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc promote additions <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc clone-remap where <base.dbc> <source.dbc> <schema.xml> <column> <value>... --manifest=map.json --output=merged.dbc [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source.dbc> <parent-merged.dbc> <parent-schema.xml> <parent-map.json> <foreign-column> <child-base.dbc> <child-source.dbc> <child-schema.xml> --child-map=map.json --child-output=child.dbc --parent-output=parent.dbc\n  wowcrucible dbc copy-row <base.dbc> <source.dbc> <schema.xml> <source-id> <target-id> <output.dbc> [--set=Column=Value]...\n  wowcrucible dbc set-row <input.dbc> <schema.xml> <id> <output.dbc> --set=Column=Value [...]", code);
+static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc rows <file.dbc> <schema.xml> <id>...\n  wowcrucible dbc find <file.dbc> <schema.xml> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc promote additions <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc clone-remap where <base.dbc> <source.dbc> <schema.xml> <column> <value>... --manifest=map.json --output=merged.dbc [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source.dbc> <parent-merged.dbc> <parent-schema.xml> <parent-map.json> <foreign-column> <child-base.dbc> <child-source.dbc> <child-schema.xml> --child-map=map.json --child-output=child.dbc --parent-output=parent.dbc\n  wowcrucible dbc copy-row <base.dbc> <source.dbc> <schema.xml> <source-id> <target-id> <output.dbc> [--set=Column=Value]...\n  wowcrucible dbc set-row <input.dbc> <schema.xml> <id> <output.dbc> --set=Column=Value [...]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]", code);
 static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>", code);
 static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLine(message); else Console.Error.WriteLine(message); return code; }
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  asset inspect <model.m2|building.wmo>...\n  asset workspace <new-output-folder> <files/folders...>\n  client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  client clear-cache <client-root>\n  client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  client corpus <output-listfile> <index-directory>...\n  client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]\n  client show <index-directory>\n  client fusion <base-root> <override-root>... [--stage=review-folder]\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  server bindings <installed-server-folder> [--source=core-source]\n  server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=sync.sql]\n  server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=server-review]\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter] [--content-only] [--format=json]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> output-folder");
+    Console.WriteLine("WoW Crucible CLI\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, audit item acquisition paths, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 

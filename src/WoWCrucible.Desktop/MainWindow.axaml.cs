@@ -411,6 +411,31 @@ public partial class MainWindow : Window
     }
 
     private void OpenLogsClick(object? sender, RoutedEventArgs e) => DesktopCrashLogger.OpenDirectory();
+    private async void OpenItemWorkbenchClick(object? sender, RoutedEventArgs e) => await new ItemWorkbenchWindow().ShowDialog(this);
+    private async void OpenCliGuideClick(object? sender, RoutedEventArgs e)
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "docs", "CLI-REFERENCE.md");
+        var text = File.Exists(path)
+            ? await File.ReadAllTextAsync(path)
+            : "The complete CLI reference was not found beside this build. Run wowcrucible --help or wowcrucible <group> --help for the built-in command map.";
+        var window = new Window
+        {
+            Title = "WoW Crucible — CLI guide", Width = 980, Height = 760,
+            MinWidth = 700, MinHeight = 500, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Content = new Grid
+            {
+                RowDefinitions = new RowDefinitions("Auto,*"), Margin = new Thickness(16),
+                Children =
+                {
+                    new TextBlock { Text = "CLI REFERENCE · searchable with Ctrl+F after opening the Markdown file in an editor", Foreground = new SolidColorBrush(Color.Parse("#C58A2B")), FontSize = 11, FontWeight = FontWeight.Bold, Margin = new Thickness(2,0,0,10) },
+                    WithGridRow(new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), FontSize = 12 }, 1)
+                }
+            }
+        };
+        await window.ShowDialog(this);
+    }
+
+    private static T WithGridRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
 
     private void DbcScrollChanged(object? sender, RangeBaseValueChangedEventArgs e)
     {
