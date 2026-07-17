@@ -31,15 +31,23 @@ public static class DefinitiveAssetProjectService
         return Save(projectPath, Upsert(project, [Create(entry.FullPath, source, entry.LogicalPath, archivePath, entry.Provenance, DefinitiveAssetKind.Texture, decision, category, notes, Group(entry.FullPath))]));
     }
 
-    public static DefinitiveAssetProject RecordModel(string projectPath, DefinitiveAssetProject project, AssetComparisonModel model, AssetDecision decision, string category, string notes)
+    public static DefinitiveAssetProject RecordModel(string projectPath, DefinitiveAssetProject project, AssetComparisonIndex index, AssetComparisonModel model, AssetDecision decision, string category, string notes)
     {
         if (decision == AssetDecision.Keeper && model.Compatibility != AssetModelCompatibility.Ready)
             throw new InvalidOperationException($"This model cannot become a deployable keeper yet: {model.Status} Record it as Review/Alternative or convert and validate it first.");
+        var graph = AssetDependencyGraphService.AnalyzeModel(index, model);
+        if (decision == AssetDecision.Keeper && graph.Blocking.Count > 0) throw new InvalidOperationException("This model has blocking dependencies:" + Environment.NewLine + string.Join(Environment.NewLine, graph.Blocking.Select(dependency => $"- {dependency.Message}")));
         var group = Group(model.ModelPath); var directory = Path.GetDirectoryName(model.ModelPath)!; var stem = Path.GetFileNameWithoutExtension(model.ModelPath);
         var files = new[] { model.ModelPath }.Concat(Directory.EnumerateFiles(directory, stem + "*", SearchOption.TopDirectoryOnly).Where(path => Path.GetExtension(path).Equals(".skin", StringComparison.OrdinalIgnoreCase) || Path.GetExtension(path).Equals(".anim", StringComparison.OrdinalIgnoreCase))).Distinct(StringComparer.OrdinalIgnoreCase);
-        var entries = files.Select(path => Create(model.ModelPath, path, model.LogicalPath, CombineArchive(model.LogicalPath, Path.GetFileName(path)), model.Provenance,
-            path.Equals(model.ModelPath, StringComparison.OrdinalIgnoreCase) ? DefinitiveAssetKind.Model : Path.GetExtension(path).Equals(".skin", StringComparison.OrdinalIgnoreCase) ? DefinitiveAssetKind.Skin : DefinitiveAssetKind.Animation,
-            decision, category, notes, group)).ToArray();
+        var embedded = graph.Resolved.Where(dependency => dependency.Kind == "embedded-texture" && dependency.SourcePath is not null).ToDictionary(dependency => dependency.SourcePath!, StringComparer.OrdinalIgnoreCase);
+        files = files.Concat(embedded.Keys).Distinct(StringComparer.OrdinalIgnoreCase);
+        var entries = files.Select(path =>
+        {
+            var dependency = embedded.GetValueOrDefault(path); var extension = Path.GetExtension(path);
+            var kind = path.Equals(model.ModelPath, StringComparison.OrdinalIgnoreCase) ? DefinitiveAssetKind.Model : extension.Equals(".skin", StringComparison.OrdinalIgnoreCase) ? DefinitiveAssetKind.Skin : extension.Equals(".anim", StringComparison.OrdinalIgnoreCase) ? DefinitiveAssetKind.Animation : DefinitiveAssetKind.Texture;
+            var archivePath = dependency?.ClientPath ?? CombineArchive(model.LogicalPath, Path.GetFileName(path)); var logicalPath = Path.GetDirectoryName(archivePath) ?? string.Empty; var preview = kind == DefinitiveAssetKind.Texture && File.Exists(Path.ChangeExtension(path, ".png")) ? Path.ChangeExtension(path, ".png") : model.ModelPath;
+            return Create(preview, path, logicalPath, archivePath, model.Provenance, kind, decision, category, notes, group);
+        }).ToArray();
         return Save(projectPath, Upsert(project, entries));
     }
 

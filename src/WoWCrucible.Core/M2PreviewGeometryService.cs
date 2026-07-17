@@ -54,6 +54,13 @@ public static class M2PreviewGeometryService
         return new(modelPath, skinPath, vertices, normals, textureCoordinates, triangles, minimum, maximum, textureSlots);
     }
 
+    public static IReadOnlyList<M2TextureSlot> InspectTextureSlots(string modelPath)
+    {
+        modelPath = Path.GetFullPath(modelPath); if (!File.Exists(modelPath)) throw new FileNotFoundException("The M2 model does not exist.", modelPath);
+        var model = File.ReadAllBytes(modelPath); if (model.Length < 8 || FourCc(model, 0) != "MD20" || ReadUInt(model, 4) != 264) throw new InvalidDataException("Texture-slot inspection requires an unwrapped Wrath MD20 version 264 model.");
+        return ReadTextureSlots(model);
+    }
+
     private static IReadOnlyList<M2TextureSlot> ReadTextureSlots(byte[] model)
     {
         const int CountOffset = 0x50; const int DataOffset = 0x54; const int TextureStride = 16; const int MaximumTextures = 4096;

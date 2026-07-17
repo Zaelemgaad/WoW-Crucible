@@ -11,6 +11,16 @@ Exit codes are consistent across workflows:
 - `2`: missing/invalid command syntax.
 - `3`: work completed but unresolved conflicts, blocked assets, warnings that require review, or partial failures remain.
 
+## Portable content projects and ID reservations
+
+```text
+wowcrucible project create <folder> <name> [--target=wotlk-335a-12340] [--asset-library=folder]
+wowcrucible project status <project-folder>
+wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]
+```
+
+A content project separates Assets, DBC, SQL, Manifests, Reports, and Staging outputs and keeps `ids.crucible.json` as its durable allocation registry. Domains such as `CreatureTemplate`, `CreatureModelData`, `CreatureDisplayInfo`, `CreatureDisplayInfoExtra`, `Spell`, `Item`, `Race`, and `Class` have independent ID spaces. Supply `--occupied` from a live DBC/SQL audit whenever IDs will be deployed; omitting it still reserves against the project registry but returns warning exit code `3` because absence from the project does not prove absence from the target server.
+
 ## Asset inspection and libraries
 
 ```text
@@ -54,11 +64,13 @@ Comparison is directory-first because expansions frequently rename equivalent as
 
 Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`. Selecting `Character\BloodElf\Female`, for example, shows all direct PNGs under every archive patch folder plus direct PNGs from the matching `Loose\Content` path; it does not guess that differently named files are equivalent. Loose-only paths also appear in the same navigator with `Loose` as their source.
 
-The visual workspace can sort cards by source/name, filename, or file size in either direction. `Scan exact copies` first narrows candidates by byte length, verifies SHA-256, and finally performs a streaming byte-for-byte comparison. It only labels exact groups and enables a collapsed comparison view; it never deletes source or processed assets. The preview-pane selector can switch from synchronized left/right images to any WotLK M2 + SKIN pair discovered directly in the selected content path. The embedded model view is live and rotatable, but it deliberately reports texture binding as unresolved until replaceable M2 texture slots and `CharSections` compositing have been resolved; a raw face or skin fragment is not falsely stretched across an entire model.
+The visual workspace can sort cards by source/name, filename, or file size in either direction. `Scan exact copies` first narrows candidates by byte length, verifies SHA-256, and finally performs a streaming byte-for-byte comparison. It only labels exact groups and enables a collapsed comparison view; it never deletes source or processed assets. The preview-pane selector can switch from synchronized left/right images to compatible WotLK M2 + SKIN sources found by the automatic model browser. The embedded model view is live and rotatable; applying a selected PNG uses the model's real first UV map but remains an explicitly labeled candidate preview until replaceable slots and full `CharSections` composition are resolved.
 
 The automatic model browser searches recursively below the selected content path. When a texture-only descendant contains no M2, it walks to the nearest parent with models, so selecting `Character\BloodElf\Female\Hair` can expose models stored at `Character\BloodElf\Female`. Models are labeled Ready, Missing Skin, Requires Conversion, or Invalid before loading. Ready models can be searched, switched with previous/next controls, and previewed with the currently selected PNG as a live UV-mapped material candidate.
 
 Keep/Alternative/Reject/Review decisions are saved under `Projects\Definitive-Set.crucible-assets.json` inside the selected library. PNGs are previews only: when the matching BLP exists, the project records and hashes that deployable BLP. Model keeper groups include the M2 plus matching SKIN and external ANIM companions. `definitive-stage` or the **Stage keepers** button re-verifies every hash, preserves logical client paths, and emits `definitive-set.crucible-patch.json`; it never modifies or deletes the processed source library.
+
+For rapid triage, **Undecided only** hides recorded images, **Auto-advance** selects the next candidate, and the keyboard shortcuts are `K` keeper, `A` alternative, `R` review later, and `X` reject. Model keepers additionally resolve embedded BLP paths from the same provenance. A missing dependency or a texture found only in another patch source blocks Keeper rather than silently creating a mixed model. Replaceable body, hair, cape, fur, and creature-skin slots remain visible as required appearance/DBC bindings.
 
 ## DBC information, validation, comparison, and editing
 

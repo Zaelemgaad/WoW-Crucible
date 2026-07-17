@@ -15,6 +15,7 @@ try
         "server" => Server(commandArguments[1..]).GetAwaiter().GetResult(),
         "client" => Client(commandArguments[1..]),
         "asset" => Asset(commandArguments[1..]),
+        "project" => Project(commandArguments[1..]),
         "mpq" => Mpq(commandArguments[1..]),
         "manifest" => Manifest(commandArguments[1..]),
         _ => Fail($"Unknown command: {commandArguments[0]}")
@@ -151,6 +152,34 @@ static int Asset(string[] args)
 }
 
 static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+
+static int Project(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ProjectHelp();
+    if (args is ["create", var root, var name, .. var createOptions])
+    {
+        var target = Option(createOptions, "--target=") ?? "wotlk-335a-12340"; var library = Option(createOptions, "--asset-library=");
+        var unknown = createOptions.Where(option => !option.StartsWith("--target=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--asset-library=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown project create option: {unknown[0]}");
+        var project = CrucibleContentProjectService.Create(root, name, target, library); Console.Error.WriteLine($"Created {project.Name} at {Path.GetFullPath(root)}\nTarget: {project.TargetProfile}\nID registry: {Path.Combine(Path.GetFullPath(root), project.IdRegistryFile)}"); return 0;
+    }
+    if (args is ["status", var projectRoot])
+    {
+        var project = CrucibleContentProjectService.Load(projectRoot); var registry = CrucibleContentProjectService.LoadRegistry(projectRoot);
+        Console.WriteLine($"Name\t{project.Name}\nTarget\t{project.TargetProfile}\nAssetLibrary\t{project.AssetLibrary ?? "not linked"}\nReservations\t{registry.Reservations.Count}\nReservedIDs\t{registry.Reservations.Sum(reservation => reservation.Values.Count)}");
+        foreach (var group in registry.Reservations.GroupBy(reservation => reservation.Domain)) Console.WriteLine($"DOMAIN\t{group.Key}\t{group.Sum(reservation => reservation.Values.Count)}"); return 0;
+    }
+    if (args is ["reserve-ids", var reserveRoot, var domainText, var countText, .. var reserveOptions] && Enum.TryParse<ContentIdDomain>(domainText, true, out var domain) && int.TryParse(countText, out var count))
+    {
+        var startText = Option(reserveOptions, "--start=") ?? "100000"; var occupiedPath = Option(reserveOptions, "--occupied="); var purpose = Option(reserveOptions, "--purpose=") ?? "Unspecified content";
+        var unknown = reserveOptions.Where(option => !option.StartsWith("--start=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--occupied=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--purpose=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown ID reservation option: {unknown[0]}");
+        if (!uint.TryParse(startText, out var start)) return Fail("--start must be an unsigned integer."); IReadOnlyList<uint> occupied = occupiedPath is null ? [] : CrucibleContentProjectService.ReadOccupiedIds(occupiedPath);
+        var result = CrucibleContentProjectService.ReserveIds(reserveRoot, domain, count, start, occupied, purpose); Console.WriteLine(string.Join(Environment.NewLine, result.Reservation.Values));
+        Console.Error.WriteLine($"Reserved {result.Reservation.Values.Count:N0} {domain} ID(s), {result.Reservation.Values.First():N0}–{result.Reservation.Values.Last():N0}, for {result.Reservation.Purpose}.{(occupiedPath is null ? " WARNING: no live DBC/SQL occupied-ID list was supplied." : $" Checked occupied IDs from {Path.GetFullPath(occupiedPath)}.")}"); return occupiedPath is null ? 3 : 0;
+    }
+    return ProjectHelp(2);
+}
+
+static int ProjectHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible project create <folder> <name> [--target=wotlk-335a-12340] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, Race, Class, Faction, Mount, Quest, Custom", code);
 
 static int Client(string[] args)
 {
@@ -664,7 +693,7 @@ static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLin
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, audit item acquisition paths, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
+    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, audit item acquisition paths, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 

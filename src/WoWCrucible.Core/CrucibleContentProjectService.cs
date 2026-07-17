@@ -1,0 +1,58 @@
+using System.Text.Json;
+
+namespace WoWCrucible.Core;
+
+public enum ContentIdDomain { Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, Race, Class, Faction, Mount, Quest, Custom }
+public sealed record ContentIdReservation(string Id, ContentIdDomain Domain, IReadOnlyList<uint> Values, string Purpose, DateTimeOffset CreatedUtc);
+public sealed record ContentIdRegistry(int FormatVersion, DateTimeOffset UpdatedUtc, IReadOnlyList<ContentIdReservation> Reservations);
+public sealed record CrucibleContentProject(int FormatVersion, string Name, string TargetProfile, DateTimeOffset CreatedUtc, DateTimeOffset UpdatedUtc, string IdRegistryFile, string? AssetLibrary);
+
+public static class CrucibleContentProjectService
+{
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
+
+    public static CrucibleContentProject Create(string rootPath, string name, string targetProfile = "wotlk-335a-12340", string? assetLibrary = null)
+    {
+        rootPath = Path.GetFullPath(rootPath); Directory.CreateDirectory(rootPath); var projectPath = Path.Combine(rootPath, "project.crucible.json");
+        if (File.Exists(projectPath)) throw new IOException($"A Crucible content project already exists at {projectPath}");
+        foreach (var directory in new[] { "Assets", "DBC", "SQL", "Manifests", "Reports", "Staging" }) Directory.CreateDirectory(Path.Combine(rootPath, directory));
+        var now = DateTimeOffset.UtcNow; var project = new CrucibleContentProject(1, name.Trim(), targetProfile.Trim(), now, now, "ids.crucible.json", string.IsNullOrWhiteSpace(assetLibrary) ? null : Path.GetFullPath(assetLibrary));
+        WriteAtomic(projectPath, project); WriteAtomic(Path.Combine(rootPath, project.IdRegistryFile), new ContentIdRegistry(1, now, [])); return project;
+    }
+
+    public static CrucibleContentProject Load(string projectOrRoot)
+    {
+        var path = ResolveProjectPath(projectOrRoot); var project = JsonSerializer.Deserialize<CrucibleContentProject>(File.ReadAllText(path), JsonOptions) ?? throw new InvalidDataException("The content project is empty.");
+        if (project.FormatVersion != 1) throw new InvalidDataException($"Unsupported content project format: {project.FormatVersion}"); return project;
+    }
+
+    public static ContentIdRegistry LoadRegistry(string projectOrRoot)
+    {
+        var projectPath = ResolveProjectPath(projectOrRoot); var project = Load(projectPath); var path = Path.Combine(Path.GetDirectoryName(projectPath)!, project.IdRegistryFile);
+        var registry = JsonSerializer.Deserialize<ContentIdRegistry>(File.ReadAllText(path), JsonOptions) ?? throw new InvalidDataException("The ID registry is empty.");
+        if (registry.FormatVersion != 1) throw new InvalidDataException($"Unsupported ID registry format: {registry.FormatVersion}"); return registry;
+    }
+
+    public static (ContentIdRegistry Registry, ContentIdReservation Reservation) ReserveIds(string projectOrRoot, ContentIdDomain domain, int count, uint start, IEnumerable<uint> occupiedIds, string purpose)
+    {
+        if (count is < 1 or > 1_000_000) throw new ArgumentOutOfRangeException(nameof(count), "Reserve from 1 to 1,000,000 IDs at once."); if (start == 0) start = 1;
+        var projectPath = ResolveProjectPath(projectOrRoot); var project = Load(projectPath); var registryPath = Path.Combine(Path.GetDirectoryName(projectPath)!, project.IdRegistryFile); var registry = LoadRegistry(projectPath);
+        var occupied = occupiedIds.ToHashSet(); foreach (var existing in registry.Reservations.Where(reservation => reservation.Domain == domain)) occupied.UnionWith(existing.Values);
+        var values = new uint[count]; var candidate = start;
+        for (var index = 0; index < values.Length;)
+        {
+            if (!occupied.Contains(candidate)) { values[index++] = candidate; occupied.Add(candidate); }
+            if (candidate == uint.MaxValue && index < values.Length) throw new OverflowException($"No room remains to reserve {count:N0} IDs in {domain} from {start:N0}."); candidate++;
+        }
+        var reservation = new ContentIdReservation(Guid.NewGuid().ToString("N"), domain, values, string.IsNullOrWhiteSpace(purpose) ? "Unspecified content" : purpose.Trim(), DateTimeOffset.UtcNow);
+        var updated = registry with { UpdatedUtc = DateTimeOffset.UtcNow, Reservations = registry.Reservations.Append(reservation).ToArray() }; WriteAtomic(registryPath, updated); return (updated, reservation);
+    }
+
+    public static IReadOnlyList<uint> ReadOccupiedIds(string path)
+    {
+        var result = new HashSet<uint>(); foreach (var line in File.ReadLines(Path.GetFullPath(path))) foreach (var token in line.Split([',', ';', '\t', ' '], StringSplitOptions.RemoveEmptyEntries)) if (uint.TryParse(token, out var value)) result.Add(value); return result.Order().ToArray();
+    }
+
+    private static string ResolveProjectPath(string path) { path = Path.GetFullPath(path); return Directory.Exists(path) ? Path.Combine(path, "project.crucible.json") : path; }
+    private static void WriteAtomic<T>(string path, T value) { Directory.CreateDirectory(Path.GetDirectoryName(path)!); var temporary = path + ".tmp"; File.WriteAllText(temporary, JsonSerializer.Serialize(value, JsonOptions)); File.Move(temporary, path, true); }
+}

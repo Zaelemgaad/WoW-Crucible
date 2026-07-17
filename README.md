@@ -62,6 +62,8 @@ Client formats and server integration are separate: a client-build profile decla
 - Begins a native modern-to-3.3.5 asset conversion pipeline: safely identifies MD20/MD21 M2 and chunked WMO structures, validates chunk bounds, inventories companion skins/animations/WMO groups and modern FileDataID chunks, hashes immutable source snapshots, and writes a machine-readable downgrade report in a dedicated conversion workspace. Modern output writing remains blocked until each translated structure can be validated instead of silently discarded.
 - Embeds native 3D preview directly in Crucible: validated WotLK MD20 vertices, UV coordinates, and companion SKIN topology are rendered as an interactive mesh with drag rotation and wheel zoom. Asset Compare automatically searches the selected path and its nearest useful parent, labels every M2 as ready/missing-skin/requires-conversion/invalid, switches quickly among sources, and can map the selected PNG candidate onto the live geometry. Exact multi-layer `CharSections` composition, material passes, geosets, equipment, animation, and particles remain explicit next stages rather than being inaccurately simulated.
 - Maintains a persistent `Projects\Definitive-Set.crucible-assets.json` beside an asset library. Texture or model decisions can be marked Keeper, Alternative, Rejected, or Review with category and notes. Records preserve provenance, hashes, logical client destinations, deployable BLP sources, and M2 SKIN/animation companions. Keeper staging re-verifies hashes and produces a tiny manifest-driven patch tree without changing the processed library.
+- Resolves model dependency closure before accepting a deployable keeper. Same-source SKIN, ANIM, and embedded BLP paths are included automatically; missing paths and cross-source-only matches block staging, while replaceable character/creature texture slots are reported as explicit future DBC/appearance bindings.
+- Creates portable content-project folders with separate Assets, DBC, SQL, Manifests, Reports, and Staging outputs plus a persistent ID registry. ID reservations are isolated by table/domain and skip both supplied live occupied IDs and every earlier project reservation.
 
 ## Command line
 
@@ -161,7 +163,7 @@ The corpus test runner accepts a WDBX 12340 definition XML and a directory conta
 
 ## Roadmap
 
-1. Project-wide ID allocation, validation, and portable content projects.
+1. Connect the new portable content-project/ID registry to live DBC and SQL occupancy scans and unified validation/change plans.
 2. Add a WoWDBDefs DBD provider and cross-check it against WDBX definitions per target build.
 3. Add BLP preview/conversion plus recursive M2/WMO/ADT asset dependency validation.
 4. Expand the Spell Workspace with named flags, searchable references, related-table navigation, and optional project-local SQLite bulk editing.

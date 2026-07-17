@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -22,6 +23,8 @@ internal sealed class AssetComparisonWindow : Window
     private readonly ComboBox _sort = new() { MinWidth = 170, ItemsSource = new[] { "Source then name", "Name A–Z", "Size: largest first", "Size: smallest first" }, SelectedIndex = 0 };
     private readonly Button _scanDuplicates = new() { Content = "Scan exact copies" };
     private readonly CheckBox _collapseDuplicates = new() { Content = "Collapse exact copies", IsEnabled = false };
+    private readonly CheckBox _undecidedOnly = new() { Content = "Undecided only", IsChecked = true };
+    private readonly CheckBox _autoAdvance = new() { Content = "Auto-advance", IsChecked = true };
     private readonly ComboBox _previewMode = new() { MinWidth = 165, ItemsSource = new[] { "Image comparison", "Live model preview" }, SelectedIndex = 0 };
     private readonly ComboBox _modelPicker = new() { MinWidth = 300 };
     private readonly TextBox _modelSearch = new() { PlaceholderText = "Filter discovered M2 models…" };
@@ -44,7 +47,7 @@ internal sealed class AssetComparisonWindow : Window
     private AssetComparisonIndex? _index; private IReadOnlyList<AssetComparisonEntry> _folderEntries = []; private IReadOnlyList<AssetComparisonEntry> _filteredEntries = [];
     private IReadOnlyDictionary<string, AssetComparisonDuplicateGroup> _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<AssetComparisonModel> _allModels = []; private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
-    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project;
+    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph;
     private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter;
 
     public AssetComparisonWindow(string? libraryRoot = null)
@@ -65,11 +68,11 @@ internal sealed class AssetComparisonWindow : Window
         });
         _directories.SelectionChanged += async (_, _) => await SelectDirectoryAsync(); _directorySearch.TextChanged += (_, _) => FilterDirectories();
         _fileSearch.TextChanged += async (_, _) => await FilterFilesAsync(); _sourceFilter.SelectionChanged += async (_, _) => { if (!_settingSourceFilter) await FilterFilesAsync(); };
-        _sort.SelectionChanged += async (_, _) => await FilterFilesAsync(); _collapseDuplicates.Click += async (_, _) => await FilterFilesAsync(); _scanDuplicates.Click += async (_, _) => await ScanDuplicatesAsync();
+        _sort.SelectionChanged += async (_, _) => await FilterFilesAsync(); _collapseDuplicates.Click += async (_, _) => await FilterFilesAsync(); _undecidedOnly.Click += async (_, _) => await FilterFilesAsync(); _scanDuplicates.Click += async (_, _) => await ScanDuplicatesAsync();
         _previewMode.SelectionChanged += async (_, _) => await ChangePreviewModeAsync(); _modelPicker.SelectionChanged += async (_, _) => await LoadSelectedModelAsync();
         _modelSearch.TextChanged += (_, _) => FilterModels(); _modelFilter.SelectionChanged += (_, _) => FilterModels();
         for (var index = 0; index < 2; index++) { var slot = index; _slotButtons[index].Click += (_, _) => SetActiveSlot(slot); }
-        SetActiveSlot(0); Content = BuildLayout(); Closed += (_, _) => DisposeImages();
+        KeyDown += async (_, e) => await HandleDecisionKeyAsync(e); SetActiveSlot(0); Content = BuildLayout(); Closed += (_, _) => DisposeImages();
     }
 
     private Control BuildLayout()
@@ -85,7 +88,7 @@ internal sealed class AssetComparisonWindow : Window
 
         var previous = new Button { Content = "← Previous" }; previous.Click += async (_, _) => { if (_page > 0) { _page--; await RenderPageAsync(); } };
         var next = new Button { Content = "Next →" }; next.Click += async (_, _) => { if ((_page + 1) * PageSize < _filteredEntries.Count) { _page++; await RenderPageAsync(); } };
-        var duplicateTools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _scanDuplicates, _collapseDuplicates } };
+        var duplicateTools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _scanDuplicates, _collapseDuplicates, _undecidedOnly, _autoAdvance, new TextBlock { Text = "Keys: K keep · A alternative · R review · X reject", VerticalAlignment = VerticalAlignment.Center, Foreground = Brush.Parse("#8793A7"), FontSize = 10 } } };
         var filters = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { _fileSearch, WithColumn(_sourceFilter, 1), WithColumn(_sort, 2) } };
         var keeper = AccentButton("KEEP"); keeper.Click += async (_, _) => await RecordCurrentAsync(AssetDecision.Keeper);
         var alternative = new Button { Content = "Alternative" }; alternative.Click += async (_, _) => await RecordCurrentAsync(AssetDecision.Alternative);
@@ -164,7 +167,7 @@ internal sealed class AssetComparisonWindow : Window
         _folderTitle.Text = string.IsNullOrEmpty(directory.LogicalPath) ? "(archive root)" : directory.LogicalPath; _status.Text = "Reading direct PNG variants…";
         var stopwatch = Stopwatch.StartNew();
         _folderEntries = await Task.Run(() => AssetComparisonService.GetDirectoryPngs(_index, directory.LogicalPath));
-        _loadedModelGeometry = null; _modelView.ClearGeometry(); _modelView.SetTexture(null); var discovered = await Task.Run(() => AssetComparisonService.GetRelevantModels(_index, directory.LogicalPath)); _allModels = discovered.Models; _modelDiscoveryScope = discovered.DiscoveryScope; FilterModels();
+        _loadedModelGeometry = null; _modelDependencyGraph = null; _modelView.ClearGeometry(); _modelView.SetTexture(null); var discovered = await Task.Run(() => AssetComparisonService.GetRelevantModels(_index, directory.LogicalPath)); _allModels = discovered.Models; _modelDiscoveryScope = discovered.DiscoveryScope; FilterModels();
         _modelStatus.Text = _allModels.Count == 0 ? "No M2 files were found in this path or its parent content paths." : $"Discovered {_allModels.Count:N0} M2 file(s) under '{_modelDiscoveryScope}', including {_allModels.Count(model => model.Compatibility == AssetModelCompatibility.Ready):N0} ready for live preview.";
         _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase); _collapseDuplicates.IsChecked = false; _collapseDuplicates.IsEnabled = false;
         var sources = new[] { "All patch sources" }.Concat(_folderEntries.Select(entry => entry.Provenance).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase)).ToArray();
@@ -175,7 +178,7 @@ internal sealed class AssetComparisonWindow : Window
     private async Task FilterFilesAsync()
     {
         var query = _fileSearch.Text?.Trim() ?? string.Empty; var source = _sourceFilter.SelectedItem as string;
-        IEnumerable<AssetComparisonEntry> filtered = _folderEntries.Where(entry => (query.Length == 0 || entry.FileName.Contains(query, StringComparison.OrdinalIgnoreCase)) && (string.IsNullOrEmpty(source) || source == "All patch sources" || entry.Provenance.Equals(source, StringComparison.OrdinalIgnoreCase)));
+        IEnumerable<AssetComparisonEntry> filtered = _folderEntries.Where(entry => (query.Length == 0 || entry.FileName.Contains(query, StringComparison.OrdinalIgnoreCase)) && (string.IsNullOrEmpty(source) || source == "All patch sources" || entry.Provenance.Equals(source, StringComparison.OrdinalIgnoreCase)) && (_undecidedOnly.IsChecked != true || DecisionFor(entry.FullPath) is null));
         if (_collapseDuplicates.IsChecked == true) filtered = filtered.GroupBy(entry => _duplicateByPath.TryGetValue(entry.FullPath, out var group) ? group.Sha256 : entry.FullPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First());
         filtered = (_sort.SelectedItem as string) switch
         {
@@ -238,13 +241,13 @@ internal sealed class AssetComparisonWindow : Window
     {
         if (_previewMode.SelectedIndex != 1) return;
         if (_modelPicker.SelectedItem is not AssetComparisonModel model) { _modelStatus.Text = "No model matches the current model filter."; return; }
-        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _modelView.ClearGeometry(); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
+        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _modelDependencyGraph = null; _modelView.ClearGeometry(); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
         _modelStatus.Text = $"Loading {model.FileName}…";
         var stopwatch = Stopwatch.StartNew();
         DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
         try
         {
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath)); _loadedModelGeometry = geometry; _modelView.SetGeometry(geometry); UpdateModelStatus();
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath)); _loadedModelGeometry = geometry; _modelDependencyGraph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model)); _modelView.SetGeometry(geometry); UpdateModelStatus();
             DesktopCrashLogger.Debug("MODEL", "comparison-preview-success", ("model", model.ModelPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("texture_slots", geometry.TextureSlots.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (Exception exception) { DesktopCrashLogger.Log("Comparison model preview failed", exception); _modelStatus.Text = exception.Message; }
@@ -255,7 +258,8 @@ internal sealed class AssetComparisonWindow : Window
         if (_modelPicker.SelectedItem is not AssetComparisonModel model) return;
         var texture = _selectedTexture is null ? "No texture card selected." : $"Selected texture candidate: {_selectedTexture.Provenance} · {_selectedTexture.FileName}";
         var slots = _loadedModelGeometry is null ? "Texture slots: load pending." : _loadedModelGeometry.TextureSlots.Count == 0 ? "Texture slots: none declared." : "Texture slots: " + string.Join(", ", _loadedModelGeometry.TextureSlots.Select(slot => $"{slot.Index}:{TextureTypeName(slot.Type)}{(string.IsNullOrWhiteSpace(slot.EmbeddedPath) ? string.Empty : $"={slot.EmbeddedPath}")}"));
-        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{texture}\n{slots}\nGeometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
+        var dependencies = _modelDependencyGraph is null ? "Dependencies: inspection pending." : $"Dependencies: {_modelDependencyGraph.Resolved.Count:N0} resolved · {_modelDependencyGraph.ExternalBindings.Count:N0} appearance/DBC binding(s) · {_modelDependencyGraph.Blocking.Count:N0} BLOCKING";
+        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{texture}\n{slots}\n{dependencies}\nGeometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
     }
 
     private async Task ScanDuplicatesAsync()
@@ -306,7 +310,8 @@ internal sealed class AssetComparisonWindow : Window
             if (_previewMode.SelectedIndex == 1)
             {
                 if (_modelPicker.SelectedItem is not AssetComparisonModel model) { _status.Text = "Select a model first."; return; }
-                _project = await Task.Run(() => DefinitiveAssetProjectService.RecordModel(_projectPath, _project, model, decision, category, notes));
+                if (_index is null) return; var index = _index;
+                _project = await Task.Run(() => DefinitiveAssetProjectService.RecordModel(_projectPath, _project, index, model, decision, category, notes));
                 _status.Text = $"Recorded {decision}: {model.Provenance} · {model.FileName} plus its SKIN/animation dependencies.";
             }
             else
@@ -315,7 +320,8 @@ internal sealed class AssetComparisonWindow : Window
                 var selected = _selectedTexture; _project = await Task.Run(() => DefinitiveAssetProjectService.RecordTexture(_projectPath, _project, selected, decision, category, notes));
                 _status.Text = $"Recorded {decision}: {selected.Provenance} · {selected.FileName}. The deployable BLP is tracked instead of its PNG preview.";
             }
-            _assetNotes.Text = string.Empty; UpdateProjectStatus(); await RenderPageAsync();
+            _assetNotes.Text = string.Empty; UpdateProjectStatus(); await FilterFilesAsync();
+            if (_autoAdvance.IsChecked == true && _previewMode.SelectedIndex == 0 && _filteredEntries.Count > 0) await SelectComparisonAsync(_filteredEntries[0]);
             DesktopCrashLogger.Debug("ASSET-PROJECT", "decision-recorded", ("decision", decision), ("entries", _project.Entries.Count), ("project", _projectPath));
         }
         catch (Exception exception) { DesktopCrashLogger.Log("Definitive Set decision failed", exception); _status.Text = exception.Message; }
@@ -345,6 +351,12 @@ internal sealed class AssetComparisonWindow : Window
     }
 
     private AssetDecision? DecisionFor(string previewPath) => _project?.Entries.Where(entry => entry.PreviewPath.Equals(previewPath, StringComparison.OrdinalIgnoreCase)).OrderBy(entry => entry.Kind).Select(entry => (AssetDecision?)entry.Decision).FirstOrDefault();
+    private async Task HandleDecisionKeyAsync(KeyEventArgs e)
+    {
+        if (e.Source is TextBox || e.KeyModifiers != KeyModifiers.None) return;
+        var decision = e.Key switch { Key.K => AssetDecision.Keeper, Key.A => AssetDecision.Alternative, Key.R => AssetDecision.Review, Key.X => AssetDecision.Rejected, _ => (AssetDecision?)null };
+        if (decision is null) return; e.Handled = true; await RecordCurrentAsync(decision.Value);
+    }
     private void RevealProject()
     {
         if (_projectPath is null) return; var directory = Path.GetDirectoryName(_projectPath)!; Directory.CreateDirectory(directory);
