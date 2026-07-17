@@ -44,7 +44,7 @@ Archive libraries use a content-first comparison layout. For example, `Archives\
 
 Comparison is directory-first because expansions frequently rename equivalent assets. `compare-folders` searches logical content paths and reports PNG/source counts; `compare-files` lists every direct PNG from every provenance folder in the selected path without requiring filenames to match. The Avalonia **Assets & compare** workspace exposes the same model visually with paged, lazy thumbnails and two comparison slots.
 
-Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`. Selecting `Character\BloodElf\Female`, for example, shows all direct PNGs under every patch folder there; it does not guess that differently named files are equivalent.
+Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`. Selecting `Character\BloodElf\Female`, for example, shows all direct PNGs under every archive patch folder plus direct PNGs from the matching `Loose\Content` path; it does not guess that differently named files are equivalent. Loose-only paths also appear in the same navigator with `Loose` as their source.
 
 ## DBC information, validation, comparison, and editing
 

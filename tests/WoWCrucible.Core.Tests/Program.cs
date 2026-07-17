@@ -64,13 +64,18 @@ var comparisonRoot = Path.Combine(assetFixture, "comparison-library");
 var oldLegacy = Path.Combine(comparisonRoot, "Archives", "patch-old-a1", "Content", "Character", "BloodElf", "Female");
 var newLegacy = Path.Combine(comparisonRoot, "Archives", "patch-new-b2", "Content", "Character", "BloodElf", "Female"); Directory.CreateDirectory(oldLegacy); Directory.CreateDirectory(newLegacy);
 File.WriteAllText(Path.Combine(oldLegacy, "old-expansion-name.png"), "old"); File.WriteAllText(Path.Combine(newLegacy, "completely-renamed.png"), "new");
+var looseMatching = Path.Combine(comparisonRoot, "Loose", "Content", "Character", "BloodElf", "Female"); var looseOnly = Path.Combine(comparisonRoot, "Loose", "Content", "ExtendedSkins", "Character", "Human", "Female");
+Directory.CreateDirectory(looseMatching); Directory.CreateDirectory(looseOnly); File.WriteAllText(Path.Combine(looseMatching, "loose-variant.png"), "loose"); File.WriteAllText(Path.Combine(looseOnly, "human-only.png"), "loose only");
 File.WriteAllText(Path.Combine(comparisonRoot, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(comparisonRoot, comparisonRoot, 1, DateTimeOffset.UtcNow, 0, [])));
 var layoutDryRun = BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, false); var layoutApplied = BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, true);
 if (layoutDryRun.Files != 2 || layoutDryRun.Conflicts != 0 || layoutApplied.MovedFiles != 2 || BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, false).SourceFolders != 0)
     throw new InvalidOperationException("Content-first layout migration was destructive, conflicting, or not resumable.");
 var comparisonIndex = AssetComparisonService.BuildIndex(comparisonRoot); var comparisonEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, @"Character\BloodElf\Female");
-if (comparisonIndex.TotalPngFiles != 2 || comparisonIndex.Directories.Single().ProvenanceSources != 2 || comparisonEntries.Count != 2 || comparisonEntries.Select(entry => entry.FileName).Distinct().Count() != 2)
-    throw new InvalidOperationException("Directory-first visual comparison incorrectly required matching asset filenames.");
+var matchingDirectory = comparisonIndex.Directories.Single(directory => directory.LogicalPath == @"Character\BloodElf\Female");
+var looseOnlyEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, @"ExtendedSkins\Character\Human\Female");
+if (comparisonIndex.TotalPngFiles != 4 || matchingDirectory.ProvenanceSources != 3 || comparisonEntries.Count != 3 || comparisonEntries.Select(entry => entry.FileName).Distinct().Count() != 3 ||
+    looseOnlyEntries.Count != 1 || looseOnlyEntries[0].Provenance != "Loose")
+    throw new InvalidOperationException("Directory-first visual comparison did not merge matching Loose content or preserve Loose-only paths.");
 try { _ = AssetComparisonService.GetDirectoryPngs(comparisonIndex, ".."); throw new InvalidOperationException("Asset comparison accepted a path outside its content root."); }
 catch (InvalidOperationException exception) when (exception.Message.Contains("escaped")) { }
 Directory.Delete(assetFixture, true); Directory.Delete(conversionWorkspacePath, true);

@@ -4,43 +4,49 @@ namespace WoWCrucible.Core;
 
 public sealed record AssetComparisonDirectory(string LogicalPath, int PngFiles, int ProvenanceSources);
 public sealed record AssetComparisonEntry(string LogicalPath, string Provenance, string FileName, string FullPath, long Bytes);
-public sealed record AssetComparisonIndex(string LibraryRoot, string ContentRoot, IReadOnlyList<AssetComparisonDirectory> Directories, int TotalPngFiles);
+public sealed record AssetComparisonIndex(string LibraryRoot, string ContentRoot, IReadOnlyList<AssetComparisonDirectory> Directories, int TotalPngFiles, string? LooseContentRoot = null);
 
 public static class AssetComparisonService
 {
     private const string ArchivePrefix = "Archives\\Content\\";
+    private const string LoosePrefix = "Loose\\Content\\";
 
     public static AssetComparisonIndex BuildIndex(string libraryRoot, CancellationToken cancellationToken = default)
     {
-        libraryRoot = Path.GetFullPath(libraryRoot); var contentRoot = Path.Combine(libraryRoot, "Archives", "Content");
-        if (!Directory.Exists(contentRoot)) throw new DirectoryNotFoundException($"The content-first archive folder does not exist: {contentRoot}");
+        libraryRoot = Path.GetFullPath(libraryRoot); var contentRoot = Path.Combine(libraryRoot, "Archives", "Content"); var looseContentRoot = Path.Combine(libraryRoot, "Loose", "Content");
+        if (!Directory.Exists(contentRoot) && !Directory.Exists(looseContentRoot)) throw new DirectoryNotFoundException($"No content-first archive or loose folder exists under: {libraryRoot}");
         var catalog = Path.Combine(libraryRoot, "asset-catalog.csv");
         var counts = new Dictionary<string, (int Files, HashSet<string> Sources)>(StringComparer.OrdinalIgnoreCase);
         if (File.Exists(catalog)) ReadCatalog(catalog, counts, cancellationToken);
         else
         {
-            foreach (var file in Directory.EnumerateFiles(contentRoot, "*.png", SearchOption.AllDirectories))
+            foreach (var root in new[] { contentRoot, looseContentRoot }.Where(Directory.Exists))
+            foreach (var file in Directory.EnumerateFiles(root, "*.png", SearchOption.AllDirectories))
             {
                 cancellationToken.ThrowIfCancellationRequested(); AddRelative(Path.GetRelativePath(libraryRoot, file), counts);
             }
         }
         var directories = counts.Select(pair => new AssetComparisonDirectory(pair.Key, pair.Value.Files, pair.Value.Sources.Count))
             .OrderBy(directory => directory.LogicalPath, StringComparer.OrdinalIgnoreCase).ToArray();
-        return new(libraryRoot, contentRoot, directories, directories.Sum(directory => directory.PngFiles));
+        return new(libraryRoot, contentRoot, directories, directories.Sum(directory => directory.PngFiles), Directory.Exists(looseContentRoot) ? looseContentRoot : null);
     }
 
     public static IReadOnlyList<AssetComparisonEntry> GetDirectoryPngs(AssetComparisonIndex index, string logicalPath)
     {
-        var directory = Path.GetFullPath(Path.Combine(index.ContentRoot, logicalPath)); EnsureInside(index.ContentRoot, directory);
-        if (!Directory.Exists(directory)) return [];
         var result = new List<AssetComparisonEntry>();
-        foreach (var provenanceDirectory in Directory.EnumerateDirectories(directory))
+        var directory = Path.GetFullPath(Path.Combine(index.ContentRoot, logicalPath)); EnsureInside(index.ContentRoot, directory);
+        if (Directory.Exists(directory))
         {
-            var provenance = Path.GetFileName(provenanceDirectory);
-            foreach (var file in Directory.EnumerateFiles(provenanceDirectory, "*.png", SearchOption.TopDirectoryOnly))
+            foreach (var provenanceDirectory in Directory.EnumerateDirectories(directory))
             {
-                var info = new FileInfo(file); result.Add(new(logicalPath, provenance, info.Name, info.FullName, info.Length));
+                var provenance = Path.GetFileName(provenanceDirectory);
+                foreach (var file in Directory.EnumerateFiles(provenanceDirectory, "*.png", SearchOption.TopDirectoryOnly)) AddEntry(result, logicalPath, provenance, file);
             }
+        }
+        if (index.LooseContentRoot is { } looseRoot)
+        {
+            var looseDirectory = Path.GetFullPath(Path.Combine(looseRoot, logicalPath)); EnsureInside(looseRoot, looseDirectory);
+            if (Directory.Exists(looseDirectory)) foreach (var file in Directory.EnumerateFiles(looseDirectory, "*.png", SearchOption.TopDirectoryOnly)) AddEntry(result, logicalPath, "Loose", file);
         }
         return result.OrderBy(entry => entry.Provenance, StringComparer.OrdinalIgnoreCase).ThenBy(entry => entry.FileName, StringComparer.OrdinalIgnoreCase).ToArray();
     }
@@ -58,11 +64,25 @@ public static class AssetComparisonService
 
     private static void AddRelative(string relative, Dictionary<string, (int Files, HashSet<string> Sources)> counts)
     {
-        relative = relative.Replace('/', '\\'); if (!relative.StartsWith(ArchivePrefix, StringComparison.OrdinalIgnoreCase)) return;
-        var parts = relative[ArchivePrefix.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 2) return; var provenance = parts[^2]; var logical = parts.Length == 2 ? string.Empty : string.Join('\\', parts[..^2]);
+        relative = relative.Replace('/', '\\'); string logical; string provenance;
+        if (relative.StartsWith(ArchivePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            var parts = relative[ArchivePrefix.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2) return; provenance = parts[^2]; logical = parts.Length == 2 ? string.Empty : string.Join('\\', parts[..^2]);
+        }
+        else if (relative.StartsWith(LoosePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            var parts = relative[LoosePrefix.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 1) return; provenance = "Loose"; logical = parts.Length == 1 ? string.Empty : string.Join('\\', parts[..^1]);
+        }
+        else return;
         if (!counts.TryGetValue(logical, out var value)) value = (0, new(StringComparer.OrdinalIgnoreCase));
         value.Files++; value.Sources.Add(provenance); counts[logical] = value;
+    }
+
+    private static void AddEntry(List<AssetComparisonEntry> result, string logicalPath, string provenance, string file)
+    {
+        var info = new FileInfo(file); result.Add(new(logicalPath, provenance, info.Name, info.FullName, info.Length));
     }
 
     private static IReadOnlyList<string> ParseCsv(string line)
