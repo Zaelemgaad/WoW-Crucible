@@ -17,6 +17,7 @@ wowcrucible asset preview-info <wrath-model.m2>
 wowcrucible asset workspace <new-output-folder> <files/folders...>
 wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]
 wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]
+wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]
 wowcrucible asset library-status <library-folder>
 ```
 
@@ -33,6 +34,8 @@ wowcrucible asset library-status "G:\Crucible-Extras-Processed"
 ```
 
 Stopping `library-run` does not discard completed work. Run the same command again to resume past existing extraction/conversion outputs.
+
+Use `library-repair` after upgrading the converter or after opening a library created by an older Crucible build. It never re-extracts MPQs; it retries only BLPs whose matching PNG is absent, refreshes the per-provenance failure lists, and rebuilds the catalog.
 
 ## DBC information, validation, comparison, and editing
 

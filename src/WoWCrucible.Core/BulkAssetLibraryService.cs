@@ -10,6 +10,7 @@ public sealed record BulkAssetArchivePlan(string SourcePath, string RelativePath
 public sealed record BulkAssetLibraryPlan(string SourceRoot, string LibraryRoot, long MaximumArchiveBytes, DateTimeOffset CreatedUtc, int LooseBlpFiles, IReadOnlyList<BulkAssetArchivePlan> Archives);
 public sealed record BulkAssetLibraryCheckpoint(DateTimeOffset UpdatedUtc, IReadOnlyList<string> CompletedArchiveIds, IReadOnlyDictionary<string, string> Failures, int ConvertedPngFiles);
 public sealed record BulkAssetLibraryRunResult(int CompletedArchives, int FailedArchives, int CopiedLooseBlps, int ConvertedPngs, int ConversionFailures, string CatalogPath, string CheckpointPath);
+public sealed record BulkAssetConversionRepairResult(int NewlyConvertedPngs, int RemainingFailures, string CatalogPath, string CheckpointPath);
 
 public static class BulkAssetLibraryService
 {
@@ -92,6 +93,30 @@ public static class BulkAssetLibraryService
         WriteCheckpoint(checkpointPath, completed, failures, converted);
         var catalog = WriteCatalog(plan);
         return new(completed.Count, failures.Count, copiedLoose, converted, conversionFailures, catalog, checkpointPath);
+    }
+
+    public static async Task<BulkAssetConversionRepairResult> RepairConversionsAsync(string libraryRoot, string converterPath, int conversionWorkers = 6,
+        IProgress<(string Stage, int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
+    {
+        var plan = LoadPlan(libraryRoot); converterPath = Path.GetFullPath(converterPath);
+        if (!File.Exists(converterPath)) throw new FileNotFoundException("The BLP converter does not exist.", converterPath);
+        conversionWorkers = Math.Clamp(conversionWorkers, 1, 16);
+        var roots = plan.Archives.Where(archive => archive.Eligible && archive.Error is null)
+            .Select(archive => (archive.RelativePath, Root: ArchiveContentRoot(plan.LibraryRoot, archive))).Where(entry => Directory.Exists(entry.Root)).ToArray();
+        var converted = 0; var failed = 0;
+        for (var index = 0; index < roots.Length; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); progress?.Report(("Repair PNGs", index + 1, roots.Length + 1, roots[index].RelativePath));
+            var result = await ConvertBlpsAsync(roots[index].Root, converterPath, conversionWorkers, cancellationToken); converted += result.Converted; failed += result.Failed;
+        }
+        progress?.Report(("Repair PNGs", roots.Length + 1, roots.Length + 1, "Loose files"));
+        var loose = await ConvertBlpsAsync(Path.Combine(plan.LibraryRoot, "Loose", "Content"), converterPath, conversionWorkers, cancellationToken); converted += loose.Converted; failed += loose.Failed;
+        var checkpointPath = Path.Combine(plan.LibraryRoot, CheckpointFileName);
+        var prior = File.Exists(checkpointPath) ? JsonSerializer.Deserialize<BulkAssetLibraryCheckpoint>(File.ReadAllText(checkpointPath)) : null;
+        var matchingPngs = Directory.EnumerateFiles(plan.LibraryRoot, "*", SearchOption.AllDirectories)
+            .Count(path => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase) && File.Exists(Path.ChangeExtension(path, ".png")));
+        WriteCheckpoint(checkpointPath, (prior?.CompletedArchiveIds ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase), new Dictionary<string, string>(prior?.Failures ?? new Dictionary<string, string>()), matchingPngs);
+        return new(converted, failed, WriteCatalog(plan), checkpointPath);
     }
 
     private static int CopyLooseBlps(BulkAssetLibraryPlan plan, IProgress<(string Stage, int Done, int Total, string Path)>? progress, CancellationToken cancellationToken)
