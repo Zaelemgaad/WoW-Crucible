@@ -40,6 +40,7 @@ internal sealed class ItemWorkbenchWindow : Window
         _items.ItemTemplate = new FuncDataTemplate<ItemCatalogEntry>((item, _) =>
         {
             var panel = new Grid { ColumnDefinitions = new("105,*,80,80,90"), Margin = new Thickness(3, 2) };
+            if (item is null) return panel;
             AddCell(panel, item.Entry.ToString("N0"), 0, FontWeight.SemiBold); AddCell(panel, item.Name, 1); AddCell(panel, QualityName(item.Quality), 2); AddCell(panel, $"iLvl {item.ItemLevel}", 3); AddCell(panel, item.ItemSetId == 0 ? "No set" : $"Set {item.ItemSetId}", 4); return panel;
         });
         _items.SelectionChanged += (_, _) => { if (_items.SelectedItem is ItemCatalogEntry item) { _cloneSource.Text = item.Entry.ToString(); _cloneResult.Text = $"Selected {item.Entry:N0} — {item.Name}\nQuality: {QualityName(item.Quality)} · Item level: {item.ItemLevel} · Set: {(item.ItemSetId == 0 ? "none" : item.ItemSetId)}"; } };

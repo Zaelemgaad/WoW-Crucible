@@ -54,7 +54,7 @@ internal sealed class CellEditorDialog : Window
             _enumChoice = new ComboBox
             {
                 ItemsSource = _semantic.Options,
-                ItemTemplate = new FuncDataTemplate<SemanticOption>((option, _) => new TextBlock { Text = $"{option.Name}  [{option.Value}]" }),
+                ItemTemplate = new FuncDataTemplate<SemanticOption>((option, _) => new TextBlock { Text = option is null ? string.Empty : $"{option.Name}  [{option.Value}]" }),
                 SelectedItem = _semantic.Options.FirstOrDefault(option => option.Value == _originalRaw),
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Top

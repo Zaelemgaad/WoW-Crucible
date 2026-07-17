@@ -39,7 +39,7 @@ internal sealed class AssetComparisonWindow : Window
             if (!string.IsNullOrWhiteSpace(_library.Text) && Directory.Exists(_library.Text)) await LoadIndexAsync();
         };
         Title = "WoW Crucible — Visual Asset Comparison"; Width = 1580; Height = 940; MinWidth = 1120; MinHeight = 700; WindowStartupLocation = WindowStartupLocation.CenterOwner;
-        _directories.ItemTemplate = new FuncDataTemplate<AssetComparisonDirectory>((item, _) => new Grid
+        _directories.ItemTemplate = new FuncDataTemplate<AssetComparisonDirectory>((item, _) => item is null ? new Grid() : new Grid
         {
             ColumnDefinitions = new("*,Auto"), Margin = new Thickness(3, 2), Children =
             {
