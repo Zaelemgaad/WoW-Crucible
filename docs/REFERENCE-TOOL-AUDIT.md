@@ -2,6 +2,8 @@
 
 WoW Crucible uses the local legacy tools as workflow research, not as compatibility authorities. Their strongest ideas are reimplemented against Crucible's build-12340 client model and capability-detected current server adapters.
 
+Age, abandonment, poor performance, broken dependencies, or an unusable current build are never sufficient reasons to dismiss a tool. Every tool is evaluated for the problem that caused it to exist, its intended complete workflow, useful interaction patterns, format knowledge, failure modes, licensing, and whether the capability still belongs in a unified Crucible workflow. A broken implementation can still describe a feature worth rebuilding independently.
+
 No Trinity Creator source or visual assets are copied into Crucible. The local Trinity Creator checkout does not include a clear source license, so it is treated strictly as behavioral reference material.
 
 ## Trinity Creator
@@ -65,6 +67,17 @@ Useful patterns:
 - Familiar archive tree/list browsing, filters, extraction, and explicit internal paths.
 
 Crucible adds background operations, small manifest-driven patch construction, content policies, archive validation, and refusal to copy-update giant source layers.
+
+## The two WoW Model Viewer projects
+
+The similarly named projects solve materially different problems:
+
+- `Miorey/wow-model-viewer` is a small ISC JavaScript integration wrapper. Its convenient API can display characters, equipment, items, NPCs, objects, animations, and appearance changes in a page, but the actual renderer and game-data delivery come from minified Wowhead/ZAM assets, remote services, and a CORS proxy/cache. It is useful interaction research but cannot be Crucible's primary renderer: custom local server assets may not exist in that content service, upstream internals change, and the underlying renderer/data do not inherit the wrapper's simple licensing.
+- `wowmodelviewer/wowmodelviewer` is the full GPLv3 desktop application. Its local model/character composition, equipment attachment, geosets, textures, animation, particles, creature/item display lookup, CASC browsing, and export behavior are the capability reference. Directly incorporating or deriving Crucible from its renderer is legally possible, but the combined application would need GPLv3-compatible distribution rather than MIT-only distribution. That is a project licensing choice, not a reason to reject its features. The current application is also C++/Qt/wxWidgets/OpenGL and oriented around CASC rather than Crucible's C#/WinForms and build-12340 MPQ stack, so licensing alone does not make it an embeddable preview component.
+
+Crucible therefore implements an independent embedded preview pipeline. The first native stage parses validated Wrath `MD20` vertex data and companion `SKIN` topology and renders the actual mesh with rotate/zoom controls in the asset converter and Item Creator. Subsequent stages resolve `ItemDisplayInfo`/`CreatureDisplayInfo` through Crucible's effective DBC layers and MPQ index, decode BLP textures, reproduce render passes/geosets, attach equipment, and add animation and particles. The same control will be shared by item, creature/NPC, gameobject, race/class appearance, spell-visual, and conversion workflows rather than becoming another standalone viewer.
+
+The preview consumes the editor's in-memory draft/change plan first. Saving DBC/SQL, building an MPQ, clearing the game cache, and restarting a server/client are deployment verification steps—not prerequisites for seeing the intended result. Where exact client behavior cannot yet be simulated, Crucible must label the approximation and show which dependencies or runtime behaviors still require an in-client test.
 
 ## Expanded local Tools collection
 

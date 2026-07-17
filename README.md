@@ -54,11 +54,13 @@ Client formats and server integration are separate: a client-build profile decla
 - Enforces manifest allow/deny/required globs and exact entry counts, provides a dry-run source-to-archive listing, and verifies an existing MPQ for missing, unexpected, or size-mismatched content without rebuilding it.
 - Refuses copy-update operations on archives larger than 2 GB; giant mod/client layers are immutable inputs, never working patch targets.
 - Begins a native modern-to-3.3.5 asset conversion pipeline: safely identifies MD20/MD21 M2 and chunked WMO structures, validates chunk bounds, inventories companion skins/animations/WMO groups and modern FileDataID chunks, hashes immutable source snapshots, and writes a machine-readable downgrade report in a dedicated conversion workspace. Modern output writing remains blocked until each translated structure can be validated instead of silently discarded.
+- Embeds the first native 3D preview stage directly in Crucible: validated WotLK MD20 vertices plus companion SKIN topology are rendered as an interactive shaded mesh with drag rotation and wheel zoom in both the asset converter and Item Creator. Display-ID/MPQ resolution, BLP textures, render passes, geosets, equipment, animation, and particles remain explicit next stages.
 
 ## Command line
 
 ```text
 wowcrucible asset inspect modern-model.m2 [building.wmo ...]
+wowcrucible asset preview-info extracted-wrath-model.m2
 wowcrucible asset workspace native-conversion-project modern-assets-folder [more-files ...]
 wowcrucible dbc info Spell.dbc
 wowcrucible dbc rows CreatureModelData.dbc schema.xml 1332 1333 1334

@@ -24,6 +24,20 @@ File.WriteAllBytes(wotlkModel, wotlkBytes); File.WriteAllText(Path.Combine(asset
 var compatibleModel = NativeAssetConversionService.Inspect(wotlkModel);
 if (compatibleModel.Compatibility != AssetCompatibility.AlreadyWotlk335 || compatibleModel.Version != 264 || compatibleModel.Dependencies.Count != 1)
     throw new InvalidOperationException("Native asset inspection did not recognize a Wrath M2 and its skin dependency.");
+var geometryModelPath = Path.Combine(assetFixture, "geometry.m2"); var geometryBytes = new byte[0x130 + 3 * 48];
+System.Text.Encoding.ASCII.GetBytes("MD20").CopyTo(geometryBytes, 0); BitConverter.GetBytes((uint)264).CopyTo(geometryBytes, 4); BitConverter.GetBytes((uint)3).CopyTo(geometryBytes, 0x3C); BitConverter.GetBytes((uint)0x130).CopyTo(geometryBytes, 0x40);
+var fixtureVertices = new[] { (X: -1f, Y: 0f, Z: -1f), (X: 1f, Y: 0f, Z: -1f), (X: 0f, Y: 0f, Z: 1f) };
+for (var index = 0; index < fixtureVertices.Length; index++)
+{
+    var offset = 0x130 + index * 48; BitConverter.GetBytes(fixtureVertices[index].X).CopyTo(geometryBytes, offset); BitConverter.GetBytes(fixtureVertices[index].Y).CopyTo(geometryBytes, offset + 4); BitConverter.GetBytes(fixtureVertices[index].Z).CopyTo(geometryBytes, offset + 8); BitConverter.GetBytes(1f).CopyTo(geometryBytes, offset + 28);
+}
+File.WriteAllBytes(geometryModelPath, geometryBytes);
+var geometrySkin = new byte[60]; System.Text.Encoding.ASCII.GetBytes("SKIN").CopyTo(geometrySkin, 0); BitConverter.GetBytes((uint)3).CopyTo(geometrySkin, 4); BitConverter.GetBytes((uint)48).CopyTo(geometrySkin, 8); BitConverter.GetBytes((uint)3).CopyTo(geometrySkin, 12); BitConverter.GetBytes((uint)54).CopyTo(geometrySkin, 16);
+for (ushort index = 0; index < 3; index++) { BitConverter.GetBytes(index).CopyTo(geometrySkin, 48 + index * 2); BitConverter.GetBytes(index).CopyTo(geometrySkin, 54 + index * 2); }
+File.WriteAllBytes(Path.Combine(assetFixture, "geometry00.skin"), geometrySkin);
+var previewGeometry = M2PreviewGeometryService.Load(geometryModelPath);
+if (previewGeometry.Vertices.Count != 3 || previewGeometry.TriangleIndices.Count != 3 || previewGeometry.Minimum.X != -1f || previewGeometry.Maximum.Z != 1f)
+    throw new InvalidOperationException("Native M2/SKIN preview geometry parsing failed.");
 var modernModel = Path.Combine(assetFixture, "modern.m2");
 using (var stream = File.Create(modernModel)) using (var writer = new BinaryWriter(stream))
 {

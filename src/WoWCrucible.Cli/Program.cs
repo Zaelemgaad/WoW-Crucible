@@ -37,6 +37,12 @@ static int Asset(string[] args)
         }
         return 0;
     }
+    if (args is ["preview-info", var previewModel])
+    {
+        var geometry = M2PreviewGeometryService.Load(previewModel);
+        Console.WriteLine($"Model\t{geometry.ModelPath}\nSkin\t{geometry.SkinPath}\nVertices\t{geometry.Vertices.Count:N0}\nTriangles\t{geometry.TriangleIndices.Count / 3:N0}\nMinimum\t{geometry.Minimum}\nMaximum\t{geometry.Maximum}");
+        return 0;
+    }
     if (args is ["workspace", var outputRoot, .. var workspaceInputs] && workspaceInputs.Length > 0)
     {
         var workspace = NativeAssetConversionService.CreateWorkspace(workspaceInputs, outputRoot);
@@ -46,7 +52,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset workspace <new-output-folder> <files/folders...>", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>", code);
 
 static int Client(string[] args)
 {

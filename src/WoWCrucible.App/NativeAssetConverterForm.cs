@@ -6,6 +6,7 @@ public sealed class NativeAssetConverterForm : Form
 {
     private readonly DataGridView _grid = new() { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill };
     private readonly TextBox _details = new() { Dock = DockStyle.Bottom, Height = 150, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+    private readonly M2PreviewControl _modelPreview = new();
     private readonly Label _status = new() { Dock = DockStyle.Bottom, Height = 32, Padding = new(8), Text = "Add modern M2/WMO files or a folder. Analysis never modifies source assets." };
     private readonly List<AssetInspection> _assets = [];
 
@@ -20,7 +21,9 @@ public sealed class NativeAssetConverterForm : Form
         bar.Controls.Add(new Label { Text = "Native conversion is enabled section-by-section only after loss and structure validation.", AutoSize = true, ForeColor = Color.DimGray, Margin = new(14, 7, 0, 0) });
         _grid.Columns.Add("File", "Source asset"); _grid.Columns.Add("Format", "Format"); _grid.Columns.Add("Compatibility", "3.3.5 status"); _grid.Columns.Add("Version", "Version"); _grid.Columns.Add("Dependencies", "Dependencies");
         _grid.SelectionChanged += (_, _) => ShowDetails();
-        Controls.Add(_grid); Controls.Add(_details); Controls.Add(_status); Controls.Add(bar);
+        var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel2, SplitterDistance = 720, Panel2MinSize = 300 };
+        split.Panel1.Controls.Add(_grid); split.Panel2.Controls.Add(_modelPreview);
+        Controls.Add(split); Controls.Add(_details); Controls.Add(_status); Controls.Add(bar);
         DragEnter += OnDragEnter; DragDrop += OnDragDrop; _grid.AllowDrop = true; _grid.DragEnter += OnDragEnter; _grid.DragDrop += OnDragDrop;
     }
 
@@ -64,9 +67,11 @@ public sealed class NativeAssetConverterForm : Form
 
     private void ShowDetails()
     {
-        if (_grid.CurrentRow is null || _grid.CurrentRow.Index < 0 || _grid.CurrentRow.Index >= _assets.Count) { _details.Clear(); return; }
+        if (_grid.CurrentRow is null || _grid.CurrentRow.Index < 0 || _grid.CurrentRow.Index >= _assets.Count) { _details.Clear(); _modelPreview.ClearPreview(); return; }
         var asset = _assets[_grid.CurrentRow.Index];
         _details.Text = $"SHA-256: {asset.Sha256}\r\nMagic/version: {asset.Magic} / {asset.Version?.ToString() ?? "unknown"}\r\nChunks: {string.Join(", ", asset.Chunks.Select(chunk => $"{chunk.Id} ({chunk.Size:N0})"))}\r\n\r\n{string.Join("\r\n", asset.Findings.Select(finding => "• " + finding))}";
+        if (asset.Format == AssetFormat.M2 && asset.Compatibility == AssetCompatibility.AlreadyWotlk335) _modelPreview.LoadModel(asset.Path);
+        else _modelPreview.ClearPreview(asset.Format == AssetFormat.M2 ? "Conversion is required before this model can be rendered by the 3.3.5 preview." : "WMO rendering will follow the native M2 preview pipeline.");
     }
 
     private void RemoveSelected()

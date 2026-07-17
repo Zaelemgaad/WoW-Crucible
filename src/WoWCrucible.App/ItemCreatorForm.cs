@@ -36,6 +36,7 @@ internal sealed class ItemCreatorForm : Form
     private readonly TextBox _description = new() { Dock = DockStyle.Fill, Multiline = true, Height = 55 };
     private readonly TextBox _preview = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, Font = new Font("Consolas", 9), WordWrap = false };
     private readonly ItemTooltipControl _tooltip = new() { Dock = DockStyle.Fill };
+    private readonly M2PreviewControl _modelPreview = new();
     private readonly ToolTip _help = new() { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 100 };
 
     public ItemCreatorForm(DatabaseConnectionProfile? profile, DatabaseCapabilities capabilities)
@@ -56,8 +57,15 @@ internal sealed class ItemCreatorForm : Form
         var tooltipPanel = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(28, 29, 38), RowCount = 2, Padding = new(12) };
         tooltipPanel.RowStyles.Add(new(SizeType.AutoSize)); tooltipPanel.RowStyles.Add(new(SizeType.Percent, 100));
         tooltipPanel.Controls.Add(new Label { Text = "LIVE IN-GAME TOOLTIP PREVIEW", AutoSize = true, Font = new Font("Segoe UI", 9, FontStyle.Bold), ForeColor = Color.FromArgb(190, 190, 205), Margin = new(8, 4, 0, 8) }, 0, 0); tooltipPanel.Controls.Add(_tooltip, 0, 1);
+        var visualTabs = new TabControl { Dock = DockStyle.Fill };
+        var tooltipPage = new TabPage("Tooltip"); tooltipPage.Controls.Add(tooltipPanel); visualTabs.TabPages.Add(tooltipPage);
+        var modelPage = new TabPage("3D model"); var modelBar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 42, Padding = new(6), WrapContents = false };
+        var loadModel = new Button { Text = "Load extracted M2…", AutoSize = true }; var clearModel = new Button { Text = "Clear", AutoSize = true };
+        modelBar.Controls.Add(loadModel); modelBar.Controls.Add(clearModel); modelBar.Controls.Add(new Label { Text = "Display-ID → MPQ resolution is the next integration step.", AutoSize = true, ForeColor = Color.DimGray, Margin = new(10, 7, 0, 0) });
+        loadModel.Click += (_, _) => LoadModelPreview(); clearModel.Click += (_, _) => _modelPreview.ClearPreview();
+        modelPage.Controls.Add(_modelPreview); modelPage.Controls.Add(modelBar); visualTabs.TabPages.Add(modelPage);
         var split = new SplitContainer { Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel2 };
-        split.Panel1.Controls.Add(tabs); split.Panel2.Controls.Add(tooltipPanel); Controls.Add(split); Controls.Add(buttons);
+        split.Panel1.Controls.Add(tabs); split.Panel2.Controls.Add(visualTabs); Controls.Add(split); Controls.Add(buttons);
         Shown += (_, _) => { split.Panel1MinSize = 570; split.Panel2MinSize = 360; split.SplitterDistance = Math.Clamp(split.Width - 440, split.Panel1MinSize, split.Width - split.Panel2MinSize); };
         _class.SelectedValueChanged += (_, _) => { UpdateSubclassChoices(); UpdateTooltip(); };
         RegisterPreviewEvents(tabs); UpdateSubclassChoices(); UpdateTooltip();
@@ -88,6 +96,12 @@ internal sealed class ItemCreatorForm : Form
     }
 
     private void UpdateTooltip() => _tooltip.ShowItem(Draft(), SelectedName(_class), SelectedName(_subclass), SelectedName(_inventory));
+
+    private void LoadModelPreview()
+    {
+        using var dialog = new OpenFileDialog { Filter = "Wrath M2 model (*.m2)|*.m2|All files (*.*)|*.*", Title = "Choose an extracted MD20 model with its companion .skin beside it" };
+        if (dialog.ShowDialog(this) == DialogResult.OK) _modelPreview.LoadModel(dialog.FileName);
+    }
 
     private void RegisterPreviewEvents(Control root)
     {
