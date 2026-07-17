@@ -17,9 +17,12 @@ public partial class App : Application
         {
             var window = new MainWindow();
             desktop.MainWindow = window;
-            var initialPath = desktop.Args?.FirstOrDefault(File.Exists);
-            if (initialPath is not null)
-                window.Opened += async (_, _) => await window.LoadPathAsync(initialPath);
+            var initialPaths = desktop.Args?.Where(File.Exists).ToArray() ?? [];
+            if (initialPaths.Length > 0)
+                window.Opened += async (_, _) =>
+                {
+                    foreach (var path in initialPaths) await window.LoadPathAsync(path);
+                };
         }
 
         base.OnFrameworkInitializationCompleted();

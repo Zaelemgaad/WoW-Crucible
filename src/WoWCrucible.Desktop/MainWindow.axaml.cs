@@ -1,6 +1,11 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Text.Json;
+using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Interactivity;
+using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using WoWCrucible.Core;
@@ -9,27 +14,38 @@ namespace WoWCrucible.Desktop;
 
 public partial class MainWindow : Window
 {
-    private WdbcFile? _file;
-    private IReadOnlyList<DbcColumn> _columns = [];
+    private readonly List<DbcDocumentSession> _documents = [];
+    private int _activeDocument = -1;
     private CancellationTokenSource? _searchCancellation;
     private long _lastRenderReport;
+    private bool _closingApproved;
+    private bool _closingPromptActive;
+    private readonly object _schemaGate = new();
+    private DbcSchemaCatalog? _schemaCatalog;
+    private string _schemaSource = "Built-in 12340 definitions";
+    private bool _syncingScrollbars;
+
+    private DbcDocumentSession? Current => _activeDocument >= 0 && _activeDocument < _documents.Count ? _documents[_activeDocument] : null;
+    private WdbcFile? CurrentFile => Current?.File;
+    private IReadOnlyList<DbcColumn> CurrentColumns => Current?.Schema.Columns ?? [];
 
     public MainWindow()
     {
         InitializeComponent();
-        DbcView.SelectionChanged += (_, selection) =>
-        {
-            InspectorTitle.Text = selection.Column.Name;
-            InspectorSummary.Text = selection.Value.Length == 0 ? "(empty)" : selection.Value;
-            InspectorDetail.Text = $"Row       {selection.Row + 1:N0}\nColumn    {selection.ColumnIndex:N0}\nType      {selection.Column.Type}\nOffset    {selection.Column.Offset:N0} bytes\nSize      {selection.Column.Size:N0} bytes";
-        };
+        DbcView.SelectionChanged += (_, selection) => ShowSelection(selection);
+        DbcView.CellEditRequested += async (_, selection) => await EditCellAsync(selection);
         DbcView.RenderMeasured += (_, measurement) =>
         {
             var now = Stopwatch.GetTimestamp();
             if (Stopwatch.GetElapsedTime(_lastRenderReport, now).TotalMilliseconds < 500) return;
             _lastRenderReport = now;
-            Dispatcher.UIThread.Post(() => RenderText.Text = $"Render {measurement.Milliseconds:0.00} ms · {measurement.VisibleRows} × {measurement.VisibleColumns} visible", DispatcherPriority.Background);
+            Dispatcher.UIThread.Post(() =>
+            {
+                RenderText.Text = $"Render {measurement.Milliseconds:0.00} ms · {measurement.VisibleRows} × {measurement.VisibleColumns} visible";
+                SyncScrollbars();
+            }, DispatcherPriority.Background);
         };
+        Closing += WindowClosing;
     }
 
     public Task LoadPathAsync(string path)
@@ -46,40 +62,37 @@ public partial class MainWindow : Window
     {
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Open a WotLK WDBC table",
-            AllowMultiple = false,
+            Title = "Open one or more WotLK WDBC tables",
+            AllowMultiple = true,
             FileTypeFilter = [new FilePickerFileType("WoW DBC tables") { Patterns = ["*.dbc"] }]
         });
-        var path = files.FirstOrDefault()?.TryGetLocalPath();
-        if (path is null) return;
-        await LoadDbcAsync(path);
+        foreach (var file in files)
+        {
+            var path = file.TryGetLocalPath();
+            if (path is not null) await LoadDbcAsync(path);
+        }
     }
 
     private async Task LoadDbcAsync(string path)
     {
+        path = Path.GetFullPath(path);
+        var existing = _documents.FindIndex(document => document.FullPath.Equals(path, StringComparison.OrdinalIgnoreCase));
+        if (existing >= 0) { ActivateDocument(existing); return; }
         SetBusy($"Loading {Path.GetFileName(path)}…");
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            var loaded = await Task.Run(() =>
+            var session = await Task.Run(() =>
             {
                 var file = WdbcFile.Load(path);
                 var tableName = Path.GetFileNameWithoutExtension(path);
-                var resolution = DbcSchemaCatalog.CreateBuiltIn12340().ResolveColumns(tableName, file.FieldCount);
-                return (file, resolution);
+                var catalog = ResolveSchemaCatalog();
+                var resolution = catalog.ResolveColumns(tableName, file.FieldCount);
+                return new DbcDocumentSession(file, resolution, _schemaSource);
             });
-            _file = loaded.file;
-            _columns = loaded.resolution.Columns;
-            DbcView.SetDocument(_file, _columns);
-            WelcomePanel.IsVisible = false;
-            M2View.IsVisible = false;
-            DbcView.IsVisible = true;
-            DocumentTab.IsVisible = true;
-            DocumentTabText.Text = Path.GetFileName(path) + (_file.IsDirty ? " *" : string.Empty);
-            InspectorTitle.Text = Path.GetFileName(path);
-            InspectorSummary.Text = $"{_file.RowCount:N0} records · {_file.FieldCount:N0} fields";
-            InspectorDetail.Text = $"Container  WDBC\nRecord     {_file.RecordSize:N0} bytes\nStrings    {_file.StringTableSize:N0} bytes\nSchema     {loaded.resolution.MatchKind}\nSource     {path}";
-            StatusText.Text = $"Loaded {_file.RowCount:N0} records in {stopwatch.Elapsed.TotalMilliseconds:0} ms";
+            _documents.Add(session);
+            ActivateDocument(_documents.Count - 1);
+            StatusText.Text = $"Loaded {session.File.RowCount:N0} records in {stopwatch.Elapsed.TotalMilliseconds:0} ms · {_documents.Count:N0} staged file(s)";
         }
         catch (Exception exception)
         {
@@ -89,34 +102,292 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void SaveClick(object? sender, RoutedEventArgs e)
+    private void ActivateDocument(int index)
     {
-        if (_file is null) return;
-        SetBusy("Saving table with backup…");
+        if (index < 0 || index >= _documents.Count) return;
+        _activeDocument = index;
+        var document = _documents[index];
+        SearchBox.Text = string.Empty;
+        DbcView.SetDocument(document.File, document.Schema.Columns, Path.GetFileNameWithoutExtension(document.File.SourcePath), DecodedToggle.IsChecked == true);
+        WelcomePanel.IsVisible = false;
+        M2View.IsVisible = false;
+        DbcHost.IsVisible = true;
+        ShowDocumentSummary(document);
+        RefreshTabs();
+    }
+
+    private void RefreshTabs()
+    {
+        DocumentTabsPanel.Children.Clear();
+        for (var index = 0; index < _documents.Count; index++)
+        {
+            var captured = index;
+            var button = new Button
+            {
+                Content = _documents[index].DisplayName,
+                Padding = new Thickness(14, 9),
+                CornerRadius = new CornerRadius(0),
+                Background = index == _activeDocument ? new SolidColorBrush(Color.Parse("#202B3C")) : Brushes.Transparent,
+                BorderBrush = index == _activeDocument ? new SolidColorBrush(Color.Parse("#C58A2B")) : Brushes.Transparent,
+                BorderThickness = new Thickness(0, 0, 0, index == _activeDocument ? 2 : 0)
+            };
+            button.Click += (_, _) => ActivateDocument(captured);
+            DocumentTabsPanel.Children.Add(button);
+        }
+    }
+
+    private void ShowDocumentSummary(DbcDocumentSession document)
+    {
+        InspectorTitle.Text = Path.GetFileName(document.File.SourcePath);
+        InspectorSummary.Text = $"{document.File.RowCount:N0} records · {document.File.FieldCount:N0} fields";
+        InspectorDetail.Text = $"Container  WDBC\nRecord     {document.File.RecordSize:N0} bytes\nStrings    {document.File.StringTableSize:N0} bytes\nSchema     {document.Schema.MatchKind}\nDefinition {document.SchemaSource}\nRow key    {document.Schema.KeyStrategy.DisplayName(document.Schema.Columns)}\nSource     {document.File.SourcePath}";
+    }
+
+    private async void SaveClick(object? sender, RoutedEventArgs e) => await SaveCurrentAsync(false);
+    private async void SaveAsClick(object? sender, RoutedEventArgs e) => await SaveCurrentAsync(true);
+
+    private async Task<bool> SaveCurrentAsync(bool saveAs)
+    {
+        var document = Current;
+        if (document is null) return false;
+        var path = document.File.SourcePath;
+        if (saveAs)
+        {
+            var destination = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = "Save DBC as",
+                SuggestedFileName = Path.GetFileName(path),
+                FileTypeChoices = [new FilePickerFileType("WoW DBC table") { Patterns = ["*.dbc"] }]
+            });
+            path = destination?.TryGetLocalPath();
+            if (path is null) return false;
+            var fullDestination = Path.GetFullPath(path);
+            if (_documents.Any(other => !ReferenceEquals(other, document) && other.FullPath.Equals(fullDestination, StringComparison.OrdinalIgnoreCase)))
+            {
+                await ShowErrorAsync("DBC already staged", "Another open document already uses that destination. Close it or choose a different path before Save As.");
+                return false;
+            }
+        }
+        SetBusy("Saving table atomically with backup…");
         try
         {
-            await Task.Run(() => _file.Save(_file.SourcePath, true));
-            DocumentTabText.Text = Path.GetFileName(_file.SourcePath);
-            StatusText.Text = "Saved safely; previous file retained as .bak";
+            if (saveAs) await Task.Run(() => document.File.SaveAs(path, true));
+            else await Task.Run(() => document.File.Save(path, true));
+            RefreshTabs();
+            StatusText.Text = $"Saved {path} · previous file retained as .bak";
+            return true;
         }
         catch (Exception exception)
         {
             DesktopCrashLogger.Log("DBC save failed", exception);
             await ShowErrorAsync("Could not save DBC", exception.Message);
+            return false;
         }
+    }
+
+    private async void CloseDocumentClick(object? sender, RoutedEventArgs e) => await CloseCurrentDocumentAsync();
+
+    private async Task CloseCurrentDocumentAsync()
+    {
+        var document = Current;
+        if (document is null) return;
+        if (document.File.IsDirty)
+        {
+            var choice = await PromptSaveAsync(document.DisplayName.TrimEnd(' ', '*'));
+            if (choice == SaveChoice.Cancel) return;
+            if (choice == SaveChoice.Save && !await SaveCurrentAsync(false)) return;
+        }
+        _documents.RemoveAt(_activeDocument);
+        if (_documents.Count > 0) ActivateDocument(Math.Min(_activeDocument, _documents.Count - 1));
+        else
+        {
+            _activeDocument = -1;
+            DbcHost.IsVisible = false;
+            M2View.IsVisible = false;
+            WelcomePanel.IsVisible = true;
+            SearchBox.Text = string.Empty;
+            RefreshTabs();
+            InspectorTitle.Text = "Nothing selected";
+            InspectorSummary.Text = "Open a table or model to begin.";
+            InspectorDetail.Text = "Table metadata and selection details appear here.";
+        }
+    }
+
+    private void ShowSelection(Controls.DbcSelectionEventArgs selection)
+    {
+        var document = Current;
+        if (document is null) return;
+        var semantic = DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(document.File.SourcePath), selection.Column.Index, document.File, selection.Row);
+        InspectorTitle.Text = semantic?.Label ?? selection.Column.Name;
+        InspectorSummary.Text = selection.Value.Length == 0 ? "(empty)" : selection.Value;
+        var choices = semantic is null ? string.Empty : $"\nKnown     {semantic.Options.Count:N0} {semantic.Kind.ToString().ToLowerInvariant()} option(s)\nEdit      Double-click the cell";
+        InspectorDetail.Text = $"Row       {selection.Row + 1:N0}\nColumn    {selection.ColumnIndex:N0}\nField     {selection.Column.Name}\nType      {selection.Column.Type}\nOffset    {selection.Column.Offset:N0} bytes\nSize      {selection.Column.Size:N0} bytes{choices}";
+    }
+
+    private async Task EditCellAsync(Controls.DbcSelectionEventArgs selection)
+    {
+        var document = Current;
+        if (document is null) return;
+        var before = document.File.GetRaw(selection.Row, selection.Column);
+        var dialog = new CellEditorDialog(document.File, selection.Row, selection.Column);
+        var value = await dialog.ShowDialog<string?>(this);
+        if (value is null) return;
+        try
+        {
+            var semantic = DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(document.File.SourcePath), selection.Column.Index, document.File, selection.Row);
+            if (semantic is null) document.File.SetDisplayValue(selection.Row, selection.Column, value);
+            else document.File.SetRaw(selection.Row, selection.Column, semantic.Parse(value));
+            var after = document.File.GetRaw(selection.Row, selection.Column);
+            document.History.Record(selection.Row, selection.Column, before, after);
+            DbcView.RefreshDocument(selection.Row);
+            RefreshTabs();
+            ShowSelection(selection with { Value = Convert.ToString(document.File.GetDisplayValue(selection.Row, selection.Column), CultureInfo.InvariantCulture) ?? string.Empty });
+            StatusText.Text = before == after ? "Value was unchanged" : $"Modified {selection.Column.Name} · Ctrl+Z to undo";
+        }
+        catch (Exception exception)
+        {
+            await ShowErrorAsync("Invalid cell value", exception.Message);
+        }
+    }
+
+    private void UndoClick(object? sender, RoutedEventArgs e) => Undo();
+    private void RedoClick(object? sender, RoutedEventArgs e) => Redo();
+
+    private void Undo()
+    {
+        var document = Current;
+        if (document is null) return;
+        var edit = document.History.Undo(document.File);
+        if (edit is null) { StatusText.Text = "Nothing to undo in this DBC"; return; }
+        DbcView.RefreshDocument(edit.Row); RefreshTabs(); StatusText.Text = $"Undid {edit.Description}";
+    }
+
+    private void Redo()
+    {
+        var document = Current;
+        if (document is null) return;
+        var edit = document.History.Redo(document.File);
+        if (edit is null) { StatusText.Text = "Nothing to redo in this DBC"; return; }
+        DbcView.RefreshDocument(edit.Row); RefreshTabs(); StatusText.Text = $"Redid {edit.Description}";
+    }
+
+    private void AddRowClick(object? sender, RoutedEventArgs e) => AddRow();
+    private void CloneRowClick(object? sender, RoutedEventArgs e) => CloneRows(1);
+    private async void CloneMultipleClick(object? sender, RoutedEventArgs e)
+    {
+        var count = await PromptCloneCountAsync();
+        if (count is not null) CloneRows(count.Value);
+    }
+
+    private void AddRow()
+    {
+        var document = Current;
+        if (document is null) return;
+        try
+        {
+            RequireStructuralKey(document);
+            ClearFilter();
+            var row = document.File.AddBlankRow(document.IdColumn);
+            document.History.Clear();
+            DbcView.RefreshDocument(row); RefreshTabs();
+            StatusText.Text = $"Created row {row + 1:N0} with the next available identity";
+        }
+        catch (Exception exception) { _ = ShowErrorAsync("Could not add row", exception.Message); }
+    }
+
+    private void CloneRows(int count)
+    {
+        var document = Current;
+        var source = DbcView.SelectedSourceRow;
+        if (document is null || source < 0) { StatusText.Text = "Select a source row first"; return; }
+        try
+        {
+            RequireStructuralKey(document);
+            ClearFilter();
+            var first = document.File.CloneRows(source, count, document.IdColumn);
+            document.History.Clear();
+            DbcView.RefreshDocument(first); RefreshTabs();
+            StatusText.Text = $"Created {count:N0} clone(s) in one batch, starting at row {first + 1:N0}";
+        }
+        catch (Exception exception) { _ = ShowErrorAsync("Could not clone row", exception.Message); }
+    }
+
+    private async void DeleteRowClick(object? sender, RoutedEventArgs e)
+    {
+        var document = Current;
+        var row = DbcView.SelectedSourceRow;
+        if (document is null || row < 0) { StatusText.Text = "Select a row first"; return; }
+        if (document.Schema.KeyStrategy.Kind == DbcRecordKeyKind.VirtualRowIndex && row != document.File.RowCount - 1 &&
+            !await ConfirmAsync("Virtual row identities will change", "This table uses row positions as identities. Deleting a non-trailing row renumbers every following record and can break references. Continue anyway?")) return;
+        if (!await ConfirmAsync("Delete selected row?", $"Delete row {row + 1:N0} from {Path.GetFileName(document.File.SourcePath)}? This structural operation clears cell undo history.")) return;
+        document.File.DeleteRows([row]);
+        document.History.Clear();
+        ClearFilter();
+        DbcView.RefreshDocument(Math.Min(row, Math.Max(0, document.File.RowCount - 1)));
+        RefreshTabs();
+        StatusText.Text = $"Deleted row {row + 1:N0}";
+    }
+
+    private static void RequireStructuralKey(DbcDocumentSession document)
+    {
+        if (document.Schema.KeyStrategy.Kind == DbcRecordKeyKind.NoStableKey)
+            throw new InvalidOperationException("This table has no verified row-key strategy. Select a matching schema before adding or cloning records.");
+    }
+
+    private void ClearFilter()
+    {
+        SearchBox.Text = string.Empty;
+        DbcView.SetFilteredRows(null);
+    }
+
+    private void DecodedChanged(object? sender, RoutedEventArgs e)
+    {
+        DbcView.SetDecoded(DecodedToggle.IsChecked == true);
+        if (CurrentFile is not null) StatusText.Text = DecodedToggle.IsChecked == true ? "Decoded names enabled" : "Raw field values enabled";
+    }
+
+    private async void SearchChanged(object? sender, TextChangedEventArgs e)
+    {
+        _searchCancellation?.Cancel();
+        _searchCancellation?.Dispose();
+        _searchCancellation = new CancellationTokenSource();
+        var token = _searchCancellation.Token;
+        var query = SearchBox.Text?.Trim() ?? string.Empty;
+        var document = Current;
+        if (document is null) return;
+        if (query.Length == 0)
+        {
+            DbcView.SetFilteredRows(null);
+            StatusText.Text = $"Showing all {document.File.RowCount:N0} records";
+            return;
+        }
+        try
+        {
+            await Task.Delay(180, token);
+            SetBusy($"Searching {document.File.RowCount:N0} records…");
+            var decoded = DecodedToggle.IsChecked == true;
+            var table = Path.GetFileNameWithoutExtension(document.File.SourcePath);
+            var semanticColumns = decoded ? DbcSemanticCatalog.GetColumns(table).Where(index => index >= 0 && index < document.Schema.Columns.Count).ToArray() : [];
+            var rows = await Task.Run(() => Enumerable.Range(0, document.File.RowCount).AsParallel().AsOrdered().WithCancellation(token)
+                .Where(row => document.File.RowContains(row, query, document.Schema.Columns) || semanticColumns.Any(index =>
+                    DbcSemanticCatalog.Get(table, index, document.File, row)?.Format(document.File.GetRaw(row, document.Schema.Columns[index])).Contains(query, StringComparison.OrdinalIgnoreCase) == true))
+                .ToArray(), token);
+            if (token.IsCancellationRequested || !ReferenceEquals(document, Current)) return;
+            DbcView.SetFilteredRows(rows);
+            StatusText.Text = $"{rows.Length:N0} of {document.File.RowCount:N0} records match “{query}”";
+        }
+        catch (OperationCanceledException) { }
     }
 
     private async void OpenM2Click(object? sender, RoutedEventArgs e)
     {
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Inspect a WotLK M2 model",
-            AllowMultiple = false,
+            Title = "Inspect a WotLK M2 model", AllowMultiple = false,
             FileTypeFilter = [new FilePickerFileType("WotLK M2 models") { Patterns = ["*.m2"] }]
         });
         var path = files.FirstOrDefault()?.TryGetLocalPath();
-        if (path is null) return;
-        await LoadM2Async(path);
+        if (path is not null) await LoadM2Async(path);
     }
 
     private async Task LoadM2Async(string path)
@@ -125,11 +396,7 @@ public partial class MainWindow : Window
         try
         {
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path));
-            WelcomePanel.IsVisible = false;
-            DbcView.IsVisible = false;
-            M2View.IsVisible = true;
-            DocumentTab.IsVisible = true;
-            DocumentTabText.Text = Path.GetFileName(path);
+            WelcomePanel.IsVisible = false; DbcHost.IsVisible = false; M2View.IsVisible = true;
             M2View.SetGeometry(geometry);
             InspectorTitle.Text = Path.GetFileName(path);
             InspectorSummary.Text = $"{geometry.Vertices.Count:N0} vertices · {geometry.TriangleIndices.Count / 3:N0} triangles";
@@ -145,69 +412,160 @@ public partial class MainWindow : Window
 
     private void OpenLogsClick(object? sender, RoutedEventArgs e) => DesktopCrashLogger.OpenDirectory();
 
-    private async void SearchChanged(object? sender, TextChangedEventArgs e)
+    private void DbcScrollChanged(object? sender, RangeBaseValueChangedEventArgs e)
     {
-        _searchCancellation?.Cancel();
-        _searchCancellation?.Dispose();
-        _searchCancellation = new CancellationTokenSource();
-        var token = _searchCancellation.Token;
-        var query = SearchBox.Text?.Trim() ?? string.Empty;
-        if (_file is null) return;
-        if (query.Length == 0)
-        {
-            DbcView.SetFilteredRows(null);
-            StatusText.Text = $"Showing all {_file.RowCount:N0} records";
-            return;
-        }
-        try
-        {
-            await Task.Delay(180, token);
-            SetBusy($"Searching {_file.RowCount:N0} records…");
-            var file = _file;
-            var columns = _columns;
-            var rows = await Task.Run(() =>
-            {
-                var matches = new List<int>();
-                for (var row = 0; row < file.RowCount; row++)
-                {
-                    if ((row & 255) == 0) token.ThrowIfCancellationRequested();
-                    if (file.RowContains(row, query, columns)) matches.Add(row);
-                }
-                return matches;
-            }, token);
-            if (token.IsCancellationRequested) return;
-            DbcView.SetFilteredRows(rows);
-            StatusText.Text = $"{rows.Count:N0} of {file.RowCount:N0} records match “{query}”";
-        }
-        catch (OperationCanceledException) { }
+        if (_syncingScrollbars) return;
+        DbcView.SetScrollOffsets(HorizontalDbcScroll.Value, VerticalDbcScroll.Value);
     }
 
-    private void SetBusy(string message)
+    private void SyncScrollbars()
     {
-        StatusText.Text = message;
+        _syncingScrollbars = true;
+        VerticalDbcScroll.Maximum = DbcView.VerticalMaximum;
+        HorizontalDbcScroll.Maximum = DbcView.HorizontalMaximum;
+        VerticalDbcScroll.ViewportSize = Math.Max(1, DbcView.Bounds.Height - 32);
+        HorizontalDbcScroll.ViewportSize = Math.Max(1, DbcView.Bounds.Width - 58);
+        VerticalDbcScroll.Value = Math.Min(DbcView.VerticalOffset, VerticalDbcScroll.Maximum);
+        HorizontalDbcScroll.Value = Math.Min(DbcView.HorizontalOffset, HorizontalDbcScroll.Maximum);
+        _syncingScrollbars = false;
+    }
+
+    protected override void OnKeyDown(Avalonia.Input.KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (!e.KeyModifiers.HasFlag(Avalonia.Input.KeyModifiers.Control)) return;
+        if (e.Key == Avalonia.Input.Key.Z) Undo();
+        else if (e.Key == Avalonia.Input.Key.Y) Redo();
+        else if (e.Key == Avalonia.Input.Key.S) _ = SaveCurrentAsync(false);
+        else return;
+        e.Handled = true;
+    }
+
+    private async void WindowClosing(object? sender, WindowClosingEventArgs e)
+    {
+        if (_closingApproved) return;
+        if (_closingPromptActive) { e.Cancel = true; return; }
+        var dirty = _documents.Where(document => document.File.IsDirty).ToArray();
+        if (dirty.Length == 0) return;
+        e.Cancel = true;
+        _closingPromptActive = true;
+        try
+        {
+            var choice = await PromptSaveAsync($"{dirty.Length:N0} modified DBC file(s)");
+            if (choice == SaveChoice.Cancel) return;
+            if (choice == SaveChoice.Save)
+            {
+                foreach (var document in dirty)
+                {
+                    try { await Task.Run(() => document.File.Save(document.File.SourcePath, true)); }
+                    catch (Exception exception) { await ShowErrorAsync("Could not save all DBCs", exception.Message); return; }
+                }
+            }
+            _closingApproved = true;
+            Close();
+        }
+        finally { _closingPromptActive = false; }
+    }
+
+    private async Task<int?> PromptCloneCountAsync()
+    {
+        var input = new NumericUpDown { Minimum = 2, Maximum = 100_000, Value = 100, Increment = 1, Width = 220 };
+        var dialog = new Window { Title = "Clone multiple rows", Width = 430, Height = 210, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var cancel = new Button { Content = "Cancel" }; var create = new Button { Content = "Create clones", Classes = { "accent" } };
+        cancel.Click += (_, _) => dialog.Close(null); create.Click += (_, _) => dialog.Close((int?)input.Value);
+        dialog.Content = new StackPanel { Margin = new Thickness(22), Spacing = 14, Children = { new TextBlock { Text = "Number of copies", FontSize = 18, FontWeight = FontWeight.SemiBold }, input, new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 8, Children = { cancel, create } } } };
+        return await dialog.ShowDialog<int?>(this);
+    }
+
+    private async Task<bool> ConfirmAsync(string title, string message)
+    {
+        var dialog = new Window { Title = title, Width = 520, Height = 220, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var no = new Button { Content = "Cancel" }; var yes = new Button { Content = "Continue", Classes = { "accent" } };
+        no.Click += (_, _) => dialog.Close(false); yes.Click += (_, _) => dialog.Close(true);
+        dialog.Content = new StackPanel { Margin = new Thickness(22), Spacing = 15, Children = { new TextBlock { Text = title, FontSize = 19, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 8, Children = { no, yes } } } };
+        return await dialog.ShowDialog<bool>(this);
+    }
+
+    private async Task<SaveChoice> PromptSaveAsync(string name)
+    {
+        var dialog = new Window { Title = "Unsaved changes", Width = 540, Height = 230, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var cancel = new Button { Content = "Cancel" }; var discard = new Button { Content = "Discard" }; var save = new Button { Content = "Save", Classes = { "accent" } };
+        cancel.Click += (_, _) => dialog.Close(SaveChoice.Cancel); discard.Click += (_, _) => dialog.Close(SaveChoice.Discard); save.Click += (_, _) => dialog.Close(SaveChoice.Save);
+        dialog.Content = new StackPanel { Margin = new Thickness(22), Spacing = 15, Children = { new TextBlock { Text = "Unsaved changes", FontSize = 19, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = $"Save changes to {name} before continuing?", TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 8, Children = { cancel, discard, save } } } };
+        return await dialog.ShowDialog<SaveChoice>(this);
+    }
+
+    private void SetBusy(string message) => StatusText.Text = message;
+
+    private DbcSchemaCatalog ResolveSchemaCatalog()
+    {
+        lock (_schemaGate)
+        {
+            if (_schemaCatalog is not null) return _schemaCatalog;
+            var path = FindSchemaDefinitionPath();
+            if (path is not null)
+            {
+                try
+                {
+                    _schemaCatalog = DbcSchemaCatalog.Load(path);
+                    _schemaSource = path;
+                    return _schemaCatalog;
+                }
+                catch (Exception exception)
+                {
+                    DesktopCrashLogger.Log($"Could not load schema {path}; using built-in definitions", exception);
+                }
+            }
+            _schemaCatalog = DbcSchemaCatalog.CreateBuiltIn12340();
+            return _schemaCatalog;
+        }
+    }
+
+    private static string? FindSchemaDefinitionPath()
+    {
+        try
+        {
+            var settingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WoWCrucible", "settings.json");
+            if (File.Exists(settingsPath))
+            {
+                using var document = JsonDocument.Parse(File.ReadAllText(settingsPath));
+                if (document.RootElement.TryGetProperty("SchemaDefinitionPath", out var configured))
+                {
+                    var path = configured.GetString();
+                    if (!string.IsNullOrWhiteSpace(path) && File.Exists(path)) return Path.GetFullPath(path);
+                }
+            }
+        }
+        catch (Exception exception) { DesktopCrashLogger.Log("Could not read configured schema path", exception); }
+
+        const string fileName = "WotLK 3.3.5 (12340).xml";
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            foreach (var relative in new[]
+            {
+                Path.Combine("Definitions", fileName),
+                Path.Combine("WDBX.Editor", "Definitions", fileName),
+                Path.Combine("WDBXEditor", "WDBXEditor", "Definitions", fileName),
+                Path.Combine("WDBX (wow edit)", "Definitions", fileName)
+            })
+            {
+                var candidate = Path.Combine(directory.FullName, relative);
+                if (File.Exists(candidate)) return candidate;
+            }
+            directory = directory.Parent;
+        }
+        return null;
     }
 
     private async Task ShowErrorAsync(string title, string message)
     {
-        var dialog = new Window
-        {
-            Title = title,
-            Width = 520,
-            Height = 210,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            Content = new StackPanel
-            {
-                Margin = new Avalonia.Thickness(22),
-                Spacing = 14,
-                Children =
-                {
-                    new TextBlock { Text = title, FontSize = 19, FontWeight = Avalonia.Media.FontWeight.SemiBold },
-                    new TextBlock { Text = message, TextWrapping = Avalonia.Media.TextWrapping.Wrap },
-                    new Button { Content = "Close", HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right }
-                }
-            }
-        };
-        ((Button)((StackPanel)dialog.Content).Children[2]).Click += (_, _) => dialog.Close();
+        var dialog = new Window { Title = title, Width = 520, Height = 220, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var close = new Button { Content = "Close", HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right };
+        close.Click += (_, _) => dialog.Close();
+        dialog.Content = new StackPanel { Margin = new Thickness(22), Spacing = 14, Children = { new TextBlock { Text = title, FontSize = 19, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap }, close } };
         await dialog.ShowDialog(this);
     }
+
+    private enum SaveChoice { Cancel, Discard, Save }
 }

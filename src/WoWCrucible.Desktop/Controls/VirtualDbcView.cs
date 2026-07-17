@@ -36,17 +36,26 @@ public sealed class VirtualDbcView : Control
     private WdbcFile? _file;
     private IReadOnlyList<DbcColumn> _columns = [];
     private IReadOnlyList<int>? _filteredRows;
+    private string _tableName = string.Empty;
+    private bool _decoded = true;
     private double _verticalOffset;
     private double _horizontalOffset;
     private int _selectedDisplayRow = -1;
     private int _selectedColumn = -1;
 
     public event EventHandler<DbcSelectionEventArgs>? SelectionChanged;
+    public event EventHandler<DbcSelectionEventArgs>? CellEditRequested;
     public event EventHandler<ViewportPerformanceEventArgs>? RenderMeasured;
 
     public WdbcFile? File => _file;
     public IReadOnlyList<DbcColumn> Columns => _columns;
     public int VisibleRowCount => _filteredRows?.Count ?? _file?.RowCount ?? 0;
+    public int SelectedSourceRow => _selectedDisplayRow < 0 ? -1 : _filteredRows is null ? _selectedDisplayRow : _filteredRows[_selectedDisplayRow];
+    public int SelectedColumn => _selectedColumn;
+    public double VerticalOffset => _verticalOffset;
+    public double HorizontalOffset => _horizontalOffset;
+    public double VerticalMaximum => Math.Max(0, VisibleRowCount * RowHeight - Math.Max(0, Bounds.Height - HeaderHeight));
+    public double HorizontalMaximum => Math.Max(0, _columns.Count * DefaultColumnWidth - Math.Max(0, Bounds.Width - RowNumberWidth));
 
     public VirtualDbcView()
     {
@@ -54,10 +63,12 @@ public sealed class VirtualDbcView : Control
         ClipToBounds = true;
     }
 
-    public void SetDocument(WdbcFile file, IReadOnlyList<DbcColumn> columns)
+    public void SetDocument(WdbcFile file, IReadOnlyList<DbcColumn> columns, string tableName, bool decoded)
     {
         _file = file;
         _columns = columns;
+        _tableName = tableName;
+        _decoded = decoded;
         _filteredRows = null;
         _verticalOffset = 0;
         _horizontalOffset = 0;
@@ -67,12 +78,41 @@ public sealed class VirtualDbcView : Control
         InvalidateVisual();
     }
 
+    public void SetDecoded(bool decoded)
+    {
+        if (_decoded == decoded) return;
+        _decoded = decoded;
+        _displayCache.Clear();
+        InvalidateVisual();
+    }
+
+    public void RefreshDocument(int selectedSourceRow = -1)
+    {
+        _displayCache.Clear();
+        if (selectedSourceRow >= 0)
+        {
+            _selectedDisplayRow = _filteredRows is null ? selectedSourceRow : IndexOf(_filteredRows, selectedSourceRow);
+            if (_selectedDisplayRow >= 0)
+                _verticalOffset = Math.Max(0, _selectedDisplayRow * RowHeight - Math.Max(0, Bounds.Height - HeaderHeight) * 0.45);
+        }
+        ClampOffsets();
+        InvalidateVisual();
+    }
+
     public void SetFilteredRows(IReadOnlyList<int>? rows)
     {
         _filteredRows = rows;
         _verticalOffset = 0;
         _selectedDisplayRow = -1;
         _displayCache.Clear();
+        InvalidateVisual();
+    }
+
+    public void SetScrollOffsets(double horizontal, double vertical)
+    {
+        _horizontalOffset = horizontal;
+        _verticalOffset = vertical;
+        ClampOffsets();
         InvalidateVisual();
     }
 
@@ -154,6 +194,8 @@ public sealed class VirtualDbcView : Control
         _selectedColumn = column;
         var sourceRow = _filteredRows is null ? displayRow : _filteredRows[displayRow];
         SelectionChanged?.Invoke(this, new(sourceRow, column, _columns[column], CachedValue(sourceRow, column)));
+        if (e.ClickCount >= 2)
+            CellEditRequested?.Invoke(this, new(sourceRow, column, _columns[column], CachedValue(sourceRow, column)));
         InvalidateVisual();
         e.Handled = true;
     }
@@ -182,7 +224,11 @@ public sealed class VirtualDbcView : Control
     {
         var key = ((long)sourceRow << 32) | (uint)columnIndex;
         if (_displayCache.TryGetValue(key, out var value)) return value;
-        value = Convert.ToString(_file!.GetDisplayValue(sourceRow, _columns[columnIndex]), CultureInfo.InvariantCulture) ?? string.Empty;
+        var column = _columns[columnIndex];
+        var semantic = _decoded ? DbcSemanticCatalog.Get(_tableName, column.Index, _file, sourceRow) : null;
+        value = semantic?.Format(_file!.GetRaw(sourceRow, column))
+            ?? Convert.ToString(_file!.GetDisplayValue(sourceRow, column), CultureInfo.InvariantCulture)
+            ?? string.Empty;
         if (_displayCache.Count >= TextCacheLimit) _displayCache.Clear();
         _displayCache[key] = value;
         return value;
@@ -190,10 +236,8 @@ public sealed class VirtualDbcView : Control
 
     private void ClampOffsets()
     {
-        var contentHeight = Math.Max(0, VisibleRowCount * RowHeight - Math.Max(0, Bounds.Height - HeaderHeight));
-        var contentWidth = Math.Max(0, _columns.Count * DefaultColumnWidth - Math.Max(0, Bounds.Width - RowNumberWidth));
-        _verticalOffset = Math.Clamp(_verticalOffset, 0, contentHeight);
-        _horizontalOffset = Math.Clamp(_horizontalOffset, 0, contentWidth);
+        _verticalOffset = Math.Clamp(_verticalOffset, 0, VerticalMaximum);
+        _horizontalOffset = Math.Clamp(_horizontalOffset, 0, HorizontalMaximum);
     }
 
     private static void DrawText(DrawingContext context, string text, double x, double y, IBrush brush, Typeface typeface, double size)
@@ -203,6 +247,13 @@ public sealed class VirtualDbcView : Control
     }
 
     private static string Trim(string value, int maximum) => value.Length <= maximum ? value : string.Concat(value.AsSpan(0, maximum - 1), "…");
+
+    private static int IndexOf(IReadOnlyList<int> rows, int sourceRow)
+    {
+        for (var index = 0; index < rows.Count; index++)
+            if (rows[index] == sourceRow) return index;
+        return -1;
+    }
 }
 
 public sealed record DbcSelectionEventArgs(int Row, int ColumnIndex, DbcColumn Column, string Value);

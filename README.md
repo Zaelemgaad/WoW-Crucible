@@ -107,7 +107,7 @@ Specialized editors will follow the principles in [docs/UX-PRINCIPLES.md](docs/U
 
 Requirements: Windows x64 and the .NET 10 SDK.
 
-The new high-performance Avalonia desktop is available as an early migration preview. It has a static themed workspace, background DBC loading/search, a direct-rendered virtual WDBC viewport, and an interactive native M2/SKIN mesh preview. The established application remains available while full feature parity is migrated.
+The new high-performance Avalonia desktop is available as an active migration preview. It has a static themed workspace, multi-file DBC staging, per-document undo/redo, guided decoded cell editing, safe row add/clone/bulk-clone/delete actions, background loading/search, a direct-rendered virtual WDBC viewport, and an interactive native M2/SKIN mesh preview. The established application remains available while the remaining workflows reach full feature parity.
 
 ```powershell
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj
