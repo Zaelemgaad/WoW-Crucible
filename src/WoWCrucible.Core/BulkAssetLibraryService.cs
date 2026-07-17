@@ -119,21 +119,31 @@ public static class BulkAssetLibraryService
         if (!Directory.Exists(root)) return (0, 0);
         var pending = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Where(path => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase) && !File.Exists(Path.ChangeExtension(path, ".png"))).ToArray();
-        var batches = BatchPaths(pending, 28_000, 36); var converted = 0; var failed = 0;
+        var batches = BatchPaths(pending, 28_000, 128);
         await Parallel.ForEachAsync(batches, new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = cancellationToken }, async (batch, token) =>
         {
-            var start = new ProcessStartInfo(converterPath) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            start.ArgumentList.Add("/M"); foreach (var path in batch) start.ArgumentList.Add(path);
-            using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the BLP converter.");
-            var output = process.StandardOutput.ReadToEndAsync(token); var error = process.StandardError.ReadToEndAsync(token);
-            await process.WaitForExitAsync(token); await Task.WhenAll(output, error);
-            foreach (var source in batch)
-            {
-                if (File.Exists(Path.ChangeExtension(source, ".png"))) Interlocked.Increment(ref converted);
-                else Interlocked.Increment(ref failed);
-            }
+            await RunConverterAsync(converterPath, batch, token);
         });
-        return (converted, failed);
+        // Older converters abort the rest of a batch at the first unsupported BLP. Retry
+        // every missing output alone so one invalid modern texture cannot hide valid neighbors.
+        var retry = pending.Where(source => !File.Exists(Path.ChangeExtension(source, ".png"))).ToArray();
+        await Parallel.ForEachAsync(retry, new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = cancellationToken },
+            async (source, token) => await RunConverterAsync(converterPath, [source], token));
+        var converted = pending.Count(source => File.Exists(Path.ChangeExtension(source, ".png")));
+        var rejected = pending.Where(source => !File.Exists(Path.ChangeExtension(source, ".png"))).ToArray();
+        var rejectionLog = Path.Combine(root, ".blp-conversion-failures.txt");
+        if (rejected.Length > 0) File.WriteAllLines(rejectionLog, rejected.Select(source => Path.GetRelativePath(root, source)));
+        else if (File.Exists(rejectionLog)) File.Delete(rejectionLog);
+        return (converted, rejected.Length);
+    }
+
+    private static async Task RunConverterAsync(string converterPath, IReadOnlyList<string> sources, CancellationToken cancellationToken)
+    {
+        var start = new ProcessStartInfo(converterPath) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        start.ArgumentList.Add("/M"); foreach (var path in sources) start.ArgumentList.Add(path);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the BLP converter.");
+        var output = process.StandardOutput.ReadToEndAsync(cancellationToken); var error = process.StandardError.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken); await Task.WhenAll(output, error);
     }
 
     private static IReadOnlyList<string[]> BatchPaths(IReadOnlyList<string> paths, int maximumCharacters, int maximumFiles)

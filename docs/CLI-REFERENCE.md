@@ -22,7 +22,7 @@ wowcrucible asset library-status <library-folder>
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
 
-`library-run` is resumable. It preserves each archive in a distinct provenance folder, preserves duplicate locale variants with suffixes, never overwrites an existing extracted file or PNG, copies loose BLPs into the library without modifying the source, converts in bounded parallel batches, verifies PNG output, writes a checkpoint after every archive, and generates `asset-catalog.csv` with Maps/UI/Characters/Creatures/Items/Textures/ModelsAndWorld/Audio/Other categories. A corrupt or unsupported individual archive entry is recorded in the checkpoint while the remaining entries continue.
+`library-run` is resumable. It preserves each archive in a distinct provenance folder, preserves duplicate locale variants with suffixes, never overwrites an existing extracted file or PNG, copies loose BLPs into the library without modifying the source, converts in bounded parallel batches, verifies PNG output, writes a checkpoint after every archive, and generates `asset-catalog.csv` with Maps/UI/Characters/Creatures/Items/Textures/ModelsAndWorld/Audio/Other categories. A corrupt or unsupported individual archive entry is recorded in the checkpoint while the remaining entries continue. If the external converter rejects a BLP, Crucible retries its batch neighbors individually and writes the genuinely unsupported paths to `.blp-conversion-failures.txt` inside that provenance root.
 
 Example:
 
