@@ -95,8 +95,8 @@ wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filt
 wowcrucible client fusion extracted-stock extracted-mod-a extracted-mod-b [--output=fusion-plan.json] [--stage=fusion-review] [--all]
 wowcrucible server client-plan "C:\path\to\installed-server" extracted-effective-dbc [--source=core-source] [--output=plan.json] [--stage=server-review]
 wowcrucible asset library-import extracted-archive asset-library provenance-name BLPConverter.exe [--workers=6]
-wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json]
-wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N]
+wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json] [--listfile=paths.txt]
+wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N] [--listfile=paths.txt]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
 wowcrucible mpq update patch-W.MPQ file-or-folder [...]
 wowcrucible manifest create classless.json patch-W.mpq changed-files-folder [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]
@@ -106,6 +106,8 @@ wowcrucible manifest build classless.json output-folder
 ```
 
 An MPQ browser can only display names known to an internal or external `(listfile)`. Client indexing preserves every hash-only entry under its synthetic StormLib name, reports the unresolved count, and can retry name recovery from a corpus built across multiple clients. `--resolved-only` prevents synthetic names from being mistaken for reusable folder paths; `--anonymous-only` quarantines those unresolved payloads for signature/content inspection.
+
+Standalone MPQ listing and extraction also accept `--listfile=paths.txt`; unresolved `File000...` placeholders are reported as a naming limitation, not archive incompatibility.
 - Maps standalone DBCs to `DBFilesClient\\<name>.dbc`.
 - Synchronizes a saved DBC into a selected server `data\\dbc` directory with backup.
 

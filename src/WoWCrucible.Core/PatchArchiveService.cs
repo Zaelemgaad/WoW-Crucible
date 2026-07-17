@@ -140,7 +140,7 @@ public sealed class PatchArchiveService
 
     public bool Contains(string archivePath, string internalPath)
     {
-        if (!Native.SFileOpenArchive(Path.GetFullPath(archivePath), 0, 0, out var archive)) ThrowNative("open the MPQ archive");
+        var archive = OpenArchiveWithRetry(Path.GetFullPath(archivePath), "open the MPQ archive");
         try { return Native.SFileHasFile(archive, PatchInputMapper.NormalizeArchivePath(internalPath)); }
         finally { Native.SFileCloseArchive(archive); }
     }
@@ -150,7 +150,7 @@ public sealed class PatchArchiveService
         archivePath = Path.GetFullPath(archivePath);
         externalListFile = string.IsNullOrWhiteSpace(externalListFile) ? null : Path.GetFullPath(externalListFile);
         if (externalListFile is not null && !File.Exists(externalListFile)) throw new FileNotFoundException("The external MPQ listfile was not found.", externalListFile);
-        if (!Native.SFileOpenArchive(archivePath, 0, 0, out var archive)) ThrowNative("open the MPQ archive");
+        var archive = OpenArchiveWithRetry(archivePath, "open the MPQ archive");
         var result = new List<MpqFileEntry>();
         try
         {
@@ -183,7 +183,7 @@ public sealed class PatchArchiveService
             ? entries.GroupBy(entry => PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase)
             : [];
         var occurrences = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        if (!Native.SFileOpenArchive(archivePath, 0, 0, out var archive)) ThrowNative("open the MPQ archive");
+        var archive = OpenArchiveWithRetry(archivePath, "open the MPQ archive");
         try
         {
             for (var index = 0; index < entries.Length; index++)
@@ -227,7 +227,7 @@ public sealed class PatchArchiveService
         IntPtr archive = IntPtr.Zero;
         try
         {
-            if (!Native.SFileOpenArchive(tempPath, 0, 0, out archive)) ThrowNative("open the MPQ archive for updating");
+            archive = OpenArchiveWithRetry(tempPath, "open the MPQ archive for updating");
             foreach (var entry in entries)
                 if (!Native.SFileAddFileEx(archive, entry.SourcePath, entry.ArchivePath, FileCompress | FileReplaceExisting, CompressionZlib, 0xFFFFFFFF))
                     ThrowNative($"add '{entry.ArchivePath}'");
@@ -254,6 +254,19 @@ public sealed class PatchArchiveService
     }
 
     private static void ThrowNative(string operation) => throw new Win32Exception(Marshal.GetLastWin32Error(), $"StormLib could not {operation}");
+
+    private static IntPtr OpenArchiveWithRetry(string archivePath, string operation)
+    {
+        const int attempts = 3;
+        var error = 0;
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            if (Native.SFileOpenArchive(archivePath, 0, 0, out var archive)) return archive;
+            error = Marshal.GetLastWin32Error();
+            if (attempt < attempts) Thread.Sleep(attempt * 150);
+        }
+        throw new Win32Exception(error, $"StormLib could not {operation} after {attempts} attempts: {archivePath}");
+    }
 
     private static class Native
     {

@@ -78,13 +78,15 @@ Promotion and clone/remap commands save semantic, reviewable operations. Strings
 ## MPQ listing, extraction, creation, and updates
 
 ```text
-wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json]
-wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]
+wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]
+wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]
 wowcrucible mpq create <archive.mpq> <files/folders...>
 wowcrucible mpq update <small-patch.mpq> <files/folders...>
 ```
 
 Filters accept text or `*`, `?`, and `**` globs. `--content-only` excludes `(listfile)`, `(attributes)`, and `(signature)` metadata. JSON output separates entry properties for scripts.
+
+If an archive opens but only exposes StormLib `File000...` placeholders, Crucible reports those entries as unresolved names rather than calling the MPQ incompatible. Supply a compatible external path corpus with `--listfile=paths.txt` to recover known client paths before filtering or extraction.
 
 `update` is transaction-safe but copies the archive first and refuses archives larger than 2 GiB. Treat large client/mod layers as immutable inputs and build a small manifest-driven patch instead.
 
