@@ -24,8 +24,10 @@ File.WriteAllBytes(wotlkModel, wotlkBytes); File.WriteAllText(Path.Combine(asset
 var compatibleModel = NativeAssetConversionService.Inspect(wotlkModel);
 if (compatibleModel.Compatibility != AssetCompatibility.AlreadyWotlk335 || compatibleModel.Version != 264 || compatibleModel.Dependencies.Count != 1)
     throw new InvalidOperationException("Native asset inspection did not recognize a Wrath M2 and its skin dependency.");
-var geometryModelPath = Path.Combine(assetFixture, "geometry.m2"); var geometryBytes = new byte[0x130 + 3 * 48];
+var geometryModelPath = Path.Combine(assetFixture, "geometry.m2"); var geometryBytes = new byte[0x130 + 3 * 48 + 32];
 System.Text.Encoding.ASCII.GetBytes("MD20").CopyTo(geometryBytes, 0); BitConverter.GetBytes((uint)264).CopyTo(geometryBytes, 4); BitConverter.GetBytes((uint)3).CopyTo(geometryBytes, 0x3C); BitConverter.GetBytes((uint)0x130).CopyTo(geometryBytes, 0x40);
+var textureDefinitionOffset = 0x130 + 3 * 48; BitConverter.GetBytes((uint)1).CopyTo(geometryBytes, 0x50); BitConverter.GetBytes((uint)textureDefinitionOffset).CopyTo(geometryBytes, 0x54);
+BitConverter.GetBytes((uint)0).CopyTo(geometryBytes, textureDefinitionOffset); BitConverter.GetBytes((uint)3).CopyTo(geometryBytes, textureDefinitionOffset + 4); BitConverter.GetBytes((uint)12).CopyTo(geometryBytes, textureDefinitionOffset + 8); BitConverter.GetBytes((uint)(textureDefinitionOffset + 16)).CopyTo(geometryBytes, textureDefinitionOffset + 12); System.Text.Encoding.ASCII.GetBytes("fixture.blp\0").CopyTo(geometryBytes, textureDefinitionOffset + 16);
 var fixtureVertices = new[] { (X: -1f, Y: 0f, Z: -1f), (X: 1f, Y: 0f, Z: -1f), (X: 0f, Y: 0f, Z: 1f) };
 for (var index = 0; index < fixtureVertices.Length; index++)
 {
@@ -36,7 +38,7 @@ var geometrySkin = new byte[60]; System.Text.Encoding.ASCII.GetBytes("SKIN").Cop
 for (ushort index = 0; index < 3; index++) { BitConverter.GetBytes(index).CopyTo(geometrySkin, 48 + index * 2); BitConverter.GetBytes(index).CopyTo(geometrySkin, 54 + index * 2); }
 File.WriteAllBytes(Path.Combine(assetFixture, "geometry00.skin"), geometrySkin);
 var previewGeometry = M2PreviewGeometryService.Load(geometryModelPath);
-if (previewGeometry.Vertices.Count != 3 || previewGeometry.TriangleIndices.Count != 3 || previewGeometry.Minimum.X != -1f || previewGeometry.Maximum.Z != 1f)
+if (previewGeometry.Vertices.Count != 3 || previewGeometry.TriangleIndices.Count != 3 || previewGeometry.Minimum.X != -1f || previewGeometry.Maximum.Z != 1f || previewGeometry.TextureSlots.Count != 1 || previewGeometry.TextureSlots[0].EmbeddedPath != "fixture.blp" || previewGeometry.TextureSlots[0].Flags != 3)
     throw new InvalidOperationException("Native M2/SKIN preview geometry parsing failed.");
 var modernModel = Path.Combine(assetFixture, "modern.m2");
 using (var stream = File.Create(modernModel)) using (var writer = new BinaryWriter(stream))
@@ -63,21 +65,30 @@ if (nativeWorkspace.CompatibleAssets != 1 || nativeWorkspace.ConversionRequired 
 var comparisonRoot = Path.Combine(assetFixture, "comparison-library");
 var oldLegacy = Path.Combine(comparisonRoot, "Archives", "patch-old-a1", "Content", "Character", "BloodElf", "Female");
 var newLegacy = Path.Combine(comparisonRoot, "Archives", "patch-new-b2", "Content", "Character", "BloodElf", "Female"); Directory.CreateDirectory(oldLegacy); Directory.CreateDirectory(newLegacy);
-File.WriteAllText(Path.Combine(oldLegacy, "old-expansion-name.png"), "old"); File.WriteAllText(Path.Combine(newLegacy, "completely-renamed.png"), "new");
+File.WriteAllText(Path.Combine(oldLegacy, "old-expansion-name.png"), "old"); File.WriteAllText(Path.Combine(newLegacy, "completely-renamed.png"), "new"); File.WriteAllText(Path.Combine(newLegacy, "exact-copy.png"), "old");
+File.Copy(geometryModelPath, Path.Combine(oldLegacy, "geometry.m2")); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(oldLegacy, "geometry00.skin"));
 var looseMatching = Path.Combine(comparisonRoot, "Loose", "Content", "Character", "BloodElf", "Female"); var looseOnly = Path.Combine(comparisonRoot, "Loose", "Content", "ExtendedSkins", "Character", "Human", "Female");
 Directory.CreateDirectory(looseMatching); Directory.CreateDirectory(looseOnly); File.WriteAllText(Path.Combine(looseMatching, "loose-variant.png"), "loose"); File.WriteAllText(Path.Combine(looseOnly, "human-only.png"), "loose only");
 File.WriteAllText(Path.Combine(comparisonRoot, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(comparisonRoot, comparisonRoot, 1, DateTimeOffset.UtcNow, 0, [])));
 var layoutDryRun = BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, false); var layoutApplied = BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, true);
-if (layoutDryRun.Files != 2 || layoutDryRun.Conflicts != 0 || layoutApplied.MovedFiles != 2 || BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, false).SourceFolders != 0)
+if (layoutDryRun.Files != 5 || layoutDryRun.Conflicts != 0 || layoutApplied.MovedFiles != 5 || BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, false).SourceFolders != 0)
     throw new InvalidOperationException("Content-first layout migration was destructive, conflicting, or not resumable.");
 var comparisonIndex = AssetComparisonService.BuildIndex(comparisonRoot); var comparisonEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, @"Character\BloodElf\Female");
 var matchingDirectory = comparisonIndex.Directories.Single(directory => directory.LogicalPath == @"Character\BloodElf\Female");
 var looseOnlyEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, @"ExtendedSkins\Character\Human\Female");
-if (comparisonIndex.TotalPngFiles != 4 || matchingDirectory.ProvenanceSources != 3 || comparisonEntries.Count != 3 || comparisonEntries.Select(entry => entry.FileName).Distinct().Count() != 3 ||
-    looseOnlyEntries.Count != 1 || looseOnlyEntries[0].Provenance != "Loose")
+var exactDuplicates = AssetComparisonService.FindExactDuplicates(comparisonEntries);
+var comparisonModels = AssetComparisonService.GetDirectoryModels(comparisonIndex, @"Character\BloodElf\Female");
+if (comparisonIndex.TotalPngFiles != 5 || matchingDirectory.ProvenanceSources != 3 || comparisonEntries.Count != 4 || comparisonEntries.Select(entry => entry.FileName).Distinct().Count() != 4 ||
+    looseOnlyEntries.Count != 1 || looseOnlyEntries[0].Provenance != "Loose" || exactDuplicates.Count != 1 || exactDuplicates[0].Entries.Count != 2 || exactDuplicates[0].RecoverableBytes != 3 || comparisonModels.Count != 1)
     throw new InvalidOperationException("Directory-first visual comparison did not merge matching Loose content or preserve Loose-only paths.");
 try { _ = AssetComparisonService.GetDirectoryPngs(comparisonIndex, ".."); throw new InvalidOperationException("Asset comparison accepted a path outside its content root."); }
 catch (InvalidOperationException exception) when (exception.Message.Contains("escaped")) { }
+var extractedImport = Path.Combine(assetFixture, "manual-extraction"); Directory.CreateDirectory(Path.Combine(extractedImport, "Interface", "FrameXML"));
+File.WriteAllText(Path.Combine(extractedImport, "Interface", "FrameXML", "fixture.lua"), "fixture");
+var imported = BulkAssetLibraryService.ImportExtractedArchiveAsync(extractedImport, comparisonRoot, "manual-patch", wotlkModel, 1).GetAwaiter().GetResult();
+var resumedImport = BulkAssetLibraryService.ImportExtractedArchiveAsync(extractedImport, comparisonRoot, "manual-patch", wotlkModel, 1).GetAwaiter().GetResult();
+if (imported.ImportedFiles != 1 || resumedImport.ImportedFiles != 0 || !File.Exists(Path.Combine(comparisonRoot, "Archives", "Content", "Interface", "FrameXML", "manual-patch", "fixture.lua")))
+    throw new InvalidOperationException("Extracted archive import did not preserve provenance or resume with an exact byte comparison.");
 Directory.Delete(assetFixture, true); Directory.Delete(conversionWorkspacePath, true);
 
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));

@@ -46,6 +46,18 @@ static int Asset(string[] args)
         Console.Error.WriteLine($"Asset library complete: {result.CompletedArchives:N0} archive(s), {result.CopiedLooseBlps:N0} loose BLP copy/copies, {result.ConvertedPngs:N0} PNG conversion(s), {result.FailedArchives:N0} archive failure(s), {result.ConversionFailures:N0} conversion failure(s).\nCatalog: {result.CatalogPath}\nCheckpoint: {result.CheckpointPath}");
         return result.FailedArchives == 0 && result.ConversionFailures == 0 ? 0 : 3;
     }
+    if (args is ["library-import", var extractedRoot, var importLibraryRoot, var provenance, var importConverterPath, .. var importOptions])
+    {
+        var workersText = Option(importOptions, "--workers=") ?? "6";
+        var unknown = importOptions.Where(option => !option.StartsWith("--workers=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset library-import option: {unknown[0]}");
+        var progress = new Progress<(string Stage, long Done, long Total, string Path)>(value =>
+            Console.Error.WriteLine(value.Total > 0 ? $"{value.Stage}\t{value.Done:N0}/{value.Total:N0}\t{value.Path}" : $"{value.Stage}\t{value.Path}"));
+        var result = BulkAssetLibraryService.ImportExtractedArchiveAsync(extractedRoot, importLibraryRoot, provenance, importConverterPath,
+            int.Parse(workersText, System.Globalization.CultureInfo.InvariantCulture), progress).GetAwaiter().GetResult();
+        Console.Error.WriteLine($"Extracted archive import complete: {result.Provenance}, {result.SourceFiles:N0} source file(s), {result.SourceBytes / (1024d * 1024 * 1024):0.##} GiB, {result.ImportedFiles:N0} newly copied, {result.ConvertedPngs:N0} PNG conversion(s), {result.ConversionFailures:N0} conversion failure(s).\nCatalog: {result.CatalogPath}");
+        return result.ConversionFailures == 0 ? 0 : 3;
+    }
     if (args is ["library-repair", var repairLibraryRoot, var repairConverterPath, .. var repairOptions])
     {
         var workersText = Option(repairOptions, "--workers=") ?? "6";
@@ -114,7 +126,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Client(string[] args)
 {

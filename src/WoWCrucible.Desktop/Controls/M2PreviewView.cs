@@ -29,6 +29,12 @@ public sealed class M2PreviewView : Control
         InvalidateVisual();
     }
 
+    public void ClearGeometry()
+    {
+        _geometry = null;
+        InvalidateVisual();
+    }
+
     public override void Render(DrawingContext context)
     {
         base.Render(context);

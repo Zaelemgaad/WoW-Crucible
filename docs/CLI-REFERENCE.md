@@ -17,6 +17,7 @@ wowcrucible asset preview-info <wrath-model.m2>
 wowcrucible asset workspace <new-output-folder> <files/folders...>
 wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]
 wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]
+wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]
 wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]
 wowcrucible asset library-layout <library-folder> [--apply]
 wowcrucible asset library-status <library-folder>
@@ -26,7 +27,9 @@ wowcrucible asset compare-files <library-folder> <logical-directory>
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
 
-`library-run` is resumable. It preserves each archive in a distinct provenance folder, preserves duplicate locale variants with suffixes, never overwrites an existing extracted file or PNG, copies loose BLPs into the library without modifying the source, converts in bounded parallel batches, verifies PNG output, writes a checkpoint after every archive, and generates `asset-catalog.csv` with Maps/UI/Characters/Creatures/Items/Textures/ModelsAndWorld/Audio/Other categories. A corrupt or unsupported individual archive entry is recorded in the checkpoint while the remaining entries continue. If the external converter rejects a BLP, Crucible retries its batch neighbors individually and writes the genuinely unsupported paths to `.blp-conversion-failures.txt` inside that provenance root.
+`library-run` is resumable. It preserves each archive in a distinct provenance folder, preserves duplicate locale variants with suffixes, never overwrites an existing extracted file or PNG, copies loose BLPs into the library without modifying the source, converts in bounded parallel batches, verifies PNG output, writes a checkpoint after every archive, and generates `asset-catalog.csv` with Maps/UI/Characters/Creatures/Items/Textures/ModelsAndWorld/Audio/Other categories. A corrupt or unsupported individual archive entry is recorded in the checkpoint while the remaining entries continue. If the external converter rejects a BLP, Crucible retries its batch neighbors individually and writes the genuinely unsupported paths to `.blp-conversion-failures.txt` inside that provenance root. Executables that reject the required `/M` batch syntax now fail immediately instead of spawning a retry for every texture.
+
+`library-import` safely ingests a folder produced by another MPQ extractor while retaining a single explicit provenance label. It preserves every file type, converts staged BLPs, uses exact byte comparisons when resuming, refuses differing destination files, and never modifies or deletes the extracted source folder.
 
 Example:
 
@@ -45,6 +48,8 @@ Archive libraries use a content-first comparison layout. For example, `Archives\
 Comparison is directory-first because expansions frequently rename equivalent assets. `compare-folders` searches logical content paths and reports PNG/source counts; `compare-files` lists every direct PNG from every provenance folder in the selected path without requiring filenames to match. The Avalonia **Assets & compare** workspace exposes the same model visually with paged, lazy thumbnails and two comparison slots.
 
 Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`. Selecting `Character\BloodElf\Female`, for example, shows all direct PNGs under every archive patch folder plus direct PNGs from the matching `Loose\Content` path; it does not guess that differently named files are equivalent. Loose-only paths also appear in the same navigator with `Loose` as their source.
+
+The visual workspace can sort cards by source/name, filename, or file size in either direction. `Scan exact copies` first narrows candidates by byte length, verifies SHA-256, and finally performs a streaming byte-for-byte comparison. It only labels exact groups and enables a collapsed comparison view; it never deletes source or processed assets. The preview-pane selector can switch from synchronized left/right images to any WotLK M2 + SKIN pair discovered directly in the selected content path. The embedded model view is live and rotatable, but it deliberately reports texture binding as unresolved until replaceable M2 texture slots and `CharSections` compositing have been resolved; a raw face or skin fragment is not falsely stretched across an entire model.
 
 ## DBC information, validation, comparison, and editing
 

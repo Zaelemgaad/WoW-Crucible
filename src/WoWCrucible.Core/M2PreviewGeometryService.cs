@@ -2,7 +2,8 @@ using System.Numerics;
 
 namespace WoWCrucible.Core;
 
-public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadOnlyList<Vector3> Vertices, IReadOnlyList<Vector3> Normals, IReadOnlyList<int> TriangleIndices, Vector3 Minimum, Vector3 Maximum);
+public sealed record M2TextureSlot(int Index, uint Type, uint Flags, string? EmbeddedPath);
+public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadOnlyList<Vector3> Vertices, IReadOnlyList<Vector3> Normals, IReadOnlyList<int> TriangleIndices, Vector3 Minimum, Vector3 Maximum, IReadOnlyList<M2TextureSlot> TextureSlots);
 
 public static class M2PreviewGeometryService
 {
@@ -31,6 +32,7 @@ public static class M2PreviewGeometryService
             vertices[index] = vertex; normals[index] = normal; minimum = Vector3.Min(minimum, vertex); maximum = Vector3.Max(maximum, vertex);
         }
 
+        var textureSlots = ReadTextureSlots(model);
         skinPath = ResolveSkin(modelPath, skinPath);
         var skin = File.ReadAllBytes(skinPath);
         if (skin.Length < 48 || FourCc(skin, 0) != "SKIN") throw new InvalidDataException("The companion file is not a valid SKIN container.");
@@ -48,7 +50,26 @@ public static class M2PreviewGeometryService
             if (vertexIndex >= vertices.Length) throw new InvalidDataException($"SKIN lookup {lookupIndex:N0} references M2 vertex {vertexIndex:N0}, but only {vertices.Length:N0} vertices exist.");
             triangles[index] = vertexIndex;
         }
-        return new(modelPath, skinPath, vertices, normals, triangles, minimum, maximum);
+        return new(modelPath, skinPath, vertices, normals, triangles, minimum, maximum, textureSlots);
+    }
+
+    private static IReadOnlyList<M2TextureSlot> ReadTextureSlots(byte[] model)
+    {
+        const int CountOffset = 0x50; const int DataOffset = 0x54; const int TextureStride = 16; const int MaximumTextures = 4096;
+        if (model.Length < DataOffset + 4) return [];
+        var count = CheckedCount(ReadUInt(model, CountOffset), MaximumTextures, "M2 texture"); var offset = CheckedOffset(ReadUInt(model, DataOffset), "M2 texture");
+        RequireRange(model, offset, count, TextureStride, "M2 textures"); var result = new M2TextureSlot[count];
+        for (var index = 0; index < count; index++)
+        {
+            var item = offset + index * TextureStride; var type = ReadUInt(model, item); var flags = ReadUInt(model, item + 4); var nameLength = ReadUInt(model, item + 8); var nameOffset = ReadUInt(model, item + 12); string? path = null;
+            if (type == 0 && nameLength > 0)
+            {
+                var length = CheckedCount(nameLength, 1024 * 1024, "M2 texture name"); var start = CheckedOffset(nameOffset, "M2 texture name"); RequireRange(model, start, length, 1, "M2 texture name");
+                path = System.Text.Encoding.UTF8.GetString(model, start, length).TrimEnd('\0');
+            }
+            result[index] = new(index, type, flags, path);
+        }
+        return result;
     }
 
     private static string ResolveSkin(string modelPath, string? selected)

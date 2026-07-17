@@ -42,7 +42,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Writes handled and fatal crash details to a portable `Logs` folder beside the application (also available through **Open Logs**), with `%LOCALAPPDATA%\\WoWCrucible\\Logs` as a fallback for read-only install locations.
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
 - Builds content-first asset libraries where patch provenance is inserted immediately before each file, keeping different patches' versions of the same Character/UI/World directory adjacent instead of burying them under separate archive trees.
-- Visually compares PNG assets by content directory rather than filename: fast catalog indexing, path/source/name filters, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions and provenance, and direct Explorer reveal.
+- Visually compares archive and Loose PNG assets by content directory rather than filename: fast catalog indexing, path/source/name filters, selectable filename/source/file-size sorting, cancellable SHA-256 plus byte-for-byte exact-copy grouping and collapsing, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions and provenance, and direct Explorer reveal. Duplicate inspection never deletes files.
 - Builds resumable client indexes with per-archive SHA-256 identities and reusable MPQ content catalogs, detects active/inactive locales, backup/custom subdirectory scopes and renamed build-12340 executables, marks anonymous hash-only entries explicitly, recovers names from local/cross-client path corpora, and resumes indexed extraction without rescanning giant archives or rewriting already-complete files.
 - Includes a visual Client Inspector for indexing/resuming a whole installation, color-coded archive scopes, loose runtime/config/AddOn inventory, plain-language compatibility guidance, content-category summaries, direct archive browsing, and provenance-preserving extraction.
 - Turns an extracted/effective client DBC directory into a reviewed client-to-server deployment plan: byte identity, row/field counts, current-core consumer, SQL-overlay warning, restart requirement, unresolved layer conflicts, portable JSON, and separate non-live staging trees for the patch and server DBC candidates.
@@ -59,7 +59,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Enforces manifest allow/deny/required globs and exact entry counts, provides a dry-run source-to-archive listing, and verifies an existing MPQ for missing, unexpected, or size-mismatched content without rebuilding it.
 - Refuses copy-update operations on archives larger than 2 GB; giant mod/client layers are immutable inputs, never working patch targets.
 - Begins a native modern-to-3.3.5 asset conversion pipeline: safely identifies MD20/MD21 M2 and chunked WMO structures, validates chunk bounds, inventories companion skins/animations/WMO groups and modern FileDataID chunks, hashes immutable source snapshots, and writes a machine-readable downgrade report in a dedicated conversion workspace. Modern output writing remains blocked until each translated structure can be validated instead of silently discarded.
-- Embeds the first native 3D preview stage directly in Crucible: validated WotLK MD20 vertices plus companion SKIN topology are rendered as an interactive shaded mesh with drag rotation and wheel zoom in both the asset converter and Item Creator. Display-ID/MPQ resolution, BLP textures, render passes, geosets, equipment, animation, and particles remain explicit next stages.
+- Embeds native 3D preview directly in Crucible: validated WotLK MD20 vertices plus companion SKIN topology are rendered as an interactive shaded mesh with drag rotation and wheel zoom. Asset Compare can discover every M2/SKIN pair in the selected content path, switch its preview pane from images to a live model, track the selected texture candidate, and decode declared embedded/replaceable texture-slot types. Exact `CharSections` composition, material passes, geosets, equipment, animation, and particles remain explicit next stages rather than being inaccurately simulated.
 
 ## Command line
 
@@ -94,6 +94,7 @@ wowcrucible client show client-index
 wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]
 wowcrucible client fusion extracted-stock extracted-mod-a extracted-mod-b [--output=fusion-plan.json] [--stage=fusion-review] [--all]
 wowcrucible server client-plan "C:\path\to\installed-server" extracted-effective-dbc [--source=core-source] [--output=plan.json] [--stage=server-review]
+wowcrucible asset library-import extracted-archive asset-library provenance-name BLPConverter.exe [--workers=6]
 wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json]
 wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]

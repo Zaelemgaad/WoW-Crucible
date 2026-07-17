@@ -12,6 +12,7 @@ public sealed record BulkAssetLibraryCheckpoint(DateTimeOffset UpdatedUtc, IRead
 public sealed record BulkAssetLibraryRunResult(int CompletedArchives, int FailedArchives, int CopiedLooseBlps, int ConvertedPngs, int ConversionFailures, string CatalogPath, string CheckpointPath);
 public sealed record BulkAssetConversionRepairResult(int NewlyConvertedPngs, int RemainingFailures, string CatalogPath, string CheckpointPath);
 public sealed record BulkAssetLayoutResult(bool Applied, int SourceFolders, long Files, long Bytes, long MovedFiles, int Conflicts, string CatalogPath);
+public sealed record BulkAssetExtractedImportResult(string Provenance, long SourceFiles, long SourceBytes, long ImportedFiles, int ConvertedPngs, int ConversionFailures, string CatalogPath);
 
 public static class BulkAssetLibraryService
 {
@@ -57,6 +58,7 @@ public static class BulkAssetLibraryService
     public static async Task<BulkAssetLibraryRunResult> RunAsync(string libraryRoot, string converterPath, int conversionWorkers = 6,
         IProgress<(string Stage, int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
     {
+        using var operationLock = AcquireOperationLock(libraryRoot);
         var plan = LoadPlan(libraryRoot); ValidateRoots(plan.SourceRoot, plan.LibraryRoot);
         converterPath = Path.GetFullPath(converterPath); if (!File.Exists(converterPath)) throw new FileNotFoundException("The BLP converter does not exist.", converterPath);
         conversionWorkers = Math.Clamp(conversionWorkers, 1, 16);
@@ -74,6 +76,7 @@ public static class BulkAssetLibraryService
             var contentRoot = ArchiveStagingRoot(plan.LibraryRoot, archive); Directory.CreateDirectory(contentRoot);
             try
             {
+                EnsureExtractionCapacity(plan.LibraryRoot, archive);
                 progress?.Report(("Extract", done, eligible.Length, archive.RelativePath));
                 var entries = archiveService.ListFiles(archive.SourcePath).Where(entry => !entry.IsMetadata).ToArray();
                 var rejectedEntries = new List<string>();
@@ -119,6 +122,64 @@ public static class BulkAssetLibraryService
             .Count(path => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase) && File.Exists(Path.ChangeExtension(path, ".png")));
         WriteCheckpoint(checkpointPath, (prior?.CompletedArchiveIds ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase), new Dictionary<string, string>(prior?.Failures ?? new Dictionary<string, string>()), matchingPngs);
         return new(converted, failed, WriteCatalog(plan), checkpointPath);
+    }
+
+    public static async Task<BulkAssetExtractedImportResult> ImportExtractedArchiveAsync(string sourceRoot, string libraryRoot, string provenance,
+        string converterPath, int conversionWorkers = 6, IProgress<(string Stage, long Done, long Total, string Path)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        sourceRoot = Path.GetFullPath(sourceRoot); libraryRoot = Path.GetFullPath(libraryRoot); converterPath = Path.GetFullPath(converterPath);
+        using var operationLock = AcquireOperationLock(libraryRoot);
+        ValidateRoots(sourceRoot, libraryRoot);
+        var sourceFromLibrary = Path.GetRelativePath(libraryRoot, sourceRoot);
+        if (sourceFromLibrary.Equals(".") || !sourceFromLibrary.StartsWith(".." + Path.DirectorySeparatorChar) && sourceFromLibrary != "..")
+            throw new InvalidOperationException("The extracted source folder must be outside the asset library.");
+        if (!File.Exists(converterPath)) throw new FileNotFoundException("The BLP converter does not exist.", converterPath);
+        var cleanProvenance = SafeName(provenance);
+        if (string.IsNullOrWhiteSpace(cleanProvenance) || cleanProvenance is "." or ".." || !cleanProvenance.Equals(provenance.Trim(), StringComparison.Ordinal))
+            throw new ArgumentException("Provenance must be a valid folder name without path separators or replacement characters.", nameof(provenance));
+        conversionWorkers = Math.Clamp(conversionWorkers, 1, 16);
+
+        var sources = Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories).ToArray();
+        var sourceBytes = sources.Sum(path => new FileInfo(path).Length);
+        var driveRoot = Path.GetPathRoot(libraryRoot) ?? throw new InvalidOperationException("The asset library has no drive root.");
+        const long ReserveBytes = 32L * 1024 * 1024 * 1024;
+        if (new DriveInfo(driveRoot).AvailableFreeSpace - ReserveBytes < sourceBytes * 2L)
+            throw new IOException($"Import requires an estimated {sourceBytes * 2d / (1024 * 1024 * 1024):0.##} GiB plus a 32 GiB safety reserve.");
+
+        var stagingRoot = Path.Combine(libraryRoot, ".staging", "Imports", cleanProvenance, "Content");
+        long imported = 0;
+        for (var index = 0; index < sources.Length; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var source = sources[index]; var relative = Path.GetRelativePath(sourceRoot, source);
+            var final = ContentFirstDestination(libraryRoot, cleanProvenance, relative);
+            if (File.Exists(final))
+            {
+                if (!FilesEqual(source, final)) throw new IOException($"Existing provenance file differs from the import source: {final}");
+            }
+            else
+            {
+                var staged = Path.GetFullPath(Path.Combine(stagingRoot, relative)); EnsureInside(stagingRoot, staged);
+                Directory.CreateDirectory(Path.GetDirectoryName(staged)!);
+                if (File.Exists(staged))
+                {
+                    if (!FilesEqual(source, staged)) throw new IOException($"Staged import file differs from the source: {staged}");
+                }
+                else { File.Copy(source, staged, false); File.SetLastWriteTimeUtc(staged, File.GetLastWriteTimeUtc(source)); imported++; }
+            }
+            if ((index & 511) == 0 || index + 1 == sources.Length) progress?.Report(("Copy extracted", index + 1, sources.Length, relative));
+        }
+
+        var conversion = await ConvertBlpsAsync(stagingRoot, converterPath, conversionWorkers, cancellationToken);
+        long relocated = 0;
+        var relocation = Directory.Exists(stagingRoot)
+            ? RelocateContent(libraryRoot, cleanProvenance, stagingRoot, true, cancellationToken,
+                path => { relocated++; if ((relocated & 511) == 0) progress?.Report(("Relocate", relocated, 0, path)); })
+            : (MovedFiles: 0L, Conflicts: 0);
+        if (relocation.Conflicts > 0) throw new IOException($"Extracted import found {relocation.Conflicts:N0} existing destination conflict(s); nothing was overwritten.");
+        var plan = LoadPlan(libraryRoot);
+        return new(cleanProvenance, sources.LongLength, sourceBytes, imported, conversion.Converted, conversion.Failed, WriteCatalog(plan));
     }
 
     public static BulkAssetLayoutResult MigrateToContentFirstLayout(string libraryRoot, bool apply,
@@ -168,13 +229,13 @@ public static class BulkAssetLibraryService
         var batches = BatchPaths(pending, 28_000, 128);
         await Parallel.ForEachAsync(batches, new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = cancellationToken }, async (batch, token) =>
         {
-            await RunConverterAsync(converterPath, batch, token);
+            EnsureCompatibleConverter(await RunConverterAsync(converterPath, batch, token), converterPath);
         });
         // Older converters abort the rest of a batch at the first unsupported BLP. Retry
         // every missing output alone so one invalid modern texture cannot hide valid neighbors.
         var retry = pending.Where(source => !File.Exists(Path.ChangeExtension(source, ".png"))).ToArray();
         await Parallel.ForEachAsync(retry, new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = cancellationToken },
-            async (source, token) => await RunConverterAsync(converterPath, [source], token));
+            async (source, token) => EnsureCompatibleConverter(await RunConverterAsync(converterPath, [source], token), converterPath));
         var converted = pending.Count(source => File.Exists(Path.ChangeExtension(source, ".png")));
         var rejected = pending.Where(source => !File.Exists(Path.ChangeExtension(source, ".png"))).ToArray();
         var rejectionLog = Path.Combine(root, ".blp-conversion-failures.txt");
@@ -183,13 +244,20 @@ public static class BulkAssetLibraryService
         return (converted, rejected.Length);
     }
 
-    private static async Task RunConverterAsync(string converterPath, IReadOnlyList<string> sources, CancellationToken cancellationToken)
+    private static async Task<string> RunConverterAsync(string converterPath, IReadOnlyList<string> sources, CancellationToken cancellationToken)
     {
         var start = new ProcessStartInfo(converterPath) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         start.ArgumentList.Add("/M"); foreach (var path in sources) start.ArgumentList.Add(path);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the BLP converter.");
         var output = process.StandardOutput.ReadToEndAsync(cancellationToken); var error = process.StandardError.ReadToEndAsync(cancellationToken);
         await process.WaitForExitAsync(cancellationToken); await Task.WhenAll(output, error);
+        return (await output) + Environment.NewLine + (await error);
+    }
+
+    private static void EnsureCompatibleConverter(string output, string converterPath)
+    {
+        if (output.Contains("Invalid filename '/M'", StringComparison.OrdinalIgnoreCase) || output.Contains("Invalid filename \"/M\"", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"The selected executable does not support BLPConverter's /M batch syntax: {converterPath}");
     }
 
     private static IReadOnlyList<string[]> BatchPaths(IReadOnlyList<string> paths, int maximumCharacters, int maximumFiles)
@@ -274,6 +342,34 @@ public static class BulkAssetLibraryService
         return (moved, conflicts);
     }
 
+    private static string ContentFirstDestination(string libraryRoot, string provenance, string relative)
+    {
+        var relativeDirectory = Path.GetDirectoryName(relative);
+        var directory = string.IsNullOrEmpty(relativeDirectory)
+            ? Path.Combine(libraryRoot, "Archives", "Content", provenance)
+            : Path.Combine(libraryRoot, "Archives", "Content", relativeDirectory, provenance);
+        var destination = Path.GetFullPath(Path.Combine(directory, Path.GetFileName(relative)));
+        EnsureInside(Path.Combine(libraryRoot, "Archives", "Content"), destination);
+        return destination;
+    }
+
+    private static bool FilesEqual(string left, string right)
+    {
+        var leftInfo = new FileInfo(left); var rightInfo = new FileInfo(right);
+        if (leftInfo.Length != rightInfo.Length) return false;
+        const int bufferSize = 1024 * 1024;
+        using var leftStream = new FileStream(left, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, FileOptions.SequentialScan);
+        using var rightStream = new FileStream(right, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, FileOptions.SequentialScan);
+        var leftBuffer = new byte[bufferSize]; var rightBuffer = new byte[bufferSize];
+        while (true)
+        {
+            var leftRead = leftStream.Read(leftBuffer); var rightRead = rightStream.Read(rightBuffer);
+            if (leftRead != rightRead) return false;
+            if (leftRead == 0) return true;
+            if (!leftBuffer.AsSpan(0, leftRead).SequenceEqual(rightBuffer.AsSpan(0, rightRead))) return false;
+        }
+    }
+
     private static void RemoveEmptyDirectories(string root, string libraryRoot)
     {
         EnsureInside(libraryRoot, root);
@@ -294,6 +390,22 @@ public static class BulkAssetLibraryService
         if (relative.Equals(".") || !relative.StartsWith(".." + Path.DirectorySeparatorChar) && relative != "..") throw new InvalidOperationException("The asset library must be outside the source tree so it cannot ingest its own output.");
     }
     private static void EnsureInside(string root, string path) { var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path)); if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar)) throw new InvalidOperationException($"Output escaped the asset library: {path}"); }
+    private static void EnsureExtractionCapacity(string libraryRoot, BulkAssetArchivePlan archive)
+    {
+        const long ReserveBytes = 32L * 1024 * 1024 * 1024;
+        var root = Path.GetPathRoot(Path.GetFullPath(libraryRoot)) ?? throw new InvalidOperationException("The asset library has no drive root.");
+        var available = new DriveInfo(root).AvailableFreeSpace;
+        var workingBytes = Math.Max(archive.ArchiveBytes * 3L, archive.LogicalBytes * 3L);
+        if (available - ReserveBytes < workingBytes)
+            throw new IOException($"Skipping {archive.RelativePath}: extraction and PNG conversion require an estimated {workingBytes / (1024d * 1024 * 1024):0.##} GiB plus a 32 GiB safety reserve, but only {available / (1024d * 1024 * 1024):0.##} GiB is free.");
+    }
+    private static FileStream AcquireOperationLock(string libraryRoot)
+    {
+        Directory.CreateDirectory(Path.GetFullPath(libraryRoot));
+        var path = Path.Combine(Path.GetFullPath(libraryRoot), ".asset-library-operation.lock");
+        try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose); }
+        catch (IOException exception) { throw new InvalidOperationException("Another Crucible asset-library operation is already running for this library.", exception); }
+    }
     private static void WriteCheckpoint(string path, HashSet<string> completed, Dictionary<string, string> failures, int converted) => WriteJsonAtomic(path, new BulkAssetLibraryCheckpoint(DateTimeOffset.UtcNow, completed.Order().ToArray(), failures, converted));
     private static void WriteJsonAtomic<T>(string path, T value) { Directory.CreateDirectory(Path.GetDirectoryName(path)!); var temp = path + ".tmp"; File.WriteAllText(temp, JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true })); File.Move(temp, path, true); }
 }

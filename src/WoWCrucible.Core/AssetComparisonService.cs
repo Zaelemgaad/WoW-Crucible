@@ -1,9 +1,18 @@
 using System.Text;
+using System.Security.Cryptography;
 
 namespace WoWCrucible.Core;
 
 public sealed record AssetComparisonDirectory(string LogicalPath, int PngFiles, int ProvenanceSources);
 public sealed record AssetComparisonEntry(string LogicalPath, string Provenance, string FileName, string FullPath, long Bytes);
+public sealed record AssetComparisonModel(string Provenance, string FileName, string ModelPath, string SkinPath)
+{
+    public override string ToString() => $"{Provenance} · {FileName}";
+}
+public sealed record AssetComparisonDuplicateGroup(string Sha256, long Bytes, IReadOnlyList<AssetComparisonEntry> Entries)
+{
+    public long RecoverableBytes => Bytes * (Entries.Count - 1L);
+}
 public sealed record AssetComparisonIndex(string LibraryRoot, string ContentRoot, IReadOnlyList<AssetComparisonDirectory> Directories, int TotalPngFiles, string? LooseContentRoot = null);
 
 public static class AssetComparisonService
@@ -51,6 +60,49 @@ public static class AssetComparisonService
         return result.OrderBy(entry => entry.Provenance, StringComparer.OrdinalIgnoreCase).ThenBy(entry => entry.FileName, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
+    public static IReadOnlyList<AssetComparisonDuplicateGroup> FindExactDuplicates(IReadOnlyList<AssetComparisonEntry> entries, CancellationToken cancellationToken = default)
+    {
+        var duplicates = new List<AssetComparisonDuplicateGroup>();
+        foreach (var sizeGroup in entries.GroupBy(entry => entry.Bytes).Where(group => group.Count() > 1))
+        {
+            var hashes = new Dictionary<string, List<AssetComparisonEntry>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in sizeGroup)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                using var stream = File.OpenRead(entry.FullPath);
+                var hash = Convert.ToHexString(SHA256.HashData(stream));
+                if (!hashes.TryGetValue(hash, out var matches)) hashes[hash] = matches = [];
+                matches.Add(entry);
+            }
+            foreach (var hashGroup in hashes.Where(pair => pair.Value.Count > 1))
+            {
+                var verifiedGroups = new List<List<AssetComparisonEntry>>();
+                foreach (var entry in hashGroup.Value)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var verified = verifiedGroups.FirstOrDefault(group => FilesAreIdentical(group[0].FullPath, entry.FullPath, cancellationToken));
+                    if (verified is null) verifiedGroups.Add([entry]); else verified.Add(entry);
+                }
+                duplicates.AddRange(verifiedGroups.Where(group => group.Count > 1).Select(group => new AssetComparisonDuplicateGroup(hashGroup.Key, sizeGroup.Key, group)));
+            }
+        }
+        return duplicates.OrderByDescending(group => group.RecoverableBytes).ThenBy(group => group.Sha256, StringComparer.Ordinal).ToArray();
+    }
+
+    public static IReadOnlyList<AssetComparisonModel> GetDirectoryModels(AssetComparisonIndex index, string logicalPath)
+    {
+        var result = new List<AssetComparisonModel>();
+        var directory = Path.GetFullPath(Path.Combine(index.ContentRoot, logicalPath)); EnsureInside(index.ContentRoot, directory);
+        if (Directory.Exists(directory))
+            foreach (var provenanceDirectory in Directory.EnumerateDirectories(directory)) AddModels(result, Path.GetFileName(provenanceDirectory), provenanceDirectory);
+        if (index.LooseContentRoot is { } looseRoot)
+        {
+            var looseDirectory = Path.GetFullPath(Path.Combine(looseRoot, logicalPath)); EnsureInside(looseRoot, looseDirectory);
+            if (Directory.Exists(looseDirectory)) AddModels(result, "Loose", looseDirectory);
+        }
+        return result.OrderBy(model => model.Provenance, StringComparer.OrdinalIgnoreCase).ThenBy(model => model.FileName, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
     private static void ReadCatalog(string catalog, Dictionary<string, (int Files, HashSet<string> Sources)> counts, CancellationToken cancellationToken)
     {
         using var reader = new StreamReader(catalog, Encoding.UTF8, true, 1024 * 1024); _ = reader.ReadLine(); string? line;
@@ -83,6 +135,33 @@ public static class AssetComparisonService
     private static void AddEntry(List<AssetComparisonEntry> result, string logicalPath, string provenance, string file)
     {
         var info = new FileInfo(file); result.Add(new(logicalPath, provenance, info.Name, info.FullName, info.Length));
+    }
+
+    private static void AddModels(List<AssetComparisonModel> result, string provenance, string directory)
+    {
+        foreach (var modelPath in Directory.EnumerateFiles(directory, "*.m2", SearchOption.TopDirectoryOnly))
+        {
+            var stem = Path.GetFileNameWithoutExtension(modelPath);
+            var skinPath = Directory.EnumerateFiles(directory, stem + "*.skin", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
+            if (skinPath is not null) result.Add(new(provenance, Path.GetFileName(modelPath), modelPath, skinPath));
+        }
+    }
+
+    private static bool FilesAreIdentical(string leftPath, string rightPath, CancellationToken cancellationToken)
+    {
+        const int BufferSize = 1024 * 1024;
+        using var left = new FileStream(leftPath, FileMode.Open, FileAccess.Read, FileShare.Read, BufferSize, FileOptions.SequentialScan);
+        using var right = new FileStream(rightPath, FileMode.Open, FileAccess.Read, FileShare.Read, BufferSize, FileOptions.SequentialScan);
+        if (left.Length != right.Length) return false;
+        var leftBuffer = new byte[BufferSize]; var rightBuffer = new byte[BufferSize];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var leftRead = left.Read(leftBuffer); var rightRead = right.Read(rightBuffer);
+            if (leftRead != rightRead) return false;
+            if (leftRead == 0) return true;
+            if (!leftBuffer.AsSpan(0, leftRead).SequenceEqual(rightBuffer.AsSpan(0, rightRead))) return false;
+        }
     }
 
     private static IReadOnlyList<string> ParseCsv(string line)
