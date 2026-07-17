@@ -118,7 +118,19 @@ internal sealed class ItemWorkbenchWindow : Window
     private async Task InspectSetAsync()
     {
         if (!uint.TryParse(_setId.Text, out var id)) { _status.Text = "Enter a numeric set ID."; return; } SetBusy("Resolving item-set members and spell names…");
-        try { var set = await Task.Run(() => ItemSetDbcService.Inspect(_itemSetPath.Text!, _schemaPath.Text!, id, File.Exists(_spellPath.Text) ? _spellPath.Text : null)); _setOutput.Text = $"{set.Id} — {set.Name}\nItems: {string.Join(", ", set.ItemIds)}\n\n" + string.Join("\n", set.Effects.Select(effect => $"{effect.RequiredItems} pieces: {effect.SpellId} — {effect.SpellName ?? "unknown spell"}")); _status.Text = $"Resolved {set.ItemIds.Count:N0} members and {set.Effects.Count:N0} set bonus(es)."; }
+        try
+        {
+            var set = await Task.Run(() => ItemSetDbcService.Inspect(_itemSetPath.Text!, _schemaPath.Text!, id, File.Exists(_spellPath.Text) ? _spellPath.Text : null));
+            IReadOnlyDictionary<uint, string> names = new Dictionary<uint, string>(); var namesUnavailable = false;
+            if (!string.IsNullOrWhiteSpace(_user.Text) && !string.IsNullOrWhiteSpace(_password.Text))
+            {
+                try { names = await new ItemCatalogService().GetItemNamesAsync(Profile(), set.ItemIds); }
+                catch (Exception exception) { DesktopCrashLogger.Log("Item-set member name lookup failed", exception); namesUnavailable = true; }
+            }
+            var members = string.Join("\n", set.ItemIds.Select(item => $"  {item:N0} — {names.GetValueOrDefault(item, "name unavailable")}"));
+            _setOutput.Text = $"{set.Id} — {set.Name}\nMembers:\n{members}\n\nBonuses:\n" + string.Join("\n", set.Effects.Select(effect => $"  {effect.RequiredItems} pieces: {effect.SpellId:N0} — {effect.SpellName ?? "unknown spell"}"));
+            _status.Text = $"Resolved {set.ItemIds.Count:N0} members and {set.Effects.Count:N0} set bonus(es).{(namesUnavailable ? " Database names were unavailable; IDs remain usable." : string.Empty)}";
+        }
         catch (Exception exception) { await ErrorAsync("Item-set inspection failed", exception); }
     }
 

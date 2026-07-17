@@ -69,6 +69,23 @@ public sealed class ItemCatalogService
         return new(profile.Database, DateTimeOffset.UtcNow, checkedSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(), missingSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(), items.Count, items.Count - unavailable.Length, unavailable);
     }
 
+    public async Task<IReadOnlyDictionary<uint, string>> GetItemNamesAsync(DatabaseConnectionProfile profile, IEnumerable<uint> itemIds, CancellationToken cancellationToken = default)
+    {
+        var ids = itemIds.Where(id => id != 0).Distinct().ToArray();
+        if (ids.Length == 0) return new Dictionary<uint, string>();
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile));
+        await connection.OpenAsync(cancellationToken);
+        var schema = await ReadSchemaAsync(connection, profile.Database, cancellationToken);
+        var table = ResolveTable(schema, "item_template") ?? throw new NotSupportedException("The selected database has no item_template table.");
+        var entry = RequireColumn(schema[table], "entry"); var name = RequireColumn(schema[table], "name");
+        var parameters = ids.Select((_, index) => $"@id{index}").ToArray();
+        await using var command = new MySqlCommand($"SELECT {Quote(entry)},{Quote(name)} FROM {Quote(table)} WHERE {Quote(entry)} IN ({string.Join(',', parameters)})", connection);
+        for (var index = 0; index < ids.Length; index++) command.Parameters.AddWithValue(parameters[index], ids[index]);
+        var result = new Dictionary<uint, string>(); await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) result[Convert.ToUInt32(reader.GetValue(0))] = Convert.ToString(reader.GetValue(1)) ?? string.Empty;
+        return result;
+    }
+
     public async Task<ItemCloneResult> CloneAsync(DatabaseConnectionProfile profile, uint sourceEntry, uint newEntry, string nameSuffix = " Variant", uint? itemSetId = null, CancellationToken cancellationToken = default)
     {
         if (sourceEntry == 0 || newEntry == 0 || sourceEntry == newEntry) throw new ArgumentException("Source and destination item IDs must be distinct positive values.");
