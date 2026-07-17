@@ -337,7 +337,8 @@ static int Dbc(string[] args)
         var sourceIds = DbcRecordIdentity.IndexRows(sourceFile, resolution.Columns, resolution.KeyStrategy).Where(pair => values.Contains(Convert.ToString(sourceFile.GetDisplayValue(pair.Value, column), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty)).Select(pair => pair.Key).ToArray();
         var manifest = DbcCloneRemapService.CreateManifest(cloneBasePath, cloneSourcePath, resolution.Columns, resolution.KeyStrategy, sourceIds, startId);
         DbcCloneRemapService.Save(cloneManifestPath, manifest); DbcCloneRemapService.Apply(cloneBasePath, cloneSourcePath, cloneOutputPath, resolution.Columns, resolution.KeyStrategy, manifest);
-        Console.Error.WriteLine($"Cloned {manifest.Entries.Count:N0} {tableName} record(s) into new IDs {manifest.Entries.Min(entry => entry.TargetId)}–{manifest.Entries.Max(entry => entry.TargetId)} without modifying existing IDs. Mapping: {Path.GetFullPath(cloneManifestPath)}");
+        var cloned = manifest.Entries.Count(entry => !entry.ReusesExisting); var reused = manifest.Entries.Count - cloned; var identical = sourceIds.Distinct().Count() - manifest.Entries.Count;
+        Console.Error.WriteLine($"{tableName}: added/cloned {cloned:N0}, reused {reused:N0} equivalent existing record(s), skipped {identical:N0} identical same-ID record(s). Existing records were not modified. Mapping: {Path.GetFullPath(cloneManifestPath)}");
         return 0;
     }
     if (args is ["clone-dependency", var parentSourcePath, var parentMergedPath, var parentSchemaPath, var parentMapPath, var foreignColumnName, var childBasePath, var childSourcePath, var childSchemaPath, .. var dependencyOptions])
@@ -358,8 +359,8 @@ static int Dbc(string[] args)
         if (changedReferencedIds.Length == 0) throw new InvalidOperationException($"No referenced {childTable} records differ from the baseline; the cloned parent can keep its existing references.");
         var childMap = DbcCloneRemapService.CreateManifest(childBasePath, childSourcePath, childResolution.Columns, childResolution.KeyStrategy, changedReferencedIds);
         DbcCloneRemapService.Save(childMapPath, childMap); DbcCloneRemapService.Apply(childBasePath, childSourcePath, childOutputPath, childResolution.Columns, childResolution.KeyStrategy, childMap);
-        var changed = DbcCloneRemapService.ApplyReferenceMap(parentMergedPath, parentOutputPath, parentResolution.Columns, parentResolution.KeyStrategy, parentMap.Entries.Select(entry => entry.TargetId), foreignColumnName, childMap);
-        Console.Error.WriteLine($"Cloned {childMap.Entries.Count:N0} referenced {childTable} record(s) and rewrote {changed:N0} cloned {parentTable}.{foreignColumnName} reference(s). Baseline records were not modified.");
+        var changed = DbcCloneRemapService.ApplyReferenceMap(parentMergedPath, parentOutputPath, parentResolution.Columns, parentResolution.KeyStrategy, parentMap.Entries.Where(entry => !entry.ReusesExisting).Select(entry => entry.TargetId), foreignColumnName, childMap);
+        Console.Error.WriteLine($"Added/cloned {childMap.Entries.Count(entry => !entry.ReusesExisting):N0} and reused {childMap.Entries.Count(entry => entry.ReusesExisting):N0} referenced {childTable} record(s); rewrote {changed:N0} newly added {parentTable}.{foreignColumnName} reference(s). Baseline records were not modified.");
         return 0;
     }
     if (args.Length >= 3 && args[0] == "validate")
@@ -395,7 +396,7 @@ static int Mpq(string[] args)
                 var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
                 var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--content-only", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase)).ToArray();
                 if (unknown.Length > 0) return Fail($"Unknown list option: {unknown[0]}");
-                var files = service.ListFiles(args[1]).Where(file => (!contentOnly || !file.IsMetadata) && file.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+                var files = service.ListFiles(args[1]).Where(file => (!contentOnly || !file.IsMetadata) && MpqPathFilter.Matches(file.ArchivePath, query)).ToArray();
                 if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(files, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
                 else foreach (var file in files) Console.WriteLine($"{file.Size}\t{file.CompressedSize}\t{file.ArchivePath}");
                 return 0;
@@ -410,7 +411,7 @@ static int Mpq(string[] args)
                 if (progressStep is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(progressStep), "Progress percentage must be from 1 to 100.");
                 var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--quiet", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--progress=", StringComparison.OrdinalIgnoreCase)).ToArray();
                 if (unknown.Length > 0) return Fail($"Unknown extract option: {unknown[0]}");
-                var files = service.ListFiles(args[1]).Where(file => file.ArchivePath.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+                var files = service.ListFiles(args[1]).Where(file => MpqPathFilter.Matches(file.ArchivePath, query)).ToArray();
                 var timer = System.Diagnostics.Stopwatch.StartNew();
                 service.Extract(args[1], args[2], files, quiet ? null : new ConsoleProgress(progressStep));
                 Console.Error.WriteLine($"Extracted {files.Length:N0} file(s) to {Path.GetFullPath(args[2])} in {timer.Elapsed.TotalSeconds:0.##}s.");

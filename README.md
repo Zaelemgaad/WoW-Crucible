@@ -78,7 +78,7 @@ wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filt
 wowcrucible client fusion extracted-stock extracted-mod-a extracted-mod-b [--output=fusion-plan.json] [--stage=fusion-review] [--all]
 wowcrucible server client-plan "C:\path\to\installed-server" extracted-effective-dbc [--source=core-source] [--output=plan.json] [--stage=server-review]
 wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json]
-wowcrucible mpq extract patch.MPQ output-folder [filter] [--quiet|--progress=N]
+wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
 wowcrucible mpq update patch-W.MPQ file-or-folder [...]
 wowcrucible manifest create classless.json patch-W.mpq changed-files-folder [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]

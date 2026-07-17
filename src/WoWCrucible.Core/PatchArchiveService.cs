@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 
 namespace WoWCrucible.Core;
 
@@ -13,6 +14,18 @@ public sealed record PatchPathAssessment(bool HasWarning, string Message);
 public static class MpqPathClassifier
 {
     public static bool IsMetadata(string path) => path.Equals("(listfile)", StringComparison.OrdinalIgnoreCase) || path.Equals("(attributes)", StringComparison.OrdinalIgnoreCase) || path.Equals("(signature)", StringComparison.OrdinalIgnoreCase);
+}
+
+public static class MpqPathFilter
+{
+    public static bool Matches(string path, string? filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter)) return true;
+        path = path.Replace('/', '\\'); filter = filter.Replace('/', '\\');
+        if (!filter.Contains('*') && !filter.Contains('?')) return path.Contains(filter, StringComparison.OrdinalIgnoreCase);
+        var pattern = "^" + Regex.Escape(filter).Replace("\\*\\*", ".*").Replace("\\*", "[^\\\\]*").Replace("\\?", "[^\\\\]") + "$";
+        return Regex.IsMatch(path, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
 }
 
 public static class PatchInputMapper
