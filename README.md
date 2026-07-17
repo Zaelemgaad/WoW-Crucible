@@ -53,10 +53,13 @@ Client formats and server integration are separate: a client-build profile decla
 - Detects protected `Interface\\GlueXML` changes, warns that stock clients may reject them through `GLUEXML.TOC.SIG`, and can bind a patch manifest to the SHA-256 of a known-compatible `Wow.exe`.
 - Enforces manifest allow/deny/required globs and exact entry counts, provides a dry-run source-to-archive listing, and verifies an existing MPQ for missing, unexpected, or size-mismatched content without rebuilding it.
 - Refuses copy-update operations on archives larger than 2 GB; giant mod/client layers are immutable inputs, never working patch targets.
+- Begins a native modern-to-3.3.5 asset conversion pipeline: safely identifies MD20/MD21 M2 and chunked WMO structures, validates chunk bounds, inventories companion skins/animations/WMO groups and modern FileDataID chunks, hashes immutable source snapshots, and writes a machine-readable downgrade report in a dedicated conversion workspace. Modern output writing remains blocked until each translated structure can be validated instead of silently discarded.
 
 ## Command line
 
 ```text
+wowcrucible asset inspect modern-model.m2 [building.wmo ...]
+wowcrucible asset workspace native-conversion-project modern-assets-folder [more-files ...]
 wowcrucible dbc info Spell.dbc
 wowcrucible dbc rows CreatureModelData.dbc schema.xml 1332 1333 1334
 wowcrucible dbc find CreatureDisplayInfo.dbc schema.xml ModelID 6000 6001 6002 [--count|--limit=100]

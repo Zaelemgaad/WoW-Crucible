@@ -107,15 +107,15 @@ Noggit remains the right class of external application for interactive terrain, 
 
 The local MultiConverter source targets .NET Core 3.1 and explicitly converts modern assets down toward WoW 3.3.5a. Its documented support is M2 from BFA/Shadowlands and WMO from BFA; ADT and WDT are not claimed as supported even though unfinished converter code exists. The UI recursively accepts drag-and-drop input and overwrites files in place. The M2 path strips modern chunks, remaps some animation IDs, adjusts cameras/skins/render flags, and currently zeros particle count/offset. Its listfile/bootstrap logic also depends on old `wow.tools` and Battle.net endpoints and may no longer initialize. The repository contains no top-level license, so its code cannot be copied into Crucible without permission or later license clarification.
 
-MultiConverter is still a valuable optional conversion backend for the planned Legion-to-WotLK workflow, but only through a guarded external adapter:
+MultiConverter remains valuable as behavioral evidence for the Legion-to-WotLK workflow, but the abandoned, unlicensed implementation will not be a Crucible backend. Crucible's replacement is a native clean implementation based on documented file structures and independently authored validation fixtures:
 
 1. Copy selected source assets and their `.skin`/animation/texture dependencies into a conversion staging directory; never give it originals.
 2. Record input hashes and converter executable/source identity, inject a user-selected current listfile, and disable its updater/network bootstrap where possible.
-3. Run one conversion job at a time with captured stdout/stderr and an explicit timeout/cancel path.
+3. Translate one asset family at a time while recording every mapped, baked, removed, or unsupported source feature.
 4. Parse and validate the resulting M2/WMO structures, list removed or downgraded features (especially particles), and compare dependency closure before accepting output.
 5. Preserve source-relative paths and feed only approved results into a tiny manifest-driven MPQ.
 
-This adapter design should be converter-neutral so maintained tools can replace MultiConverter without changing Crucible projects.
+The conversion project format remains backend-neutral so a user can compare another maintained converter's output without making it a trusted or required dependency.
 
 ### Explicitly reject
 
@@ -130,7 +130,7 @@ This adapter design should be converter-neutral so maintained tools can replace 
 1. DBD build/profile parser plus WDBX-vs-DBD schema cross-checking.
 2. BLP preview/conversion adapter and asset validation in the client inspector.
 3. Recursive M2/WMO/ADT dependency graph feeding required manifest paths.
-4. Guarded, staging-only external converter profiles with hash/diff validation and captured logs.
+4. Native staged modern-to-3.3.5 M2 conversion with explicit feature-loss mapping, followed by WMO support.
 5. Guided NPC appearance import and additive display/extra/SQL planning.
 6. Bulk gameobject generation from indexed model paths.
 7. Project-local SQLite staging for spell/table bulk editing.

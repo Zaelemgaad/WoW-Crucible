@@ -11,6 +11,7 @@ try
         "db" => Database(args[1..]).GetAwaiter().GetResult(),
         "server" => Server(args[1..]).GetAwaiter().GetResult(),
         "client" => Client(args[1..]),
+        "asset" => Asset(args[1..]),
         "mpq" => Mpq(args[1..]),
         "manifest" => Manifest(args[1..]),
         _ => Fail($"Unknown command: {args[0]}")
@@ -21,6 +22,31 @@ catch (Exception ex)
     Console.Error.WriteLine($"ERROR: {ex.Message}");
     return 1;
 }
+
+static int Asset(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["inspect", .. var inspectInputs] && inspectInputs.Length > 0)
+    {
+        foreach (var input in inspectInputs)
+        {
+            var inspection = NativeAssetConversionService.Inspect(input);
+            Console.WriteLine($"{inspection.Compatibility}\t{inspection.Format}\t{inspection.Magic}\t{inspection.Version?.ToString() ?? "-"}\t{inspection.Size}\t{inspection.Path}");
+            foreach (var finding in inspection.Findings) Console.WriteLine($"  {finding}");
+            foreach (var dependency in inspection.Dependencies) Console.WriteLine($"  dependency\t{dependency.Kind}\t{dependency.Path}\t{dependency.Sha256}");
+        }
+        return 0;
+    }
+    if (args is ["workspace", var outputRoot, .. var workspaceInputs] && workspaceInputs.Length > 0)
+    {
+        var workspace = NativeAssetConversionService.CreateWorkspace(workspaceInputs, outputRoot);
+        Console.Error.WriteLine($"Created native conversion workspace: {workspace.RootPath}\nAlready compatible: {workspace.CompatibleAssets:N0}\nRequire conversion: {workspace.ConversionRequired:N0}\nBlocked/invalid: {workspace.BlockedAssets:N0}\nReport: {Path.Combine(workspace.RootPath, "conversion-report.json")}");
+        return workspace.BlockedAssets == 0 ? 0 : 3;
+    }
+    return AssetHelp(2);
+}
+
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset workspace <new-output-folder> <files/folders...>", code);
 
 static int Client(string[] args)
 {
@@ -470,7 +496,7 @@ static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLin
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\n  client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  client clear-cache <client-root>\n  client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  client corpus <output-listfile> <index-directory>...\n  client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]\n  client show <index-directory>\n  client fusion <base-root> <override-root>... [--stage=review-folder]\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  server bindings <installed-server-folder> [--source=core-source]\n  server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=output.sql]\n  server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=review-folder]\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter] [--content-only] [--format=json]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> output-folder");
+    Console.WriteLine("WoW Crucible CLI\n\n  asset inspect <model.m2|building.wmo>...\n  asset workspace <new-output-folder> <files/folders...>\n  client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  client clear-cache <client-root>\n  client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  client corpus <output-listfile> <index-directory>...\n  client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]\n  client show <index-directory>\n  client fusion <base-root> <override-root>... [--stage=review-folder]\n  server detect <installed-server-folder>\n  server inspect <installed-server-folder>\n  server bindings <installed-server-folder> [--source=core-source]\n  server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--migration=sync.sql]\n  server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=server-review]\n  dbc info <file.dbc>\n  dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  mpq list <archive.mpq> [filter] [--content-only] [--format=json]\n  mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  mpq create <archive.mpq> <files/folders...>\n  mpq update <small-patch.mpq> <files/folders...>\n  manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]\n  manifest list <manifest.json>\n  manifest validate <manifest.json> [archive.mpq]\n  manifest build <manifest.json> output-folder");
     return 0;
 }
 

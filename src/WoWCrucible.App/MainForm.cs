@@ -34,7 +34,7 @@ public sealed class MainForm : Form
         AllowDrop = true;
         KeyPreview = true;
 
-        _startCenter = new StartCenterControl(_settings, OpenGuidedSpellWorkspace, OpenItemCreator, ImportServerWorkspace, ConnectDatabase, DatabaseStatus, OpenFile, () => OpenPatchBuilder(), () => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }, OpenLayeredDbcs, OpenClientInspector, ConfigurePaths);
+        _startCenter = new StartCenterControl(_settings, OpenGuidedSpellWorkspace, OpenItemCreator, ImportServerWorkspace, ConnectDatabase, DatabaseStatus, OpenFile, () => OpenPatchBuilder(), () => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }, OpenLayeredDbcs, OpenClientInspector, OpenNativeAssetConverter, ConfigurePaths);
 
         var tools = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new(6, 4, 6, 4) };
         tools.Items.Add(Button("Home", (_, _) => ShowStartCenter()));
@@ -63,6 +63,7 @@ public sealed class MainForm : Form
         tools.Items.Add(Button("Build Patch MPQ", (_, _) => OpenPatchBuilder()));
         tools.Items.Add(Button("Browse/Extract MPQ", (_, _) => { using var browser = new MpqBrowserForm(_settings); browser.ShowDialog(this); }));
         tools.Items.Add(Button("Inspect Client", (_, _) => OpenClientInspector()));
+        tools.Items.Add(Button("Native Asset Converter", (_, _) => OpenNativeAssetConverter()));
         tools.Items.Add(Button("Layered DBCs", (_, _) => OpenLayeredDbcs()));
         tools.Items.Add(Button("Sync to Core Data", (_, _) => SyncToCoreData()));
         tools.Items.Add(Button("Open Logs", (_, _) => CrashLogger.OpenDirectory()));
@@ -131,6 +132,8 @@ public sealed class MainForm : Form
                 else LoadFile(initialFile);
             };
     }
+
+    private void OpenNativeAssetConverter() { using var form = new NativeAssetConverterForm(); form.ShowDialog(this); }
 
     private static ToolStripButton Button(string text, EventHandler action)
     {

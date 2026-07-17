@@ -17,6 +17,37 @@ if (!ClientPatchDeploymentService.InvalidateCache(deploymentFixture).Existed || 
     throw new InvalidOperationException("Explicit client cache invalidation failed.");
 Directory.Delete(deploymentFixture, true); File.Delete(patchDeploymentSource);
 
+var assetFixture = Path.Combine(Path.GetTempPath(), $"crucible-native-assets-{Guid.NewGuid():N}"); Directory.CreateDirectory(assetFixture);
+var wotlkModel = Path.Combine(assetFixture, "fixture.m2"); var wotlkBytes = new byte[0x130];
+System.Text.Encoding.ASCII.GetBytes("MD20").CopyTo(wotlkBytes, 0); BitConverter.GetBytes((uint)264).CopyTo(wotlkBytes, 4); BitConverter.GetBytes((uint)3).CopyTo(wotlkBytes, 0x128);
+File.WriteAllBytes(wotlkModel, wotlkBytes); File.WriteAllText(Path.Combine(assetFixture, "fixture00.skin"), "skin");
+var compatibleModel = NativeAssetConversionService.Inspect(wotlkModel);
+if (compatibleModel.Compatibility != AssetCompatibility.AlreadyWotlk335 || compatibleModel.Version != 264 || compatibleModel.Dependencies.Count != 1)
+    throw new InvalidOperationException("Native asset inspection did not recognize a Wrath M2 and its skin dependency.");
+var modernModel = Path.Combine(assetFixture, "modern.m2");
+using (var stream = File.Create(modernModel)) using (var writer = new BinaryWriter(stream))
+{
+    writer.Write(System.Text.Encoding.ASCII.GetBytes("MD21")); writer.Write((uint)8); writer.Write(System.Text.Encoding.ASCII.GetBytes("MD20")); writer.Write((uint)274);
+    writer.Write(System.Text.Encoding.ASCII.GetBytes("TXID")); writer.Write((uint)8); writer.Write((uint)123); writer.Write((uint)456);
+}
+var modernInspection = NativeAssetConversionService.Inspect(modernModel);
+if (modernInspection.Compatibility != AssetCompatibility.RequiresNativeConversion || modernInspection.Chunks.Count != 2 || modernInspection.Version != 274 || !modernInspection.Findings.Any(finding => finding.Contains("FileDataID")))
+    throw new InvalidOperationException("Native asset inspection did not classify a chunked modern M2 or report FileDataID dependencies.");
+var wmoFixture = Path.Combine(assetFixture, "fixture.wmo");
+using (var stream = File.Create(wmoFixture)) using (var writer = new BinaryWriter(stream))
+{
+    writer.Write(System.Text.Encoding.ASCII.GetBytes("REVM")); writer.Write((uint)4); writer.Write((uint)17);
+}
+var wmoInspection = NativeAssetConversionService.Inspect(wmoFixture);
+if (wmoInspection.Version != 17 || wmoInspection.Chunks.Single().Id != "MVER")
+    throw new InvalidOperationException("Native WMO inspection did not normalize reversed on-disk chunk identifiers.");
+var conversionWorkspacePath = Path.Combine(Path.GetTempPath(), $"crucible-native-workspace-{Guid.NewGuid():N}");
+var nativeWorkspace = NativeAssetConversionService.CreateWorkspace([wotlkModel, modernModel], conversionWorkspacePath);
+if (nativeWorkspace.CompatibleAssets != 1 || nativeWorkspace.ConversionRequired != 1 || !File.Exists(Path.Combine(conversionWorkspacePath, "conversion-report.json")) ||
+    Directory.EnumerateFiles(Path.Combine(conversionWorkspacePath, "source"), "fixture.m2", SearchOption.AllDirectories).Count() != 1)
+    throw new InvalidOperationException("Native conversion workspace did not preserve immutable hashed inputs and report compatibility.");
+Directory.Delete(assetFixture, true); Directory.Delete(conversionWorkspacePath, true);
+
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));
 if (targetProfiles.Count != 4 || TargetProfileCatalog.Find(targetProfiles, null).ClientBuild != 12340 ||
     targetProfiles.Single(profile => profile.ClientBuild == 15595).SupportTier != TargetSupportTier.Experimental)

@@ -9,7 +9,7 @@ internal sealed class StartCenterControl : UserControl
 
     private readonly Func<string?> _databaseStatus;
 
-    public StartCenterControl(AppSettings settings, Action editSpells, Action createItem, Action detectServer, Action connectDatabase, Func<string?> databaseStatus, Action openDbcs, Action buildPatch, Action browseMpq, Action compareLayers, Action inspectClient, Action configurePaths)
+    public StartCenterControl(AppSettings settings, Action editSpells, Action createItem, Action detectServer, Action connectDatabase, Func<string?> databaseStatus, Action openDbcs, Action buildPatch, Action browseMpq, Action compareLayers, Action inspectClient, Action convertAssets, Action configurePaths)
     {
         _settings = settings; _databaseStatus = databaseStatus; Dock = DockStyle.Fill; AutoScroll = true; BackColor = Color.FromArgb(244, 246, 249);
         var content = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Dock = DockStyle.Top, Padding = new(36, 28, 36, 36), BackColor = BackColor };
@@ -32,6 +32,9 @@ internal sealed class StartCenterControl : UserControl
         inspection.Controls.Add(Card("Understand compatibility", "See whether a layer contains known WotLK DBCs, UI code, protected login UI, media assets, unresolved paths, or loader-specific subdirectories.", "Inspect Client Layers", inspectClient), 1, 0);
         inspection.Controls.Add(Card("Prepare a stock fusion", "Start from custom content only. Keep uncertain override layers separate until their load order and executable/server dependencies are proven.", "Review Client Content", inspectClient), 2, 0);
         content.Controls.Add(inspection);
+        var assets = CardRow();
+        assets.Controls.Add(Card("Port modern models safely", "Inspect Legion-era M2/WMO structures, snapshot every source and dependency, and produce an explicit 3.3.5 downgrade report before native conversion writes output.", "Open Native Converter", convertAssets), 0, 0);
+        content.Controls.Add(assets);
         var workspace = CardRow();
         workspace.Controls.Add(Card("Detect your server automatically", "Choose the installed server folder. Crucible finds its live config, DBC directory, and world database—even for a Windows/WSL split layout.", "Detect Server Workspace", () => { detectServer(); RefreshReadiness(); }), 0, 0);
         workspace.Controls.Add(Card("Connect manually", "Use explicit host, port, user, database, and session-only password when a server layout cannot be detected or the database is remote.", "Manual Database Connection", () => { connectDatabase(); RefreshReadiness(); }), 1, 0);
