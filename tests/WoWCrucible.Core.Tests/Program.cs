@@ -479,6 +479,53 @@ File.Delete(aggregateSidecar); Directory.CreateDirectory(aggregateSidecar);
 var catalogWithBlockedSidecar = BulkAssetLibraryService.RebuildCatalog(aggregateLibrary);
 if (!File.Exists(catalogWithBlockedSidecar) || Directory.EnumerateFiles(aggregateLibrary, $"{AssetComparisonService.AggregateSidecarFileName}.*.tmp", SearchOption.TopDirectoryOnly).Any())
     throw new InvalidOperationException("A nonessential sidecar write failure poisoned a committed catalog rebuild or left temporary files behind.");
+
+var targetClientFixture = Path.Combine(Path.GetTempPath(), $"crucible-target-client-{Guid.NewGuid():N}"); var targetClientData = Path.Combine(targetClientFixture, "Data"); Directory.CreateDirectory(targetClientData);
+Directory.CreateDirectory(Path.Combine(targetClientFixture, "WTF")); File.WriteAllText(Path.Combine(targetClientFixture, "WTF", "Config.wtf"), "SET locale \"enUS\"");
+var targetCommon = Path.Combine(targetClientData, "common.MPQ"); var targetPatch3 = Path.Combine(targetClientData, "patch-3.MPQ");
+var graphWmoTexturePath = Path.Combine(dependencyContent, "Textures", "Graph", dependencySource, "Wmo.blp");
+var targetDifferentWmo = Path.Combine(targetClientFixture, "different-wmo.blp"); File.WriteAllBytes(targetDifferentWmo, [99, 98, 97, 96]);
+var targetPatchService = new PatchArchiveService();
+targetPatchService.Create(targetCommon, [new(graphTerrain, @"Textures\Graph\Terrain.blp"), new(graphWmoTexturePath, @"Textures\Graph\Wmo.blp")]);
+targetPatchService.Create(targetPatch3, [new(targetDifferentWmo, @"Textures\Graph\Wmo.blp")]);
+var targetIndexDirectory = Path.Combine(targetClientFixture, "target-index"); var targetIndexer = new ClientArchiveIndexService(); targetIndexer.Build(targetClientFixture, targetIndexDirectory, false);
+var targetCatalog = ClientEffectiveAssetCatalog.Load(targetIndexDirectory); var effectiveWmo = targetCatalog.Resolve(@"Textures\Graph\Wmo.blp");
+if (effectiveWmo.State != ClientEffectiveAssetState.Effective || effectiveWmo.Effective?.ArchiveRelativePath != @"Data\patch-3.MPQ")
+    throw new InvalidOperationException("Effective target-client ordering did not select the higher Wrath patch layer.");
+var targetAwareGraph = ClientAssetDependencyService.Analyze(recursiveIndex, ClientAssetDependencyService.InferLocation(recursiveIndex, graphAdt), null, targetCatalog);
+if (targetAwareGraph.Blocking.Count != 0 || targetAwareGraph.PatchEntries.Count != 7 ||
+    !targetAwareGraph.Nodes.Any(node => node.ClientPath.Equals(@"Textures\Graph\Terrain.blp", StringComparison.OrdinalIgnoreCase) && node.State == ClientAssetDependencyState.TargetInherited) ||
+    !targetAwareGraph.Nodes.Any(node => node.ClientPath.Equals(@"Textures\Graph\Wmo.blp", StringComparison.OrdinalIgnoreCase) && node.State == ClientAssetDependencyState.TargetOverride))
+    throw new InvalidOperationException($"Target-aware closure did not omit exact bytes and retain a different-byte override: patch={targetAwareGraph.PatchEntries.Count}, inherited={targetAwareGraph.Inherited.Count}, blocking={targetAwareGraph.Blocking.Count}.");
+var targetManifestPath = Path.Combine(targetClientFixture, "target-bound.crucible-patch.json");
+PatchManifestService.Save(targetManifestPath, "target closure", "patch-target.MPQ", targetAwareGraph.PatchEntries, policy: new(ExpectedEntryCount: targetAwareGraph.PatchEntries.Count), targetClient: targetAwareGraph.TargetRequirement);
+var loadedTargetManifest = PatchManifestService.Load(targetManifestPath);
+if (loadedTargetManifest.FormatVersion != 4 || loadedTargetManifest.TargetClient?.InheritedAssets.Count != 1 || !PatchManifestService.Validate(loadedTargetManifest).Passed || loadedTargetManifest.TargetClient.IndexFingerprint != targetCatalog.Fingerprint)
+    throw new InvalidOperationException("A minimal target-aware closure did not persist and validate its inherited path hashes and client-index fingerprint.");
+var heldTerrain = graphTerrain + ".held"; File.Move(graphTerrain, heldTerrain);
+try
+{
+    var inheritedMissingGraph = ClientAssetDependencyService.Analyze(recursiveIndex, ClientAssetDependencyService.InferLocation(recursiveIndex, graphAdt), null, targetCatalog);
+    if (inheritedMissingGraph.Blocking.Count != 0 || !inheritedMissingGraph.Nodes.Any(node => node.ClientPath.Equals(@"Textures\Graph\Terrain.blp", StringComparison.OrdinalIgnoreCase) && node.State == ClientAssetDependencyState.TargetInherited && node.SourcePath is null))
+        throw new InvalidOperationException("An exact effective target path did not safely satisfy a dependency missing from the processed source layer.");
+}
+finally { File.Move(heldTerrain, graphTerrain); }
+var mysterySource = Path.Combine(targetClientFixture, "mystery-terrain.blp"); File.WriteAllBytes(mysterySource, [55, 54, 53]);
+targetPatchService.Create(Path.Combine(targetClientData, "mystery.MPQ"), [new(mysterySource, @"Textures\Graph\Terrain.blp")]);
+targetIndexer.Build(targetClientFixture, targetIndexDirectory, false); var ambiguousTarget = ClientEffectiveAssetCatalog.Load(targetIndexDirectory);
+File.Move(graphTerrain, heldTerrain);
+try
+{
+    var ambiguousGraph = ClientAssetDependencyService.Analyze(recursiveIndex, ClientAssetDependencyService.InferLocation(recursiveIndex, graphAdt), null, ambiguousTarget);
+    if (!ambiguousGraph.Blocking.Any(node => node.ClientPath.Equals(@"Textures\Graph\Terrain.blp", StringComparison.OrdinalIgnoreCase) && node.State == ClientAssetDependencyState.TargetAmbiguous))
+        throw new InvalidOperationException("A missing local dependency trusted a target path whose nonstandard archive precedence was ambiguous.");
+    var explicitTargetGraph = ClientAssetDependencyService.Analyze(recursiveIndex, ClientAssetDependencyService.InferLocation(recursiveIndex, graphAdt), null, ambiguousTarget,
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [@"Textures\Graph\Terrain.blp"] = @"Data\common.MPQ" });
+    if (explicitTargetGraph.Blocking.Count != 0 || !explicitTargetGraph.Nodes.Any(node => node.ClientPath.Equals(@"Textures\Graph\Terrain.blp", StringComparison.OrdinalIgnoreCase) && node.State == ClientAssetDependencyState.TargetInherited && node.TargetArchive == @"Data\common.MPQ"))
+        throw new InvalidOperationException("An explicit effective target-archive choice did not resolve and record an ambiguous inherited dependency.");
+}
+finally { File.Move(heldTerrain, graphTerrain); }
+Directory.Delete(targetClientFixture, true);
 Directory.Delete(assetFixture, true); Directory.Delete(conversionWorkspacePath, true);
 
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));

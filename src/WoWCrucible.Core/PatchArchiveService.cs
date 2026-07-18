@@ -189,6 +189,7 @@ public sealed class PatchArchiveService
             for (var index = 0; index < entries.Length; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                Native.SFileSetLocale(entries[index].Locale);
                 var internalPath = PatchInputMapper.NormalizeArchivePath(entries[index].ArchivePath);
                 var outputPath = internalPath;
                 if (duplicatePaths.Contains(internalPath))
@@ -196,7 +197,6 @@ public sealed class PatchArchiveService
                     occurrences.TryGetValue(internalPath, out var occurrence); occurrences[internalPath] = ++occurrence;
                     var extension = Path.GetExtension(internalPath); var stem = internalPath[..^extension.Length];
                     outputPath = $"{stem}.locale-{entries[index].Locale:X4}.variant-{occurrence:D2}{extension}";
-                    Native.SFileSetLocale(entries[index].Locale);
                 }
                 var destination = Path.GetFullPath(Path.Combine(destinationRoot, outputPath.Replace('\\', Path.DirectorySeparatorChar)));
                 var relativeDestination = Path.GetRelativePath(destinationRoot, destination);

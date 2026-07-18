@@ -32,14 +32,22 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _bindingStatus = StatusText("No client executable binding.");
     private string? _existingPatch;
     private string? _requiredClientExecutableSha256;
+    private PatchTargetClientRequirement? _targetClientRequirement;
     private readonly TextBox _dependencyLibrary = new() { PlaceholderText = "Processed asset library root" };
     private readonly TextBox _dependencyRoot = new() { PlaceholderText = "Root M2, WMO, ADT, or WDT inside the processed library" };
+    private readonly TextBox _dependencyTargetIndex = new() { PlaceholderText = "Optional complete target-client index (omit byte-identical base assets)" };
     private readonly ListBox _dependencyNodes = new();
     private readonly ComboBox _dependencyCandidates = new() { PlaceholderText = "Select an explicit provenance candidate" };
     private readonly TextBlock _dependencyStatus = StatusText("Choose one client asset to calculate its recursive patch closure.");
     private ClientAssetDependencyGraph? _dependencyGraph;
     private readonly Dictionary<string, string> _dependencyOverrides = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _dependencyTargetOverrides = new(StringComparer.OrdinalIgnoreCase);
     private string _dependencyOverrideScope = string.Empty;
+    private readonly object _dependencyTargetCacheLock = new();
+    private ClientEffectiveAssetCatalog? _dependencyTargetCatalog;
+    private string _dependencyTargetCatalogPath = string.Empty;
+    private long _dependencyTargetCatalogLength;
+    private long _dependencyTargetCatalogWriteTicks;
 
     private readonly TextBox _archivePath = new() { PlaceholderText = "MPQ archive" };
     private readonly TextBox _externalListfile = new() { PlaceholderText = "Optional external listfile" };
@@ -60,7 +68,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
 
     public MpqWorkspaceView(DesktopWorkspaceSession session)
     {
-        _session = session; _dependencyLibrary.Text = session.Settings.ProcessedAssetLibraryPath;
+        _session = session; _dependencyLibrary.Text = session.Settings.ProcessedAssetLibraryPath; _dependencyTargetIndex.Text = session.Settings.ClientIndexPath;
         _builderItems.ItemTemplate = new FuncDataTemplate<PatchRow>((row, _) => row is null ? new Grid() : BuildPatchRow(row));
         _browserItems.ItemTemplate = new FuncDataTemplate<MpqFileEntry>((entry, _) => entry is null ? new Grid() : new Grid
         {
@@ -117,7 +125,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         var addFolder = new Button { Content = "Add folder tree" }; addFolder.Click += async (_, _) => await AddFolderAsync();
         var openExisting = new Button { Content = "Update existing small MPQ" }; openExisting.Click += async (_, _) => await ChooseExistingPatchAsync();
         var remove = new Button { Content = "Remove selected" }; remove.Click += (_, _) => RemoveSelected();
-        var clear = new Button { Content = "Clear" }; clear.Click += (_, _) => { _entries.Clear(); _existingPatch = null; RefreshBuilder(); };
+        var clear = new Button { Content = "Clear" }; clear.Click += (_, _) => { _entries.Clear(); _existingPatch = null; _targetClientRequirement = null; RefreshBuilder(); };
         var loadManifest = new Button { Content = "Load manifest" }; loadManifest.Click += async (_, _) => await LoadManifestAsync();
         var saveManifest = new Button { Content = "Save manifest" }; saveManifest.Click += async (_, _) => await SaveManifestAsync();
         var bind = new Button { Content = "Bind client Wow.exe" }; bind.Click += async (_, _) => await BindClientAsync();
@@ -163,13 +171,14 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     {
         var browseLibrary = new Button { Content = "Library…" }; browseLibrary.Click += async (_, _) => { var path = await PickFolderAsync("Select the processed asset library"); if (path is not null) { _dependencyLibrary.Text = path; ClearDependencyChoices(); } };
         var browseRoot = new Button { Content = "Root asset…" }; browseRoot.Click += async (_, _) => { var path = await PickFileAsync("Select a dependency root", ["*.m2", "*.wmo", "*.adt", "*.wdt"]); if (path is not null) { _dependencyRoot.Text = path; ClearDependencyChoices(); } };
+        var browseTarget = new Button { Content = "Target index…" }; browseTarget.Click += async (_, _) => { var path = await PickFolderAsync("Select a complete target-client index"); if (path is not null) { _dependencyTargetIndex.Text = path; ClearDependencyChoices(); } };
         var analyze = AccentButton("Analyze recursive closure"); analyze.Click += async (_, _) => await AnalyzeDependenciesAsync();
         var stage = AccentButton("Stage complete closure in patch builder"); stage.Click += (_, _) => StageDependencyClosure();
         var useCandidate = new Button { Content = "Use selected candidate explicitly" }; useCandidate.Click += async (_, _) => await UseDependencyCandidateAsync();
-        var clearChoices = new Button { Content = "Clear provenance choices" }; clearChoices.Click += async (_, _) => { ClearDependencyChoices(); await AnalyzeDependenciesAsync(); };
+        var clearChoices = new Button { Content = "Clear explicit choices" }; clearChoices.Click += async (_, _) => { ClearDependencyChoices(); await AnalyzeDependenciesAsync(); };
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
-        var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Children = { _dependencyLibrary, WithColumn(browseLibrary, 1), WithRow(_dependencyRoot, 1), WithRow(WithColumn(browseRoot, 1), 1) } };
-        var explanation = new TextBlock { Text = "Crucible follows WotLK M2 → exact view SKINs/embedded textures, WMO → groups/textures/doodad models, and ADT/WDT → terrain textures/models/WMOs recursively. Every resolved file must come from the root asset's provenance. Missing and cross-source paths block staging; replaceable M2 slots remain visible as explicit DBC/SQL bindings.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
+        var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Children = { _dependencyLibrary, WithColumn(browseLibrary, 1), WithRow(_dependencyRoot, 1), WithRow(WithColumn(browseRoot, 1), 1), WithRow(_dependencyTargetIndex, 2), WithRow(WithColumn(browseTarget, 1), 2) } };
+        var explanation = new TextBlock { Text = "Crucible follows WotLK M2 → exact view SKINs/embedded textures, WMO → groups/textures/doodad models, and ADT/WDT → terrain textures/models/WMOs recursively. Every local file must come from the root provenance unless selected explicitly. A complete optional target index probes even anonymous MPQ entries by exact path: byte-identical effective assets are inherited and omitted, different bytes remain intentional overrides, and uncertain target order is never used to satisfy an unstaged dependency.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
         var toolbar = new WrapPanel { Children = { analyze, stage, _dependencyCandidates, useCandidate, clearChoices, cancel } };
         var dropTarget = new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Padding = new Thickness(8), Child = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Drop one M2, WMO, ADT, or WDT root here", Foreground = Brush.Parse("#8995A9") }, WithRow(_dependencyNodes, 1) } } };
         DragDrop.SetAllowDrop(dropTarget, true); DragDrop.AddDragOverHandler(dropTarget, (_, args) => { args.DragEffects = args.DataTransfer.TryGetFiles()?.Any(file => file.TryGetLocalPath() is { } path && IsDependencyRoot(path)) == true ? DragDropEffects.Copy : DragDropEffects.None; args.Handled = true; });
@@ -182,14 +191,15 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         BeginOperation(); _dependencyGraph = null; _dependencyNodes.ItemsSource = null; _dependencyStatus.Text = "Indexing the processed library and walking dependency edges…";
         try
         {
-            var library = Path.GetFullPath(_dependencyLibrary.Text?.Trim() ?? string.Empty); var root = Path.GetFullPath(_dependencyRoot.Text?.Trim() ?? string.Empty); var token = _operation!.Token; var scope = library + "|" + root;
-            if (!_dependencyOverrideScope.Equals(scope, StringComparison.OrdinalIgnoreCase)) { _dependencyOverrides.Clear(); _dependencyOverrideScope = scope; }
+            var library = Path.GetFullPath(_dependencyLibrary.Text?.Trim() ?? string.Empty); var root = Path.GetFullPath(_dependencyRoot.Text?.Trim() ?? string.Empty); var targetIndexPath = string.IsNullOrWhiteSpace(_dependencyTargetIndex.Text) ? null : Path.GetFullPath(_dependencyTargetIndex.Text.Trim()); var token = _operation!.Token; var scope = library + "|" + root + "|" + targetIndexPath;
+            if (!_dependencyOverrideScope.Equals(scope, StringComparison.OrdinalIgnoreCase)) { _dependencyOverrides.Clear(); _dependencyTargetOverrides.Clear(); _dependencyOverrideScope = scope; }
             var overrides = _dependencyOverrides.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
-            var graph = await Task.Run(() => { var index = AssetComparisonService.BuildIndex(library, token); var location = ClientAssetDependencyService.InferLocation(index, root); return ClientAssetDependencyService.Analyze(index, location, overrides, token); }, token);
+            var targetOverrides = _dependencyTargetOverrides.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+            var graph = await Task.Run(() => { var index = AssetComparisonService.BuildIndex(library, token); var location = ClientAssetDependencyService.InferLocation(index, root); var target = LoadDependencyTargetCatalog(targetIndexPath, token); return ClientAssetDependencyService.Analyze(index, location, overrides, target, targetOverrides, token); }, token);
             _dependencyGraph = graph; _dependencyNodes.ItemsSource = graph.Nodes;
             _dependencyNodes.SelectedItem = graph.Blocking.FirstOrDefault();
-            _dependencyStatus.Text = $"{graph.Nodes.Count:N0} graph node(s) · {graph.PatchEntries.Count:N0} patch file(s) · {graph.ExternalBindings.Count:N0} runtime binding(s) · {graph.Blocking.Count:N0} BLOCKING · {_dependencyOverrides.Count:N0} explicit provenance choice(s)\nRoot: {graph.Root.ClientPath} · provenance {graph.Root.Provenance}";
-            _session.Settings.ProcessedAssetLibraryPath = library; _session.Settings.Save(); DesktopCrashLogger.Debug("ASSET", "dependency-closure-success", ("root", graph.Root.ClientPath), ("nodes", graph.Nodes.Count), ("files", graph.PatchEntries.Count), ("blocking", graph.Blocking.Count));
+            _dependencyStatus.Text = $"{graph.Nodes.Count:N0} graph node(s) · {graph.PatchEntries.Count:N0} patch file(s) · {graph.Inherited.Count:N0} inherited from target · {graph.ExternalBindings.Count:N0} runtime binding(s) · {graph.Blocking.Count:N0} BLOCKING · {_dependencyOverrides.Count:N0} provenance choice(s) · {_dependencyTargetOverrides.Count:N0} target-archive choice(s)\nRoot: {graph.Root.ClientPath} · provenance {graph.Root.Provenance}";
+            _session.Settings.ProcessedAssetLibraryPath = library; if (targetIndexPath is not null) _session.Settings.ClientIndexPath = targetIndexPath; _session.Settings.Save(); DesktopCrashLogger.Debug("ASSET", "dependency-closure-success", ("root", graph.Root.ClientPath), ("nodes", graph.Nodes.Count), ("files", graph.PatchEntries.Count), ("inherited", graph.Inherited.Count), ("blocking", graph.Blocking.Count));
         }
         catch (OperationCanceledException) { _dependencyStatus.Text = "Dependency analysis cancelled."; }
         catch (Exception exception) { _dependencyStatus.Text = $"Dependency analysis failed: {exception.Message}"; DesktopCrashLogger.Log("Asset dependency analysis failed", exception); }
@@ -200,21 +210,39 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         if (_dependencyGraph is null) { _dependencyStatus.Text = "Analyze a root asset first."; return; }
         if (_dependencyGraph.Blocking.Count > 0) { _dependencyStatus.Text = $"Staging blocked by {_dependencyGraph.Blocking.Count:N0} missing, cross-source, or invalid dependency node(s). Resolve them explicitly first."; return; }
         foreach (var entry in _dependencyGraph.PatchEntries) { var index = _entries.FindIndex(row => row.ArchivePath.Equals(entry.ArchivePath, StringComparison.OrdinalIgnoreCase)); var row = new PatchRow(entry.SourcePath, entry.ArchivePath); if (index >= 0) _entries[index] = row; else _entries.Add(row); }
-        RefreshBuilder(); _tabs.SelectedIndex = 0; _builderStatus.Text = $"Staged dependency-complete closure: {_dependencyGraph.PatchEntries.Count:N0} file(s), {_dependencyGraph.ExternalBindings.Count:N0} visible runtime binding(s). Review archive paths, save the manifest, then build the tiny MPQ.";
+        if (_dependencyGraph.PatchEntries.Count == 0) { _dependencyStatus.Text = $"All {_dependencyGraph.Inherited.Count:N0} file dependency node(s) are already byte-identical in or safely supplied by the selected target client. No patch archive is needed for this closure."; return; }
+        _targetClientRequirement = _dependencyGraph.TargetRequirement;
+        RefreshBuilder(); _tabs.SelectedIndex = 0; _builderStatus.Text = $"Staged minimal dependency-complete closure: {_dependencyGraph.PatchEntries.Count:N0} file(s), {_dependencyGraph.Inherited.Count:N0} inherited target file(s) omitted, {_dependencyGraph.ExternalBindings.Count:N0} visible runtime binding(s). Review archive paths, save the manifest, then build the tiny MPQ.";
     }
 
     private async Task UseDependencyCandidateAsync()
     {
-        if (_dependencyNodes.SelectedItem is not ClientAssetDependencyNode node || node.State != ClientAssetDependencyState.CrossSourceConflict) { _dependencyStatus.Text = "Select a cross-source conflict row first."; return; }
-        if (_dependencyCandidates.SelectedItem is not string candidate) { _dependencyStatus.Text = "Select one physical candidate explicitly; Crucible will not guess between layers."; return; }
-        _dependencyOverrides[node.ClientPath] = candidate; await AnalyzeDependenciesAsync();
+        if (_dependencyNodes.SelectedItem is not ClientAssetDependencyNode node || node.State is not (ClientAssetDependencyState.CrossSourceConflict or ClientAssetDependencyState.TargetAmbiguous)) { _dependencyStatus.Text = "Select a cross-source or target-order conflict row first."; return; }
+        if (_dependencyCandidates.SelectedItem is not string candidate) { _dependencyStatus.Text = "Select one candidate explicitly; Crucible will not guess between layers."; return; }
+        if (node.State == ClientAssetDependencyState.CrossSourceConflict) _dependencyOverrides[node.ClientPath] = candidate;
+        else _dependencyTargetOverrides[node.ClientPath] = candidate;
+        await AnalyzeDependenciesAsync();
     }
 
-    private void ClearDependencyChoices() { _dependencyOverrides.Clear(); _dependencyOverrideScope = string.Empty; _dependencyCandidates.ItemsSource = null; }
+    private void ClearDependencyChoices() { _dependencyOverrides.Clear(); _dependencyTargetOverrides.Clear(); _dependencyOverrideScope = string.Empty; _dependencyCandidates.ItemsSource = null; }
+
+    private ClientEffectiveAssetCatalog? LoadDependencyTargetCatalog(string? indexPath, CancellationToken cancellationToken)
+    {
+        if (indexPath is null) return null;
+        var summaryPath = Path.Combine(indexPath, "client-index.json"); var info = new FileInfo(summaryPath);
+        if (!info.Exists) return ClientEffectiveAssetCatalog.Load(indexPath, cancellationToken);
+        lock (_dependencyTargetCacheLock)
+        {
+            if (_dependencyTargetCatalog is not null && _dependencyTargetCatalogPath.Equals(indexPath, StringComparison.OrdinalIgnoreCase) && _dependencyTargetCatalogLength == info.Length && _dependencyTargetCatalogWriteTicks == info.LastWriteTimeUtc.Ticks)
+                return _dependencyTargetCatalog;
+            _dependencyTargetCatalog = ClientEffectiveAssetCatalog.Load(indexPath, cancellationToken); _dependencyTargetCatalogPath = indexPath; _dependencyTargetCatalogLength = info.Length; _dependencyTargetCatalogWriteTicks = info.LastWriteTimeUtc.Ticks;
+            return _dependencyTargetCatalog;
+        }
+    }
 
     private static Grid BuildDependencyRow(ClientAssetDependencyNode node)
     {
-        var color = node.State switch { ClientAssetDependencyState.Root or ClientAssetDependencyState.Resolved => "#76B78B", ClientAssetDependencyState.ExternalBinding => "#A9A7C8", _ => "#E3A35D" };
+        var color = node.State switch { ClientAssetDependencyState.Root or ClientAssetDependencyState.Resolved => "#76B78B", ClientAssetDependencyState.TargetInherited => "#6EA8D9", ClientAssetDependencyState.TargetOverride => "#D7A15D", ClientAssetDependencyState.ExternalBinding => "#A9A7C8", ClientAssetDependencyState.TargetAmbiguous or ClientAssetDependencyState.Invalid => "#D96F6F", _ => "#E3A35D" };
         var primary = new Grid { ColumnDefinitions = new("Auto,Auto,*"), ColumnSpacing = 9, Children = { new TextBlock { Text = node.State.ToString(), Foreground = Brush.Parse(color), FontWeight = FontWeight.SemiBold }, WithColumn(new TextBlock { Text = node.Kind, Foreground = Brush.Parse("#93A0B3") }, 1), WithColumn(new TextBlock { Text = node.ClientPath, TextTrimming = TextTrimming.CharacterEllipsis }, 2) } };
         var candidates = node.Candidates.Count > 1 ? $" Candidates: {string.Join(" | ", node.Candidates)}" : string.Empty;
         return new Grid { RowDefinitions = new("Auto,Auto"), Margin = new Thickness(4, 3), Children = { primary, WithRow(new TextBlock { Text = node.Message + candidates, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#7F8BA0") }, 1) } };
@@ -318,14 +346,15 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     {
         try
         {
+            _targetClientRequirement = null;
             foreach (var mapped in PatchInputMapper.Map(paths)) { var existing = _entries.FindIndex(row => row.ArchivePath.Equals(mapped.ArchivePath, StringComparison.OrdinalIgnoreCase)); var row = new PatchRow(mapped.SourcePath, mapped.ArchivePath); if (existing >= 0) _entries[existing] = row; else _entries.Add(row); }
             RefreshBuilder();
         }
         catch (Exception exception) { _builderStatus.Text = exception.Message; DesktopCrashLogger.Log("Patch input mapping failed", exception); }
     }
 
-    private void RemoveSelected() { var selected = _builderItems.SelectedItems?.OfType<PatchRow>().ToHashSet() ?? []; _entries.RemoveAll(selected.Contains); RefreshBuilder(); }
-    private void RefreshBuilder() { _builderItems.ItemsSource = _entries.OrderBy(row => row.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray(); var warnings = _entries.Count(row => PatchInputMapper.AssessArchivePath(row.ArchivePath).HasWarning); _builderStatus.Text = $"{_entries.Count:N0} file(s) · {warnings:N0} path warning(s) · {(_existingPatch is null ? "new tiny MPQ" : $"transaction-safe update of {Path.GetFileName(_existingPatch)}")}"; }
+    private void RemoveSelected() { var selected = _builderItems.SelectedItems?.OfType<PatchRow>().ToHashSet() ?? []; _entries.RemoveAll(selected.Contains); _targetClientRequirement = null; RefreshBuilder(); }
+    private void RefreshBuilder() { _builderItems.ItemsSource = _entries.OrderBy(row => row.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray(); var warnings = _entries.Count(row => PatchInputMapper.AssessArchivePath(row.ArchivePath).HasWarning); _builderStatus.Text = $"{_entries.Count:N0} file(s) · {warnings:N0} path warning(s) · {(_existingPatch is null ? "new tiny MPQ" : $"transaction-safe update of {Path.GetFileName(_existingPatch)}")}{(_targetClientRequirement is null ? string.Empty : $" · bound to {_targetClientRequirement.ClientName} with {_targetClientRequirement.InheritedAssets.Count:N0} inherited path(s)")}"; }
     private PatchEntry[] CurrentEntries() => _entries.Select(row => new PatchEntry(row.SourcePath, row.ArchivePath)).ToArray();
     private PatchManifestPolicy? CurrentPolicy()
     {
@@ -334,7 +363,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         return allowed.Length == 0 && forbidden.Length == 0 && required.Length == 0 && expected is null ? null : new(allowed, forbidden, expected, required);
     }
 
-    private async Task ChooseExistingPatchAsync() { var path = await PickFileAsync("Select a deliberately small patch MPQ to update", ["*.mpq"]); if (path is null) return; _existingPatch = path; _builderStatus.Text = $"Updating {path}. Existing entries remain; matching internal paths are replaced. Archives above {PatchArchiveService.MaximumSafeUpdateBytes / (1024 * 1024):N0} MiB are refused."; }
+    private async Task ChooseExistingPatchAsync() { var path = await PickFileAsync("Select a deliberately small patch MPQ to update", ["*.mpq"]); if (path is null) return; _existingPatch = path; _targetClientRequirement = null; _builderStatus.Text = $"Updating {path}. Existing entries remain; matching internal paths are replaced. Archives above {PatchArchiveService.MaximumSafeUpdateBytes / (1024 * 1024):N0} MiB are refused."; }
     private async Task BindClientAsync() { var path = await PickFileAsync("Bind a compatible build-12340 Wow.exe", ["Wow.exe", "*.exe"]); if (path is null) return; _requiredClientExecutableSha256 = await Task.Run(() => PatchManifestService.ComputeExecutableSha256(path)); _bindingStatus.Text = $"Bound {Path.GetFileName(path)} · SHA-256 {_requiredClientExecutableSha256}"; }
 
     private async Task SaveManifestAsync()
@@ -342,7 +371,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         try
         {
             var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Save Crucible patch manifest", SuggestedFileName = "patch.crucible-patch.json", FileTypeChoices = [new FilePickerFileType("Crucible patch manifest") { Patterns = ["*.crucible-patch.json", "*.json"] }] }); var path = file?.TryGetLocalPath(); if (path is null) return;
-            PatchManifestService.Save(path, Path.GetFileNameWithoutExtension(path), _existingPatch is null ? "patch-W.mpq" : Path.GetFileName(_existingPatch), CurrentEntries(), _requiredClientExecutableSha256, CurrentPolicy()); _builderStatus.Text = $"Saved manifest {path}";
+            PatchManifestService.Save(path, Path.GetFileNameWithoutExtension(path), _existingPatch is null ? "patch-W.mpq" : Path.GetFileName(_existingPatch), CurrentEntries(), _requiredClientExecutableSha256, CurrentPolicy(), _targetClientRequirement); _builderStatus.Text = $"Saved manifest {path}{(_targetClientRequirement is null ? string.Empty : $" bound to target fingerprint {_targetClientRequirement.IndexFingerprint}")}";
         }
         catch (Exception exception) { _builderStatus.Text = $"Manifest save failed: {exception.Message}"; DesktopCrashLogger.Log("Manifest save failed", exception); }
     }
@@ -352,7 +381,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         try
         {
             var path = await PickFileAsync("Load Crucible patch manifest", ["*.crucible-patch.json", "*.json"]); if (path is null) return; var manifest = await Task.Run(() => PatchManifestService.Load(path));
-            _entries.Clear(); _entries.AddRange(manifest.Entries.Select(entry => new PatchRow(entry.SourcePath, entry.ArchivePath))); _existingPatch = null; _requiredClientExecutableSha256 = manifest.RequiredClientExecutableSha256; ApplyPolicy(manifest.Policy); _bindingStatus.Text = _requiredClientExecutableSha256 is null ? "No client executable binding." : $"Required client SHA-256 {_requiredClientExecutableSha256}"; RefreshBuilder();
+            _entries.Clear(); _entries.AddRange(manifest.Entries.Select(entry => new PatchRow(entry.SourcePath, entry.ArchivePath))); _existingPatch = null; _requiredClientExecutableSha256 = manifest.RequiredClientExecutableSha256; _targetClientRequirement = manifest.TargetClient; ApplyPolicy(manifest.Policy); _bindingStatus.Text = (_requiredClientExecutableSha256 is null ? "No client executable binding." : $"Required client SHA-256 {_requiredClientExecutableSha256}") + (_targetClientRequirement is null ? string.Empty : $" · target {_targetClientRequirement.ClientName} fingerprint {_targetClientRequirement.IndexFingerprint}"); RefreshBuilder();
         }
         catch (Exception exception) { _builderStatus.Text = $"Manifest load failed: {exception.Message}"; DesktopCrashLogger.Log("Manifest load failed", exception); }
     }
@@ -367,8 +396,9 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
             var output = _existingPatch;
             if (output is null) { var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Build tiny patch MPQ", SuggestedFileName = "patch-W.MPQ", FileTypeChoices = [new FilePickerFileType("MPQ patch") { Patterns = ["*.mpq"] }] }); output = file?.TryGetLocalPath(); if (output is null) return; }
             _builderStatus.Text = $"Building {entries.Length:N0} manifest entries…"; var service = new PatchArchiveService(); var update = _existingPatch is not null; await Task.Run(() => { if (update) service.Update(output, entries); else service.Create(output, entries); });
+            string? companionManifest = null; if (_targetClientRequirement is not null) { companionManifest = output + ".crucible-patch.json"; PatchManifestService.Save(companionManifest, Path.GetFileNameWithoutExtension(output), Path.GetFileName(output), entries, _requiredClientExecutableSha256, CurrentPolicy(), _targetClientRequirement); }
             ClientCacheInvalidationResult? cache = null; if (ClientPatchDeploymentService.IsInsideClientData(output, _session.Settings.ClientDataPath)) { var root = Directory.GetParent(_session.Settings.ClientDataPath)?.FullName; if (root is not null) cache = await Task.Run(() => ClientPatchDeploymentService.InvalidateCache(root)); }
-            _builderStatus.Text = $"{(update ? "Updated" : "Created")} {output} with {entries.Length:N0} file(s).{(cache is null ? string.Empty : cache.Existed ? $" Deleted the entire client Cache ({cache.DeletedFiles:N0} files)." : " Client Cache was already absent.")}";
+            _builderStatus.Text = $"{(update ? "Updated" : "Created")} {output} with {entries.Length:N0} file(s).{(companionManifest is null ? string.Empty : $" Target-bound companion manifest: {companionManifest}.")}{(cache is null ? string.Empty : cache.Existed ? $" Deleted the entire client Cache ({cache.DeletedFiles:N0} files)." : " Client Cache was already absent.")}";
         }
         catch (Exception exception) { _builderStatus.Text = $"Build failed: {exception.Message}"; DesktopCrashLogger.Log("MPQ build failed", exception); }
     }

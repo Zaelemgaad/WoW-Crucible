@@ -5,7 +5,9 @@ using System.Text.RegularExpressions;
 namespace WoWCrucible.Core;
 
 public sealed record PatchManifestPolicy(IReadOnlyList<string>? AllowedGlobs = null, IReadOnlyList<string>? ForbiddenGlobs = null, int? ExpectedEntryCount = null, IReadOnlyList<string>? RequiredGlobs = null);
-public sealed record PatchManifest(int FormatVersion, string Name, string OutputFileName, IReadOnlyList<PatchEntry> Entries, string? RequiredClientExecutableSha256 = null, PatchManifestPolicy? Policy = null);
+public sealed record PatchInheritedAssetRequirement(string ClientPath, string EffectiveArchive, string Sha256);
+public sealed record PatchTargetClientRequirement(string ClientName, string? ActiveLocale, string IndexFingerprint, IReadOnlyList<PatchInheritedAssetRequirement> InheritedAssets);
+public sealed record PatchManifest(int FormatVersion, string Name, string OutputFileName, IReadOnlyList<PatchEntry> Entries, string? RequiredClientExecutableSha256 = null, PatchManifestPolicy? Policy = null, PatchTargetClientRequirement? TargetClient = null);
 public sealed record PatchCompatibilityIssue(string Code, string Message);
 public sealed record PatchManifestValidationIssue(string Code, string Message, string? ArchivePath = null);
 public sealed record PatchManifestValidationResult(IReadOnlyList<PatchManifestValidationIssue> Errors, IReadOnlyList<PatchManifestValidationIssue> Warnings)
@@ -15,15 +17,15 @@ public sealed record PatchManifestValidationResult(IReadOnlyList<PatchManifestVa
 
 public static class PatchManifestService
 {
-    public static void Save(string manifestPath, string name, string outputFileName, IEnumerable<PatchEntry> entries, string? requiredClientExecutableSha256 = null, PatchManifestPolicy? policy = null)
+    public static void Save(string manifestPath, string name, string outputFileName, IEnumerable<PatchEntry> entries, string? requiredClientExecutableSha256 = null, PatchManifestPolicy? policy = null, PatchTargetClientRequirement? targetClient = null)
     {
         manifestPath = Path.GetFullPath(manifestPath);
         var directory = Path.GetDirectoryName(manifestPath)!; Directory.CreateDirectory(directory);
         var materialized = entries.ToArray();
         var validation = ValidateEntries(materialized, policy);
-        if (!validation.Passed) throw new InvalidDataException(string.Join(Environment.NewLine, validation.Errors.Select(error => error.Message)));
+        var targetErrors = ValidateTarget(targetClient); if (!validation.Passed || targetErrors.Count > 0) throw new InvalidDataException(string.Join(Environment.NewLine, validation.Errors.Select(error => error.Message).Concat(targetErrors.Select(error => error.Message))));
         var portable = materialized.Select(entry => new PatchEntry(Path.GetRelativePath(directory, Path.GetFullPath(entry.SourcePath)), PatchInputMapper.NormalizeArchivePath(entry.ArchivePath))).ToArray();
-        var manifest = new PatchManifest(3, name, Path.GetFileName(outputFileName), portable, NormalizeSha256(requiredClientExecutableSha256), NormalizePolicy(policy));
+        var manifest = new PatchManifest(targetClient is null ? 3 : 4, name, Path.GetFileName(outputFileName), portable, NormalizeSha256(requiredClientExecutableSha256), NormalizePolicy(policy), NormalizeTarget(targetClient));
         File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
     }
 
@@ -31,10 +33,10 @@ public static class PatchManifestService
     {
         manifestPath = Path.GetFullPath(manifestPath);
         var manifest = JsonSerializer.Deserialize<PatchManifest>(File.ReadAllText(manifestPath)) ?? throw new InvalidDataException("The patch manifest is empty.");
-        if (manifest.FormatVersion is < 1 or > 3) throw new InvalidDataException($"Unsupported patch manifest version: {manifest.FormatVersion}");
+        if (manifest.FormatVersion is < 1 or > 4) throw new InvalidDataException($"Unsupported patch manifest version: {manifest.FormatVersion}");
         var directory = Path.GetDirectoryName(manifestPath)!;
         var resolved = manifest.Entries.Select(entry => new PatchEntry(Path.GetFullPath(Path.Combine(directory, entry.SourcePath)), PatchInputMapper.NormalizeArchivePath(entry.ArchivePath))).ToArray();
-        return manifest with { Entries = resolved, RequiredClientExecutableSha256 = NormalizeSha256(manifest.RequiredClientExecutableSha256), Policy = NormalizePolicy(manifest.Policy) };
+        return manifest with { Entries = resolved, RequiredClientExecutableSha256 = NormalizeSha256(manifest.RequiredClientExecutableSha256), Policy = NormalizePolicy(manifest.Policy), TargetClient = NormalizeTarget(manifest.TargetClient) };
     }
 
     public static void Build(string manifestPath, string outputDirectory)
@@ -49,6 +51,8 @@ public static class PatchManifestService
     {
         var entryValidation = ValidateEntries(manifest.Entries, manifest.Policy);
         var errors = entryValidation.Errors.ToList(); var warnings = entryValidation.Warnings.ToList();
+        errors.AddRange(ValidateTarget(manifest.TargetClient));
+        if (manifest.TargetClient is not null && manifest.FormatVersion < 4) errors.Add(new("TargetRequirementVersion", "Target-client inheritance requires patch manifest format version 4."));
         if (archivePath is not null)
         {
             if (errors.Any(error => error.Code is "InvalidArchivePath" or "DuplicateArchivePath")) return new(errors, warnings);
@@ -118,6 +122,36 @@ public static class PatchManifestService
         if (normalized.Length != 64 || normalized.Any(character => !Uri.IsHexDigit(character))) throw new InvalidDataException("Client executable SHA-256 must contain exactly 64 hexadecimal characters.");
         return normalized;
     }
+
+    private static PatchTargetClientRequirement? NormalizeTarget(PatchTargetClientRequirement? target)
+    {
+        if (target is null) return null;
+        return target with
+        {
+            ClientName = target.ClientName.Trim(), ActiveLocale = string.IsNullOrWhiteSpace(target.ActiveLocale) ? null : target.ActiveLocale.Trim(),
+            IndexFingerprint = target.IndexFingerprint.Trim().ToUpperInvariant(),
+            InheritedAssets = target.InheritedAssets.Select(asset => asset with { ClientPath = PatchInputMapper.NormalizeArchivePath(asset.ClientPath), EffectiveArchive = PatchInputMapper.NormalizeArchivePath(asset.EffectiveArchive), Sha256 = asset.Sha256.Trim().ToUpperInvariant() }).OrderBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase).ToArray()
+        };
+    }
+
+    private static IReadOnlyList<PatchManifestValidationIssue> ValidateTarget(PatchTargetClientRequirement? target)
+    {
+        if (target is null) return [];
+        var errors = new List<PatchManifestValidationIssue>();
+        if (string.IsNullOrWhiteSpace(target.ClientName)) errors.Add(new("InvalidTargetClient", "Target-client requirement has no client name."));
+        if (!IsSha256(target.IndexFingerprint)) errors.Add(new("InvalidTargetFingerprint", "Target-client index fingerprint is not a SHA-256 value."));
+        if (target.InheritedAssets.Count == 0) errors.Add(new("EmptyTargetInheritance", "Target-client requirement contains no inherited assets."));
+        foreach (var asset in target.InheritedAssets)
+        {
+            try { _ = PatchInputMapper.NormalizeArchivePath(asset.ClientPath); _ = PatchInputMapper.NormalizeArchivePath(asset.EffectiveArchive); }
+            catch (Exception exception) { errors.Add(new("InvalidInheritedPath", exception.Message, asset.ClientPath)); }
+            if (!IsSha256(asset.Sha256)) errors.Add(new("InvalidInheritedHash", $"Inherited target path '{asset.ClientPath}' has an invalid SHA-256 value.", asset.ClientPath));
+        }
+        foreach (var duplicate in target.InheritedAssets.GroupBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1)) errors.Add(new("DuplicateInheritedPath", $"Target requirement repeats inherited path '{duplicate.Key}'.", duplicate.Key));
+        return errors;
+    }
+
+    private static bool IsSha256(string? value) => value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F');
 
     private static PatchManifestPolicy? NormalizePolicy(PatchManifestPolicy? policy)
     {

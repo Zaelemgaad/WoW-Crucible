@@ -2,14 +2,16 @@ using System.Text;
 
 namespace WoWCrucible.Core;
 
-public enum ClientAssetDependencyState { Root, Resolved, Missing, CrossSourceConflict, ExternalBinding, Invalid }
+public enum ClientAssetDependencyState { Root, Resolved, TargetOverride, TargetInherited, Missing, CrossSourceConflict, TargetAmbiguous, ExternalBinding, Invalid }
 public sealed record ClientAssetLocation(string ClientPath, string Provenance, string SourcePath);
 public sealed record ClientAssetDependencyNode(int Depth, string? ParentClientPath, string Kind, string ClientPath,
-    ClientAssetDependencyState State, string Provenance, string? SourcePath, IReadOnlyList<string> Candidates, string Message);
-public sealed record ClientAssetDependencyGraph(ClientAssetLocation Root, IReadOnlyList<ClientAssetDependencyNode> Nodes)
+    ClientAssetDependencyState State, string Provenance, string? SourcePath, IReadOnlyList<string> Candidates, string Message,
+    string? TargetArchive = null, string? TargetSha256 = null);
+public sealed record ClientAssetDependencyGraph(ClientAssetLocation Root, IReadOnlyList<ClientAssetDependencyNode> Nodes, PatchTargetClientRequirement? TargetRequirement = null)
 {
-    public IReadOnlyList<ClientAssetDependencyNode> Blocking => Nodes.Where(node => node.State is ClientAssetDependencyState.Missing or ClientAssetDependencyState.CrossSourceConflict or ClientAssetDependencyState.Invalid).ToArray();
-    public IReadOnlyList<ClientAssetDependencyNode> Resolved => Nodes.Where(node => node.State is ClientAssetDependencyState.Root or ClientAssetDependencyState.Resolved).ToArray();
+    public IReadOnlyList<ClientAssetDependencyNode> Blocking => Nodes.Where(node => node.State is ClientAssetDependencyState.Missing or ClientAssetDependencyState.CrossSourceConflict or ClientAssetDependencyState.TargetAmbiguous or ClientAssetDependencyState.Invalid).ToArray();
+    public IReadOnlyList<ClientAssetDependencyNode> Resolved => Nodes.Where(node => node.State is ClientAssetDependencyState.Root or ClientAssetDependencyState.Resolved or ClientAssetDependencyState.TargetOverride).ToArray();
+    public IReadOnlyList<ClientAssetDependencyNode> Inherited => Nodes.Where(node => node.State == ClientAssetDependencyState.TargetInherited).ToArray();
     public IReadOnlyList<ClientAssetDependencyNode> ExternalBindings => Nodes.Where(node => node.State == ClientAssetDependencyState.ExternalBinding).ToArray();
     public IReadOnlyList<PatchEntry> PatchEntries => Resolved.Where(node => node.SourcePath is not null).GroupBy(node => node.ClientPath, StringComparer.OrdinalIgnoreCase).Select(group => new PatchEntry(group.First().SourcePath!, group.Key)).OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
 }
@@ -32,9 +34,17 @@ public static class ClientAssetDependencyService
     }
 
     public static ClientAssetDependencyGraph Analyze(AssetComparisonIndex index, ClientAssetLocation root, CancellationToken cancellationToken = default)
-        => Analyze(index, root, null, cancellationToken);
+        => Analyze(index, root, null, null, cancellationToken);
 
     public static ClientAssetDependencyGraph Analyze(AssetComparisonIndex index, ClientAssetLocation root, IReadOnlyDictionary<string, string>? sourceOverrides, CancellationToken cancellationToken = default)
+        => Analyze(index, root, sourceOverrides, null, cancellationToken);
+
+    public static ClientAssetDependencyGraph Analyze(AssetComparisonIndex index, ClientAssetLocation root, IReadOnlyDictionary<string, string>? sourceOverrides,
+        ClientEffectiveAssetCatalog? targetClient, CancellationToken cancellationToken = default)
+        => Analyze(index, root, sourceOverrides, targetClient, null, cancellationToken);
+
+    public static ClientAssetDependencyGraph Analyze(AssetComparisonIndex index, ClientAssetLocation root, IReadOnlyDictionary<string, string>? sourceOverrides,
+        ClientEffectiveAssetCatalog? targetClient, IReadOnlyDictionary<string, string>? targetArchiveOverrides, CancellationToken cancellationToken = default)
     {
         root = root with { ClientPath = PatchInputMapper.NormalizeArchivePath(root.ClientPath), SourcePath = Path.GetFullPath(root.SourcePath) };
         if (!File.Exists(root.SourcePath)) throw new FileNotFoundException("The dependency root does not exist.", root.SourcePath);
@@ -78,13 +88,83 @@ public static class ClientAssetDependencyService
                 else Add(resolution);
             }
         }
-        return new(root, nodes.OrderBy(node => node.Depth).ThenBy(node => node.ClientPath, StringComparer.OrdinalIgnoreCase).ThenBy(node => node.Kind, StringComparer.OrdinalIgnoreCase).ToArray());
+        var ordered = nodes.OrderBy(node => node.Depth).ThenBy(node => node.ClientPath, StringComparer.OrdinalIgnoreCase).ThenBy(node => node.Kind, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (targetClient is not null) ordered = ApplyTargetClient(ordered, targetClient, targetArchiveOverrides, cancellationToken);
+        var inheritedRequirements = ordered.Where(node => node.State == ClientAssetDependencyState.TargetInherited && node.TargetArchive is not null && node.TargetSha256 is not null)
+                .GroupBy(node => node.ClientPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First())
+                .Select(node => new PatchInheritedAssetRequirement(node.ClientPath, node.TargetArchive!, node.TargetSha256!)).OrderBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase).ToArray();
+        var requirement = targetClient is not null && inheritedRequirements.Length > 0 ? new PatchTargetClientRequirement(targetClient.Index.Name, targetClient.Index.ActiveLocale, targetClient.Fingerprint, inheritedRequirements) : null;
+        return new(root, ordered, requirement);
 
         void Add(ClientAssetDependencyNode node) { if (nodes.Count >= MaximumNodes) throw new InvalidDataException($"Dependency graph exceeded {MaximumNodes:N0} nodes; the input is corrupt or unexpectedly broad."); nodes.Add(node); }
     }
 
     public static ClientAssetDependencyGraph Analyze(AssetComparisonIndex index, string sourcePath, CancellationToken cancellationToken = default)
         => Analyze(index, InferLocation(index, sourcePath), cancellationToken);
+
+    private static ClientAssetDependencyNode[] ApplyTargetClient(IReadOnlyList<ClientAssetDependencyNode> nodes, ClientEffectiveAssetCatalog target, IReadOnlyDictionary<string, string>? targetArchiveOverrides, CancellationToken cancellationToken)
+    {
+        var targetChoices = (targetArchiveOverrides ?? new Dictionary<string, string>()).ToDictionary(pair => PatchInputMapper.NormalizeArchivePath(pair.Key), pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+        var result = new List<ClientAssetDependencyNode>(nodes.Count);
+        foreach (var node in nodes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (node.State is ClientAssetDependencyState.ExternalBinding or ClientAssetDependencyState.Invalid) { result.Add(node); continue; }
+            ClientEffectiveAssetResolution targetResolution;
+            try { targetChoices.TryGetValue(node.ClientPath, out var targetChoice); targetResolution = target.Resolve(node.ClientPath, targetChoice, cancellationToken); }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                result.Add(node.SourcePath is null
+                    ? node with { State = ClientAssetDependencyState.TargetAmbiguous, Message = $"Target-client resolution failed and this dependency has no staged source: {exception.Message}" }
+                    : node with { Message = $"{node.Message} Target-client comparison failed, so Crucible conservatively keeps this file in the patch: {exception.Message}" });
+                continue;
+            }
+
+            if (node.SourcePath is not null && node.State is ClientAssetDependencyState.Root or ClientAssetDependencyState.Resolved)
+            {
+                if (targetResolution.State == ClientEffectiveAssetState.Effective)
+                {
+                    try
+                    {
+                        var targetHash = target.HashEffective(targetResolution.Effective!, cancellationToken); var provider = targetResolution.Effective!.ArchiveRelativePath;
+                        if (target.ContentEquals(node.SourcePath, targetResolution, cancellationToken))
+                        {
+                            result.Add(node with { State = ClientAssetDependencyState.TargetInherited, Provenance = $"Target client · {provider}", Message = $"Byte-identical target asset already supplied by {provider}; omitted from the minimal patch.", TargetArchive = provider, TargetSha256 = targetHash });
+                        }
+                        else result.Add(node with { State = ClientAssetDependencyState.TargetOverride, Message = $"{node.Message} Target currently supplies different bytes from {provider}; this source remains in the patch as an intentional override.", TargetArchive = provider, TargetSha256 = targetHash });
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException) { result.Add(node with { Message = $"{node.Message} Exact target comparison failed, so Crucible conservatively keeps this source in the patch: {exception.Message}" }); }
+                }
+                else if (targetResolution.State == ClientEffectiveAssetState.Ambiguous)
+                    result.Add(node with { Message = $"{node.Message} {targetResolution.Message} This source remains staged, so the uncertainty cannot create a missing dependency." });
+                else result.Add(node with { Message = $"{node.Message} Target does not supply this path; it remains in the patch." });
+                continue;
+            }
+
+            if (node.State is ClientAssetDependencyState.Missing or ClientAssetDependencyState.CrossSourceConflict)
+            {
+                if (targetResolution.State == ClientEffectiveAssetState.Effective)
+                {
+                    var provider = targetResolution.Effective!.ArchiveRelativePath;
+                    try
+                    {
+                        var targetHash = target.HashEffective(targetResolution.Effective, cancellationToken);
+                        result.Add(node with { State = ClientAssetDependencyState.TargetInherited, Provenance = $"Target client · {provider}", SourcePath = null, Candidates = targetResolution.Candidates.Select(candidate => candidate.ArchiveRelativePath).ToArray(), Message = $"Required path is inherited from the effective target archive {provider}; no patch copy is needed. Review visual fidelity if another provenance was expected.", TargetArchive = provider, TargetSha256 = targetHash });
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        result.Add(node with { State = ClientAssetDependencyState.TargetAmbiguous, Candidates = targetResolution.Candidates.Select(candidate => candidate.ArchiveRelativePath).ToArray(), Message = $"The target path exists in {provider}, but its bytes could not be verified and no local source is staged: {exception.Message}" });
+                    }
+                }
+                else if (targetResolution.State == ClientEffectiveAssetState.Ambiguous)
+                    result.Add(node with { State = ClientAssetDependencyState.TargetAmbiguous, Candidates = targetResolution.Candidates.Select(candidate => candidate.ArchiveRelativePath).ToArray(), Message = $"This dependency is not staged locally and target precedence is ambiguous. {targetResolution.Message}" });
+                else result.Add(node);
+                continue;
+            }
+            result.Add(node);
+        }
+        return result.ToArray();
+    }
 
     private static ClientAssetDependencyNode Resolve(AssetComparisonIndex index, string provenance, string rawPath, string kind, string parent, int depth, IReadOnlyDictionary<string, string> overrides)
     {
