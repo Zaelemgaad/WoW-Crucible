@@ -832,6 +832,32 @@ if (!spellCreation.TryGetValue(597, out var conjureFood) || !conjureFood.Created
     throw new InvalidOperationException("Spell.dbc acquisition coverage did not map reachable create-item effects such as Conjured Bread.");
 if (!SqlWorkspaceService.IsReadOnlyStatement("-- reviewed\nSELECT * FROM item_template") || SqlWorkspaceService.IsReadOnlyStatement("/* not read-only */ UPDATE item_template SET name='bad'"))
     throw new InvalidOperationException("SQL Studio read-only routing could execute a write through the immediate query path.");
+var readBatchSql = "SELECT 'semi;colon' AS value; -- retained comment\nSHOW TABLES;";
+var readStatements = SqlReadBatchParser.Split(readBatchSql);
+if (readStatements.Count != 2 || !SqlWorkspaceService.IsReadOnlyBatch(readBatchSql) || SqlWorkspaceService.IsReadOnlyStatement(readBatchSql) ||
+    !SqlWorkspaceService.IsReadOnlyStatement("SELECT 'INTO OUTFILE' AS harmless_text") ||
+    SqlWorkspaceService.IsReadOnlyBatch("SELECT 1; UPDATE item_template SET name='bad'") ||
+    SqlWorkspaceService.IsReadOnlyStatement("SELECT * FROM item_template INTO /* no */ OUTFILE '/tmp/leak'") ||
+    SqlReadBatchParser.Split("SELECT `semi;column`, \"double;value\" FROM item_template;").Count != 1)
+    throw new InvalidOperationException("SQL read-batch splitting did not preserve quoted semicolons or independently reject write/file-output statements.");
+try { _ = SqlReadBatchParser.Split("SELECT 'unterminated"); throw new InvalidOperationException("An unterminated SQL literal was accepted."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("quoted", StringComparison.OrdinalIgnoreCase)) { }
+var queryHistoryRoot = Path.Combine(Path.GetTempPath(), $"crucible-query-history-{Guid.NewGuid():N}"); Directory.CreateDirectory(queryHistoryRoot);
+try
+{
+    var store = new SqlQueryHistoryStore(Path.Combine(queryHistoryRoot, "history.json"), 10);
+    var batch = new SqlQueryBatch([new SqlQueryBatchResult(1, "SELECT 1", new SqlQueryResult(["value"], [[1]], -1, TimeSpan.FromMilliseconds(2)), false)], TimeSpan.FromMilliseconds(3));
+    var recorded = store.Record("acore_world", "SELECT 1", batch); var bookmarked = store.Bookmark("acore_world", "SELECT 1", "Health check");
+    for (var index = 0; index < 14; index++) store.Record("acore_world", $"SELECT {index + 2}", batch);
+    var retained = store.Load();
+    if (recorded.Count != 1 || bookmarked.Count != 1 || retained.Count(entry => entry.Bookmarked) != 1 || retained.Count(entry => !entry.Bookmarked) != 10 ||
+        retained.Single(entry => entry.Bookmarked).Label != "Health check" || store.ClearUnbookmarked().Count != 1)
+        throw new InvalidOperationException("Portable SQL query history did not deduplicate, bookmark, cap, or clear entries safely.");
+    File.WriteAllText(Path.Combine(queryHistoryRoot, "history.json"), "{broken");
+    if (store.Load().Count != 0 || Directory.EnumerateFiles(queryHistoryRoot, "history.json.corrupt-*.json").Count() != 1)
+        throw new InvalidOperationException("A corrupt SQL query-history file was discarded instead of being preserved before recovery.");
+}
+finally { if (Directory.Exists(queryHistoryRoot)) Directory.Delete(queryHistoryRoot, true); }
 var joinSource = new DatabaseTableCapability("item_template", ItemColumns("entry", "name"));
 var joinTarget = new DatabaseTableCapability("npc_vendor", ItemColumns("entry", "item"));
 var joinRelation = new DatabaseRelationCapability("fixture_item_vendor", "item_template", "entry", "npc_vendor", "item", false, "Fixture relation");

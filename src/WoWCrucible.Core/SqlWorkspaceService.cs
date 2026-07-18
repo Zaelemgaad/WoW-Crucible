@@ -264,29 +264,34 @@ public sealed class SqlWorkspaceService
 
     public async Task<SqlQueryResult> QueryAsync(DatabaseConnectionProfile profile, string sql, int maximumRows = 1000, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(sql)) throw new ArgumentException("Enter a query.");
-        if (!IsReadOnlyStatement(sql)) throw new InvalidOperationException("QueryAsync accepts only SELECT, SHOW, DESCRIBE, DESC, or EXPLAIN. Use the explicitly confirmed write path for every other statement.");
-        maximumRows = Math.Clamp(maximumRows, 1, 10000); var started = System.Diagnostics.Stopwatch.StartNew();
-        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
-        await using var command = new MySqlCommand(sql, connection) { CommandTimeout = 120 };
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        var columns = Enumerable.Range(0, reader.FieldCount).Select(reader.GetName).ToArray(); var rows = new List<IReadOnlyList<object?>>();
-        while (rows.Count < maximumRows && await reader.ReadAsync(cancellationToken)) rows.Add(Enumerable.Range(0, reader.FieldCount).Select(index => reader.IsDBNull(index) ? null : reader.GetValue(index)).ToArray());
-        return new(columns, rows, -1, started.Elapsed);
+        var statements = SqlReadBatchParser.Split(sql);
+        if (statements.Count != 1) throw new InvalidOperationException("QueryAsync accepts exactly one read-only statement. Use QueryBatchAsync for an explicit read batch.");
+        var batch = await QueryBatchAsync(profile, sql, maximumRows, cancellationToken);
+        return batch.Results[0].Result;
     }
 
-    public static bool IsReadOnlyStatement(string sql)
+    public async Task<SqlQueryBatch> QueryBatchAsync(DatabaseConnectionProfile profile, string sql, int maximumRowsPerResult = 1000, CancellationToken cancellationToken = default)
     {
-        var text = (sql ?? string.Empty).TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
-        while (text.Length > 0)
+        var statements = SqlReadBatchParser.Split(sql);
+        if (statements.Count == 0) throw new ArgumentException("Enter at least one query.");
+        if (!statements.All(SqlReadBatchParser.IsReadOnlyStatement)) throw new InvalidOperationException("Read batches accept only SELECT, SHOW, DESCRIBE, DESC, or EXPLAIN, and reject SELECT file-output clauses. Use the separately confirmed write path for every mutation.");
+        maximumRowsPerResult = Math.Clamp(maximumRowsPerResult, 1, 10000); var batchWatch = System.Diagnostics.Stopwatch.StartNew(); var results = new List<SqlQueryBatchResult>(statements.Count);
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        for (var statementIndex = 0; statementIndex < statements.Count; statementIndex++)
         {
-            if (text.StartsWith("--", StringComparison.Ordinal) || text.StartsWith('#')) { var end = text.IndexOf('\n'); if (end < 0) return false; text = text[(end + 1)..].TrimStart(); continue; }
-            if (text.StartsWith("/*", StringComparison.Ordinal)) { var end = text.IndexOf("*/", StringComparison.Ordinal); if (end < 0) return false; text = text[(end + 2)..].TrimStart(); continue; }
-            break;
+            cancellationToken.ThrowIfCancellationRequested(); var statement = statements[statementIndex]; var watch = System.Diagnostics.Stopwatch.StartNew();
+            await using var command = new MySqlCommand(statement, connection) { CommandTimeout = 120 };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var columns = Enumerable.Range(0, reader.FieldCount).Select(reader.GetName).ToArray(); var rows = new List<IReadOnlyList<object?>>();
+            while (rows.Count < maximumRowsPerResult && await reader.ReadAsync(cancellationToken)) rows.Add(Enumerable.Range(0, reader.FieldCount).Select(index => reader.IsDBNull(index) ? null : reader.GetValue(index)).ToArray());
+            var truncated = rows.Count == maximumRowsPerResult && await reader.ReadAsync(cancellationToken); watch.Stop();
+            results.Add(new(statementIndex + 1, statement, new(columns, rows, -1, watch.Elapsed), truncated));
         }
-        var token = new string(text.TakeWhile(char.IsLetter).ToArray()).ToUpperInvariant();
-        return token is "SELECT" or "SHOW" or "DESCRIBE" or "DESC" or "EXPLAIN";
+        batchWatch.Stop(); return new(results, batchWatch.Elapsed);
     }
+
+    public static bool IsReadOnlyStatement(string sql) => SqlReadBatchParser.IsReadOnlyStatement(sql);
+    public static bool IsReadOnlyBatch(string sql) => SqlReadBatchParser.IsReadOnlyBatch(sql);
 
     public async Task<SqlQueryResult> ExecuteAsync(DatabaseConnectionProfile profile, string sql, CancellationToken cancellationToken = default)
     {

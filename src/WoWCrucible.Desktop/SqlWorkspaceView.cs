@@ -71,8 +71,12 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly TextBox _query = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "SELECT * FROM item_template WHERE entry IN (17, 17802);" };
     private readonly ListBox _queryResults = new();
+    private readonly ComboBox _queryResultSets = new() { PlaceholderText = "Result set" };
     private readonly ComboBox _queryDisplay = new() { ItemsSource = new[] { "Complete field cards", "Compact rows" }, SelectedIndex = 0 };
     private readonly TextBlock _querySummary = Status("Run a read-only query to inspect structured results.");
+    private readonly SqlQueryHistoryStore _queryHistoryStore = new();
+    private readonly ListBox _queryHistory = new();
+    private readonly TextBox _queryBookmarkLabel = new() { PlaceholderText = "Optional bookmark label" };
     private readonly ListBox _favorites = new();
     private readonly TabControl _tabs;
     private readonly TextBox _favoriteNotes = new() { PlaceholderText = "Optional note: what you changed or why this row matters" };
@@ -90,6 +94,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private bool _suppressSchemaSelection;
     private string? _browseTable;
     private SqlQueryResult? _queryResult;
+    private SqlQueryBatch? _queryBatch;
 
     public event EventHandler? BackRequested;
     public event EventHandler? ConnectionRequested;
@@ -112,9 +117,10 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _rows.SelectionChanged += (_, _) => SelectRow();
         _rowDisplay.SelectionChanged += (_, _) => ApplyRowTemplate();
         _queryDisplay.SelectionChanged += (_, _) => ApplyQueryResultTemplate();
+        _queryResultSets.SelectionChanged += (_, _) => SelectQueryResultSet();
         _processes.SelectionChanged += (_, _) => ShowSelectedProcess();
         _databaseUsers.SelectionChanged += (_, _) => SelectDatabaseUser();
-        RefreshConnectionStatus(); RefreshFavorites(); PopulateTables(); PopulateRelations();
+        RefreshConnectionStatus(); RefreshFavorites(); RefreshQueryHistory(); PopulateTables(); PopulateRelations();
     }
 
     public void Activate() { PopulateTables(); if (_tables.SelectedItem is null && _tables.ItemCount > 0) _tables.SelectedIndex = 0; _ = LoadSchemasAsync(); }
@@ -154,15 +160,34 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private Control QueryPage()
     {
-        var run = AccentButton("Run read-only query"); run.Click += async (_, _) => await RunQueryAsync();
+        var run = AccentButton("Run read-only batch"); run.Click += async (_, _) => await RunQueryAsync();
         var prepare = new Button { Content = "Prepare write statement" }; prepare.Click += (_, _) => PrepareStatement();
+        var bookmark = new Button { Content = "★ Bookmark query" }; bookmark.Click += (_, _) => BookmarkCurrentQuery();
         var exportCsv = new Button { Content = "Export result CSV" }; exportCsv.Click += async (_, _) => await ExportQueryResultAsync(SqlExportFormat.Csv);
         var exportJson = new Button { Content = "Export result JSONL" }; exportJson.Click += async (_, _) => await ExportQueryResultAsync(SqlExportFormat.JsonLines);
         var copy = new Button { Content = "Copy selected row" }; copy.Click += async (_, _) => await CopySelectedQueryRowAsync();
-        var controls = new WrapPanel { Children = { run, prepare, _queryDisplay, copy, exportCsv, exportJson, _querySummary, new TextBlock { Text = "Read queries run immediately. Writes require an inline confirmation and transaction.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } };
+        var controls = new WrapPanel { Children = { run, prepare, bookmark, _queryResultSets, _queryDisplay, copy, exportCsv, exportJson, _querySummary, new TextBlock { Text = "Up to 32 semicolon-separated read statements run sequentially. Every statement is validated independently; writes still require inline confirmation.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } };
         var results = new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _queryResults };
         ApplyQueryResultTemplate();
-        return new Grid { RowDefinitions = new("2*,Auto,Auto,3*"), Children = { _query, WithRow(controls, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(results, 3) } };
+        var lower = new TabControl { Items = { new TabItem { Header = "Current results", Content = results }, new TabItem { Header = "History & bookmarks", Content = QueryHistoryPage() } } };
+        return new Grid { RowDefinitions = new("2*,Auto,Auto,3*"), Children = { _query, WithRow(controls, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(lower, 3) } };
+    }
+
+    private Control QueryHistoryPage()
+    {
+        _queryHistory.ItemTemplate = new FuncDataTemplate<SqlQueryHistoryEntry>((entry, _) => entry is null ? new TextBlock() : new StackPanel
+        {
+            Margin = new Thickness(4, 3),
+            Children =
+            {
+                new TextBlock { Text = entry.Display, FontWeight = entry.Bookmarked ? FontWeight.SemiBold : FontWeight.Normal, TextWrapping = TextWrapping.Wrap },
+                new TextBlock { Text = $"{entry.ResultSets:N0} result set(s) · {entry.Rows:N0} row(s) · {entry.DurationMs:N0} ms\n{entry.Sql}", TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), FontSize = 10, Foreground = Brush.Parse("#8995A9") }
+            }
+        });
+        var load = AccentButton("Load selected into editor"); load.Click += async (_, _) => await LoadQueryHistoryAsync();
+        var remove = new Button { Content = "Remove selected" }; remove.Click += (_, _) => { if (_queryHistory.SelectedItem is SqlQueryHistoryEntry entry) { _queryHistoryStore.Remove(entry.Id); RefreshQueryHistory(); } };
+        var clear = new Button { Content = "Clear non-bookmarked history" }; clear.Click += (_, _) => { _queryHistoryStore.ClearUnbookmarked(); RefreshQueryHistory(); };
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 6, Children = { new WrapPanel { Children = { _queryBookmarkLabel, load, remove, clear, new TextBlock { Text = $"Stored locally at {CruciblePaths.SqlQueryHistoryFile}", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(_queryHistory, 1) } };
     }
 
     private Control FavoritesPage()
@@ -680,14 +705,20 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private async Task RunQueryAsync()
     {
         if (_profile is null) { _status.Text = "Connect Server & SQL first."; return; } var sql = _query.Text ?? string.Empty;
-        if (!IsReadOnly(sql)) { _status.Text = "This is not recognized as read-only. Use Prepare write statement so it cannot execute accidentally."; return; }
-        Begin("Running read-only query…");
+        if (!SqlWorkspaceService.IsReadOnlyBatch(sql)) { _status.Text = "One or more statements are not recognized as read-only, are malformed, or use SELECT file output. Use Prepare write statement for an intentional mutation."; return; }
+        Begin("Running validated read-only batch…");
         try
         {
-            _queryResult = await _service.QueryAsync(_profile, sql, 2000, _operation!.Token);
-            _queryResults.ItemsSource = _queryResult.Rows.Select((row, index) => new QueryDisplayRow(index + 1, _queryResult.Columns, row)).ToArray();
-            ApplyQueryResultTemplate(); _querySummary.Text = $"{_queryResult.Rows.Count:N0} row(s) · {_queryResult.Columns.Count:N0} column(s) · {_queryResult.Duration.TotalMilliseconds:N0} ms";
-            _status.Text = $"Returned {_queryResult.Rows.Count:N0} structured row(s) in {_queryResult.Duration.TotalMilliseconds:N0} ms. The in-memory result can be copied or exported atomically.";
+            _queryBatch = await _service.QueryBatchAsync(_profile, sql, 2000, _operation!.Token);
+            _queryResultSets.ItemsSource = _queryBatch.Results; _queryResultSets.SelectedItem = _queryBatch.Results.FirstOrDefault(); SelectQueryResultSet();
+            var truncated = _queryBatch.Results.Count(result => result.Truncated);
+            _status.Text = $"Returned {_queryBatch.TotalRows:N0} structured row(s) across {_queryBatch.Results.Count:N0} result set(s) in {_queryBatch.Duration.TotalMilliseconds:N0} ms.{(truncated == 0 ? string.Empty : $" {truncated:N0} result set(s) reached the 2,000-row display cap.")} Select a result set to copy or export it.";
+            try { _queryHistoryStore.Record(_profile.Database, sql, _queryBatch); RefreshQueryHistory(); }
+            catch (Exception historyException)
+            {
+                DesktopCrashLogger.Log("SQL query succeeded but portable history could not be updated", historyException);
+                _status.Text += " The result is valid, but portable query history could not be updated; see the log for details.";
+            }
         }
         catch (Exception exception) { Fail("Query failed", exception); }
         finally { End(); }
@@ -696,10 +727,52 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private void PrepareStatement()
     {
         if (_profile is null) { _status.Text = "Connect Server & SQL first."; return; } var sql = _query.Text ?? string.Empty;
-        if (IsReadOnly(sql)) { _status.Text = "Use Run read-only query for this statement."; return; }
+        if (SqlWorkspaceService.IsReadOnlyBatch(sql)) { _status.Text = "Use Run read-only batch for this statement set."; return; }
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;
-        var confirm = AccentButton("Execute write transaction"); confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; var result = await _service.ExecuteAsync(_profile, sql); _queryResult = null; _queryResults.ItemsSource = null; _querySummary.Text = $"Write result · {result.AffectedRows:N0} affected row(s) · {result.Duration.TotalMilliseconds:N0} ms"; _confirmation.IsVisible = false; _status.Text = "Statement committed transactionally."; } catch (Exception exception) { Fail("Statement failed", exception); } finally { confirm.IsEnabled = true; } };
+        var confirm = AccentButton("Execute write transaction"); confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; var result = await _service.ExecuteAsync(_profile, sql); _queryBatch = null; _queryResult = null; _queryResultSets.ItemsSource = null; _queryResults.ItemsSource = null; _querySummary.Text = $"Write result · {result.AffectedRows:N0} affected row(s) · {result.Duration.TotalMilliseconds:N0} ms"; _confirmation.IsVisible = false; _status.Text = "Statement committed transactionally."; } catch (Exception exception) { Fail("Statement failed", exception); } finally { confirm.IsEnabled = true; } };
         _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Execute this non-read-only statement against {_profile.Database}? Review it carefully. Crucible begins a transaction, but MySQL schema/DDL statements can implicitly commit and may not be rollbackable.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+    }
+
+    private void SelectQueryResultSet()
+    {
+        if (_queryResultSets.SelectedItem is not SqlQueryBatchResult selected)
+        {
+            _queryResult = null; _queryResults.ItemsSource = null; _querySummary.Text = "No result set selected."; return;
+        }
+        _queryResult = selected.Result;
+        _queryResults.ItemsSource = _queryResult.Rows.Select((row, index) => new QueryDisplayRow(index + 1, _queryResult.Columns, row)).ToArray();
+        ApplyQueryResultTemplate();
+        _querySummary.Text = $"Result {selected.Index:N0}/{_queryBatch?.Results.Count ?? 1:N0} · {_queryResult.Rows.Count:N0} row(s) · {_queryResult.Columns.Count:N0} column(s) · {_queryResult.Duration.TotalMilliseconds:N0} ms{(selected.Truncated ? " · truncated at display cap" : string.Empty)}";
+    }
+
+    private void BookmarkCurrentQuery()
+    {
+        if (_profile is null) { _status.Text = "Connect Server & SQL before bookmarking a query."; return; }
+        var sql = _query.Text ?? string.Empty; if (!SqlWorkspaceService.IsReadOnlyBatch(sql)) { _status.Text = "Only a validated read-only query or batch can be bookmarked here."; return; }
+        _queryHistoryStore.Bookmark(_profile.Database, sql, _queryBookmarkLabel.Text); RefreshQueryHistory(); _status.Text = "Bookmarked the current read batch in the portable SQL history.";
+    }
+
+    private async Task LoadQueryHistoryAsync()
+    {
+        if (_queryHistory.SelectedItem is not SqlQueryHistoryEntry entry) { _status.Text = "Select a history or bookmark entry first."; return; }
+        if (_profile is null) { _status.Text = "Connect Server & SQL before loading a database-specific history entry."; return; }
+        if (!_profile.Database.Equals(entry.Database, StringComparison.OrdinalIgnoreCase))
+        {
+            await SwitchSchemaAsync(entry.Database);
+            if (_profile is null || !_profile.Database.Equals(entry.Database, StringComparison.OrdinalIgnoreCase))
+            {
+                _status.Text = $"Could not switch to {entry.Database}; the history entry was not loaded against a different schema.";
+                return;
+            }
+        }
+        _query.Text = entry.Sql; _queryBookmarkLabel.Text = entry.Label; _tabs.SelectedIndex = 1;
+        _status.Text = $"Loaded {(entry.Bookmarked ? "bookmark" : "history entry")} from {entry.Database}. Review it, then run the read batch explicitly.";
+    }
+
+    private void RefreshQueryHistory()
+    {
+        var selected = (_queryHistory.SelectedItem as SqlQueryHistoryEntry)?.Id; var entries = _queryHistoryStore.Load(); _queryHistory.ItemsSource = entries;
+        _queryHistory.SelectedItem = selected is null ? entries.FirstOrDefault() : entries.FirstOrDefault(entry => entry.Id.Equals(selected, StringComparison.OrdinalIgnoreCase));
     }
 
     private void ApplyQueryResultTemplate()
@@ -847,7 +920,6 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         if (type is "tinyint" or "smallint" or "mediumint" or "int" or "bigint" or "decimal" or "float" or "double" or "bit") return text;
         return text;
     }
-    private static bool IsReadOnly(string sql) => SqlWorkspaceService.IsReadOnlyStatement(sql);
     private static string FormatResult(SqlQueryResult result) { var builder = new StringBuilder(); builder.AppendLine(string.Join('\t', result.Columns)); foreach (var row in result.Rows) builder.AppendLine(string.Join('\t', row.Select(CellText))); return builder.ToString(); }
     private static string? EmptyNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static IReadOnlyList<string> ParseColumnList(string? value) => (value ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);

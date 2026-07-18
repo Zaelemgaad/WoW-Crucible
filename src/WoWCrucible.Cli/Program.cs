@@ -803,15 +803,26 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
     if (operation.Equals("query", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 6 || args[5].StartsWith("--", StringComparison.Ordinal)) return Fail("db query requires a UTF-8 .sql file after the database name.");
-        var queryOptions = args[6..]; var write = queryOptions.Any(option => option.Equals("--write", StringComparison.OrdinalIgnoreCase)); var queryOutput = Option(queryOptions, "--output="); var queryFormat = Option(queryOptions, "--format="); var queryOverwrite = queryOptions.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase));
-        var unknown = queryOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--format=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--write", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var queryOptions = args[6..]; var write = queryOptions.Any(option => option.Equals("--write", StringComparison.OrdinalIgnoreCase)); var batch = queryOptions.Any(option => option.Equals("--batch", StringComparison.OrdinalIgnoreCase)); var batchFormat = Option(queryOptions, "--batch-format=") ?? "text"; var queryOutput = Option(queryOptions, "--output="); var queryFormat = Option(queryOptions, "--format="); var queryOverwrite = queryOptions.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase));
+        var unknown = queryOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--format=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--batch-format=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--write", StringComparison.OrdinalIgnoreCase) && !option.Equals("--batch", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown query option: {unknown[0]}");
         if (queryOutput is null && (queryFormat is not null || queryOverwrite)) return Fail("--format and --overwrite require --output for a read-only query result.");
         var sql = await File.ReadAllTextAsync(args[5], cancellationToken);
         if (write)
         {
+            if (batch) return Fail("--write and --batch are mutually exclusive. Review mutations through the single confirmed write path.");
             if (queryOutput is not null || queryFormat is not null || queryOverwrite) return Fail("Query-result output options apply only to read-only queries, not --write.");
             var result = await new SqlWorkspaceService().ExecuteAsync(profile, sql, cancellationToken); Console.WriteLine($"AffectedRows\t{result.AffectedRows}\nDurationMs\t{result.Duration.TotalMilliseconds:0}"); return 0;
+        }
+        if (batch)
+        {
+            if (queryOutput is not null || queryFormat is not null || queryOverwrite) return Fail("Batch results may have different shapes. Export a selected result in desktop SQL Studio, or omit --batch for single-result --output.");
+            var result = await new SqlWorkspaceService().QueryBatchAsync(profile, sql, 10000, cancellationToken);
+            if (batchFormat.Equals("json", StringComparison.OrdinalIgnoreCase)) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            else if (batchFormat.Equals("text", StringComparison.OrdinalIgnoreCase))
+                foreach (var set in result.Results) { Console.WriteLine($"RESULT\t{set.Index}\t{set.Result.Rows.Count}\t{set.Result.Columns.Count}\t{(set.Truncated ? "TRUNCATED" : "COMPLETE")}"); Console.WriteLine(string.Join('\t', set.Result.Columns)); foreach (var row in set.Result.Rows) Console.WriteLine(string.Join('\t', row.Select(value => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)))); }
+            else return Fail("--batch-format must be text or json.");
+            Console.Error.WriteLine($"Returned {result.TotalRows:N0} row(s) across {result.Results.Count:N0} independently validated read result(s) in {result.Duration.TotalMilliseconds:N0} ms."); return 0;
         }
         var query = await new SqlWorkspaceService().QueryAsync(profile, sql, 10000, cancellationToken); Console.WriteLine(string.Join('\t', query.Columns)); foreach (var row in query.Rows) Console.WriteLine(string.Join('\t', row.Select(value => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture))));
         if (queryOutput is not null)
@@ -1414,7 +1425,12 @@ static IReadOnlyList<MpqFileEntry> LoadMpqIndex(PatchArchiveService service, str
 {
     var result = MpqArchiveIndexCache.LoadOrCreate(archive, listFile, () => service.ListFiles(archive, "*", listFile)); Console.Error.WriteLine($"MPQ index: {(result.Cached ? "cache hit" : "read archive and cached")} · {result.Entries.Count:N0} entries."); return result.Entries;
 }
-static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLine(message); else Console.Error.WriteLine(message); return code; }
+static int GroupHelp(string message, int code)
+{
+    if (message.Contains("wowcrucible db query", StringComparison.Ordinal))
+        message += "\n\nRead-only query batches: add --batch to execute up to 32 semicolon-delimited SELECT/SHOW/DESCRIBE/EXPLAIN statements from one SQL file. Use --batch-format=text|json for independently shaped, labeled result sets. Batches reject --write and single-result --output switches; SELECT file output is always blocked.";
+    if (code == 0) Console.WriteLine(message); else Console.Error.WriteLine(message); return code;
+}
 
 static int Help()
 {
