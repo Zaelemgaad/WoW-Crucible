@@ -279,15 +279,40 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
 
     private Control BuildMergePage()
     {
-        var add = AccentButton("Add source MPQs"); add.Click += async (_, _) => { var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Select small patch MPQs to merge", AllowMultiple = true, FileTypeFilter = [new FilePickerFileType("MPQ patches") { Patterns = ["*.mpq"] }] }); foreach (var path in files.Select(file => file.TryGetLocalPath()).OfType<string>()) if (!_mergePaths.Contains(path, StringComparer.OrdinalIgnoreCase)) _mergePaths.Add(path); RefreshMergeInputs(); };
+        var add = AccentButton("Add source MPQs"); add.Click += async (_, _) => { var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Select small patch MPQs to merge", AllowMultiple = true, FileTypeFilter = [new FilePickerFileType("MPQ patches") { Patterns = ["*.mpq"] }] }); AddMergePaths(files.Select(file => file.TryGetLocalPath()).OfType<string>()); };
         var remove = new Button { Content = "Remove selected" }; remove.Click += (_, _) => { var selected = _mergeInputs.SelectedItems?.OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase) ?? []; _mergePaths.RemoveAll(selected.Contains); RefreshMergeInputs(); };
         var earlier = new Button { Content = "Move earlier" }; earlier.Click += (_, _) => MoveMergeInput(-1);
         var later = new Button { Content = "Move later" }; later.Click += (_, _) => MoveMergeInput(1);
         var clear = new Button { Content = "Clear" }; clear.Click += (_, _) => { _mergePaths.Clear(); RefreshMergeInputs(); };
         var merge = AccentButton("Merge into new MPQ…"); merge.Click += async (_, _) => await MergePatchesAsync();
         var policy = new StackPanel { Children = { new TextBlock { Text = "Different-byte path conflict policy" }, _mergePolicy } };
-        var explanation = new TextBlock { Text = "Exact duplicate internal paths are verified by SHA-256 and byte-for-byte comparison, then stored once. Different bytes at the same path block the merge by default. Choosing earlier/later archive is an explicit global conflict decision; source MPQs are always immutable.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
-        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), Margin = new Thickness(12), Children = { new WrapPanel { Children = { add, remove, earlier, later, clear, policy, merge } }, WithRow(explanation, 1), WithRow(_mergeInputs, 2), WithRow(_mergeStatus, 3) } };
+        var explanation = new TextBlock { Text = "Drop two or more deliberately small patch MPQs below, or add them with the picker. Exact duplicate internal paths are verified by SHA-256 and byte-for-byte comparison, then stored once. Different bytes at the same path block the merge by default. Choosing earlier/later archive is an explicit global conflict decision; source MPQs are always immutable.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
+        var dropTarget = new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _mergeInputs };
+        DragDrop.SetAllowDrop(dropTarget, true);
+        DragDrop.AddDragOverHandler(dropTarget, (_, args) =>
+        {
+            args.DragEffects = args.DataTransfer.TryGetFiles()?.Any(file => file.TryGetLocalPath() is { } path && File.Exists(path) && Path.GetExtension(path).Equals(".mpq", StringComparison.OrdinalIgnoreCase)) == true ? DragDropEffects.Copy : DragDropEffects.None;
+            args.Handled = true;
+        });
+        DragDrop.AddDropHandler(dropTarget, (_, args) =>
+        {
+            AddMergePaths(args.DataTransfer.TryGetFiles()?.Select(file => file.TryGetLocalPath()).OfType<string>() ?? []);
+            args.Handled = true;
+        });
+        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), Margin = new Thickness(12), Children = { new WrapPanel { Children = { add, remove, earlier, later, clear, policy, merge } }, WithRow(explanation, 1), WithRow(dropTarget, 2), WithRow(_mergeStatus, 3) } };
+    }
+
+    private void AddMergePaths(IEnumerable<string> paths)
+    {
+        var rejected = 0;
+        foreach (var path in paths)
+        {
+            if (!File.Exists(path) || !Path.GetExtension(path).Equals(".mpq", StringComparison.OrdinalIgnoreCase)) { rejected++; continue; }
+            var full = Path.GetFullPath(path);
+            if (!_mergePaths.Contains(full, StringComparer.OrdinalIgnoreCase)) _mergePaths.Add(full);
+        }
+        RefreshMergeInputs();
+        if (rejected > 0) _mergeStatus.Text += $" Ignored {rejected:N0} non-MPQ or missing path(s).";
     }
 
     private void RefreshMergeInputs() { _mergeInputs.ItemsSource = _mergePaths.ToArray(); _mergeStatus.Text = $"{_mergePaths.Count:N0} source patch(es). Listed order controls earlier/later conflict precedence."; }

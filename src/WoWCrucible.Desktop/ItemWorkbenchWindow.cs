@@ -36,6 +36,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBlock _auditSummary = new() { TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _inspection = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#AEB8C8")) };
     private ItemAcquisitionAudit? _audit;
+    private bool _auditLoading;
+    private string _auditIdentity = string.Empty;
     private readonly TextBox _cloneSource = new() { PlaceholderText = "Source item ID" };
     private readonly TextBox _cloneDestination = new() { PlaceholderText = "New item ID" };
     private readonly TextBox _cloneSuffix = new() { Text = " Variant" };
@@ -93,6 +95,17 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, titleActions } } });
         var connection = ConnectionBar(); Grid.SetRow(connection, 1); root.Children.Add(connection);
         _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Unobtainable / cut items", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() } } };
+        _tabs.SelectionChanged += async (_, _) =>
+        {
+            if (_tabs.SelectedIndex != 1 || _audit is not null || _auditLoading) return;
+            if (CanQueryDatabase()) await AuditAsync(automatic: true);
+            else _status.Text = "Connect the live world database above; this tab will then load the complete acquisition catalog automatically. Exact IDs can also be explained after connection.";
+        };
+        _host.TextChanged += (_, _) => InvalidateAuditIfTargetChanged();
+        _user.TextChanged += (_, _) => InvalidateAuditIfTargetChanged();
+        _database.TextChanged += (_, _) => InvalidateAuditIfTargetChanged();
+        _port.ValueChanged += (_, _) => InvalidateAuditIfTargetChanged();
+        _acquisitionDbc.TextChanged += (_, _) => InvalidateAuditIfTargetChanged();
         Grid.SetRow(_tabs, 2); root.Children.Add(_tabs);
         var statusBorder = new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,1,0,0), Padding = new Thickness(14,7), Child = _status };
         Grid.SetRow(statusBorder, 3); root.Children.Add(statusBorder); Content = root;
@@ -133,7 +146,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var rowActions = new WrapPanel { Children = { edit, fullSql, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
         var exact = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _inspectId, WithColumn(inspect, 1), rowActions } };
         var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
-        var note = new TextBlock { Text = "Every row now shows why its path was accepted or rejected. “No known path” means no vendor, achievement, direct/reachable loot, usable quest reward/start item, character-start, profession/disenchant/fishing/spell-loot, or causally reachable Spell.dbc create-item source was found. Exact numeric search reports no-path, known-path, or absent instead of leaving an ambiguous empty list. Reference controls, disabled quests, orphaned rewards, and unreachable spells are not mistaken for playable acquisition. Custom scripts still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        var note = new TextBlock { Text = "This tab scans automatically once a verified SQL profile is available. Every row shows why its path was accepted or rejected. “No known path” means no vendor, achievement, direct/reachable loot, usable quest reward/start item, character-start, profession/disenchant/fishing/spell-loot, or causally reachable Spell.dbc create-item source was found. The result deliberately includes NPC equipment, Monster entries, deprecated rows, tests, and developer items—not only polished cut player gear. Exact numeric search pins an existing row regardless of the current list filter. Custom scripts still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
         return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(exact, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
@@ -162,25 +175,43 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         return new ScrollViewer { Content = content };
     }
 
-    private async Task AuditAsync()
+    private async Task AuditAsync(bool automatic = false)
     {
-        SetBusy("Scanning every known SQL and DBC acquisition source…"); DesktopCrashLogger.Debug("ITEM", "acquisition-audit-start", ("host", _host.Text), ("database", _database.Text), ("dbc", _acquisitionDbc.Text)); try { _audit = await new ItemCatalogService().AuditAsync(Profile(), EmptyNull(_acquisitionDbc.Text)); ApplyAuditFilter(); _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} no path · {_audit.ObtainableItems:N0} known · {_audit.TotalItems:N0} total"; _status.Text = $"Checked {_audit.CheckedSources.Count:N0} source families; {_audit.MissingSources.Count:N0} unavailable or unconfigured. Enter any exact ID to pin and explain it."; DesktopCrashLogger.Debug("ITEM", "acquisition-audit-success", ("total_items", _audit.TotalItems), ("no_known_path", _audit.NoKnownAcquisitionPath.Count), ("checked_sources", _audit.CheckedSources.Count), ("missing_sources", _audit.MissingSources.Count)); }
+        if (_auditLoading) return;
+        _auditLoading = true;
+        SetBusy(automatic ? "Loading the complete acquisition catalog…" : "Scanning every known SQL and DBC acquisition source…");
+        DesktopCrashLogger.Debug("ITEM", "acquisition-audit-start", ("host", _host.Text), ("database", _database.Text), ("dbc", _acquisitionDbc.Text), ("automatic", automatic));
+        try
+        {
+            var profile = Profile();
+            _audit = await new ItemCatalogService().AuditAsync(profile, EmptyNull(_acquisitionDbc.Text));
+            _auditIdentity = AuditIdentity(profile);
+            ApplyAuditFilter();
+            _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} no path · {_audit.ObtainableItems:N0} known · {_audit.TotalItems:N0} total";
+            _status.Text = $"Checked {_audit.CheckedSources.Count:N0} source families; {_audit.MissingSources.Count:N0} unavailable or unconfigured. Exact IDs are pinned even when another classification filter is selected.";
+            DesktopCrashLogger.Debug("ITEM", "acquisition-audit-success", ("total_items", _audit.TotalItems), ("no_known_path", _audit.NoKnownAcquisitionPath.Count), ("checked_sources", _audit.CheckedSources.Count), ("missing_sources", _audit.MissingSources.Count));
+        }
         catch (Exception exception) { await ErrorAsync("Acquisition audit failed", exception); }
+        finally { _auditLoading = false; }
     }
 
     private async Task InspectExactAsync()
     {
         if (!TryParseItemId(_inspectId.Text, out var entry)) { _inspection.Text = "Enter a positive item ID. Plain, grouped, and #prefixed forms are accepted (17802, 17,802, or #17802)."; return; }
-        SetBusy($"Tracing every acquisition candidate for item {entry:N0}…");
+        SetBusy($"Locating exact item {entry:N0} in the complete acquisition catalog…");
         try
         {
-            var result = await new ItemCatalogService().InspectAsync(Profile(), entry, EmptyNull(_acquisitionDbc.Text));
-            if (!result.Found) { _inspection.Text = $"Item {entry:N0} does not exist in item_template."; _status.Text = "Exact item inspection complete."; return; }
-            var item = result.Item!;
-            var evidence = result.HasKnownAcquisitionPath ? result.AcceptedEvidence : result.RejectedEvidence;
-            _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(result.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\n" + string.Join("\n", evidence.Select(value => $"• {value}"));
+            var profile = Profile();
+            if (_audit is null || !_auditIdentity.Equals(AuditIdentity(profile), StringComparison.Ordinal)) await AuditAsync();
+            if (_audit is null) return;
+            var item = _audit.AllItems.FirstOrDefault(candidate => candidate.Entry == entry);
+            if (item is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _inspection.Text = $"Item {entry:N0} does not exist in item_template."; _status.Text = "Exact item inspection complete."; return; }
+            var evidence = item.HasKnownAcquisitionPath
+                ? item.AcquisitionSources.Select(value => $"Accepted · {value}")
+                : item.NoPathReview;
+            _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(item.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\n" + string.Join("\n", evidence.Select(value => $"• {value}"));
             _items.ItemsSource = new[] { item }; _items.SelectedItem = item; _items.ScrollIntoView(item);
-            _status.Text = $"Inspected and selected item {entry:N0} across {result.CheckedSources.Count:N0} source families. It can now be opened, favorited, or edited.";
+            _status.Text = $"Pinned item {entry:N0} across {_audit.CheckedSources.Count:N0} source families. It can now be opened, favorited, or edited.";
         }
         catch (Exception exception) { await ErrorAsync("Exact item inspection failed", exception); }
     }
@@ -256,7 +287,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private void ApplyAuditFilter()
     {
-        if (_audit is null) { _status.Text = "Run the full acquisition scan, or enter an exact numeric item ID here and press Enter for immediate inspection."; return; } var query = _search.Text?.Trim() ?? string.Empty;
+        if (_audit is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _status.Text = CanQueryDatabase() ? "The acquisition catalog is loading, or press Scan acquisition paths to refresh it now." : "Connect the live world database above. This tab will then load automatically."; return; } var query = _search.Text?.Trim() ?? string.Empty;
         if (TryParseItemId(query, out var exactId))
         {
             var exact = _audit.AllItems.FirstOrDefault(item => item.Entry == exactId);
@@ -351,6 +382,23 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         if (password.Length == 0 && current is not null && current.Host.Equals(_host.Text, StringComparison.OrdinalIgnoreCase) && current.Port == (uint)(_port.Value ?? 3306) && current.User.Equals(_user.Text, StringComparison.OrdinalIgnoreCase) && current.Database.Equals(_database.Text, StringComparison.OrdinalIgnoreCase)) password = current.Password;
         return new(_host.Text ?? "127.0.0.1", (uint)(_port.Value ?? 3306), _user.Text ?? string.Empty, password, _database.Text ?? string.Empty, MySqlSslMode.Preferred);
     }
+    private bool CanQueryDatabase() => !string.IsNullOrWhiteSpace(_user.Text) && (!string.IsNullOrWhiteSpace(_password.Text) || _session.DatabaseProfile is not null);
+    private string AuditIdentity(DatabaseConnectionProfile profile)
+        => $"{profile.Host.ToUpperInvariant()}|{profile.Port}|{profile.User.ToUpperInvariant()}|{profile.Database.ToUpperInvariant()}|{NormalizeIdentityPath(_acquisitionDbc.Text)}";
+    private static string NormalizeIdentityPath(string? path)
+    {
+        var value = path?.Trim() ?? string.Empty;
+        if (value.Length == 0) return string.Empty;
+        try { return Path.GetFullPath(value).ToUpperInvariant(); }
+        catch { return value.ToUpperInvariant(); }
+    }
+    private void InvalidateAuditIfTargetChanged()
+    {
+        if (_audit is null || _auditLoading) return;
+        if (_auditIdentity.Equals(AuditIdentity(Profile()), StringComparison.Ordinal)) return;
+        _audit = null; _auditIdentity = string.Empty; _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _auditSummary.Text = "Target changed · refresh required";
+        _status.Text = "The database or DBC target changed. Reopen this tab or press Scan acquisition paths to load fresh evidence.";
+    }
     private async Task ConnectDatabaseAsync(bool openStudio)
     {
         try
@@ -387,7 +435,12 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private static void AddCell(Grid grid, string text, int column, FontWeight? weight = null) { var value = new TextBlock { Text = text, TextTrimming = TextTrimming.CharacterEllipsis, FontWeight = weight ?? FontWeight.Normal, Margin = new Thickness(4) }; Grid.SetColumn(value,column); grid.Children.Add(value); }
     private static string QualityName(int quality) => quality switch { 0=>"Poor",1=>"Common",2=>"Uncommon",3=>"Rare",4=>"Epic",5=>"Legendary",6=>"Artifact",7=>"Heirloom",_=>$"Quality {quality}" };
     private static string? EmptyNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-    private void SessionChanged(object? sender, EventArgs e) => PopulateSessionConnection();
+    private void SessionChanged(object? sender, EventArgs e)
+    {
+        PopulateSessionConnection();
+        InvalidateAuditIfTargetChanged();
+        if (_tabs.SelectedIndex == 1 && _audit is null && !_auditLoading && CanQueryDatabase()) _ = AuditAsync(automatic: true);
+    }
     private void PopulateSessionConnection()
     {
         var profile = _session.DatabaseProfile; if (profile is null) return;
