@@ -109,6 +109,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private Control AcquisitionPage()
     {
         var audit = AccentButton("Scan acquisition paths"); audit.Click += async (_, _) => await AuditAsync();
+        var findExact = new Button { Content = "Find exact ID" }; findExact.Click += async (_, _) => await InspectSearchExactAsync();
         var inspect = AccentButton("Explain exact ID"); inspect.Click += async (_, _) => await InspectExactAsync();
         var edit = new Button { Content = "Open selected in decoded editor" }; edit.Click += async (_, _) => await OpenSelectedItemAsync(false);
         var fullSql = new Button { Content = "Open complete SQL row" }; fullSql.Click += async (_, _) => await OpenSelectedInSqlAsync();
@@ -116,7 +117,9 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var browseDbc = new Button { Content = "DBC folder…" }; browseDbc.Click += async (_, _) => await PickFolderAsync(_acquisitionDbc, "Select the server DBC folder");
         var browseMpq = new Button { Content = "Related MPQ…" }; browseMpq.Click += async (_, _) => await PickFileAsync(_favoriteMpq, "Select an optional related MPQ", "*.mpq");
         var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto"), RowSpacing = 7, Margin = new Thickness(0,0,0,8) };
-        header.Children.Add(audit); Grid.SetColumn(_search, 1); _search.Margin = new Thickness(10,0); header.Children.Add(_search); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
+        header.Children.Add(audit);
+        var searchRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Margin = new Thickness(10,0), Children = { _search, WithColumn(findExact, 1) } };
+        Grid.SetColumn(searchRow, 1); header.Children.Add(searchRow); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
         var classificationLabel = new TextBlock { Text = "Show", VerticalAlignment = VerticalAlignment.Center };
         Grid.SetRow(classificationLabel, 1); header.Children.Add(classificationLabel); Grid.SetRow(_classification, 1); Grid.SetColumn(_classification, 1); _classification.Margin = new Thickness(10,0); header.Children.Add(_classification);
         var rowActions = new WrapPanel { Children = { edit, fullSql, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
@@ -172,6 +175,17 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             _status.Text = $"Inspected and selected item {entry:N0} across {result.CheckedSources.Count:N0} source families. It can now be opened, favorited, or edited.";
         }
         catch (Exception exception) { await ErrorAsync("Exact item inspection failed", exception); }
+    }
+
+    private async Task InspectSearchExactAsync()
+    {
+        if (!uint.TryParse(_search.Text?.Trim(), out var entry) || entry == 0)
+        {
+            _status.Text = "Enter one positive numeric item ID in the catalog search box for an exact database lookup.";
+            return;
+        }
+        _inspectId.Text = entry.ToString();
+        await InspectExactAsync();
     }
 
     private async Task OpenSelectedItemAsync(bool favorite)
@@ -254,7 +268,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             _ => _audit.NoKnownAcquisitionPath
         };
         if (query.Length > 0) rows = rows.Where(item => item.Entry.ToString().Contains(query, StringComparison.OrdinalIgnoreCase) || item.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || QualityName(item.Quality).Contains(query, StringComparison.OrdinalIgnoreCase) || item.ItemLevel.ToString().Contains(query) || item.ItemSetId.ToString().Contains(query));
-        var result = rows.Take(100_000).ToArray(); _items.ItemsSource = result;
+        var result = rows.ToArray(); _items.ItemsSource = result;
         var label = mode switch { 1 => "known-path", 2 => "total", _ => "no-known-path" };
         _status.Text = $"Showing {result.Length:N0} {label} item(s). Numeric searches always show an existing exact row and state its classification.";
     }
