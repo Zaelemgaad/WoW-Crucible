@@ -37,6 +37,7 @@ wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]
 wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
 wowcrucible asset texture-validate <file-or-folder> [--recursive]
 wowcrucible asset inspect <model.m2|building.wmo>...
+wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
 wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--naked|--groups=group:variant,...|--all-geosets]
 wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>
 wowcrucible asset appearance-render <processed-library> <dbc-folder> <logical-path> <model-file> <body.png> [--skin=N] [--face=N] [--facial-hair=N] [--hair=N] [--source=name] [--hair-output=file.png] [--overwrite]
@@ -59,6 +60,8 @@ wowcrucible asset definitive-stage <library-folder> <output-folder>
 ```
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
+
+`dependency-graph` infers the root's logical client path and provenance from the content-first library, then follows WotLK M2 → exact view SKIN/embedded texture, WMO → group/texture/doodad model, and ADT/WDT → terrain texture/model/WMO edges recursively. Missing/corrupt dependencies and assets found only in another provenance are blocking and return exit code `3`; JSON reports every physical candidate so a caller can make an explicit choice rather than silently mixing mods. `--manifest` writes only when the graph is clean and uses every resolved path as a validated tiny-patch input. The desktop MPQ workspace additionally supports selecting one cross-provenance candidate explicitly and recomputing all of that candidate's downstream edges before staging.
 
 Crucible's native managed texture codec validates and decodes BLP2 palette, raw BGRA, DXT1/DXT1A, DXT3 and DXT5 payloads plus BLP1 palette and JPEG payloads. Encoding writes Wrath-compatible BLP2 with a complete optional mip chain. `auto` selects DXT1 for opaque pixels, DXT1A for binary transparency, and DXT5 for smooth alpha. Output replacement is opt-in and written through a temporary file. Old but top-level-decodable textures with corrupt phantom/trailing mip metadata are reported as `WARN` and expose only their valid mip chain; the legacy exporter pattern with all offset entries set to `0xFFFFFFFF` and cumulative ends stored in the size table is also recovered only when those ends produce a valid bounded chain. A broken top mip remains `FAIL`. The same operations are available inside the single-window **Texture Lab**, which opens directly with `--textures` or by opening a `.blp` file.
 

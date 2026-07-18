@@ -32,6 +32,14 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _bindingStatus = StatusText("No client executable binding.");
     private string? _existingPatch;
     private string? _requiredClientExecutableSha256;
+    private readonly TextBox _dependencyLibrary = new() { PlaceholderText = "Processed asset library root" };
+    private readonly TextBox _dependencyRoot = new() { PlaceholderText = "Root M2, WMO, ADT, or WDT inside the processed library" };
+    private readonly ListBox _dependencyNodes = new();
+    private readonly ComboBox _dependencyCandidates = new() { PlaceholderText = "Select an explicit provenance candidate" };
+    private readonly TextBlock _dependencyStatus = StatusText("Choose one client asset to calculate its recursive patch closure.");
+    private ClientAssetDependencyGraph? _dependencyGraph;
+    private readonly Dictionary<string, string> _dependencyOverrides = new(StringComparer.OrdinalIgnoreCase);
+    private string _dependencyOverrideScope = string.Empty;
 
     private readonly TextBox _archivePath = new() { PlaceholderText = "MPQ archive" };
     private readonly TextBox _externalListfile = new() { PlaceholderText = "Optional external listfile" };
@@ -52,7 +60,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
 
     public MpqWorkspaceView(DesktopWorkspaceSession session)
     {
-        _session = session;
+        _session = session; _dependencyLibrary.Text = session.Settings.ProcessedAssetLibraryPath;
         _builderItems.ItemTemplate = new FuncDataTemplate<PatchRow>((row, _) => row is null ? new Grid() : BuildPatchRow(row));
         _browserItems.ItemTemplate = new FuncDataTemplate<MpqFileEntry>((entry, _) => entry is null ? new Grid() : new Grid
         {
@@ -77,10 +85,13 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
             }
         });
         _treeItems.DoubleTapped += (_, _) => OpenSelectedTreeFolder();
+        _dependencyNodes.ItemTemplate = new FuncDataTemplate<ClientAssetDependencyNode>((node, _) => node is null ? new Grid() : BuildDependencyRow(node));
+        _dependencyNodes.SelectionChanged += (_, _) => _dependencyCandidates.ItemsSource = (_dependencyNodes.SelectedItem as ClientAssetDependencyNode)?.Candidates;
 
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12,8), Children = { back, WithColumn(new TextBlock { Text = "MPQ PATCHES & ARCHIVES", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, 1) } };
         _tabs.Items.Add(new TabItem { Header = "Patch builder", Content = BuildBuilderPage() });
+        _tabs.Items.Add(new TabItem { Header = "Dependency closure", Content = BuildDependencyPage() });
         _tabs.Items.Add(new TabItem { Header = "Archive browser", Content = BuildBrowserPage() });
         _tabs.Items.Add(new TabItem { Header = "Merge small patches", Content = BuildMergePage() });
         _tabs.Items.Add(new TabItem { Header = "Client deployment", Content = BuildDeploymentPage() });
@@ -90,7 +101,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     public async Task OpenArchiveAsync(string path)
     {
         _archivePath.Text = Path.GetFullPath(path);
-        _tabs.SelectedIndex = 1;
+        _tabs.SelectedIndex = 2;
         await LoadArchiveAsync();
     }
 
@@ -147,6 +158,69 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         });
         return new Grid { RowDefinitions = new("Auto,Auto,*,Auto,Auto"), Margin = new Thickness(8), RowSpacing = 8, Children = { toolbar, WithRow(policy, 1), WithRow(dropTarget, 2), WithRow(_bindingStatus, 3), WithRow(_builderStatus, 4) } };
     }
+
+    private Control BuildDependencyPage()
+    {
+        var browseLibrary = new Button { Content = "Library…" }; browseLibrary.Click += async (_, _) => { var path = await PickFolderAsync("Select the processed asset library"); if (path is not null) { _dependencyLibrary.Text = path; ClearDependencyChoices(); } };
+        var browseRoot = new Button { Content = "Root asset…" }; browseRoot.Click += async (_, _) => { var path = await PickFileAsync("Select a dependency root", ["*.m2", "*.wmo", "*.adt", "*.wdt"]); if (path is not null) { _dependencyRoot.Text = path; ClearDependencyChoices(); } };
+        var analyze = AccentButton("Analyze recursive closure"); analyze.Click += async (_, _) => await AnalyzeDependenciesAsync();
+        var stage = AccentButton("Stage complete closure in patch builder"); stage.Click += (_, _) => StageDependencyClosure();
+        var useCandidate = new Button { Content = "Use selected candidate explicitly" }; useCandidate.Click += async (_, _) => await UseDependencyCandidateAsync();
+        var clearChoices = new Button { Content = "Clear provenance choices" }; clearChoices.Click += async (_, _) => { ClearDependencyChoices(); await AnalyzeDependenciesAsync(); };
+        var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
+        var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Children = { _dependencyLibrary, WithColumn(browseLibrary, 1), WithRow(_dependencyRoot, 1), WithRow(WithColumn(browseRoot, 1), 1) } };
+        var explanation = new TextBlock { Text = "Crucible follows WotLK M2 → exact view SKINs/embedded textures, WMO → groups/textures/doodad models, and ADT/WDT → terrain textures/models/WMOs recursively. Every resolved file must come from the root asset's provenance. Missing and cross-source paths block staging; replaceable M2 slots remain visible as explicit DBC/SQL bindings.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
+        var toolbar = new WrapPanel { Children = { analyze, stage, _dependencyCandidates, useCandidate, clearChoices, cancel } };
+        var dropTarget = new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Padding = new Thickness(8), Child = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Drop one M2, WMO, ADT, or WDT root here", Foreground = Brush.Parse("#8995A9") }, WithRow(_dependencyNodes, 1) } } };
+        DragDrop.SetAllowDrop(dropTarget, true); DragDrop.AddDragOverHandler(dropTarget, (_, args) => { args.DragEffects = args.DataTransfer.TryGetFiles()?.Any(file => file.TryGetLocalPath() is { } path && IsDependencyRoot(path)) == true ? DragDropEffects.Copy : DragDropEffects.None; args.Handled = true; });
+        DragDrop.AddDropHandler(dropTarget, async (_, args) => { var path = args.DataTransfer.TryGetFiles()?.Select(file => file.TryGetLocalPath()).FirstOrDefault(path => path is not null && IsDependencyRoot(path)); if (path is not null) { _dependencyRoot.Text = path; ClearDependencyChoices(); await AnalyzeDependenciesAsync(); } args.Handled = true; });
+        return new Grid { RowDefinitions = new("Auto,Auto,Auto,*,Auto"), Margin = new Thickness(10), RowSpacing = 8, Children = { paths, WithRow(explanation, 1), WithRow(toolbar, 2), WithRow(dropTarget, 3), WithRow(_dependencyStatus, 4) } };
+    }
+
+    private async Task AnalyzeDependenciesAsync()
+    {
+        BeginOperation(); _dependencyGraph = null; _dependencyNodes.ItemsSource = null; _dependencyStatus.Text = "Indexing the processed library and walking dependency edges…";
+        try
+        {
+            var library = Path.GetFullPath(_dependencyLibrary.Text?.Trim() ?? string.Empty); var root = Path.GetFullPath(_dependencyRoot.Text?.Trim() ?? string.Empty); var token = _operation!.Token; var scope = library + "|" + root;
+            if (!_dependencyOverrideScope.Equals(scope, StringComparison.OrdinalIgnoreCase)) { _dependencyOverrides.Clear(); _dependencyOverrideScope = scope; }
+            var overrides = _dependencyOverrides.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+            var graph = await Task.Run(() => { var index = AssetComparisonService.BuildIndex(library, token); var location = ClientAssetDependencyService.InferLocation(index, root); return ClientAssetDependencyService.Analyze(index, location, overrides, token); }, token);
+            _dependencyGraph = graph; _dependencyNodes.ItemsSource = graph.Nodes;
+            _dependencyNodes.SelectedItem = graph.Blocking.FirstOrDefault();
+            _dependencyStatus.Text = $"{graph.Nodes.Count:N0} graph node(s) · {graph.PatchEntries.Count:N0} patch file(s) · {graph.ExternalBindings.Count:N0} runtime binding(s) · {graph.Blocking.Count:N0} BLOCKING · {_dependencyOverrides.Count:N0} explicit provenance choice(s)\nRoot: {graph.Root.ClientPath} · provenance {graph.Root.Provenance}";
+            _session.Settings.ProcessedAssetLibraryPath = library; _session.Settings.Save(); DesktopCrashLogger.Debug("ASSET", "dependency-closure-success", ("root", graph.Root.ClientPath), ("nodes", graph.Nodes.Count), ("files", graph.PatchEntries.Count), ("blocking", graph.Blocking.Count));
+        }
+        catch (OperationCanceledException) { _dependencyStatus.Text = "Dependency analysis cancelled."; }
+        catch (Exception exception) { _dependencyStatus.Text = $"Dependency analysis failed: {exception.Message}"; DesktopCrashLogger.Log("Asset dependency analysis failed", exception); }
+    }
+
+    private void StageDependencyClosure()
+    {
+        if (_dependencyGraph is null) { _dependencyStatus.Text = "Analyze a root asset first."; return; }
+        if (_dependencyGraph.Blocking.Count > 0) { _dependencyStatus.Text = $"Staging blocked by {_dependencyGraph.Blocking.Count:N0} missing, cross-source, or invalid dependency node(s). Resolve them explicitly first."; return; }
+        foreach (var entry in _dependencyGraph.PatchEntries) { var index = _entries.FindIndex(row => row.ArchivePath.Equals(entry.ArchivePath, StringComparison.OrdinalIgnoreCase)); var row = new PatchRow(entry.SourcePath, entry.ArchivePath); if (index >= 0) _entries[index] = row; else _entries.Add(row); }
+        RefreshBuilder(); _tabs.SelectedIndex = 0; _builderStatus.Text = $"Staged dependency-complete closure: {_dependencyGraph.PatchEntries.Count:N0} file(s), {_dependencyGraph.ExternalBindings.Count:N0} visible runtime binding(s). Review archive paths, save the manifest, then build the tiny MPQ.";
+    }
+
+    private async Task UseDependencyCandidateAsync()
+    {
+        if (_dependencyNodes.SelectedItem is not ClientAssetDependencyNode node || node.State != ClientAssetDependencyState.CrossSourceConflict) { _dependencyStatus.Text = "Select a cross-source conflict row first."; return; }
+        if (_dependencyCandidates.SelectedItem is not string candidate) { _dependencyStatus.Text = "Select one physical candidate explicitly; Crucible will not guess between layers."; return; }
+        _dependencyOverrides[node.ClientPath] = candidate; await AnalyzeDependenciesAsync();
+    }
+
+    private void ClearDependencyChoices() { _dependencyOverrides.Clear(); _dependencyOverrideScope = string.Empty; _dependencyCandidates.ItemsSource = null; }
+
+    private static Grid BuildDependencyRow(ClientAssetDependencyNode node)
+    {
+        var color = node.State switch { ClientAssetDependencyState.Root or ClientAssetDependencyState.Resolved => "#76B78B", ClientAssetDependencyState.ExternalBinding => "#A9A7C8", _ => "#E3A35D" };
+        var primary = new Grid { ColumnDefinitions = new("Auto,Auto,*"), ColumnSpacing = 9, Children = { new TextBlock { Text = node.State.ToString(), Foreground = Brush.Parse(color), FontWeight = FontWeight.SemiBold }, WithColumn(new TextBlock { Text = node.Kind, Foreground = Brush.Parse("#93A0B3") }, 1), WithColumn(new TextBlock { Text = node.ClientPath, TextTrimming = TextTrimming.CharacterEllipsis }, 2) } };
+        var candidates = node.Candidates.Count > 1 ? $" Candidates: {string.Join(" | ", node.Candidates)}" : string.Empty;
+        return new Grid { RowDefinitions = new("Auto,Auto"), Margin = new Thickness(4, 3), Children = { primary, WithRow(new TextBlock { Text = node.Message + candidates, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#7F8BA0") }, 1) } };
+    }
+
+    private static bool IsDependencyRoot(string path) => File.Exists(path) && Path.GetExtension(path).ToLowerInvariant() is ".m2" or ".wmo" or ".adt" or ".wdt";
 
     private Control BuildBrowserPage()
     {

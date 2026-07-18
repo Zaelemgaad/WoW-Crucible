@@ -659,7 +659,7 @@ public partial class MainWindow : Window
     }
     private void OpenMpqWorkspaceClick(object? sender, RoutedEventArgs e)
         => OpenMpqWorkspace();
-    private void OpenMpqWorkspace()
+    public void OpenMpqWorkspace()
     {
         if (_mpqWorkspaceView is null)
         {

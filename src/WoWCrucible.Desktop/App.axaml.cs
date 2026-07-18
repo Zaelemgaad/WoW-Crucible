@@ -38,6 +38,7 @@ public partial class App : Application
             else if (arguments.Any(argument => IsOption(argument, "--behaviors"))) window.Opened += (_, _) => window.OpenBehaviorWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--tool-inventory"))) window.Opened += async (_, _) => await window.OpenToolInventoryAsync();
             else if (arguments.Any(argument => IsOption(argument, "--dbd-schemas"))) window.Opened += (_, _) => window.OpenDbdSchemaAudit();
+            else if (arguments.Any(argument => IsOption(argument, "--mpq"))) window.Opened += (_, _) => window.OpenMpqWorkspace();
             var initialPaths = desktop.Args?.Where(File.Exists).ToArray() ?? [];
             if (initialPaths.Length > 0)
                 window.Opened += async (_, _) =>

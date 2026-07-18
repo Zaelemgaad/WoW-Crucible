@@ -354,6 +354,22 @@ definitive = DefinitiveAssetProjectService.RecordTexture(definitivePath, definit
 var dependencyGraph = AssetDependencyGraphService.AnalyzeModel(comparisonIndex, comparisonModels[0]);
 if (dependencyGraph.Blocking.Count != 0 || !dependencyGraph.Resolved.Any(dependency => dependency.Kind == "embedded-texture" && dependency.ClientPath == embeddedFixturePath))
     throw new InvalidOperationException("Model dependency closure did not resolve an embedded texture from the same provenance layer.");
+var dependencySource="graph-source";var dependencyContent=Path.Combine(comparisonRoot,"Archives","Content");
+var graphTerrain=WriteGraphAsset(dependencyContent,dependencySource,@"Textures\Graph\Terrain.blp",[1,2,3]);
+WriteGraphAsset(dependencyContent,dependencySource,@"Textures\Graph\Wmo.blp",[4,5,6]);WriteGraphAsset(dependencyContent,dependencySource,@"Textures\Graph\Model.blp",[7,8,9]);
+var graphModelBytes=new byte[0x200];System.Text.Encoding.ASCII.GetBytes("MD20").CopyTo(graphModelBytes,0);BitConverter.GetBytes((uint)264).CopyTo(graphModelBytes,4);BitConverter.GetBytes((uint)1).CopyTo(graphModelBytes,0x44);BitConverter.GetBytes((uint)1).CopyTo(graphModelBytes,0x50);BitConverter.GetBytes((uint)0x100).CopyTo(graphModelBytes,0x54);
+var graphModelTexture=System.Text.Encoding.UTF8.GetBytes("Textures\\Graph\\Model.blp\0");BitConverter.GetBytes((uint)graphModelTexture.Length).CopyTo(graphModelBytes,0x108);BitConverter.GetBytes((uint)0x110).CopyTo(graphModelBytes,0x10C);graphModelTexture.CopyTo(graphModelBytes,0x110);
+WriteGraphAsset(dependencyContent,dependencySource,@"World\Model\Graph\Doodad.m2",graphModelBytes);WriteGraphAsset(dependencyContent,dependencySource,@"World\Model\Graph\Doodad00.skin",System.Text.Encoding.ASCII.GetBytes("SKIN"));
+WriteGraphAsset(dependencyContent,dependencySource,@"World\Wmo\Graph\House_000.wmo",GraphChunks(("MVER",BitConverter.GetBytes((uint)17)),("MOGP",new byte[4])));
+var graphMohd=new byte[64];BitConverter.GetBytes((uint)1).CopyTo(graphMohd,4);WriteGraphAsset(dependencyContent,dependencySource,@"World\Wmo\Graph\House.wmo",GraphChunks(("MVER",BitConverter.GetBytes((uint)17)),("MOHD",graphMohd),("MOTX",GraphStrings(@"Textures\Graph\Wmo.blp")),("MODN",GraphStrings(@"World\Model\Graph\Doodad.m2"))));
+var graphAdt=WriteGraphAsset(dependencyContent,dependencySource,@"World\Maps\Graph\Graph_1_1.adt",GraphChunks(("MVER",BitConverter.GetBytes((uint)18)),("MTEX",GraphStrings(@"Textures\Graph\Terrain.blp")),("MMDX",GraphStrings(@"World\Model\Graph\Doodad.m2")),("MWMO",GraphStrings(@"World\Wmo\Graph\House.wmo"))));
+var recursiveIndex=AssetComparisonService.BuildIndex(comparisonRoot);var recursiveGraph=ClientAssetDependencyService.Analyze(recursiveIndex,graphAdt);
+if(recursiveGraph.Blocking.Count!=0||recursiveGraph.PatchEntries.Count!=8||!recursiveGraph.Nodes.Any(node=>node.Kind=="wmo-group")||!recursiveGraph.Nodes.Any(node=>node.Kind=="wmo-doodad-model")||!recursiveGraph.Nodes.Any(node=>node.Kind=="embedded-texture")||!recursiveGraph.Nodes.Any(node=>node.Kind=="terrain-texture"))
+    throw new InvalidOperationException($"Recursive ADT/WMO/M2/SKIN/BLP dependency closure was incomplete: files={recursiveGraph.PatchEntries.Count}, blocking={recursiveGraph.Blocking.Count}.");
+var graphManifest=Path.Combine(assetFixture,"graph.crucible-patch.json");PatchManifestService.Save(graphManifest,"graph fixture","patch-graph.MPQ",recursiveGraph.PatchEntries,policy:new(ExpectedEntryCount:recursiveGraph.PatchEntries.Count));if(!PatchManifestService.Validate(PatchManifestService.Load(graphManifest)).Passed)throw new InvalidOperationException("Dependency closure did not produce a valid portable patch manifest.");
+var otherTerrain=Path.Combine(dependencyContent,"Textures","Graph","other-source","Terrain.blp");Directory.CreateDirectory(Path.GetDirectoryName(otherTerrain)!);File.Move(graphTerrain,otherTerrain);var conflictingGraph=ClientAssetDependencyService.Analyze(recursiveIndex,graphAdt);var explicitGraph=ClientAssetDependencyService.Analyze(recursiveIndex,ClientAssetDependencyService.InferLocation(recursiveIndex,graphAdt),new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase){[@"Textures\Graph\Terrain.blp"]=otherTerrain});File.Move(otherTerrain,graphTerrain);
+if(!conflictingGraph.Blocking.Any(node=>node.State==ClientAssetDependencyState.CrossSourceConflict&&node.ClientPath.Equals(@"Textures\Graph\Terrain.blp",StringComparison.OrdinalIgnoreCase)))throw new InvalidOperationException("Recursive dependency closure silently mixed a required asset from another provenance layer.");
+if(explicitGraph.Blocking.Count!=0||!explicitGraph.Nodes.Any(node=>node.ClientPath.Equals(@"Textures\Graph\Terrain.blp",StringComparison.OrdinalIgnoreCase)&&node.Provenance=="other-source"&&node.State==ClientAssetDependencyState.Resolved))throw new InvalidOperationException("An explicit cross-provenance dependency resolution did not produce a complete auditable graph.");
 definitive = DefinitiveAssetProjectService.RecordModel(definitivePath, definitive, comparisonIndex, comparisonModels[0], AssetDecision.Keeper, "Race", "fixture model");
 var definitiveStage = DefinitiveAssetProjectService.StageKeepers(definitivePath, definitive, Path.Combine(assetFixture, "definitive-stage"));
 if (definitive.Entries.Count != 4 || definitiveStage.Files != 4 || !File.Exists(definitiveStage.ManifestPath) || !PatchManifestService.Validate(PatchManifestService.Load(definitiveStage.ManifestPath)).Passed)
@@ -1373,6 +1389,18 @@ if (corruptSnapshotInspection.Valid || !corruptSnapshotInspection.Findings.Any(f
 Directory.Delete(layerRoot, true);
 
 Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, layered comparison, manifest build, and MPQ workflows.");
+
+static string WriteGraphAsset(string contentRoot,string provenance,string clientPath,byte[] bytes)
+{
+    var normalized=PatchInputMapper.NormalizeArchivePath(clientPath);var output=Path.Combine(contentRoot,Path.GetDirectoryName(normalized)!,provenance,Path.GetFileName(normalized));Directory.CreateDirectory(Path.GetDirectoryName(output)!);File.WriteAllBytes(output,bytes);return output;
+}
+
+static byte[] GraphStrings(params string[] values)=>System.Text.Encoding.UTF8.GetBytes(string.Join('\0',values)+'\0');
+
+static byte[] GraphChunks(params (string Id,byte[] Data)[] chunks)
+{
+    using var stream=new MemoryStream();using var writer=new BinaryWriter(stream,System.Text.Encoding.UTF8,true);foreach(var chunk in chunks){if(chunk.Id.Length!=4)throw new ArgumentException("Chunk IDs require four characters.");writer.Write(System.Text.Encoding.ASCII.GetBytes(new string(chunk.Id.Reverse().ToArray())));writer.Write((uint)chunk.Data.Length);writer.Write(chunk.Data);}writer.Flush();return stream.ToArray();
+}
 
 static void WriteRecoverySnapshotFixture(string path, string database, params (LegacyDatabaseTableSchema Schema, string RowsJson)[] sources)
 {

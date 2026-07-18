@@ -51,6 +51,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Displays editable internal MPQ paths and preserves folder hierarchy.
 - Opens existing MPQ patches and safely adds or replaces files while keeping a `.bak` copy.
 - Merges multiple small patch MPQs without mutating sources: duplicate paths are verified by SHA-256 and byte-for-byte comparison, exact copies are stored once, and different-byte path conflicts block output unless earlier/later archive precedence is explicitly selected.
+- Calculates recursive client-asset closure directly inside the MPQ workspace: WotLK M2 view SKINs/embedded BLPs, WMO groups/textures/doodad M2s, and ADT/WDT terrain textures/models/WMOs are followed transitively. Missing, invalid, and cross-provenance edges block patch staging until the user explicitly selects a physical candidate; replaceable M2 slots remain visible as DBC/SQL bindings rather than invented files. A clean closure stages directly into the tiny manifest-driven patch builder.
 - Installs verified patch MPQs into a selected client and deletes that client's exact `Cache` folder only after a successful update; GUI builds written directly into the configured client `Data` folder do the same automatically.
 - Remembers server `data\\dbc` and WoW client `Data` paths for future open, sync, and patch dialogs.
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
@@ -229,12 +230,10 @@ The corpus test runner accepts a WDBX 12340 definition XML and a directory conta
 
 1. Connect the new portable content-project/ID registry to live DBC and SQL occupancy scans and unified validation/change plans.
 2. Complete **Legacy SQL Recovery & Promotion** beyond the implemented snapshot and offline baseline audit: add core-specific dependency closure, explicit selection, baseline → legacy-edited → target conflict analysis, collision-safe ID remapping, SQL/rollback preview, and transactional deployment. The default path remains read-only and never carries deletions into the target implicitly.
-3. Add a WoWDBDefs DBD provider and cross-check it against WDBX definitions per target build.
-4. Extend the completed native BLP preview/codec with recursive M2/WMO/ADT material and asset dependency validation.
-5. Expand the Spell Workspace with named flags, searchable references, related-table navigation, and optional project-local SQLite bulk editing.
-6. Guided creature/NPC appearance import, gameobject generation, vendor, loot, quest, race, and class creators on the live capability model.
-7. CASC/DB2 support and complete corpus verification for additional client profiles.
-8. Expand the revision-aware AzerothCore/TrinityCore DBC binding and audit engine into transactional multi-destination deployment plans.
+3. Expand the Spell Workspace with named flags, searchable references, related-table navigation, and optional project-local SQLite bulk editing.
+4. Guided creature/NPC appearance import, gameobject generation, vendor, loot, quest, race, and class creators on the live capability model.
+5. CASC/DB2 support and complete corpus verification for additional client profiles.
+6. Expand the revision-aware AzerothCore/TrinityCore DBC binding and audit engine into transactional multi-destination deployment plans.
 
 The detailed decisions from legacy and newly added local tools are recorded in [the reference-tool audit](docs/REFERENCE-TOOL-AUDIT.md).
 
