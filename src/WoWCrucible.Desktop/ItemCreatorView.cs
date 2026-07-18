@@ -47,6 +47,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private readonly Button _commit = AccentButton("Insert into connected database");
     private ItemWritePlan? _pendingInsert;
     private uint? _loadedEntry;
+    private SpellTooltipCatalog? _spellCatalog; private CancellationTokenSource? _spellDecode;
 
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
@@ -59,6 +60,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         _characterModelPath.Text = session.Settings.ItemPreviewCharacterModelPath; _characterSkinPath.Text = session.Settings.ItemPreviewCharacterSkinPath;
         _class.SelectionChanged += (_, _) => { UpdateSubclassChoices(); RefreshPreview(); };
         foreach (var number in Numbers()) number.ValueChanged += (_, _) => RefreshPreview();
+        foreach (var spellId in _spellIds) spellId.ValueChanged += (_, _) => ScheduleSpellDecode();
         foreach (var combo in Combos().Where(combo => !ReferenceEquals(combo, _class))) combo.SelectionChanged += (_, _) => RefreshPreview();
         foreach (var text in new[] { _name, _description }) text.TextChanged += (_, _) => RefreshPreview();
 
@@ -104,7 +106,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         _damageMin.Value=Decimal(row,"dmg_min1");_damageMax.Value=Decimal(row,"dmg_max1");_delay.Value=Decimal(row,"delay");_durability.Value=Decimal(row,"MaxDurability");_itemSet.Value=Decimal(row,"itemset");_description.Text=Text(row,"description");
         for(var index=0;index<10;index++){Set(_statTypes[index],Int(row,$"stat_type{index+1}"));_statValues[index].Value=Decimal(row,$"stat_value{index+1}");}
         for(var index=0;index<5;index++){var slot=index+1;_spellIds[index].Value=Decimal(row,$"spellid_{slot}");Set(_spellTriggers[index],Int(row,$"spelltrigger_{slot}"));_spellCharges[index].Value=Decimal(row,$"spellcharges_{slot}");_spellPpm[index].Value=Decimal(row,$"spellppmRate_{slot}");_spellCooldowns[index].Value=Decimal(row,$"spellcooldown_{slot}",-1);_spellCategories[index].Value=Decimal(row,$"spellcategory_{slot}");_spellCategoryCooldowns[index].Value=Decimal(row,$"spellcategorycooldown_{slot}",-1);}
-        _loadedEntry=(uint)(_entry.Value??0);_commit.Content="Apply decoded fields to existing item";RefreshPreview();RefreshSql();_status.Text=$"Loaded live item {_loadedEntry} with decoded names. Unmapped/custom fields remain editable in SQL Studio."; _ = ResolveDisplayAsync(false);
+        _loadedEntry=(uint)(_entry.Value??0);_commit.Content="Apply decoded fields to existing item";RefreshPreview();RefreshSql();_status.Text=$"Loaded live item {_loadedEntry} with decoded names. Unmapped/custom fields remain editable in SQL Studio."; _ = ResolveDisplayAsync(false); ScheduleSpellDecode();
     }
 
     private Control StatsPage()
@@ -119,6 +121,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     {
         var stack=new StackPanel { Spacing=8,Margin=new Thickness(10) };
         stack.Children.Add(new TextBlock { Text="Spell IDs must exist in the effective client/server spell data. Trigger controls tooltip wording; cooldown -1 uses the spell default.",TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#9AA5B7") });
+        var decode=AccentButton("Decode spell names and tooltip text");decode.Click+=async(_,_)=>await DecodeSpellTooltipsAsync(true,CancellationToken.None);stack.Children.Add(decode);
         for(var index=0;index<5;index++)
         {
             var slot=index; var find=new Button{Content="Find…"}; find.Click+=(_,_)=>ReferenceLookupRequested?.Invoke(this,new(ReferenceDomain.Spell,$"Item spell effect {slot+1}",(uint)(_spellIds[slot].Value??0),selected=>_spellIds[slot].Value=selected));
@@ -140,7 +143,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         if(item.DamageMin>0||item.DamageMax>0){ var speed=item.Delay/1000f; AddPair($"{item.DamageMin:0.##} - {item.DamageMax:0.##} Damage",speed>0?$"Speed {speed:0.00}":""); if(speed>0) AddTooltip($"({(item.DamageMin+item.DamageMax)/2f/speed:0.0} damage per second)",Brushes.White); }
         foreach(var stat in (item.Stats??[]).Take(10).Where(stat=>stat.Value!=0)){ var primary=stat.Type is 0 or 1 or 3 or 4 or 5 or 6 or 7; AddTooltip(primary?$"{(stat.Value>0?"+":"")}{stat.Value} {StatName(stat.Type)}":SecondaryStatText(stat.Type,stat.Value),primary?Brushes.White:Brush.Parse("#1EFF00")); }
         if(item.RequiredLevel>0) AddTooltip($"Requires Level {item.RequiredLevel}",Brushes.White); if(item.MaxDurability>0) AddTooltip($"Durability {item.MaxDurability} / {item.MaxDurability}",Brushes.White);
-        foreach(var spell in (item.Spells??[]).Take(5).Where(spell=>spell.SpellId!=0)){ var prefix=spell.Trigger switch{0 or 5=>"Use",1=>"Equip",2=>"Chance on hit",4=>"Use",6=>"Use",_=>"Effect"}; var text=spell.Trigger==6?$"Use: Teaches spell #{spell.SpellId}.":$"{prefix}: Spell #{spell.SpellId}."; if(spell.Charges!=0) text+=$" ({Math.Abs(spell.Charges)} charge{(Math.Abs(spell.Charges)==1?"":"s")})"; AddTooltip(text,Brush.Parse("#1EFF00")); }
+        foreach(var spell in (item.Spells??[]).Take(5).Where(spell=>spell.SpellId!=0)){ var prefix=spell.Trigger switch{0 or 5=>"Use",1=>"Equip",2=>"Chance on hit",4=>"Use",6=>"Use",_=>"Effect"};SpellTooltipRecord? decoded=null;if(_spellCatalog is not null)_spellCatalog.Records.TryGetValue((uint)spell.SpellId,out decoded);var label=decoded is null?$"Spell #{spell.SpellId}":decoded.Name+(string.IsNullOrWhiteSpace(decoded.Subtext)?string.Empty:$" ({decoded.Subtext})");var text=spell.Trigger==6?$"Use: Teaches {label}.":$"{prefix}: {label}.";var detail=decoded?.PreferredItemText(spell.Trigger);if(!string.IsNullOrWhiteSpace(detail))text+=$" {detail}";if(spell.Charges!=0)text+=$" ({Math.Abs(spell.Charges)} charge{(Math.Abs(spell.Charges)==1?"":"s")})";AddTooltip(text,Brush.Parse("#1EFF00")); }
         if(item.ItemSetId>0) AddTooltip($"Item Set: {item.ItemSetId}",Brush.Parse("#FFD100")); if(!string.IsNullOrWhiteSpace(item.Description)) AddTooltip($"\"{item.Description.Trim()}\"",Brush.Parse("#FFD100"));
         if(item.SellPrice>0) AddTooltip($"Sell Price: {Price(item.SellPrice)}",Brushes.White); AddTooltip($"Entry {item.Entry}  •  Display {item.DisplayId}",Brush.Parse("#787882"),11);
     }
@@ -244,9 +247,25 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         catch(Exception exception){_modelStatus.Text=$"Default character selection failed: {exception.Message}";}
     }
 
+    private void ScheduleSpellDecode()
+    {
+        _spellDecode?.Cancel();_spellDecode?.Dispose();_spellDecode=new CancellationTokenSource();_ = DecodeSpellTooltipsAsync(false,_spellDecode.Token);
+    }
+
+    private async Task DecodeSpellTooltipsAsync(bool announce,CancellationToken token)
+    {
+        try
+        {
+            if(!announce)await Task.Delay(350,token);var dbcFolder=Path.GetDirectoryName(_displayDbcPath.Text?.Trim()??string.Empty)??string.Empty;var path=Path.Combine(dbcFolder,"Spell.dbc");if(!File.Exists(path)){if(announce)_status.Text="Spell.dbc is not beside ItemDisplayInfo.dbc; configure the server DBC folder first.";return;}
+            var catalog=_spellCatalog is not null&&_spellCatalog.Matches(path)?_spellCatalog:await Task.Run(()=>SpellTooltipService.Load(path),token);token.ThrowIfCancellationRequested();_spellCatalog=catalog;RefreshPreview();
+            if(announce){var ids=_spellIds.Select(value=>(uint)(value.Value??0)).Where(value=>value!=0).Distinct().ToArray();var found=ids.Count(id=>catalog.Records.ContainsKey(id));_status.Text=$"Decoded {found:N0}/{ids.Length:N0} configured item spell ID(s) from {catalog.Records.Count:N0} WotLK spells. Raw client $-tokens remain visible when their value depends on runtime context.";}
+        }
+        catch(OperationCanceledException){}catch(Exception exception){if(announce)_status.Text=$"Spell tooltip decode failed: {exception.Message}";else DesktopCrashLogger.Debug("ITEM","spell-tooltip-decode-unavailable",("error",exception.Message));}
+    }
+
     private void UpdateSubclassChoices(){ _subclass.ItemsSource=Selected(_class) switch{0=>Values((0,"Consumable"),(1,"Potion"),(2,"Elixir"),(3,"Flask"),(4,"Scroll"),(5,"Food & Drink"),(6,"Item Enhancement"),(7,"Bandage")),1=>Values((0,"Bag"),(1,"Soul Bag"),(2,"Herb Bag"),(3,"Enchanting Bag"),(4,"Engineering Bag"),(5,"Gem Bag")),2=>Values((0,"One-Handed Axe"),(1,"Two-Handed Axe"),(2,"Bow"),(3,"Gun"),(4,"One-Handed Mace"),(5,"Two-Handed Mace"),(6,"Polearm"),(7,"One-Handed Sword"),(8,"Two-Handed Sword"),(10,"Staff"),(13,"Fist Weapon"),(15,"Dagger"),(16,"Thrown"),(18,"Crossbow"),(19,"Wand"),(20,"Fishing Pole")),4=>Values((0,"Miscellaneous Armor"),(1,"Cloth"),(2,"Leather"),(3,"Mail"),(4,"Plate"),(6,"Shield"),(7,"Libram"),(8,"Idol"),(9,"Totem"),(10,"Sigil")),_=>Values((0,"Generic"))};_subclass.SelectedIndex=0; }
     private void SessionChanged(object? sender,EventArgs e)=>RefreshSchemaStatus(); private void RefreshSchemaStatus(){var cap=_session.DatabaseCapabilities;_status.Text=cap?.FindTable("item_template") is{ } table?$"Live schema ready · {cap.Database}.item_template · {table.Columns.Count:N0} columns":"Offline portable schema ready · connect Server & SQL for live deployment.";}
-    public void Dispose()=>_session.Changed-=SessionChanged;
+    public void Dispose(){_session.Changed-=SessionChanged;_spellDecode?.Cancel();_spellDecode?.Dispose();_model.Dispose();}
     private IStorageProvider Storage()=>TopLevel.GetTopLevel(this)?.StorageProvider??throw new InvalidOperationException("Item Creator is not attached to the main window.");
     private async Task PickFileAsync(TextBox target,string title,string pattern){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType(title){Patterns=[pattern]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
     private async Task PickTextureAsync(TextBox target,string title){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType("Character texture"){Patterns=["*.blp","*.png","*.jpg","*.jpeg","*.bmp","*.tga"]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}

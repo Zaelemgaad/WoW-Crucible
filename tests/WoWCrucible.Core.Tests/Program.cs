@@ -5,6 +5,9 @@ if (args.Length != 2)
     throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
 
 var itemDisplayPath = Path.Combine(args[1], "ItemDisplayInfo.dbc");
+var spellTooltipCatalog=SpellTooltipService.Load(Path.Combine(args[1],"Spell.dbc"));
+if(spellTooltipCatalog.Records.Count<40000||!spellTooltipCatalog.Records.TryGetValue(133,out var fireballTooltip)||fireballTooltip.Name!="Fireball"||string.IsNullOrWhiteSpace(fireballTooltip.Description)||SpellTooltipService.Clean("|cffffffff  A\r\n B  |r")!="A B")
+    throw new InvalidOperationException("Cached WotLK spell tooltip decoding did not preserve real names/descriptions or clean client color/whitespace codes.");
 var martinDisplay = ItemDisplayInfoService.Resolve(itemDisplayPath, args[0], 7016, 4, 4, 4);
 if (martinDisplay.InventoryIcons.FirstOrDefault() != "INV_Chest_Samurai" || martinDisplay.ModelNames.Any(value => value.Length > 0) ||
     !martinDisplay.Assets.Any(asset => asset.Kind == "wear-texture" && asset.ClientPaths.Any(path => path.EndsWith(@"Item\TextureComponents\ArmUpperTexture\Plate_A_01Silver_Sleeve_AU.blp", StringComparison.OrdinalIgnoreCase)) &&
