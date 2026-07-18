@@ -844,6 +844,57 @@ var rawSpellPreview = DbcRowExportService.Preview(spellExportFile, spellExportSc
 if (rawSpellPreview.Rows[0]["Name_Lang[enUS]"] is not uint)
     throw new InvalidOperationException("DBC export raw-string mode did not expose the physical string-table offset.");
 File.Delete(spellJsonLinesExport);
+
+var generatedImportFile = WdbcFile.Load(generatedKeyPath); var generatedImportOriginalHash = generatedImportFile.ComputeContentSha256();
+var generatedBefore = Convert.ToSingle(generatedImportFile.GetDisplayValue(900, generatedData), System.Globalization.CultureInfo.InvariantCulture);
+var generatedImportCsv = Path.Combine(Path.GetTempPath(), $"crucible-gt-import-{Guid.NewGuid():N}.csv");
+File.WriteAllText(generatedImportCsv, $"$recordKey,$rowIndex,Data\r\n900,900,{(generatedBefore + 0.25f).ToString("R", System.Globalization.CultureInfo.InvariantCulture)}\r\n1100,,{(generatedBefore + 0.5f).ToString("R", System.Globalization.CultureInfo.InvariantCulture)}\r\n");
+try
+{
+    _ = DbcRowImportService.Preview(generatedImportFile, generatedSchema, generatedImportCsv, new(DbcRowImportFormat.Csv));
+    throw new InvalidOperationException("DBC import appended a missing virtual record without explicit permission.");
+}
+catch (InvalidDataException exception) when (exception.Message.Contains("Enable append explicitly", StringComparison.Ordinal)) { }
+var generatedImportPlan = DbcRowImportService.Preview(generatedImportFile, generatedSchema, generatedImportCsv, new(DbcRowImportFormat.Csv, AllowAppend: true));
+if (generatedImportPlan.UpdatedRows != 1 || generatedImportPlan.AppendedRows != 1 || generatedImportPlan.ChangedCells != 2 || generatedImportFile.ComputeContentSha256() != generatedImportOriginalHash)
+    throw new InvalidOperationException("DBC import preview mutated its source or misreported virtual updates/appends.");
+var generatedApply = DbcRowImportService.Apply(generatedImportFile, generatedImportPlan);
+if (generatedApply.ResultRows != 1101 || generatedImportFile.RowCount != 1101 || Math.Abs(Convert.ToSingle(generatedImportFile.GetDisplayValue(900, generatedData)) - (generatedBefore + 0.25f)) > 0.0001f ||
+    Math.Abs(Convert.ToSingle(generatedImportFile.GetDisplayValue(1100, generatedData)) - (generatedBefore + 0.5f)) > 0.0001f)
+    throw new InvalidOperationException("DBC import did not apply virtual updates and contiguous append without writing the synthetic key into physical data.");
+
+var spellImportFile = WdbcFile.Load(Path.Combine(args[1], "Spell.dbc")); var spellImportHash = spellImportFile.ComputeContentSha256();
+var spellImportJson = Path.Combine(Path.GetTempPath(), $"crucible-spell-import-{Guid.NewGuid():N}.json");
+File.WriteAllText(spellImportJson, "[{\"$recordKey\":133,\"Name_Lang[enUS]\":\"  Crucible, Fireball  \"}]");
+var spellImportPlan = DbcRowImportService.Preview(spellImportFile, spellExportSchema, spellImportJson, new(DbcRowImportFormat.Json));
+if (spellImportPlan.UpdatedRows != 1 || spellImportPlan.AppendedRows != 0 || spellImportPlan.ChangedCells != 1 || spellImportFile.ComputeContentSha256() != spellImportHash)
+    throw new InvalidOperationException("Physical-key DBC import preview mutated the Spell source or misreported its change.");
+DbcRowImportService.Apply(spellImportFile, spellImportPlan);
+var spellRows = DbcRecordIdentity.IndexRows(spellImportFile, spellExportSchema.Columns, spellExportSchema.KeyStrategy); var spellName = spellExportSchema.Columns.Single(column => column.Name == "Name_Lang[enUS]");
+if (spellImportFile.GetRaw(spellRows[133], spellExportSchema.Columns[0]) != 133 || spellImportFile.GetString(spellImportFile.GetRaw(spellRows[133], spellName)) != "  Crucible, Fireball  ")
+    throw new InvalidOperationException("DBC import changed a physical key or failed to preserve/re-intern decoded string whitespace.");
+var quotedCsvImport = Path.Combine(Path.GetTempPath(), $"crucible-spell-quoted-{Guid.NewGuid():N}.csv");
+File.WriteAllText(quotedCsvImport, "$recordKey,Name_Lang[enUS]\r\n133,\"Crucible, Fireball\r\nSecond line\"\r\n");
+var quotedCsvFile = WdbcFile.Load(Path.Combine(args[1], "Spell.dbc")); var quotedCsvPlan = DbcRowImportService.Preview(quotedCsvFile, spellExportSchema, quotedCsvImport, new(DbcRowImportFormat.Csv)); DbcRowImportService.Apply(quotedCsvFile, quotedCsvPlan);
+var quotedRows = DbcRecordIdentity.IndexRows(quotedCsvFile, spellExportSchema.Columns, spellExportSchema.KeyStrategy);
+if (quotedCsvFile.GetDisplayValue(quotedRows[133], spellName).ToString() != "Crucible, Fireball\r\nSecond line") throw new InvalidOperationException("DBC CSV import did not preserve quoted commas and embedded newlines.");
+var physicalAppendJson = Path.Combine(Path.GetTempPath(), $"crucible-spell-append-{Guid.NewGuid():N}.json"); File.WriteAllText(physicalAppendJson, "[{\"$recordKey\":9999999,\"Name_Lang[enUS]\":\"Crucible Physical Append\"}]");
+var physicalAppendFile = WdbcFile.Load(Path.Combine(args[1], "Spell.dbc")); var physicalAppendPlan = DbcRowImportService.Preview(physicalAppendFile, spellExportSchema, physicalAppendJson, new(DbcRowImportFormat.Json, AllowAppend: true)); DbcRowImportService.Apply(physicalAppendFile, physicalAppendPlan);
+var physicalAppendRows = DbcRecordIdentity.IndexRows(physicalAppendFile, spellExportSchema.Columns, spellExportSchema.KeyStrategy);
+if (physicalAppendPlan.AppendedRows != 1 || !physicalAppendRows.TryGetValue(9999999, out var physicalAppendedRow) || physicalAppendFile.GetDisplayValue(physicalAppendedRow, spellName).ToString() != "Crucible Physical Append")
+    throw new InvalidOperationException("DBC import did not explicitly append and initialize a missing physical-key record.");
+
+var unknownImport = Path.Combine(Path.GetTempPath(), $"crucible-spell-unknown-{Guid.NewGuid():N}.jsonl"); File.WriteAllText(unknownImport, "{\"$recordKey\":133,\"DefinitelyNotAColumn\":1}\n");
+try { _ = DbcRowImportService.Preview(WdbcFile.Load(Path.Combine(args[1], "Spell.dbc")), spellExportSchema, unknownImport, new(DbcRowImportFormat.JsonLines)); throw new InvalidOperationException("DBC import silently discarded an unknown schema column."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("unknown column", StringComparison.OrdinalIgnoreCase)) { }
+var duplicateImport = Path.Combine(Path.GetTempPath(), $"crucible-spell-duplicate-{Guid.NewGuid():N}.jsonl"); File.WriteAllText(duplicateImport, "{\"$recordKey\":133,\"Effect[0]\":1}\n{\"$recordKey\":133,\"Effect[0]\":2}\n");
+try { _ = DbcRowImportService.Preview(WdbcFile.Load(Path.Combine(args[1], "Spell.dbc")), spellExportSchema, duplicateImport, new(DbcRowImportFormat.JsonLines)); throw new InvalidOperationException("DBC import accepted duplicate input targets."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("more than once", StringComparison.OrdinalIgnoreCase)) { }
+var staleImportFile = WdbcFile.Load(Path.Combine(args[1], "Spell.dbc")); var stalePlan = DbcRowImportService.Preview(staleImportFile, spellExportSchema, spellImportJson, new(DbcRowImportFormat.Json));
+staleImportFile.SetRaw(0, spellExportSchema.Columns[1], staleImportFile.GetRaw(0, spellExportSchema.Columns[1]) + 1);
+try { _ = DbcRowImportService.Apply(staleImportFile, stalePlan); throw new InvalidOperationException("DBC import applied a preview after the open table changed."); }
+catch (InvalidOperationException exception) when (exception.Message.Contains("changed after", StringComparison.OrdinalIgnoreCase)) { }
+File.Delete(generatedImportCsv); File.Delete(spellImportJson); File.Delete(quotedCsvImport); File.Delete(physicalAppendJson); File.Delete(unknownImport); File.Delete(duplicateImport);
 File.Delete(generatedBasePath); File.Delete(generatedOverridePath);
 
 var azerothBindings = ServerTableBindingCatalog.BuiltIn(ServerCoreFamily.AzerothCore);

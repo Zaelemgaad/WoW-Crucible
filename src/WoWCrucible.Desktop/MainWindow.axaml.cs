@@ -35,6 +35,7 @@ public partial class MainWindow : Window
     private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
     private DbdSchemaAuditView? _dbdSchemaAuditView;
     private DbcExportWorkspaceView? _dbcExportWorkspaceView;
+    private DbcImportWorkspaceView? _dbcImportWorkspaceView;
     private CreatureWorkspaceView? _creatureWorkspaceView;
     private GameObjectWorkspaceView? _gameObjectWorkspaceView;
     private QuestWorkspaceView? _questWorkspaceView;
@@ -68,7 +69,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
+        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -191,6 +192,21 @@ public partial class MainWindow : Window
         _dbcExportWorkspaceView?.Dispose(); var view = _dbcExportWorkspaceView = new DbcExportWorkspaceView(document);
         view.BackRequested += (_, _) => { view.Dispose(); if (ReferenceEquals(_dbcExportWorkspaceView, view)) _dbcExportWorkspaceView = null; CloseFeatureWorkspace(); };
         OpenFeatureWorkspace(view, $"Export {Path.GetFileName(document.File.SourcePath)}");
+    }
+
+    private void OpenDbcImportClick(object? sender, RoutedEventArgs e)
+    {
+        var document = Current;
+        if (document is null) { StatusText.Text = "Open or select a DBC before importing structured rows."; return; }
+        _dbcImportWorkspaceView?.Dispose(); var view = _dbcImportWorkspaceView = new DbcImportWorkspaceView(document);
+        view.BackRequested += (_, _) => { view.Dispose(); if (ReferenceEquals(_dbcImportWorkspaceView, view)) _dbcImportWorkspaceView = null; CloseFeatureWorkspace(); };
+        view.Applied += (_, result) =>
+        {
+            DbcView.SetDocument(document.File, document.Schema.Columns, Path.GetFileNameWithoutExtension(document.File.SourcePath), DecodedToggle.IsChecked == true);
+            ShowDocumentSummary(document); RefreshTabs();
+            StatusText.Text = $"Structured import staged · {result.UpdatedRows:N0} updated row(s) · {result.AppendedRows:N0} appended · {result.ChangedCells:N0} cells · save still required";
+        };
+        OpenFeatureWorkspace(view, $"Import {Path.GetFileName(document.File.SourcePath)}");
     }
 
     private async Task<bool> SaveCurrentAsync(bool saveAs)

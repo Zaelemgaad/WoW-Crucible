@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace WoWCrucible.Core;
@@ -27,6 +28,42 @@ public sealed class WdbcFile
     public int RecordSize { get; }
     public int StringTableSize => _strings.Length;
     public bool IsDirty { get; private set; }
+
+    public WdbcFile CloneInMemory()
+    {
+        var clone = new WdbcFile(SourcePath, RowCount, FieldCount, RecordSize,
+            _records.AsSpan(0, checked(RowCount * RecordSize)).ToArray(), _strings.ToArray())
+        {
+            IsDirty = IsDirty
+        };
+        return clone;
+    }
+
+    public string ComputeContentSha256()
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Span<byte> metadata = stackalloc byte[16];
+        BinaryPrimitives.WriteInt32LittleEndian(metadata[0..4], RowCount);
+        BinaryPrimitives.WriteInt32LittleEndian(metadata[4..8], FieldCount);
+        BinaryPrimitives.WriteInt32LittleEndian(metadata[8..12], RecordSize);
+        BinaryPrimitives.WriteInt32LittleEndian(metadata[12..16], _strings.Length);
+        hash.AppendData(metadata);
+        hash.AppendData(_records.AsSpan(0, checked(RowCount * RecordSize)));
+        hash.AppendData(_strings);
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    public void ReplaceContentFrom(WdbcFile source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (source.FieldCount != FieldCount || source.RecordSize != RecordSize)
+            throw new InvalidDataException("The replacement WDBC layout differs from the open table.");
+        RowCount = source.RowCount;
+        _records = source._records.AsSpan(0, checked(source.RowCount * source.RecordSize)).ToArray();
+        _strings = source._strings.ToArray();
+        _stringOffsets = null;
+        IsDirty = true;
+    }
 
     public static WdbcFile Load(string path)
     {
@@ -79,7 +116,8 @@ public sealed class WdbcFile
 
     public void SetDisplayValue(int row, DbcColumn column, object? value)
     {
-        var text = Convert.ToString(value, CultureInfo.InvariantCulture)?.Trim() ?? string.Empty;
+        var converted = Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+        var text = column.Type == DbcValueType.StringOffset ? converted : converted.Trim();
         uint raw = column.Type switch
         {
             DbcValueType.Int32 => unchecked((uint)int.Parse(text, NumberStyles.Integer, CultureInfo.InvariantCulture)),
