@@ -37,6 +37,10 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private readonly ComboBox _resolvedModels = new() { PlaceholderText = "Resolved model source" };
     private readonly TextBox _characterModelPath = new(); private readonly TextBox _characterSkinPath = new();
     private readonly ComboBox _wearSources = new() { PlaceholderText = "Resolved armor texture source" };
+    private readonly ComboBox _appearanceSkins = new() { PlaceholderText = "Skin" }; private readonly ComboBox _appearanceFaces = new() { PlaceholderText = "Face" };
+    private readonly ComboBox _appearanceFacialHair = new() { PlaceholderText = "Facial hair / features" }; private readonly ComboBox _appearanceHair = new() { PlaceholderText = "Hair" };
+    private readonly ComboBox _appearanceSources = new() { PlaceholderText = "Character appearance provenance" }; private readonly TextBlock _appearanceStatus = Status("Load decoded character choices to use CharSections instead of a bare base atlas.");
+    private AssetComparisonIndex? _appearanceIndex; private CharacterAppearancePreviewPlan? _appearancePlan; private bool _suppressAppearance;
     private readonly TextBlock _displayDetails = Status("Resolve the current display ID to see every ItemDisplayInfo model, texture, icon, geoset, and visual field.");
     private ItemDisplayInfoRecord? _resolvedDisplay;
     private readonly TextBlock _status = Status("Offline portable schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
@@ -68,14 +72,17 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _modelStatus.Text = "Model preview cleared."; };
         var browseCharacter = new Button { Content = "Character M2…" }; browseCharacter.Click += async (_, _) => await PickFileAsync(_characterModelPath, "Choose a playable character M2", "*.m2");
         var browseCharacterSkin = new Button { Content = "Base skin…" }; browseCharacterSkin.Click += async (_, _) => await PickTextureAsync(_characterSkinPath, "Choose that character's base skin atlas");
-        var fillCharacter = new Button { Content = "Use extracted Human female" }; fillCharacter.Click += (_, _) => FillDefaultCharacter();
+        var fillCharacter = new Button { Content = "Use extracted Human female" }; fillCharacter.Click += async (_, _) => { FillDefaultCharacter(); await LoadAppearanceChoicesAsync(); };
+        var loadAppearance = new Button { Content = "Load decoded character choices" }; loadAppearance.Click += async (_, _) => await LoadAppearanceChoicesAsync();
         var previewEquipped = AccentButton("Preview equipped on character"); previewEquipped.Click += async (_, _) => await PreviewEquippedAsync();
         var browseDisplay = new Button { Content = "DBC…" }; browseDisplay.Click += async (_, _) => await PickFileAsync(_displayDbcPath, "Choose ItemDisplayInfo.dbc", "*.dbc");
         var browseSchema = new Button { Content = "Schema…" }; browseSchema.Click += async (_, _) => await PickFileAsync(_displaySchemaPath, "Choose WotLK schema XML", "*.xml");
         var browseLibrary = new Button { Content = "Assets…" }; browseLibrary.Click += async (_, _) => await PickFolderAsync(_assetLibraryPath, "Choose processed asset library");
         var resolverPaths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _displayDbcPath, WithColumn(browseDisplay,1), WithRow(_displaySchemaPath,1), WithRow(WithColumn(browseSchema,1),1), WithRow(_assetLibraryPath,2), WithRow(WithColumn(browseLibrary,1),2) } };
         var characterPaths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _characterModelPath, WithColumn(browseCharacter,1), WithRow(_characterSkinPath,1), WithRow(WithColumn(browseCharacterSkin,1),1) } };
-        var modelHeader = new StackPanel { Spacing = 7, Children = { new TextBlock { Text="Live item display resolution", FontWeight=FontWeight.SemiBold }, resolverPaths, new WrapPanel { Children = { resolveDisplay, loadResolved, loadModel, clearModel } }, _resolvedModels, _displayDetails, new Separator(), new TextBlock { Text="Equipped armor preview", FontWeight=FontWeight.SemiBold }, new TextBlock { Text="Choose one playable character M2 and its 256-based base skin atlas. Crucible overlays this item's eight wearable regions and applies its inventory-aware geosets without mixing patch sources.",TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#9AA5B7") }, characterPaths, _wearSources, new WrapPanel { Children = { fillCharacter, previewEquipped } } } };
+        var appearanceChoices = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _appearanceSkins, WithColumn(_appearanceFaces,1), WithRow(_appearanceFacialHair,1), WithRow(WithColumn(_appearanceHair,1),1), WithRow(_appearanceSources,2) } }; Grid.SetColumnSpan(_appearanceSources,2);
+        foreach(var combo in new[]{_appearanceSkins,_appearanceFaces,_appearanceFacialHair,_appearanceHair,_appearanceSources})combo.SelectionChanged+=async(_,_)=>{if(!_suppressAppearance)await LoadAppearanceChoicesAsync();};
+        var modelHeader = new StackPanel { Spacing = 7, Children = { new TextBlock { Text="Live item display resolution", FontWeight=FontWeight.SemiBold }, resolverPaths, new WrapPanel { Children = { resolveDisplay, loadResolved, loadModel, clearModel } }, _resolvedModels, _displayDetails, new Separator(), new TextBlock { Text="Equipped armor preview", FontWeight=FontWeight.SemiBold }, new TextBlock { Text="Choose a playable character M2. Load decoded choices to build its real CharSections skin, face, underwear, facial features, hair texture, and hair geosets; the base-atlas field remains a manual fallback.",TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#9AA5B7") }, characterPaths, appearanceChoices, _appearanceStatus, _wearSources, new WrapPanel { Children = { fillCharacter, loadAppearance, previewEquipped } } } };
         var modelPage = new Grid { RowDefinitions = new("2*,Auto,3*,Auto"), Children = { new ScrollViewer { Content=modelHeader }, WithRow(new GridSplitter { ResizeDirection=GridResizeDirection.Rows, Background=Brush.Parse("#2B3445") },1), WithRow(new Border { Background=Brush.Parse("#090D14"), Child=_model },2), WithRow(_modelStatus,3) } };
         var previewTabs = new TabControl { Items = { new TabItem { Header="Tooltip", Content=new ScrollViewer { Content=new Border { Background=Brush.Parse("#080911"), BorderBrush=Brush.Parse("#7C6639"), BorderThickness=new Thickness(1), Margin=new Thickness(8), Child=_tooltip } } }, new TabItem { Header="3D model", Content=modelPage }, new TabItem { Header="SQL preview", Content=_sql } } };
 
@@ -186,14 +193,40 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             if(!File.Exists(modelPath)) throw new FileNotFoundException("Choose an extracted playable character M2.",modelPath);
             var normalized=modelPath.Replace('/','\\'); if(normalized.Contains("\\Female\\",StringComparison.OrdinalIgnoreCase)&&source.Source.EndsWith(" · male",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("The selected wear source is male but the character model path is female. Choose a female source."); if(normalized.Contains("\\Male\\",StringComparison.OrdinalIgnoreCase)&&source.Source.EndsWith(" · female",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("The selected wear source is female but the character model path is male. Choose a male source.");
             _modelStatus.Text=$"Composing display {_resolvedDisplay.Id:N0} from {source.Source}…";
-            var preview=await Task.Run(()=>ItemEquipmentPreviewService.Compose(skinPath,_resolvedDisplay,Selected(_inventory),source));
-            var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(modelPath,visibilityMode:M2PreviewVisibilityMode.BaseAppearance,geosetSelection:preview.Geosets));
-            _model.SetGeometry(geometry); _model.SetDecodedTexture(preview.Atlas);
+            ComposedCharacterAppearance? appearance=null; ItemEquipmentPreview preview; var groupVariants=new Dictionary<int,int>();
+            if(_appearanceIndex is not null&&_appearancePlan?.SelectedSource is not null)
+            {
+                appearance=await Task.Run(()=>CharacterAppearancePreviewService.Compose(_appearanceIndex,_appearancePlan)); preview=await Task.Run(()=>ItemEquipmentPreviewService.Compose(appearance.Body,_resolvedDisplay,Selected(_inventory),source));
+                foreach(var pair in _appearancePlan.Geosets.GroupVariants)groupVariants[pair.Key]=pair.Value;
+            }
+            else preview=await Task.Run(()=>ItemEquipmentPreviewService.Compose(skinPath,_resolvedDisplay,Selected(_inventory),source));
+            foreach(var pair in preview.Geosets.GroupVariants)groupVariants[pair.Key]=pair.Value;
+            var selection=new M2GeosetSelection(groupVariants,appearance is null?preview.Geosets.Source:$"Decoded CharSections + {preview.Geosets.Source}");
+            var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(modelPath,visibilityMode:M2PreviewVisibilityMode.BaseAppearance,geosetSelection:selection));
+            _model.SetGeometry(geometry);
+            if(appearance?.Hair is not null){var textures=new Dictionary<int,RgbaTexture>();foreach(var slot in geometry.TextureSlots){if(slot.Type==1)textures[slot.Index]=preview.Atlas;else if(slot.Type==6)textures[slot.Index]=appearance.Hair;}if(textures.Count>0)_model.SetDecodedTextures(textures);else _model.SetDecodedTexture(preview.Atlas);}else _model.SetDecodedTexture(preview.Atlas);
             _session.Settings.ItemPreviewCharacterModelPath=modelPath; _session.Settings.ItemPreviewCharacterSkinPath=skinPath; _session.Settings.Save();
             var geosets=preview.Geosets.GroupVariants.Count==0?"no equipment geoset override":string.Join(", ",preview.Geosets.GroupVariants.Select(pair=>$"{pair.Key}:{pair.Value}"));
             _modelStatus.Text=$"Equipped display {_resolvedDisplay.Id:N0} · {source.Source} · wear slots {(preview.AppliedSlots.Count==0?"none":string.Join(", ",preview.AppliedSlots))} · {geosets}{(preview.MissingSlots.Count==0?string.Empty:$" · missing source slots {string.Join(", ",preview.MissingSlots)}")}";
         }
         catch(Exception exception){_modelStatus.Text=$"Equipped preview failed: {exception.Message}";DesktopCrashLogger.Log("Equipped item preview failed",exception);}
+    }
+
+    private async Task LoadAppearanceChoicesAsync()
+    {
+        try
+        {
+            var modelPath=_characterModelPath.Text?.Trim()??string.Empty;if(!File.Exists(modelPath))throw new FileNotFoundException("Choose a playable character M2 first.",modelPath);
+            var identity=CharacterAppearanceService.Infer(Path.GetDirectoryName(modelPath)??string.Empty,Path.GetFileName(modelPath))??throw new InvalidDataException("The selected model path does not identify a supported playable race and sex.");
+            var dbcFolder=Path.GetDirectoryName(_displayDbcPath.Text?.Trim()??string.Empty)??string.Empty;if(!File.Exists(Path.Combine(dbcFolder,"CharSections.dbc")))throw new FileNotFoundException("Point the display DBC field at the server DBC folder containing CharSections.dbc.");
+            _appearanceStatus.Text="Indexing processed assets and resolving CharSections choices…";
+            var libraryRoot=Path.GetFullPath(_assetLibraryPath.Text?.Trim()??string.Empty);if(_appearanceIndex is null||!_appearanceIndex.LibraryRoot.Equals(libraryRoot,StringComparison.OrdinalIgnoreCase))_appearanceIndex=await Task.Run(()=>AssetComparisonService.BuildIndex(libraryRoot));
+            var skin=(_appearanceSkins.SelectedItem as CharacterBaseSkin)?.Id;var face=(_appearanceFaces.SelectedItem as CharacterSection)?.Id;var facial=(_appearanceFacialHair.SelectedItem as CharacterSection)?.Id;var hair=(_appearanceHair.SelectedItem as CharacterSection)?.Id;var source=(_appearanceSources.SelectedItem as CharacterAppearanceSource)?.FullPath;
+            var preferred=Directory.GetParent(modelPath)?.Name;var plan=await Task.Run(()=>CharacterAppearancePreviewService.Build(_appearanceIndex,dbcFolder,identity,skin,face,facial,hair,source,preferred));_appearancePlan=plan;
+            _suppressAppearance=true;try{_appearanceSkins.ItemsSource=plan.Skins;_appearanceSkins.SelectedItem=plan.SelectedSkin;_appearanceFaces.ItemsSource=plan.Faces;_appearanceFaces.SelectedItem=plan.SelectedFace;_appearanceFacialHair.ItemsSource=plan.FacialHair;_appearanceFacialHair.SelectedItem=plan.SelectedFacialHair;_appearanceHair.ItemsSource=plan.Hair;_appearanceHair.SelectedItem=plan.SelectedHair;_appearanceSources.ItemsSource=plan.Sources;_appearanceSources.SelectedItem=plan.SelectedSource;}finally{_suppressAppearance=false;}
+            _appearanceStatus.Text=plan.Message+(plan.SelectedSource is null?" Select a provenance before previewing.":" Ready for equipped preview.");
+        }
+        catch(Exception exception){_appearancePlan=null;_appearanceStatus.Text=$"Decoded appearance unavailable: {exception.Message}";}
     }
 
     private void FillDefaultCharacter()

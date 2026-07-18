@@ -41,7 +41,12 @@ public static class ItemEquipmentPreviewService
     {
         if (string.IsNullOrWhiteSpace(baseCharacterTexture) || !File.Exists(baseCharacterTexture))
             throw new FileNotFoundException("Choose an extracted base character skin atlas (BLP or ordinary image).", baseCharacterTexture);
-        ArgumentNullException.ThrowIfNull(display); ArgumentNullException.ThrowIfNull(source);
+        return Compose(DecodeTexture(baseCharacterTexture), display, inventoryType, source);
+    }
+
+    public static ItemEquipmentPreview Compose(RgbaTexture baseCharacterAtlas, ItemDisplayInfoRecord display, int inventoryType, ItemWearSourceSet source)
+    {
+        ArgumentNullException.ThrowIfNull(baseCharacterAtlas); ArgumentNullException.ThrowIfNull(display); ArgumentNullException.ThrowIfNull(source);
         var layers = new List<CharacterTextureLayer>(); var applied = new List<int>(); var missing = new List<int>();
         for (var slot = 0; slot < display.WearTextures.Count && slot < SlotRegions.Length; slot++)
         {
@@ -49,7 +54,7 @@ public static class ItemEquipmentPreviewService
             if (!source.SlotFiles.TryGetValue(slot, out var path) || !File.Exists(path)) { missing.Add(slot); continue; }
             layers.Add(new(DecodeTexture(path), SlotRegions[slot])); applied.Add(slot);
         }
-        var atlas = CharacterTextureComposer.Compose(DecodeTexture(baseCharacterTexture), layers);
+        var atlas = CharacterTextureComposer.Compose(baseCharacterAtlas, layers);
         return new(atlas, ResolveGeosets(inventoryType, display.GeosetGroups), applied, missing);
     }
 

@@ -27,7 +27,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private sealed record AppearancePlan(CharacterAppearanceIdentity? Identity, IReadOnlyList<CharacterBaseSkin> Skins, CharacterBaseSkin? SelectedSkin,
         IReadOnlyList<CharacterSection> Faces, CharacterSection? SelectedFace, IReadOnlyList<CharacterSection> FacialHair, CharacterSection? SelectedFacialHair,
         IReadOnlyList<CharacterSection> Hair, CharacterSection? SelectedHair, CharacterSection? Underwear,
-        IReadOnlyList<AppearanceSourceChoice> Sources, AppearanceSourceChoice? SelectedSource, CharacterAppearanceGeosetPlan? Geosets, string Message);
+        IReadOnlyList<AppearanceSourceChoice> Sources, AppearanceSourceChoice? SelectedSource, CharacterAppearanceGeosetPlan? Geosets, string Message, CharacterAppearancePreviewPlan? CorePlan = null);
     private readonly TextBox _library = new() { Text = Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty };
     private readonly TextBox _directorySearch = new() { PlaceholderText = "Filter content paths…" };
     private readonly ListBox _directories = new();
@@ -594,37 +594,11 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     {
         var identity = CharacterAppearanceService.Infer(model.LogicalPath, model.FileName);
         if (identity is null) return EmptyAppearance(null, "This model path does not identify a playable race and sex; CharSections appearance binding does not apply.");
-        var dbcPath = Path.Combine(_session.Settings.CoreDbcPath, "CharSections.dbc");
-        if (!File.Exists(dbcPath)) return EmptyAppearance(identity, $"Detected {identity.RaceName} {identity.SexName}, but CharSections.dbc is unavailable. Point Server & SQL at a server DBC folder to enable real appearances.");
-        var sections = CharacterAppearanceService.LoadSections(dbcPath, identity); token.ThrowIfCancellationRequested();
-        var skins = sections.Where(section => section.Kind == CharacterSectionKind.Skin && section.Texture0 is not null).Select(section => new CharacterBaseSkin(section.Id, section.RaceId, section.SexId, section.Flags, section.VariationIndex, section.ColorIndex, section.Texture0!)).ToArray();
-        if (skins.Length == 0) return EmptyAppearance(identity, $"CharSections.dbc has no base-skin records for {identity.RaceName} {identity.SexName}.");
-        var selectedSkin = requestedSkin is not null && requestedSkin.RaceId == identity.RaceId && requestedSkin.SexId == identity.SexId
-            ? skins.FirstOrDefault(skin => skin.Id == requestedSkin.Id) ?? skins[0] : skins[0];
-        var faces = sections.Where(section => section.Kind == CharacterSectionKind.Face && section.ColorIndex == selectedSkin.ColorIndex).ToArray();
-        var facialHair = sections.Where(section => section.Kind == CharacterSectionKind.FacialHair).ToArray();
-        var hair = sections.Where(section => section.Kind == CharacterSectionKind.Hair).ToArray();
-        var underwear = sections.FirstOrDefault(section => section.Kind == CharacterSectionKind.Underwear && section.ColorIndex == selectedSkin.ColorIndex);
-        var selectedFace = Pick(faces, requestedFace); var selectedFacialHair = Pick(facialHair, requestedFacialHair); var selectedHair = Pick(hair, requestedHair);
-        var geosets = CharacterAppearanceService.ResolveGeosets(_session.Settings.CoreDbcPath, identity, selectedHair?.VariationIndex, selectedFacialHair?.VariationIndex);
-        if (_index is null) return new(identity, skins, selectedSkin, faces, selectedFace, facialHair, selectedFacialHair, hair, selectedHair, underwear, [], null, geosets, "The asset index is unavailable, so the selected CharSections textures cannot be resolved.");
-        var resolution = AssetDependencyGraphService.ResolveClientAsset(_index, model.Provenance, selectedSkin.TexturePath);
-        var paths = (resolution.SourcePath is not null ? new[] { resolution.SourcePath } : resolution.Candidates).ToArray();
-        var exactEquivalent = paths.Length > 1 && paths.Skip(1).All(path => AssetComparisonService.FilesAreIdentical(paths[0], path, token));
-        var sources = paths.Select(path => new AppearanceSourceChoice(SourceName(_index, path), path, exactEquivalent)).OrderBy(source => source.Provenance, StringComparer.OrdinalIgnoreCase).ToArray();
-        var selectedSource = sources.FirstOrDefault(source => source.FullPath.Equals(requestedSource, StringComparison.OrdinalIgnoreCase));
-        selectedSource ??= sources.Length == 1 || exactEquivalent ? sources.FirstOrDefault() : null;
-        var message = sources.Length == 0
-            ? $"{identity.RaceName} {identity.SexName} · skin {selectedSkin.ColorIndex}: required texture is missing from the processed library."
-            : selectedSource is null
-                ? $"{identity.RaceName} {identity.SexName} · skin {selectedSkin.ColorIndex}: {sources.Length:N0} non-identical provenance variants exist. Choose the source that belongs to this model/client; Crucible will not guess."
-                : $"{identity.RaceName} {identity.SexName} · skin {selectedSkin.ColorIndex}: composing body, face, underwear, scalp, and hair from {selectedSource.Provenance}{(exactEquivalent ? " (all listed base candidates are byte-for-byte identical)" : string.Empty)}.";
-        var geosetMessage = geosets.Hair is null ? string.Empty : $" Hair style {geosets.Hair.VariationIndex:N0} selects exact geoset {geosets.Hair.GeosetId:N0}{(geosets.Hair.ShowScalp ? " with scalp" : string.Empty)}.";
-        if (geosets.Warnings.Count > 0) geosetMessage += $" {string.Join(" ", geosets.Warnings)}";
-        return new(identity, skins, selectedSkin, faces, selectedFace, facialHair, selectedFacialHair, hair, selectedHair, underwear, sources, selectedSource, geosets, message + geosetMessage);
-
-        static CharacterSection? Pick(IReadOnlyList<CharacterSection> options, CharacterSection? requested)
-            => requested is null ? options.FirstOrDefault() : options.FirstOrDefault(option => option.Id == requested.Id) ?? options.FirstOrDefault();
+        if (!File.Exists(Path.Combine(_session.Settings.CoreDbcPath, "CharSections.dbc"))) return EmptyAppearance(identity, $"Detected {identity.RaceName} {identity.SexName}, but CharSections.dbc is unavailable. Point Server & SQL at a server DBC folder to enable real appearances.");
+        if (_index is null) return EmptyAppearance(identity, "The asset index is unavailable, so CharSections textures cannot be resolved.");
+        var core=CharacterAppearancePreviewService.Build(_index,_session.Settings.CoreDbcPath,identity,requestedSkin?.Id,requestedFace?.Id,requestedFacialHair?.Id,requestedHair?.Id,requestedSource,model.Provenance,token);
+        var sources=core.Sources.Select(source=>new AppearanceSourceChoice(source.Provenance,source.FullPath,source.ByteEquivalent)).ToArray();var selectedSource=core.SelectedSource is null?null:sources.FirstOrDefault(source=>source.FullPath.Equals(core.SelectedSource.FullPath,StringComparison.OrdinalIgnoreCase));
+        return new(identity,core.Skins,core.SelectedSkin,core.Faces,core.SelectedFace,core.FacialHair,core.SelectedFacialHair,core.Hair,core.SelectedHair,core.Underwear,sources,selectedSource,core.Geosets,core.Message,core);
     }
 
     private void ApplyAppearancePlan(AppearancePlan plan)
@@ -647,36 +621,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private sealed record DecodedAppearance(RgbaTexture Body, RgbaTexture? Hair, IReadOnlyList<string> Missing);
     private DecodedAppearance DecodeAppearance(AppearancePlan plan, CancellationToken token)
     {
-        if (_index is null || plan.SelectedSource is null) throw new InvalidOperationException("A selected appearance provenance is required.");
-        var missing = new List<string>(); var layers = new List<CharacterTextureLayer>();
-        var body = BlpTextureService.Decode(plan.SelectedSource.FullPath); token.ThrowIfCancellationRequested();
-        Add(plan.Underwear?.Texture1, CharacterTextureRegion.Torso); Add(plan.Underwear?.Texture0, CharacterTextureRegion.Pelvis);
-        Add(plan.SelectedFace?.Texture1, CharacterTextureRegion.FaceUpper); Add(plan.SelectedFace?.Texture0, CharacterTextureRegion.FaceLower);
-        Add(plan.SelectedFacialHair?.Texture1, CharacterTextureRegion.FaceUpper); Add(plan.SelectedFacialHair?.Texture0, CharacterTextureRegion.FaceLower);
-        Add(plan.SelectedHair?.Texture2, CharacterTextureRegion.FaceUpper); Add(plan.SelectedHair?.Texture1, CharacterTextureRegion.FaceLower);
-        RgbaTexture? hair = null;
-        var hairPath = Resolve(plan.SelectedHair?.Texture0);
-        if (hairPath is not null) hair = BlpTextureService.Decode(hairPath);
-        token.ThrowIfCancellationRequested();
-        return new(CharacterTextureComposer.Compose(body, layers), hair, missing);
-
-        void Add(string? clientPath, CharacterTextureRegion region)
-        {
-            var path = Resolve(clientPath); if (path is null) return;
-            layers.Add(new(BlpTextureService.Decode(path), region)); token.ThrowIfCancellationRequested();
-        }
-        string? Resolve(string? clientPath)
-        {
-            if (string.IsNullOrWhiteSpace(clientPath)) return null;
-            var resolution = AssetDependencyGraphService.ResolveClientAsset(_index, plan.SelectedSource.Provenance, clientPath);
-            if (resolution.SourcePath is not null) return resolution.SourcePath;
-            missing.Add(Path.GetFileName(clientPath)); return null;
-        }
+        if (_index is null||plan.CorePlan is null)throw new InvalidOperationException("A resolved core appearance plan is required.");var composed=CharacterAppearancePreviewService.Compose(_index,plan.CorePlan,token);return new(composed.Body,composed.Hair,composed.Missing);
     }
-
-    private static string SourceName(AssetComparisonIndex index, string path)
-        => index.LooseContentRoot is { } loose && Path.GetRelativePath(loose, path) is var relative && relative != ".." && !relative.StartsWith(".." + Path.DirectorySeparatorChar)
-            ? "Loose" : Directory.GetParent(path)?.Name ?? "Unknown";
 
     private void RefreshGeosetInspector(M2PreviewGeometry geometry)
     {
