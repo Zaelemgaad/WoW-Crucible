@@ -7,50 +7,54 @@
         x:Class="WoWCrucible.Desktop.MainWindow"
         Title="WoW Crucible"
         WindowStartupLocation="CenterScreen">
-    <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="Auto,Auto,*,Auto,Auto">
+    <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="1.1*,Auto,3*,Auto,1.5*">
         <Border x:Name="MainHeader" Grid.Row="0" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,0,0,1">
-            <Grid ColumnDefinitions="Auto,*,Auto" Margin="14,0">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="9">
+            <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" Margin="14,4">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="9" Margin="0,2,10,4">
                     <TextBlock Text="WOW CRUCIBLE" FontWeight="SemiBold" FontSize="15" VerticalAlignment="Center" />
                 </StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <Button Classes="accent" Content="Open DBC" Click="OpenDbcClick" />
-                    <Button Content="Open M2" Click="OpenM2Click" />
-                    <Button Content="Save" Click="SaveClick" />
-                    <Button Content="Save As" Click="SaveAsClick" />
-                    <Button Content="Close" Click="CloseDocumentClick" />
-                    <Button Content="Logs" Click="OpenLogsClick" />
-                    <Button Content="CLI Guide" Click="OpenCliGuideClick" />
-                    <TextBox x:Name="SearchBox" PlaceholderText="Search loaded table…" TextChanged="SearchChanged" />
-                </StackPanel>
-                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <WrapPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <ToggleSwitch x:Name="DevbugModeToggle" OnContent="DEVBUG ON" OffContent="DEVBUG OFF" IsCheckedChanged="DevbugModeChanged" />
-                    <Border Padding="9,5" CornerRadius="5" Background="#13251F" BorderBrush="#285845" BorderThickness="1">
+                    <Border Margin="8,0,0,0" Padding="9,5" CornerRadius="5" Background="#13251F" BorderBrush="#285845" BorderThickness="1">
                         <TextBlock Text="AVALONIA PREVIEW" Foreground="#79D7A8" FontSize="11" FontWeight="SemiBold" />
                     </Border>
-                </StackPanel>
+                </WrapPanel>
+                <ScrollViewer Grid.Row="1" Grid.ColumnSpan="2" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                    <WrapPanel Orientation="Horizontal">
+                        <Button Margin="0,0,8,0" Classes="accent" Content="Open DBC" Click="OpenDbcClick" />
+                        <Button Margin="0,0,8,0" Content="Open M2" Click="OpenM2Click" />
+                        <Button Margin="0,0,8,0" Content="Save" Click="SaveClick" />
+                        <Button Margin="0,0,8,0" Content="Save As" Click="SaveAsClick" />
+                        <Button Margin="0,0,8,0" Content="Close" Click="CloseDocumentClick" />
+                        <Button Margin="0,0,8,0" Content="Logs" Click="OpenLogsClick" />
+                        <Button Margin="0,0,8,0" Content="CLI Guide" Click="OpenCliGuideClick" />
+                        <TextBox x:Name="SearchBox" PlaceholderText="Search loaded table…" TextChanged="SearchChanged" />
+                    </WrapPanel>
+                </ScrollViewer>
             </Grid>
         </Border>
 
         <Border x:Name="NavigationPane" Grid.Row="1" Grid.Column="0" BorderBrush="#2B3445" BorderThickness="0,0,1,0" Background="#0E1219">
-            <Grid RowDefinitions="Auto,Auto,*,Auto" Margin="12">
+            <Grid RowDefinitions="Auto,*,Auto" Margin="12">
                 <TextBlock Text="WORKSPACE" Foreground="#7F8A9F" FontSize="10" FontWeight="Bold" Margin="6,4,0,9" />
-                <StackPanel Grid.Row="1" Spacing="4">
-                    <Button HorizontalContentAlignment="Left" Content="▦  DBC tables" Click="OpenEditorWorkspaceClick" />
-                    <Button HorizontalContentAlignment="Left" Content="◫  DBC layers &amp; promotion" Click="OpenLayeredDbcsClick" />
-                    <Button HorizontalContentAlignment="Left" Content="◈  Items &amp; sets" Click="OpenItemWorkbenchClick" />
-                    <Button HorizontalContentAlignment="Left" Content="♟  Creatures &amp; NPCs" Click="OpenCreatureWorkspaceClick" />
-                    <Button HorizontalContentAlignment="Left" Content="▱  Gameobjects" Click="OpenGameObjectWorkspaceClick" />
-                    <Button HorizontalContentAlignment="Left" Content="✦  Quests" Click="OpenQuestWorkspaceClick" />
-                    <Button HorizontalContentAlignment="Left" Content="⌘  Behaviors &amp; dialogue" Click="OpenBehaviorWorkspaceClick" />
-                    <Button HorizontalContentAlignment="Left" Content="◇  MPQ patches" Click="OpenMpqWorkspaceClick" />
-                    <Button HorizontalContentAlignment="Left" Content="▣  Client workshop" Click="OpenClientWorkspaceClick" />
-                    <Button HorizontalContentAlignment="Left" Content="▧  Texture lab" Click="OpenTextureWorkspaceClick" />
-                    <Button HorizontalContentAlignment="Left" Content="⬡  Assets &amp; compare" Click="OpenAssetComparisonClick" />
-                    <Button HorizontalContentAlignment="Left" Content="⚙  Server &amp; SQL" Click="OpenServerSqlClick" />
-                    <Button HorizontalContentAlignment="Left" Content="▤  SQL studio" Click="OpenSqlWorkspaceClick" />
-                </StackPanel>
-                <Border Grid.Row="3" Padding="10" CornerRadius="6" Background="#131925" BorderBrush="#273044" BorderThickness="1">
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Spacing="4">
+                        <Button HorizontalContentAlignment="Left" Click="OpenEditorWorkspaceClick"><TextBlock Text="▦  DBC tables" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenLayeredDbcsClick"><TextBlock Text="◫  DBC layers &amp; promotion" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenItemWorkbenchClick"><TextBlock Text="◈  Items &amp; sets" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenCreatureWorkspaceClick"><TextBlock Text="♟  Creatures &amp; NPCs" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenGameObjectWorkspaceClick"><TextBlock Text="▱  Gameobjects" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenQuestWorkspaceClick"><TextBlock Text="✦  Quests" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenBehaviorWorkspaceClick"><TextBlock Text="⌘  Behaviors &amp; dialogue" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenMpqWorkspaceClick"><TextBlock Text="◇  MPQ patches" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenClientWorkspaceClick"><TextBlock Text="▣  Client workshop" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenTextureWorkspaceClick"><TextBlock Text="▧  Texture lab" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenAssetComparisonClick"><TextBlock Text="⬡  Assets &amp; compare" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenServerSqlClick"><TextBlock Text="⚙  Server &amp; SQL" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenSqlWorkspaceClick"><TextBlock Text="▤  SQL studio" TextWrapping="Wrap" /></Button>
+                    </StackPanel>
+                </ScrollViewer>
+                <Border Grid.Row="2" Margin="0,8,0,0" Padding="10" CornerRadius="6" Background="#131925" BorderBrush="#273044" BorderThickness="1">
                     <StackPanel Spacing="5">
                         <TextBlock Text="Performance mode" FontWeight="SemiBold" />
                         <TextBlock Text="No animations · direct-rendered tables · background file I/O · Devbug optional" TextWrapping="Wrap" Foreground="#8E99AD" FontSize="11" />
@@ -63,25 +67,27 @@
 
         <Grid x:Name="EditorWorkspace" Grid.Row="1" Grid.Column="2" RowDefinitions="Auto,*" Background="#090C11">
             <Border BorderBrush="#2B3445" BorderThickness="0,0,0,1" Background="#0E131C">
-                <Grid ColumnDefinitions="*,Auto">
+                <Grid RowDefinitions="Auto,Auto">
                     <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                         <StackPanel x:Name="DocumentTabsPanel" Orientation="Horizontal" VerticalAlignment="Bottom" />
                     </ScrollViewer>
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" Margin="6,4" VerticalAlignment="Center">
-                        <Button Content="Undo" Padding="8,4" Click="UndoClick" />
-                        <Button Content="Redo" Padding="8,4" Click="RedoClick" />
-                        <Button Content="+ Row" Padding="8,4" Click="AddRowClick" />
-                        <Button Content="Clone" Padding="8,4" Click="CloneRowClick" />
-                        <Button Content="Clone ×…" Padding="8,4" Click="CloneMultipleClick" />
-                        <Button Content="Delete" Padding="8,4" Click="DeleteRowClick" />
-                        <Button Content="Spell workspace" Padding="8,4" Click="OpenSpellWorkspaceClick" />
-                        <ToggleSwitch x:Name="DecodedToggle" OnContent="Decoded" OffContent="Raw" IsChecked="True" Margin="4,0" IsCheckedChanged="DecodedChanged" />
-                    </StackPanel>
+                    <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                        <WrapPanel Margin="6,4" Orientation="Horizontal">
+                            <Button Margin="0,0,4,0" Content="Undo" Padding="8,4" Click="UndoClick" />
+                            <Button Margin="0,0,4,0" Content="Redo" Padding="8,4" Click="RedoClick" />
+                            <Button Margin="0,0,4,0" Content="+ Row" Padding="8,4" Click="AddRowClick" />
+                            <Button Margin="0,0,4,0" Content="Clone" Padding="8,4" Click="CloneRowClick" />
+                            <Button Margin="0,0,4,0" Content="Clone ×…" Padding="8,4" Click="CloneMultipleClick" />
+                            <Button Margin="0,0,4,0" Content="Delete" Padding="8,4" Click="DeleteRowClick" />
+                            <Button Margin="0,0,4,0" Content="Spell workspace" Padding="8,4" Click="OpenSpellWorkspaceClick" />
+                            <ToggleSwitch x:Name="DecodedToggle" OnContent="Decoded" OffContent="Raw" IsChecked="True" Margin="4,0" IsCheckedChanged="DecodedChanged" />
+                        </WrapPanel>
+                    </ScrollViewer>
                 </Grid>
             </Border>
             <Grid Grid.Row="1">
-                <Grid x:Name="WelcomePanel" VerticalAlignment="Center" HorizontalAlignment="Center">
-                    <Border CornerRadius="12" Padding="34" BorderBrush="#2A3447" BorderThickness="1">
+                <Grid x:Name="WelcomePanel">
+                    <Border Margin="18" CornerRadius="12" Padding="34" BorderBrush="#2A3447" BorderThickness="1">
                         <Border.Background>
                             <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
                                 <GradientStop Color="#182233" Offset="0" />
@@ -91,10 +97,10 @@
                         <StackPanel Spacing="13">
                             <TextBlock Text="Crucible, rebuilt for speed." FontSize="28" FontWeight="SemiBold" />
                             <TextBlock Text="This is the first native Avalonia workspace. Open a WotLK WDBC table to test the custom virtual viewport against a real client or server dataset." Foreground="#A7B0C0" TextWrapping="Wrap" LineHeight="21" />
-                            <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                            <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
                                 <Button Classes="accent" Content="Open a DBC" Click="OpenDbcClick" />
-                                <Button Content="Preview an M2" Click="OpenM2Click" />
-                            </StackPanel>
+                                <Button Margin="8,0,0,0" Content="Preview an M2" Click="OpenM2Click" />
+                            </WrapPanel>
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -117,7 +123,9 @@
                     <TextBlock x:Name="InspectorSummary" Text="Open a table or model to begin." TextWrapping="Wrap" Foreground="#939EB1" />
                 </StackPanel>
                 <Border Grid.Row="2" Margin="0,18,0,0" CornerRadius="7" BorderBrush="#283247" BorderThickness="1" Background="#0A0E15">
-                    <TextBlock x:Name="InspectorDetail" Text="Table metadata and selection details appear here." Margin="14" TextWrapping="Wrap" Foreground="#7F8A9F" FontFamily="Cascadia Mono,Consolas" FontSize="11" />
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <TextBlock x:Name="InspectorDetail" Text="Table metadata and selection details appear here." Margin="14" TextWrapping="Wrap" Foreground="#7F8A9F" FontFamily="Cascadia Mono,Consolas" FontSize="11" />
+                    </ScrollViewer>
                 </Border>
             </Grid>
         </Border>
@@ -132,7 +140,9 @@
         <Border x:Name="FeatureWorkspaceHost" Grid.Row="0" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#090C11" />
         <Grid x:Name="DialogOverlayHost" Grid.Row="0" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#CC05070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,8*,*">
             <Border Grid.Row="1" Grid.Column="1" Padding="20" CornerRadius="10" BorderBrush="#39465E" BorderThickness="1" Background="#111722">
-                <ContentControl x:Name="DialogContent" />
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                    <ContentControl x:Name="DialogContent" />
+                </ScrollViewer>
             </Border>
         </Grid>
     </Grid>

@@ -133,9 +133,15 @@ geometrySkin[162] = 16; BitConverter.GetBytes((ushort)0).CopyTo(geometrySkin, 16
 File.WriteAllBytes(Path.Combine(assetFixture, "geometry00.skin"), geometrySkin);
 var previewGeometry = M2PreviewGeometryService.Load(geometryModelPath);
 var allGeosetGeometry = M2PreviewGeometryService.Load(geometryModelPath, visibilityMode: M2PreviewVisibilityMode.AllGeosets);
+var selectedHairGeometry = M2PreviewGeometryService.Load(geometryModelPath, geosetSelection: new M2GeosetSelection(new Dictionary<int, int> { [0] = 2 }, "test selection"));
+if (!M2PreviewGeometryService.IsBaseAppearanceGeoset(0) || !M2PreviewGeometryService.IsBaseAppearanceGeoset(401) || !M2PreviewGeometryService.IsBaseAppearanceGeoset(1301) ||
+    M2PreviewGeometryService.IsBaseAppearanceGeoset(3) || M2PreviewGeometryService.IsBaseAppearanceGeoset(1201) || M2PreviewGeometryService.IsBaseAppearanceGeoset(1501) ||
+    M2PreviewGeometryService.IsBaseAppearanceGeoset(1801) || M2PreviewGeometryService.IsBaseAppearanceGeoset(2401) || M2PreviewGeometryService.IsBaseAppearanceGeoset(2701) || M2PreviewGeometryService.IsBaseAppearanceGeoset(3201))
+    throw new InvalidOperationException("Base character geoset policy enabled hair without a DBC selection or enabled equipment/customization-only geometry.");
 if (previewGeometry.Vertices.Count != 3 || previewGeometry.TriangleIndices.Count != 3 || previewGeometry.TotalTriangleIndices != 6 || previewGeometry.Submeshes.Count != 2 || previewGeometry.Submeshes.Count(section => section.Visible) != 1 ||
     allGeosetGeometry.TriangleIndices.Count != 6 || allGeosetGeometry.Submeshes.Count(section => section.Visible) != 2 || previewGeometry.Minimum.X != -1f || previewGeometry.Maximum.Z != 1f || previewGeometry.TextureSlots.Count != 1 || previewGeometry.TextureSlots[0].EmbeddedPath != embeddedFixturePath || previewGeometry.TextureSlots[0].Flags != 3 ||
-    previewGeometry.MaterialUnits.Count != 1 || previewGeometry.MaterialUnits[0].SubmeshIndex != 0 || previewGeometry.MaterialUnits[0].TextureDefinitionIndex != 0 || previewGeometry.Batches.Count != 1 || previewGeometry.Batches[0].TextureDefinitionIndex != 0)
+    previewGeometry.MaterialUnits.Count != 1 || previewGeometry.MaterialUnits[0].SubmeshIndex != 0 || previewGeometry.MaterialUnits[0].TextureDefinitionIndex != 0 || previewGeometry.Batches.Count != 1 || previewGeometry.Batches[0].TextureDefinitionIndex != 0 ||
+    selectedHairGeometry.TriangleIndices.Count != 6 || selectedHairGeometry.Submeshes.Count(section => section.Visible) != 2 || selectedHairGeometry.GeosetSelection?.GroupVariants[0] != 2)
     throw new InvalidOperationException("Native M2/SKIN preview geometry parsing failed.");
 var bloodElfFemale = CharacterAppearanceService.Infer(@"Character\BloodElf\Female", "BloodElfFemale.M2");
 if (bloodElfFemale is null || bloodElfFemale.RaceId != 10 || bloodElfFemale.SexId != 1) throw new InvalidOperationException("Character appearance inference did not distinguish Blood Elf female from male.");
@@ -145,6 +151,9 @@ if (bloodElfSkins.Count < 10 || bloodElfSkins[0].ColorIndex != 0 || !bloodElfSki
 var bloodElfSections = CharacterAppearanceService.LoadSections(Path.Combine(args[1], "CharSections.dbc"), bloodElfFemale);
 if (!bloodElfSections.Any(section => section.Kind == CharacterSectionKind.Face && section.Texture0 is not null && section.Texture1 is not null) || !bloodElfSections.Any(section => section.Kind == CharacterSectionKind.Hair && section.Texture1 is not null && section.Texture2 is not null) || !bloodElfSections.Any(section => section.Kind == CharacterSectionKind.Underwear))
     throw new InvalidOperationException("CharSections full appearance discovery omitted face, hair, or underwear component layers.");
+var bloodElfGeosets = CharacterAppearanceService.ResolveGeosets(args[1], bloodElfFemale, 1, 0);
+if (bloodElfGeosets.Hair?.GeosetId != 3 || bloodElfGeosets.Hair.VariationIndex != 1 || bloodElfGeosets.FacialHair?.Variants.Count != 5 || bloodElfGeosets.GroupVariants[0] != 3 || bloodElfGeosets.GroupVariants[17] != 2 || bloodElfGeosets.Warnings.Count != 0)
+    throw new InvalidOperationException("WotLK character appearance did not resolve the selected hair/facial style into exact CharHairGeosets and CharacterFacialHairStyles groups.");
 var atlasPixels = Enumerable.Repeat((byte)255, 256 * 256 * 4).ToArray(); var upperPixels = new byte[128 * 32 * 4];
 for (var offset = 0; offset < upperPixels.Length; offset += 4) { upperPixels[offset] = 12; upperPixels[offset + 1] = 34; upperPixels[offset + 2] = 56; upperPixels[offset + 3] = 255; }
 var composedAtlas = CharacterTextureComposer.Compose(new(256, 256, atlasPixels), [new(new(128, 32, upperPixels), CharacterTextureRegion.FaceUpper)]);

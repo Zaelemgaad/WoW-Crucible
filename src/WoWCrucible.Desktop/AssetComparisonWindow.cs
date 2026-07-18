@@ -23,7 +23,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private sealed record AppearancePlan(CharacterAppearanceIdentity? Identity, IReadOnlyList<CharacterBaseSkin> Skins, CharacterBaseSkin? SelectedSkin,
         IReadOnlyList<CharacterSection> Faces, CharacterSection? SelectedFace, IReadOnlyList<CharacterSection> FacialHair, CharacterSection? SelectedFacialHair,
         IReadOnlyList<CharacterSection> Hair, CharacterSection? SelectedHair, CharacterSection? Underwear,
-        IReadOnlyList<AppearanceSourceChoice> Sources, AppearanceSourceChoice? SelectedSource, string Message);
+        IReadOnlyList<AppearanceSourceChoice> Sources, AppearanceSourceChoice? SelectedSource, CharacterAppearanceGeosetPlan? Geosets, string Message);
     private readonly TextBox _library = new() { Text = Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty };
     private readonly TextBox _directorySearch = new() { PlaceholderText = "Filter content paths…" };
     private readonly ListBox _directories = new();
@@ -39,7 +39,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly ComboBox _modelPicker = new();
     private readonly TextBox _modelSearch = new() { PlaceholderText = "Filter discovered M2 models…" };
     private readonly ComboBox _modelFilter = new() { ItemsSource = new[] { "Ready models", "All models" }, SelectedIndex = 0 };
-    private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Base appearance", "All geosets (diagnostic)" }, SelectedIndex = 0 };
+    private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Selected appearance geosets", "All geosets (diagnostic only)" }, SelectedIndex = 0 };
     private readonly ComboBox _skinPicker = new() { PlaceholderText = "No CharSections base skins loaded" };
     private readonly ComboBox _facePicker = new() { PlaceholderText = "No face layers" };
     private readonly ComboBox _facialHairPicker = new() { PlaceholderText = "No facial-hair layers" };
@@ -503,11 +503,13 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
         try
         {
-            var visibilityMode = _geosetMode.SelectedIndex == 1 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath, visibilityMode), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
-            var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             var requestedSkin = _skinPicker.SelectedItem as CharacterBaseSkin; var requestedFace = _facePicker.SelectedItem as CharacterSection; var requestedFacialHair = _facialHairPicker.SelectedItem as CharacterSection; var requestedHair = _hairPicker.SelectedItem as CharacterSection; var requestedSource = (_appearanceSourcePicker.SelectedItem as AppearanceSourceChoice)?.FullPath;
             var appearance = await Task.Run(() => BuildAppearancePlan(model, requestedSkin, requestedFace, requestedFacialHair, requestedHair, requestedSource, token), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+            var visibilityMode = _geosetMode.SelectedIndex == 1 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
+            var geosetSelection = visibilityMode == M2PreviewVisibilityMode.BaseAppearance && appearance.Geosets is { GroupVariants.Count: > 0 } geosets
+                ? new M2GeosetSelection(geosets.GroupVariants, "CharHairGeosets.dbc + CharacterFacialHairStyles.dbc") : null;
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath, visibilityMode, geosetSelection), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+            var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             ApplyAppearancePlan(appearance);
             var embeddedTextures = new Dictionary<int, RgbaTexture>(); string? embeddedTexturePath = null;
             _appearanceComposed = false;
@@ -575,7 +577,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var hair = sections.Where(section => section.Kind == CharacterSectionKind.Hair).ToArray();
         var underwear = sections.FirstOrDefault(section => section.Kind == CharacterSectionKind.Underwear && section.ColorIndex == selectedSkin.ColorIndex);
         var selectedFace = Pick(faces, requestedFace); var selectedFacialHair = Pick(facialHair, requestedFacialHair); var selectedHair = Pick(hair, requestedHair);
-        if (_index is null) return new(identity, skins, selectedSkin, faces, selectedFace, facialHair, selectedFacialHair, hair, selectedHair, underwear, [], null, "The asset index is unavailable, so the selected CharSections textures cannot be resolved.");
+        var geosets = CharacterAppearanceService.ResolveGeosets(_session.Settings.CoreDbcPath, identity, selectedHair?.VariationIndex, selectedFacialHair?.VariationIndex);
+        if (_index is null) return new(identity, skins, selectedSkin, faces, selectedFace, facialHair, selectedFacialHair, hair, selectedHair, underwear, [], null, geosets, "The asset index is unavailable, so the selected CharSections textures cannot be resolved.");
         var resolution = AssetDependencyGraphService.ResolveClientAsset(_index, model.Provenance, selectedSkin.TexturePath);
         var paths = (resolution.SourcePath is not null ? new[] { resolution.SourcePath } : resolution.Candidates).ToArray();
         var exactEquivalent = paths.Length > 1 && paths.Skip(1).All(path => AssetComparisonService.FilesAreIdentical(paths[0], path, token));
@@ -587,7 +590,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             : selectedSource is null
                 ? $"{identity.RaceName} {identity.SexName} · skin {selectedSkin.ColorIndex}: {sources.Length:N0} non-identical provenance variants exist. Choose the source that belongs to this model/client; Crucible will not guess."
                 : $"{identity.RaceName} {identity.SexName} · skin {selectedSkin.ColorIndex}: composing body, face, underwear, scalp, and hair from {selectedSource.Provenance}{(exactEquivalent ? " (all listed base candidates are byte-for-byte identical)" : string.Empty)}.";
-        return new(identity, skins, selectedSkin, faces, selectedFace, facialHair, selectedFacialHair, hair, selectedHair, underwear, sources, selectedSource, message);
+        var geosetMessage = geosets.Hair is null ? string.Empty : $" Hair style {geosets.Hair.VariationIndex:N0} selects exact geoset {geosets.Hair.GeosetId:N0}{(geosets.Hair.ShowScalp ? " with scalp" : string.Empty)}.";
+        if (geosets.Warnings.Count > 0) geosetMessage += $" {string.Join(" ", geosets.Warnings)}";
+        return new(identity, skins, selectedSkin, faces, selectedFace, facialHair, selectedFacialHair, hair, selectedHair, underwear, sources, selectedSource, geosets, message + geosetMessage);
 
         static CharacterSection? Pick(IReadOnlyList<CharacterSection> options, CharacterSection? requested)
             => requested is null ? options.FirstOrDefault() : options.FirstOrDefault(option => option.Id == requested.Id) ?? options.FirstOrDefault();
@@ -608,7 +613,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         finally { _suppressAppearanceSelection = false; }
     }
 
-    private static AppearancePlan EmptyAppearance(CharacterAppearanceIdentity? identity, string message) => new(identity, [], null, [], null, [], null, [], null, null, [], null, message);
+    private static AppearancePlan EmptyAppearance(CharacterAppearanceIdentity? identity, string message) => new(identity, [], null, [], null, [], null, [], null, null, [], null, null, message);
 
     private sealed record DecodedAppearance(RgbaTexture Body, RgbaTexture? Hair, IReadOnlyList<string> Missing);
     private DecodedAppearance DecodeAppearance(AppearancePlan plan, CancellationToken token)
@@ -654,7 +659,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var dependencies = _modelDependencyGraph is null ? "Dependencies: inspection pending." : $"Dependencies: {_modelDependencyGraph.Resolved.Count:N0} resolved · {_modelDependencyGraph.ExternalBindings.Count:N0} appearance/DBC binding(s) · {_modelDependencyGraph.Blocking.Count:N0} BLOCKING";
         var geosets = _loadedModelGeometry is null || _loadedModelGeometry.Submeshes.Count == 0
             ? "Geosets: no SKIN submesh table; showing the complete mesh."
-            : $"Geosets: {_loadedModelGeometry.Submeshes.Count(section => section.Visible):N0} visible of {_loadedModelGeometry.Submeshes.Count:N0} · {_loadedModelGeometry.VisibilityMode} · {_loadedModelGeometry.TriangleIndices.Count / 3:N0} of {_loadedModelGeometry.TotalTriangleIndices / 3:N0} triangles";
+            : $"Geosets: {_loadedModelGeometry.Submeshes.Count(section => section.Visible):N0} visible of {_loadedModelGeometry.Submeshes.Count:N0} · {_loadedModelGeometry.VisibilityMode} · {_loadedModelGeometry.TriangleIndices.Count / 3:N0} of {_loadedModelGeometry.TotalTriangleIndices / 3:N0} triangles" +
+              (_loadedModelGeometry.GeosetSelection is null ? string.Empty : $" · exact DBC groups {string.Join(", ", _loadedModelGeometry.GeosetSelection.GroupVariants.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value}"))}");
         var previewNote = _appearanceComposed
             ? "Geometry, per-submesh materials, and the selected CharSections body/face/facial-hair/underwear/scalp/hair appearance are live. Equipment, animation, and multi-pass shaders remain fidelity stages."
             : _resolvedModelTexturePath is not null

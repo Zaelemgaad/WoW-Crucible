@@ -4,6 +4,7 @@ namespace WoWCrucible.Core;
 
 public sealed record M2TextureSlot(int Index, uint Type, uint Flags, string? EmbeddedPath);
 public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
+public sealed record M2GeosetSelection(IReadOnlyDictionary<int, int> GroupVariants, string Source);
 public sealed record M2PreviewSubmesh(int Index, ushort GeosetId, ushort Level, int VertexStart, int VertexCount, int TriangleStart, int TriangleIndexCount, bool Visible);
 public sealed record M2PreviewMaterialUnit(int Index, byte Flags, sbyte PriorityPlane, ushort ShaderId, ushort SubmeshIndex, ushort SecondarySubmeshIndex, short ColorIndex, ushort RenderFlagsIndex, ushort TextureUnitLookupIndex, ushort TextureCount, ushort TextureLookupIndex, int TextureDefinitionIndex, ushort SecondaryTextureUnitLookupIndex, ushort TransparencyLookupIndex, ushort TextureAnimationLookupIndex);
 public sealed record M2PreviewBatch(int SubmeshIndex, ushort GeosetId, int TriangleStart, int TriangleIndexCount, int? MaterialUnitIndex, int? TextureDefinitionIndex);
@@ -14,6 +15,7 @@ public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadO
     public IReadOnlyList<M2PreviewBatch> Batches { get; init; } = [];
     public int TotalTriangleIndices { get; init; } = TriangleIndices.Count;
     public M2PreviewVisibilityMode VisibilityMode { get; init; } = M2PreviewVisibilityMode.BaseAppearance;
+    public M2GeosetSelection? GeosetSelection { get; init; }
 }
 
 public static class M2PreviewGeometryService
@@ -22,7 +24,8 @@ public static class M2PreviewGeometryService
     private const int MaximumVertices = 5_000_000;
     private const int MaximumTriangleIndices = 15_000_000;
 
-    public static M2PreviewGeometry Load(string modelPath, string? skinPath = null, M2PreviewVisibilityMode visibilityMode = M2PreviewVisibilityMode.BaseAppearance)
+    public static M2PreviewGeometry Load(string modelPath, string? skinPath = null, M2PreviewVisibilityMode visibilityMode = M2PreviewVisibilityMode.BaseAppearance,
+        M2GeosetSelection? geosetSelection = null)
     {
         modelPath = Path.GetFullPath(modelPath);
         if (!File.Exists(modelPath)) throw new FileNotFoundException("The M2 model does not exist.", modelPath);
@@ -64,7 +67,7 @@ public static class M2PreviewGeometryService
             allTriangles[index] = vertexIndex;
         }
         var materialUnits = ReadMaterialUnits(skin, textureLookup, textureSlots.Count);
-        var (submeshes, triangles, batches) = ReadVisibleSubmeshes(skin, allTriangles, materialUnits, visibilityMode);
+        var (submeshes, triangles, batches) = ReadVisibleSubmeshes(skin, allTriangles, materialUnits, visibilityMode, geosetSelection);
         if (triangles.Length > 0)
         {
             minimum = new Vector3(float.PositiveInfinity); maximum = new Vector3(float.NegativeInfinity);
@@ -76,7 +79,8 @@ public static class M2PreviewGeometryService
             MaterialUnits = materialUnits,
             Batches = batches,
             TotalTriangleIndices = allTriangles.Length,
-            VisibilityMode = visibilityMode
+            VisibilityMode = visibilityMode,
+            GeosetSelection = geosetSelection
         };
     }
 
@@ -144,7 +148,7 @@ public static class M2PreviewGeometryService
         return result;
     }
 
-    private static (IReadOnlyList<M2PreviewSubmesh> Submeshes, int[] Triangles, IReadOnlyList<M2PreviewBatch> Batches) ReadVisibleSubmeshes(byte[] skin, int[] allTriangles, IReadOnlyList<M2PreviewMaterialUnit> materialUnits, M2PreviewVisibilityMode visibilityMode)
+    private static (IReadOnlyList<M2PreviewSubmesh> Submeshes, int[] Triangles, IReadOnlyList<M2PreviewBatch> Batches) ReadVisibleSubmeshes(byte[] skin, int[] allTriangles, IReadOnlyList<M2PreviewMaterialUnit> materialUnits, M2PreviewVisibilityMode visibilityMode, M2GeosetSelection? geosetSelection)
     {
         const int CountOffset = 28; const int DataOffset = 32; const int SubmeshStride = 48; const int MaximumSubmeshes = 131_072;
         if (skin.Length < DataOffset + 4) return ([], allTriangles, [new(0, 0, 0, allTriangles.Length, null, null)]);
@@ -167,6 +171,21 @@ public static class M2PreviewGeometryService
         var visible = visibilityMode == M2PreviewVisibilityMode.AllGeosets
             ? Enumerable.Repeat(true, count).ToArray()
             : raw.Select(section => IsBaseAppearanceGeoset(section.Id)).ToArray();
+        if (visibilityMode == M2PreviewVisibilityMode.BaseAppearance && geosetSelection is not null)
+        {
+            foreach (var (group, variant) in geosetSelection.GroupVariants)
+            {
+                if (group < 0 || group > ushort.MaxValue / 100 || variant < 0 || variant > 99) continue;
+                for (var index = 0; index < raw.Length; index++)
+                {
+                    var id = raw[index].Id;
+                    if (group == 0 ? id is > 0 and < 100 : id / 100 == group) visible[index] = false;
+                }
+                if (variant == 0) continue;
+                var selectedId = group == 0 ? variant : checked(group * 100 + variant);
+                for (var index = 0; index < raw.Length; index++) if (raw[index].Id == selectedId) visible[index] = true;
+            }
+        }
         if (!visible.Any(value => value))
         {
             var fallback = Array.FindIndex(raw, section => section.Id == 0);
@@ -190,12 +209,16 @@ public static class M2PreviewGeometryService
         return (submeshes, triangles.ToArray(), batches);
     }
 
-    private static bool IsBaseAppearanceGeoset(ushort geosetId)
+    internal static bool IsBaseAppearanceGeoset(ushort geosetId)
     {
         if (geosetId == 0) return true;
-        if (geosetId < 100 || geosetId % 100 != 1) return false;
+        if (geosetId < 100) return false;
         var group = geosetId / 100;
-        return group is not 12 and not 15 and not 17 and not 18 and not 23 and not 24 and not 25 and not 35;
+        // These groups are driven by equipped items or explicit customization data.
+        // Showing their *01 fallback on a naked character produces phantom cloaks,
+        // belts, helms, attachments, and stacked modern customization geometry.
+        if (group is 12 or 15 or 17 or 18 or 23 or 24 or 25 or 26 or 27 or 28 or 32 or 35) return false;
+        return geosetId % 100 == 1;
     }
 
     private static string ResolveSkin(string modelPath, string? selected)
