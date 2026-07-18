@@ -30,6 +30,7 @@ public partial class App : Application
                     library = arguments[assetComparisonIndex + 1].Trim('"');
                 window.Opened += (_, _) => window.OpenAssetComparison(library);
             }
+            if (arguments.Any(argument => IsOption(argument, "--sql-studio"))) window.Opened += (_, _) => window.OpenSqlWorkspace();
             var initialPaths = desktop.Args?.Where(File.Exists).ToArray() ?? [];
             if (initialPaths.Length > 0)
                 window.Opened += async (_, _) =>
