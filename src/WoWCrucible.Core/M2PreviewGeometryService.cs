@@ -5,7 +5,12 @@ namespace WoWCrucible.Core;
 public sealed record M2TextureSlot(int Index, uint Type, uint Flags, string? EmbeddedPath);
 public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
 public sealed record M2GeosetSelection(IReadOnlyDictionary<int, int> GroupVariants, string Source);
-public sealed record M2PreviewSubmesh(int Index, ushort GeosetId, ushort Level, int VertexStart, int VertexCount, int TriangleStart, int TriangleIndexCount, bool Visible);
+public sealed record M2PreviewSubmesh(int Index, ushort GeosetId, ushort Level, int VertexStart, int VertexCount, int TriangleStart, int TriangleIndexCount, bool Visible)
+{
+    public int GeosetGroup => M2GeosetCatalog.Group(GeosetId);
+    public int GeosetVariant => M2GeosetCatalog.Variant(GeosetId);
+    public string GeosetGroupName => M2GeosetCatalog.GroupName(GeosetGroup);
+}
 public sealed record M2PreviewMaterialUnit(int Index, byte Flags, sbyte PriorityPlane, ushort ShaderId, ushort SubmeshIndex, ushort SecondarySubmeshIndex, short ColorIndex, ushort RenderFlagsIndex, ushort TextureUnitLookupIndex, ushort TextureCount, ushort TextureLookupIndex, int TextureDefinitionIndex, ushort SecondaryTextureUnitLookupIndex, ushort TransparencyLookupIndex, ushort TextureAnimationLookupIndex);
 public sealed record M2PreviewBatch(int SubmeshIndex, ushort GeosetId, int TriangleStart, int TriangleIndexCount, int? MaterialUnitIndex, int? TextureDefinitionIndex);
 public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadOnlyList<Vector3> Vertices, IReadOnlyList<Vector3> Normals, IReadOnlyList<Vector2> TextureCoordinates, IReadOnlyList<int> TriangleIndices, Vector3 Minimum, Vector3 Maximum, IReadOnlyList<M2TextureSlot> TextureSlots)
@@ -185,6 +190,15 @@ public static class M2PreviewGeometryService
                 var selectedId = group == 0 ? variant : checked(group * 100 + variant);
                 for (var index = 0; index < raw.Length; index++) if (raw[index].Id == selectedId) visible[index] = true;
             }
+        }
+        if (visibilityMode == M2PreviewVisibilityMode.BaseAppearance && geosetSelection?.GroupVariants.ContainsKey(7) != true &&
+            !raw.Where((section, index) => section.Id / 100 == 7 && visible[index]).Any())
+        {
+            // Wrath has race/sex models whose fixed built-in ears are not variant 01
+            // (for example an HD replacement may contain 702 but no 701). When no
+            // DBC/manual ear choice drives group 7, show the lowest real variant.
+            var fixedEarId = raw.Where(section => section.Id / 100 == 7 && section.Id % 100 > 0).Select(section => section.Id).DefaultIfEmpty().Min();
+            if (fixedEarId > 0) for (var index = 0; index < raw.Length; index++) if (raw[index].Id == fixedEarId) visible[index] = true;
         }
         if (!visible.Any(value => value))
         {

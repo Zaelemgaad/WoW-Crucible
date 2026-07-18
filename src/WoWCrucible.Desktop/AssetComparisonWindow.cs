@@ -20,6 +20,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     {
         public override string ToString() => $"{Provenance} · {Path.GetFileName(FullPath)}{(ExactEquivalent ? " · exact-equivalent" : string.Empty)}";
     }
+    private sealed record GeosetChoice(int Variant, string Label)
+    {
+        public override string ToString() => Label;
+    }
     private sealed record AppearancePlan(CharacterAppearanceIdentity? Identity, IReadOnlyList<CharacterBaseSkin> Skins, CharacterBaseSkin? SelectedSkin,
         IReadOnlyList<CharacterSection> Faces, CharacterSection? SelectedFace, IReadOnlyList<CharacterSection> FacialHair, CharacterSection? SelectedFacialHair,
         IReadOnlyList<CharacterSection> Hair, CharacterSection? SelectedHair, CharacterSection? Underwear,
@@ -39,7 +43,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly ComboBox _modelPicker = new();
     private readonly TextBox _modelSearch = new() { PlaceholderText = "Filter discovered M2 models…" };
     private readonly ComboBox _modelFilter = new() { ItemsSource = new[] { "Ready models", "All models" }, SelectedIndex = 0 };
-    private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Selected appearance geosets", "All geosets (diagnostic only)" }, SelectedIndex = 0 };
+    private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Character appearance (DBC-driven)", "Naked base (no hair or facial hair)", "Manual: exactly one variant per group", "Everything stacked (diagnostic only)" }, SelectedIndex = 0 };
+    private readonly ItemsControl _geosetGroups = new();
+    private readonly TextBlock _geosetInspectorStatus = new() { Text = "Load a compatible character M2 to inspect its named geoset groups.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), FontSize = 11 };
     private readonly ComboBox _skinPicker = new() { PlaceholderText = "No CharSections base skins loaded" };
     private readonly ComboBox _facePicker = new() { PlaceholderText = "No face layers" };
     private readonly ComboBox _facialHairPicker = new() { PlaceholderText = "No facial-hair layers" };
@@ -65,8 +71,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly DesktopWorkspaceSession _session;
     private AssetComparisonIndex? _index; private IReadOnlyList<AssetComparisonEntry> _folderEntries = []; private IReadOnlyList<AssetComparisonEntry> _filteredEntries = [];
     private IReadOnlyDictionary<string, AssetComparisonDuplicateGroup> _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<int, int> _manualGeosetVariants = [];
     private IReadOnlyList<AssetComparisonModel> _allModels = []; private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private Control? _imageDirectoryTools; private Control? _imageCardScroller; private Control? _imagePager; private Control? _modelOnlyCatalogNotice; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
-    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath; private int _resolvedModelTextureCount; private bool _appearanceComposed;
+    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath; private string? _geosetInspectorModel; private int _resolvedModelTextureCount; private bool _appearanceComposed;
     private Task? _modelDiscoveryTask;
     private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _suppressAppearanceSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
 
@@ -212,10 +219,25 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var modelFilters = new Grid { ColumnDefinitions = new("2*,*,Auto,Auto"), ColumnSpacing = 8, Children = { _modelSearch, WithColumn(_modelFilter, 1), WithColumn(previousModel, 2), WithColumn(nextModel, 3) } };
         var appearanceHeader = new TextBlock { Text = "CHARSECTIONS BASE APPEARANCE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") };
         var appearancePickers = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Children = { _skinPicker, WithColumn(_appearanceSourcePicker, 1), WithCell(_facePicker, 1, 0), WithCell(_facialHairPicker, 1, 1), WithCell(_hairPicker, 2, 0) } };
-        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _geosetMode, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
+        var geosetInspector = new Expander
+        {
+            Header = "Exact geoset inspector",
+            Content = new StackPanel
+            {
+                Spacing = 6,
+                Children =
+                {
+                    new TextBlock { Text = "Each group selector permits one visible variant or Hidden. Base-body sections with geoset ID 0 always remain visible. Only the Everything stacked mode intentionally combines mutually exclusive variants.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8793A7"), FontSize = 11 },
+                    _geosetInspectorStatus,
+                    _geosetGroups
+                }
+            }
+        };
+        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _geosetMode, geosetInspector, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
         var modelHeaderScroll = new ScrollViewer { Content = modelHeader, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
-        var modelPane = new Grid { RowDefinitions = new("Auto,*"), IsVisible = false, Children = { modelHeaderScroll } };
-        var modelBorder = new Border { Background = Brush.Parse("#090D14"), BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Child = _modelView }; Grid.SetRow(modelBorder, 1); modelPane.Children.Add(modelBorder); _modelPreviewPane = modelPane;
+        var modelPane = new Grid { RowDefinitions = new("2*,Auto,3*"), IsVisible = false, Children = { modelHeaderScroll } };
+        var modelSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }; Grid.SetRow(modelSplitter, 1); modelPane.Children.Add(modelSplitter);
+        var modelBorder = new Border { Background = Brush.Parse("#090D14"), BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Child = _modelView }; Grid.SetRow(modelBorder, 2); modelPane.Children.Add(modelBorder); _modelPreviewPane = modelPane;
         var previewHost = new Grid { Children = { grid, modelPane } };
         var root = new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(6) }; root.Children.Add(toolbar); Grid.SetRow(previewHost, 1); root.Children.Add(previewHost); return root;
     }
@@ -492,12 +514,13 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _modelCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token, directoryToken); var token = _modelCancellation.Token;
         if (_modelPicker.SelectedItem is not AssetComparisonModel model)
         {
+            ClearGeosetInspector("Choose a compatible M2 to inspect its geosets.");
             _modelStatus.Text = _allModels.Count == 0
                 ? "No M2 files were found in this path or its parent content paths."
                 : $"{_allModels.Count:N0} M2 file(s) were discovered, but none match the current model filter. Choose All models to inspect compatibility details.";
             return;
         }
-        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _modelDependencyGraph = null; _modelView.ClearGeometry(); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
+        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _modelDependencyGraph = null; _modelView.ClearGeometry(); ClearGeosetInspector("This model has no compatible M2/SKIN geometry to inspect."); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
         _modelStatus.Text = $"Loading {model.FileName}…";
         var stopwatch = Stopwatch.StartNew();
         DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
@@ -505,9 +528,15 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         {
             var requestedSkin = _skinPicker.SelectedItem as CharacterBaseSkin; var requestedFace = _facePicker.SelectedItem as CharacterSection; var requestedFacialHair = _facialHairPicker.SelectedItem as CharacterSection; var requestedHair = _hairPicker.SelectedItem as CharacterSection; var requestedSource = (_appearanceSourcePicker.SelectedItem as AppearanceSourceChoice)?.FullPath;
             var appearance = await Task.Run(() => BuildAppearancePlan(model, requestedSkin, requestedFace, requestedFacialHair, requestedHair, requestedSource, token), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
-            var visibilityMode = _geosetMode.SelectedIndex == 1 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
-            var geosetSelection = visibilityMode == M2PreviewVisibilityMode.BaseAppearance && appearance.Geosets is { GroupVariants.Count: > 0 } geosets
-                ? new M2GeosetSelection(geosets.GroupVariants, "CharHairGeosets.dbc + CharacterFacialHairStyles.dbc") : null;
+            var geosetMode = _geosetMode.SelectedIndex;
+            var visibilityMode = geosetMode == 3 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
+            M2GeosetSelection? geosetSelection = geosetMode switch
+            {
+                0 when appearance.Geosets is { GroupVariants.Count: > 0 } geosets => new(geosets.GroupVariants, "CharHairGeosets.dbc + CharacterFacialHairStyles.dbc"),
+                1 => new(M2GeosetCatalog.NakedCharacterSelection, "naked character preset"),
+                2 when _manualGeosetVariants.Count > 0 => new(new Dictionary<int, int>(_manualGeosetVariants), "manual exact geoset inspector"),
+                _ => null
+            };
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath, visibilityMode, geosetSelection), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             ApplyAppearancePlan(appearance);
@@ -547,7 +576,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                     if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
                 }
             }
-            _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _resolvedModelTexturePath = embeddedTexturePath; _resolvedModelTextureCount = embeddedTextures.Count; _modelView.SetGeometry(geometry);
+            _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _resolvedModelTexturePath = embeddedTexturePath; _resolvedModelTextureCount = embeddedTextures.Count; RefreshGeosetInspector(geometry); _modelView.SetGeometry(geometry);
             if (_selectedTexture is null) _modelView.SetDecodedTextures(embeddedTextures);
             UpdateModelStatus();
             DesktopCrashLogger.Debug("MODEL", "comparison-preview-success", ("model", model.ModelPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("texture_slots", geometry.TextureSlots.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
@@ -556,7 +585,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         catch (Exception exception)
         {
             if (!IsCurrent(token, activity) || request != _modelRequest) return;
-            DesktopCrashLogger.Log($"Comparison model preview failed: {model.ModelPath}", exception);
+            DesktopCrashLogger.Log($"Comparison model preview failed: {model.ModelPath}", exception); ClearGeosetInspector("Model loading failed before the geoset table could be inspected.");
             _modelStatus.Text = $"Could not load {model.FileName}: {exception.Message}";
         }
     }
@@ -649,6 +678,56 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         => index.LooseContentRoot is { } loose && Path.GetRelativePath(loose, path) is var relative && relative != ".." && !relative.StartsWith(".." + Path.DirectorySeparatorChar)
             ? "Loose" : Directory.GetParent(path)?.Name ?? "Unknown";
 
+    private void RefreshGeosetInspector(M2PreviewGeometry geometry)
+    {
+        var groups = M2GeosetCatalog.Describe(geometry.Submeshes);
+        if (!string.Equals(_geosetInspectorModel, geometry.ModelPath, StringComparison.OrdinalIgnoreCase))
+        {
+            _geosetInspectorModel = geometry.ModelPath; _manualGeosetVariants.Clear();
+            foreach (var group in groups)
+            {
+                var visible = group.Variants.FirstOrDefault(variant => variant.Variant > 0 && variant.Visible);
+                _manualGeosetVariants[group.Group] = visible?.Variant ?? 0;
+            }
+        }
+        var editable = groups.Where(group => group.Variants.Any(variant => variant.Variant > 0)).ToArray();
+        _geosetGroups.ItemsSource = editable.Select(BuildGeosetGroupRow).ToArray();
+        var baseSections = groups.Where(group => group.Group == 0).SelectMany(group => group.Variants).FirstOrDefault(variant => variant.Variant == 0)?.SubmeshIndices.Count ?? 0;
+        _geosetInspectorStatus.Text = $"{groups.Count:N0} decoded group(s) · {editable.Sum(group => group.Variants.Count(variant => variant.Variant > 0)):N0} selectable variant(s) · {baseSections:N0} always-on base section(s). " +
+            (_geosetMode.SelectedIndex == 2 ? "Manual selections are live." : "Switch to Manual mode to change the selectors below without stacking variants.");
+    }
+
+    private void ClearGeosetInspector(string message)
+    {
+        _geosetInspectorModel = null; _manualGeosetVariants.Clear(); _geosetGroups.ItemsSource = null; _geosetInspectorStatus.Text = message;
+    }
+
+    private Control BuildGeosetGroupRow(M2GeosetGroup group)
+    {
+        var choices = new List<GeosetChoice> { new(0, "Hidden") };
+        choices.AddRange(group.Variants.Where(variant => variant.Variant > 0).Select(variant =>
+        {
+            var geosetId = group.Group == 0 ? variant.Variant : group.Group * 100 + variant.Variant;
+            return new GeosetChoice(variant.Variant, $"Variant {variant.Variant:N0} · ID {geosetId:N0} · {variant.SubmeshIndices.Count:N0} section(s) · {variant.Triangles:N0} triangles");
+        }));
+        var selectedVariant = _manualGeosetVariants.GetValueOrDefault(group.Group);
+        var selector = new ComboBox { ItemsSource = choices, SelectedItem = choices.FirstOrDefault(choice => choice.Variant == selectedVariant) ?? choices[0], HorizontalAlignment = HorizontalAlignment.Stretch };
+        selector.SelectionChanged += async (_, _) =>
+        {
+            if (selector.SelectedItem is not GeosetChoice choice) return;
+            _manualGeosetVariants[group.Group] = choice.Variant;
+            if (_geosetMode.SelectedIndex == 2) await RunUiActionAsync("manual-geoset-change", LoadSelectedModelAsync);
+        };
+        return new Grid
+        {
+            ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Margin = new Thickness(0, 2), Children =
+            {
+                new TextBlock { Text = $"{group.Group:N0} · {group.Name}", VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap },
+                WithColumn(selector, 1)
+            }
+        };
+    }
+
     private void UpdateModelStatus()
     {
         if (_modelPicker.SelectedItem is not AssetComparisonModel model) return;
@@ -660,7 +739,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var geosets = _loadedModelGeometry is null || _loadedModelGeometry.Submeshes.Count == 0
             ? "Geosets: no SKIN submesh table; showing the complete mesh."
             : $"Geosets: {_loadedModelGeometry.Submeshes.Count(section => section.Visible):N0} visible of {_loadedModelGeometry.Submeshes.Count:N0} · {_loadedModelGeometry.VisibilityMode} · {_loadedModelGeometry.TriangleIndices.Count / 3:N0} of {_loadedModelGeometry.TotalTriangleIndices / 3:N0} triangles" +
-              (_loadedModelGeometry.GeosetSelection is null ? string.Empty : $" · exact DBC groups {string.Join(", ", _loadedModelGeometry.GeosetSelection.GroupVariants.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value}"))}");
+              (_loadedModelGeometry.GeosetSelection is null ? string.Empty : $" · {_loadedModelGeometry.GeosetSelection.Source}: {string.Join(", ", _loadedModelGeometry.GeosetSelection.GroupVariants.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value}"))}") +
+              (_loadedModelGeometry.VisibilityMode == M2PreviewVisibilityMode.AllGeosets ? " · WARNING: mutually exclusive variants are intentionally stacked" : string.Empty);
+        var visibleGeosets = _loadedModelGeometry is null ? string.Empty : string.Join(" · ", M2GeosetCatalog.Describe(_loadedModelGeometry.Submeshes)
+            .SelectMany(group => group.Variants.Where(variant => variant.Visible).Select(variant => $"{group.Name}={variant.Variant}")));
         var previewNote = _appearanceComposed
             ? "Geometry, per-submesh materials, and the selected CharSections body/face/facial-hair/underwear/scalp/hair appearance are live. Equipment, animation, and multi-pass shaders remain fidelity stages."
             : _resolvedModelTexturePath is not null
@@ -668,7 +750,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             : _modelOnlyDirectory
             ? "Geometry is live. Replacement texture resolution and Character layer/CharSections composition remain approximate until the full appearance plan supplies every layer."
             : "Geometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
-        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{geosets}\n{texture}\n{slots}\n{dependencies}\n{previewNote}";
+        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{geosets}{(visibleGeosets.Length == 0 ? string.Empty : $"\nVisible groups: {visibleGeosets}")}\n{texture}\n{slots}\n{dependencies}\n{previewNote}";
     }
 
     private async Task ScanDuplicatesAsync()

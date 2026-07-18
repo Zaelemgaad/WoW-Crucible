@@ -232,23 +232,34 @@ static int Asset(string[] args)
     }
     if (args is ["preview-info", var previewModelPath, .. var previewOptions])
     {
-        var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.Equals("--naked", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (known.Length != previewOptions.Length) return Fail($"Unknown preview-info option: {previewOptions.Except(known).First()}");
-        var mode = previewOptions.Contains("--all-geosets", StringComparer.OrdinalIgnoreCase) ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
+        var allGeosets = previewOptions.Contains("--all-geosets", StringComparer.OrdinalIgnoreCase); var naked = previewOptions.Contains("--naked", StringComparer.OrdinalIgnoreCase); var groupText = Option(previewOptions, "--groups=");
+        if (allGeosets && (naked || groupText is not null)) return Fail("--all-geosets cannot be combined with --naked or --groups because it intentionally shows every variant.");
+        var mode = allGeosets ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
         var dbcFolder = Option(previewOptions, "--dbc="); var hairText = Option(previewOptions, "--hair="); var facialText = Option(previewOptions, "--facial-hair=");
-        M2GeosetSelection? selection = null;
+        if (naked && (hairText is not null || facialText is not null)) return Fail("--naked cannot be combined with --hair or --facial-hair.");
+        var selectedGroups = naked ? new Dictionary<int, int>(M2GeosetCatalog.NakedCharacterSelection) : new Dictionary<int, int>(); var selectionSource = naked ? "naked character preset" : string.Empty;
         if (hairText is not null || facialText is not null)
         {
             if (dbcFolder is null) return Fail("--hair and --facial-hair require --dbc=<folder> so Crucible can resolve exact build-12340 geosets.");
             var identity = CharacterAppearanceService.Infer(Path.GetDirectoryName(Path.GetFullPath(previewModelPath)) ?? string.Empty, Path.GetFileName(previewModelPath))
                 ?? throw new InvalidDataException("The model path/name does not identify a supported playable race and sex.");
             var plan = CharacterAppearanceService.ResolveGeosets(dbcFolder, identity, ParseVariation(hairText), ParseVariation(facialText));
-            selection = plan.GroupVariants.Count == 0 ? null : new(plan.GroupVariants, "CharHairGeosets.dbc + CharacterFacialHairStyles.dbc");
+            foreach (var pair in plan.GroupVariants) selectedGroups[pair.Key] = pair.Value; selectionSource = "CharHairGeosets.dbc + CharacterFacialHairStyles.dbc";
             foreach (var warning in plan.Warnings) Console.Error.WriteLine($"WARNING: {warning}");
         }
+        if (groupText is not null)
+        {
+            foreach (var pair in ParseGroups(groupText)) selectedGroups[pair.Key] = pair.Value;
+            selectionSource = selectionSource.Length == 0 ? "explicit CLI group selection" : selectionSource + " + explicit CLI overrides";
+        }
+        var selection = selectedGroups.Count == 0 ? null : new M2GeosetSelection(selectedGroups, selectionSource);
         var geometry = M2PreviewGeometryService.Load(previewModelPath, visibilityMode: mode, geosetSelection: selection);
         Console.WriteLine($"Model\t{geometry.ModelPath}\nSkin\t{geometry.SkinPath}\nVertices\t{geometry.Vertices.Count:N0}\nGeosets\t{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} ({geometry.VisibilityMode})\nTriangles\t{geometry.TriangleIndices.Count / 3:N0}/{geometry.TotalTriangleIndices / 3:N0}\nMinimum\t{geometry.Minimum}\nMaximum\t{geometry.Maximum}");
         if (geometry.GeosetSelection is not null) Console.WriteLine($"GEOSET_SELECTION\t{geometry.GeosetSelection.Source}\t{string.Join(",", geometry.GeosetSelection.GroupVariants.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value}"))}");
+        foreach (var group in M2GeosetCatalog.Describe(geometry.Submeshes)) Console.WriteLine($"GEOSET_GROUP\t{group.Group}\t{group.Name}\tvariants={string.Join(',', group.Variants.Select(variant => variant.Variant))}\tvisible={string.Join(',', group.Variants.Where(variant => variant.Visible).Select(variant => variant.Variant))}");
+        foreach (var section in geometry.Submeshes) Console.WriteLine($"SUBMESH\t{section.Index}\tgeoset={section.GeosetId}\tgroup={section.GeosetGroup}:{section.GeosetGroupName}\tvariant={section.GeosetVariant}\tvisible={section.Visible}\ttriangles={section.TriangleIndexCount / 3}");
         foreach (var slot in geometry.TextureSlots) Console.WriteLine($"TEXTURE\t{slot.Index}\t{slot.Type}\t{slot.Flags}\t{slot.EmbeddedPath ?? "<external appearance binding>"}");
         foreach (var material in geometry.MaterialUnits) Console.WriteLine($"MATERIAL\t{material.Index}\tsubmesh={material.SubmeshIndex}\tshader={material.ShaderId}\tlookup={material.TextureLookupIndex}\ttexture={(material.TextureDefinitionIndex < 0 ? "<unresolved>" : material.TextureDefinitionIndex)}\tpasses={material.TextureCount}");
         foreach (var batch in geometry.Batches) Console.WriteLine($"BATCH\t{submeshLabel(batch)}\tindices={batch.TriangleStart}+{batch.TriangleIndexCount}\tmaterial={batch.MaterialUnitIndex?.ToString() ?? "<none>"}\ttexture={batch.TextureDefinitionIndex?.ToString() ?? "<none>"}");
@@ -257,6 +268,18 @@ static int Asset(string[] args)
         static string submeshLabel(M2PreviewBatch batch) => $"submesh={batch.SubmeshIndex},geoset={batch.GeosetId}";
         static uint? ParseVariation(string? value) => value is null ? null : uint.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
             ? parsed : throw new ArgumentException($"Invalid non-negative appearance variation: {value}");
+        static IReadOnlyDictionary<int, int> ParseGroups(string value)
+        {
+            var result = new Dictionary<int, int>();
+            foreach (var token in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var parts = token.Split(':', StringSplitOptions.TrimEntries); if (parts.Length != 2 || !int.TryParse(parts[0], out var group) || !int.TryParse(parts[1], out var variant) || group is < 0 or > 655 || variant is < 0 or > 99)
+                    throw new ArgumentException($"Invalid geoset group selection '{token}'. Use group:variant with group 0..655 and variant 0..99; variant 0 hides that group.");
+                result[group] = variant;
+            }
+            if (result.Count == 0) throw new ArgumentException("--groups requires at least one group:variant selection.");
+            return result;
+        }
     }
     if (args is ["appearance-info", var charSectionsPath, var logicalPath, var modelFile])
     {
@@ -289,7 +312,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset texture-info <file.blp>\n  wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]\n  wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]\n  wowcrucible asset texture-validate <file-or-folder> [--recursive]\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--all-geosets]\n  wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>\n  wowcrucible asset appearance-compose <base.blp> <output.png> [component options] [--overwrite]\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]\n  wowcrucible asset library-repair <library-folder> [--workers=6]\n  wowcrucible asset library-artifacts <library-folder> [--source-root=folder]... [--apply]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset texture-info <file.blp>\n  wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]\n  wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]\n  wowcrucible asset texture-validate <file-or-folder> [--recursive]\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--naked|--groups=group:variant,...|--all-geosets]\n  wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>\n  wowcrucible asset appearance-compose <base.blp> <output.png> [component options] [--overwrite]\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]\n  wowcrucible asset library-repair <library-folder> [--workers=6]\n  wowcrucible asset library-artifacts <library-folder> [--source-root=folder]... [--apply]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Project(string[] args)
 {
