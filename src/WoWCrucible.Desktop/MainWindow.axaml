@@ -56,7 +56,7 @@
                         <Button HorizontalContentAlignment="Left" Click="OpenNativeConversionClick"><TextBlock Text="⇄  Modern asset conversion" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenToolInventoryClick"><TextBlock Text="⌂  Tool inventory" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenServerSqlClick"><TextBlock Text="⚙  Server &amp; SQL" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenSqlWorkspaceClick"><TextBlock Text="▤  SQL studio" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenSqlWorkspaceClick"><TextBlock Text="▤  Full SQL studio" TextWrapping="Wrap" /></Button>
                     </StackPanel>
                 </ScrollViewer>
                 <Border Grid.Row="2" Margin="0,8,0,0" Padding="10" CornerRadius="6" Background="#131925" BorderBrush="#273044" BorderThickness="1">

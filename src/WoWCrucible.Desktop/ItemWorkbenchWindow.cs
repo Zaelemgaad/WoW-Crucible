@@ -69,7 +69,13 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             Grid.SetColumn(identity, 1); panel.Children.Add(identity);
             AddCell(panel, QualityName(item.Quality), 2); AddCell(panel, $"iLvl {item.ItemLevel}", 3); AddCell(panel, item.ItemSetId == 0 ? "No set" : $"Set {item.ItemSetId}", 4); return panel;
         });
-        _items.SelectionChanged += (_, _) => { if (_items.SelectedItem is ItemCatalogEntry item) { _cloneSource.Text = item.Entry.ToString(); _cloneResult.Text = $"Selected {item.Entry:N0} — {item.Name}\nQuality: {QualityName(item.Quality)} · Item level: {item.ItemLevel} · Set: {(item.ItemSetId == 0 ? "none" : item.ItemSetId)}"; } };
+        _items.SelectionChanged += (_, _) =>
+        {
+            if (_items.SelectedItem is not ItemCatalogEntry item) return;
+            _cloneSource.Text = item.Entry.ToString(); _inspectId.Text = item.Entry.ToString();
+            _cloneResult.Text = $"Selected {item.Entry:N0} — {item.Name}\nQuality: {QualityName(item.Quality)} · Item level: {item.ItemLevel} · Set: {(item.ItemSetId == 0 ? "none" : item.ItemSetId)}";
+            ShowCatalogEvidence(item);
+        };
         _search.TextChanged += (_, _) => ApplyAuditFilter();
         _search.KeyDown += async (_, args) =>
         {
@@ -81,7 +87,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
-        var sqlStudio = AccentButton("SQL Studio / Favorites"); sqlStudio.Click += (_, _) => SqlStudioRequested?.Invoke(this, EventArgs.Empty);
+        var sqlStudio = AccentButton("Full SQL Studio / Favorites"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
         var mpqMerge = new Button { Content = "MPQ patches / merge" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
         var titleActions = new WrapPanel { Children = { sqlStudio, mpqMerge } };
         root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, titleActions } } });
@@ -96,13 +102,15 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private Control ConnectionBar()
     {
-        var bar = new Grid { ColumnDefinitions = new("*,*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 14, RowSpacing = 7, Margin = new Thickness(12, 8) };
+        var connect = AccentButton("Connect & share with SQL Studio"); connect.Click += async (_, _) => await ConnectDatabaseAsync(false);
+        var bar = new Grid { ColumnDefinitions = new("*,*,*"), RowDefinitions = new("Auto,Auto,Auto,Auto"), ColumnSpacing = 14, RowSpacing = 7, Margin = new Thickness(12, 8) };
         var heading = new TextBlock { Text = "LIVE WORLD DATABASE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = new SolidColorBrush(Color.Parse("#C58A2B")), VerticalAlignment = VerticalAlignment.Center };
         Grid.SetColumnSpan(heading, 3); bar.Children.Add(heading);
         AddConnectionField(bar, "Host", _host, 1, 0); AddConnectionField(bar, "Port", _port, 1, 1); AddConnectionField(bar, "User", _user, 1, 2);
         AddConnectionField(bar, "Password", _password, 2, 0); AddConnectionField(bar, "Database", _database, 2, 1);
         var privacy = new TextBlock { Text = "Password remains in memory only.", Foreground = new SolidColorBrush(Color.Parse("#78859A")), FontSize = 10, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
         Grid.SetRow(privacy, 2); Grid.SetColumn(privacy, 2); bar.Children.Add(privacy);
+        Grid.SetRow(connect, 3); Grid.SetColumnSpan(connect, 3); connect.HorizontalAlignment = HorizontalAlignment.Stretch; bar.Children.Add(connect);
         return new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Child = bar };
     }
 
@@ -188,6 +196,14 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         await InspectExactAsync();
     }
 
+    private void ShowCatalogEvidence(ItemCatalogEntry item)
+    {
+        var known = item.HasKnownAcquisitionPath;
+        var evidence = known ? item.AcquisitionSources.Select(value => $"Accepted · {value}") : item.NoPathReview;
+        _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(known ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\n" +
+            string.Join("\n", evidence.Select(value => $"• {value}"));
+    }
+
     private async Task OpenSelectedItemAsync(bool favorite)
     {
         if (_items.SelectedItem is not ItemCatalogEntry selected) { _status.Text = "Select an item row first."; return; }
@@ -269,6 +285,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         };
         if (query.Length > 0) rows = rows.Where(item => item.Entry.ToString().Contains(query, StringComparison.OrdinalIgnoreCase) || item.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || QualityName(item.Quality).Contains(query, StringComparison.OrdinalIgnoreCase) || item.ItemLevel.ToString().Contains(query) || item.ItemSetId.ToString().Contains(query));
         var result = rows.ToArray(); _items.ItemsSource = result;
+        if (result.Length > 0) { _items.SelectedItem = result[0]; _items.ScrollIntoView(result[0]); }
         var label = mode switch { 1 => "known-path", 2 => "total", _ => "no-known-path" };
         _status.Text = $"Showing {result.Length:N0} {label} item(s). Numeric searches always show an existing exact row and state its classification.";
     }
@@ -324,6 +341,25 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var current = _session.DatabaseProfile;
         if (password.Length == 0 && current is not null && current.Host.Equals(_host.Text, StringComparison.OrdinalIgnoreCase) && current.Port == (uint)(_port.Value ?? 3306) && current.User.Equals(_user.Text, StringComparison.OrdinalIgnoreCase) && current.Database.Equals(_database.Text, StringComparison.OrdinalIgnoreCase)) password = current.Password;
         return new(_host.Text ?? "127.0.0.1", (uint)(_port.Value ?? 3306), _user.Text ?? string.Empty, password, _database.Text ?? string.Empty, MySqlSslMode.Preferred);
+    }
+    private async Task ConnectDatabaseAsync(bool openStudio)
+    {
+        try
+        {
+            var profile = Profile(); SetBusy($"Verifying {profile.User}@{profile.Host}:{profile.Port}/{profile.Database}…");
+            await _session.TestManualDatabaseAsync(profile);
+            _status.Text = $"Connected and shared with every Crucible SQL tool · {profile.Database} on {profile.Host}:{profile.Port}.";
+            if (openStudio) SqlStudioRequested?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception exception) { await ErrorAsync("Database connection failed", exception); }
+    }
+    private async Task OpenSqlStudioAsync()
+    {
+        var profile = Profile(); var active = _session.DatabaseTested && _session.DatabaseProfile is { } connected &&
+            connected.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) && connected.Port == profile.Port &&
+            connected.User.Equals(profile.User, StringComparison.OrdinalIgnoreCase) && connected.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase);
+        if (active) SqlStudioRequested?.Invoke(this, EventArgs.Empty);
+        else await ConnectDatabaseAsync(true);
     }
     private void LoadDefaults() { try { var path = CruciblePaths.SettingsFileForRead; if (!File.Exists(path)) return; using var json = JsonDocument.Parse(File.ReadAllText(path)); var root = json.RootElement; if (root.TryGetProperty("DatabaseHost", out var host)) _host.Text = host.GetString(); if (root.TryGetProperty("DatabasePort", out var port)) _port.Value = port.GetUInt32(); if (root.TryGetProperty("DatabaseUser", out var user)) _user.Text = user.GetString(); if (root.TryGetProperty("WorldDatabase", out var db)) _database.Text = db.GetString(); if (root.TryGetProperty("SchemaDefinitionPath", out var schema)) _schemaPath.Text = schema.GetString(); if (root.TryGetProperty("CoreDbcPath", out var dbc)) { var directory = dbc.GetString(); _acquisitionDbc.Text = directory; if (Directory.Exists(directory)) { _itemSetPath.Text = Path.Combine(directory, "ItemSet.dbc"); _spellPath.Text = Path.Combine(directory, "Spell.dbc"); } } } catch (Exception exception) { DesktopCrashLogger.Debug("SETTINGS", "item-workbench-defaults-load-failed", ("error", exception.Message)); } }
     private async Task PickFileAsync(TextBox target, string title, string pattern) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(title) { Patterns = [pattern] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }
