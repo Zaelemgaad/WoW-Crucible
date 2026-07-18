@@ -40,6 +40,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _effects = new() { AcceptsReturn = true, PlaceholderText = "requiredItems:spellId, one bonus per line" }; private readonly TextBox _effectsOutput = new() { PlaceholderText = "Output ItemSet.dbc" };
 
     public event EventHandler? BackRequested;
+    public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
 
     public ItemWorkbenchView(DesktopWorkspaceSession session)
     {
@@ -82,13 +83,14 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var audit = AccentButton("Scan acquisition paths"); audit.Click += async (_, _) => await AuditAsync();
         var inspect = AccentButton("Explain exact ID"); inspect.Click += async (_, _) => await InspectExactAsync();
         var edit = new Button { Content = "Open selected in decoded editor" }; edit.Click += async (_, _) => await OpenSelectedItemAsync(false);
+        var fullSql = new Button { Content = "Open complete SQL row" }; fullSql.Click += async (_, _) => await OpenSelectedInSqlAsync();
         var favorite = new Button { Content = "★ Favorite selected row" }; favorite.Click += async (_, _) => await OpenSelectedItemAsync(true);
         var browseDbc = new Button { Content = "DBC folder…" }; browseDbc.Click += async (_, _) => await PickFolderAsync(_acquisitionDbc, "Select the server DBC folder");
         var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), Margin = new Thickness(0,0,0,8) }; header.Children.Add(audit); Grid.SetColumn(_search, 1); _search.Margin = new Thickness(10,0); header.Children.Add(_search); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
-        var rowActions = new WrapPanel { Children = { edit, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
+        var rowActions = new WrapPanel { Children = { edit, fullSql, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
         var exact = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _inspectId, WithColumn(inspect, 1), rowActions } };
         var dbc = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1) } };
-        var note = new TextBlock { Text = "“No known path” means no vendor, direct/reachable loot, usable linked starter→ender quest reward, starting-item, prospecting, milling, disenchanting, fishing, or spell-loot source was found in the live schema. Reference-pool control rows, disabled quests, and orphaned quest templates are not mistaken for playable acquisition. Script-created items still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        var note = new TextBlock { Text = "“No known path” means no vendor, achievement, direct/reachable loot, usable quest reward/start item, character-start, profession/disenchant/fishing/spell-loot, or causally reachable Spell.dbc create-item source was found. Exact numeric search reports no-path, known-path, or absent instead of leaving an ambiguous empty list. Reference controls, disabled quests, orphaned rewards, and unreachable spells are not mistaken for playable acquisition. Custom scripts still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
         return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(exact, 1), WithRow(dbc, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
@@ -166,9 +168,51 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         catch (Exception exception) { await ErrorAsync(favorite ? "Favorite failed" : "Decoded item open failed", exception); }
     }
 
+    private async Task OpenSelectedInSqlAsync()
+    {
+        if (_items.SelectedItem is not ItemCatalogEntry selected) { _status.Text = "Select an item row first."; return; }
+        SetBusy($"Opening complete item_template row {selected.Entry:N0}…");
+        try
+        {
+            var profile = Profile();
+            var capabilities = _session.DatabaseCapabilities is { } active && _session.DatabaseProfile is { } connected &&
+                connected.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) && connected.Port == profile.Port && connected.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase)
+                ? active : await new DatabaseCapabilityService().InspectAsync(profile);
+            if (_session.DatabaseProfile is null || !_session.DatabaseTested || !_session.DatabaseProfile.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) ||
+                _session.DatabaseProfile.Port != profile.Port || !_session.DatabaseProfile.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase))
+                await _session.TestManualDatabaseAsync(profile);
+            var table = capabilities.FindTable("item_template") ?? throw new NotSupportedException("The connected schema has no item_template table.");
+            var entryColumn = table.Find("entry")?.Name ?? throw new NotSupportedException("item_template has no entry column.");
+            var row = await new SqlWorkspaceService().ReadRowAsync(profile, table, new Dictionary<string, object?> { [entryColumn] = selected.Entry })
+                ?? throw new InvalidOperationException($"Item {selected.Entry} disappeared before it could be opened.");
+            FullSqlEditRequested?.Invoke(this, new(table.Name, row.Values));
+        }
+        catch (Exception exception) { await ErrorAsync("Complete SQL row open failed", exception); }
+    }
+
     private void ApplyAuditFilter()
     {
-        if (_audit is null) return; var query = _search.Text?.Trim() ?? string.Empty; IEnumerable<ItemCatalogEntry> rows = _audit.NoKnownAcquisitionPath;
+        if (_audit is null) return; var query = _search.Text?.Trim() ?? string.Empty;
+        if (uint.TryParse(query, out var exactId) && exactId > 0)
+        {
+            var exact = _audit.AllItems.FirstOrDefault(item => item.Entry == exactId);
+            if (exact is null)
+            {
+                _items.ItemsSource = Array.Empty<ItemCatalogEntry>();
+                _status.Text = $"Exact item {exactId:N0} does not exist in item_template.";
+                return;
+            }
+            if (exact.HasKnownAcquisitionPath)
+            {
+                _items.ItemsSource = Array.Empty<ItemCatalogEntry>();
+                _status.Text = $"Exact item {exactId:N0} exists but has a known acquisition path: {string.Join("; ", exact.AcquisitionSources.Take(3))}. Use Explain exact ID for full evidence.";
+                return;
+            }
+            _items.ItemsSource = new[] { exact }; _items.SelectedItem = exact; _items.ScrollIntoView(exact);
+            _status.Text = $"Exact item {exactId:N0} is classified NO KNOWN ACQUISITION PATH.";
+            return;
+        }
+        IEnumerable<ItemCatalogEntry> rows = _audit.NoKnownAcquisitionPath;
         if (query.Length > 0) rows = rows.Where(item => item.Entry.ToString().Contains(query, StringComparison.OrdinalIgnoreCase) || item.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || QualityName(item.Quality).Contains(query, StringComparison.OrdinalIgnoreCase) || item.ItemLevel.ToString().Contains(query) || item.ItemSetId.ToString().Contains(query));
         var result = rows.Take(100_000).ToArray(); _items.ItemsSource = result; _status.Text = $"Showing {result.Length:N0} no-known-path item(s).";
     }

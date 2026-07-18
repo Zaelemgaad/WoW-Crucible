@@ -423,6 +423,9 @@ if (ItemCatalogService.IsDirectLootItem(17, 1_072_025) || !ItemCatalogService.Is
 var startingItems = ItemCatalogService.ReadCharStartOutfitItems(Path.Combine(args[1], "CharStartOutfit.dbc"));
 if (!startingItems.Contains(6948) || startingItems.Contains(17) || startingItems.Contains(17802))
     throw new InvalidOperationException("CharStartOutfit DBC acquisition coverage did not distinguish starting equipment from cut/developer items.");
+var spellCreation = ItemCatalogService.ReadSpellCreationGraph(Path.Combine(args[1], "Spell.dbc"));
+if (!spellCreation.TryGetValue(597, out var conjureFood) || !conjureFood.CreatedItems.Contains(1113u) || spellCreation.Count < 1_000)
+    throw new InvalidOperationException("Spell.dbc acquisition coverage did not map reachable create-item effects such as Conjured Bread.");
 if (!SqlWorkspaceService.IsReadOnlyStatement("-- reviewed\nSELECT * FROM item_template") || SqlWorkspaceService.IsReadOnlyStatement("/* not read-only */ UPDATE item_template SET name='bad'"))
     throw new InvalidOperationException("SQL Studio read-only routing could execute a write through the immediate query path.");
 

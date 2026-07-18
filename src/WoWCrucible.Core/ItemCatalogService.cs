@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using MySqlConnector;
 
 namespace WoWCrucible.Core;
@@ -7,7 +8,8 @@ public sealed record ItemCatalogEntry(uint Entry, string Name, int Quality, int 
     public bool HasKnownAcquisitionPath => AcquisitionSources.Count > 0;
 }
 public sealed record ItemAcquisitionAudit(string Database, DateTimeOffset AuditedUtc, IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources,
-    int TotalItems, int ObtainableItems, IReadOnlyList<ItemCatalogEntry> NoKnownAcquisitionPath);
+    int TotalItems, int ObtainableItems, IReadOnlyList<ItemCatalogEntry> NoKnownAcquisitionPath,
+    [property: JsonIgnore] IReadOnlyList<ItemCatalogEntry> AllItems);
 public sealed record ItemAcquisitionInspection(ItemCatalogEntry? Item, IReadOnlyList<string> AcceptedEvidence, IReadOnlyList<string> RejectedEvidence,
     IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources)
 {
@@ -24,7 +26,8 @@ public sealed class ItemCatalogService
     private static readonly AcquisitionSpec[] DirectAcquisitionSpecs =
     [
         new("npc_vendor", "item"),
-        new("playercreateinfo_item", "itemid", "item")
+        new("playercreateinfo_item", "itemid", "item"),
+        new("achievement_reward", "ItemID", "item")
     ];
     private static readonly string[] LootTables =
     [
@@ -46,7 +49,7 @@ public sealed class ItemCatalogService
     {
         var scan = await ScanAsync(profile, dbcFolder, cancellationToken);
         var unavailable = scan.Items.Where(item => !item.HasKnownAcquisitionPath).ToArray();
-        return new(profile.Database, DateTimeOffset.UtcNow, scan.CheckedSources, scan.MissingSources, scan.Items.Count, scan.Items.Count - unavailable.Length, unavailable);
+        return new(profile.Database, DateTimeOffset.UtcNow, scan.CheckedSources, scan.MissingSources, scan.Items.Count, scan.Items.Count - unavailable.Length, unavailable, scan.Items);
     }
 
     public Task<ItemAcquisitionInspection> InspectAsync(DatabaseConnectionProfile profile, uint entry, CancellationToken cancellationToken = default)
@@ -90,8 +93,10 @@ public sealed class ItemCatalogService
             }
         }
         await CollectReachableLootAsync(connection, schema, acquired, rejected, checkedSources, missingSources, cancellationToken);
-        await CollectLinkedQuestRewardsAsync(connection, schema, acquired, rejected, checkedSources, missingSources, cancellationToken);
+        var reachableSpells = new HashSet<uint>();
+        await CollectLinkedQuestRewardsAsync(connection, schema, acquired, rejected, reachableSpells, checkedSources, missingSources, cancellationToken);
         CollectCharStartOutfitItems(dbcFolder, acquired, checkedSources, missingSources);
+        await CollectReachableSpellCreatedItemsAsync(connection, schema, itemTable, dbcFolder, reachableSpells, acquired, checkedSources, missingSources, cancellationToken);
 
         var itemColumns = schema[itemTable];
         var entryColumn = RequireColumn(itemColumns, "entry"); var nameColumn = RequireColumn(itemColumns, "name");
@@ -195,30 +200,33 @@ public sealed class ItemCatalogService
     }
 
     private static async Task CollectLinkedQuestRewardsAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
-        Dictionary<uint, HashSet<string>> acquired, Dictionary<uint, HashSet<string>> rejected, ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+        Dictionary<uint, HashSet<string>> acquired, Dictionary<uint, HashSet<string>> rejected, ISet<uint> reachableSpells,
+        ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
     {
         var questTable = ResolveTable(schema, "quest_template");
         if (questTable is null) { missingSources.Add("quest_template"); return; }
         var questId = ResolveColumn(schema[questTable], "ID", "entry");
         var rewards = QuestRewardColumns.Select(name => ResolveColumn(schema[questTable], name)).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (questId is null || rewards.Length == 0) { missingSources.Add("quest_template reward columns"); return; }
+        var startItem = ResolveColumn(schema[questTable], "StartItem", "SourceItemId");
+        var rewardSpell = ResolveColumn(schema[questTable], "RewardSpell");
 
         var starters = await ReadQuestLinksAsync(connection, schema, ["creature_queststarter", "gameobject_queststarter"], missingSources, cancellationToken);
         var enders = await ReadQuestLinksAsync(connection, schema, ["creature_questender", "gameobject_questender"], missingSources, cancellationToken);
         var disabled = await ReadDisabledQuestsAsync(connection, schema, missingSources, cancellationToken);
         var disabledIds = disabled.Keys.ToHashSet();
-        var linked = starters.Intersect(enders).ToHashSet();
-        checkedSources.Add("quest_template (linked starter + ender + not disabled)");
-        var sql = $"SELECT {Quote(questId)},{string.Join(',', rewards.Select(Quote))} FROM {Quote(questTable)}";
+        checkedSources.Add("quest_template (usable rewards, starting items, and reward spells)");
+        var selected = rewards.Concat(startItem is null ? [] : [startItem]).Concat(rewardSpell is null ? [] : [rewardSpell]).ToArray();
+        var sql = $"SELECT {Quote(questId)},{string.Join(',', selected.Select(Quote))} FROM {Quote(questTable)}";
         await using var command = new MySqlCommand(sql, connection) { CommandTimeout = 120 };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             var currentQuest = Convert.ToUInt32(reader.GetValue(0));
             var usable = IsUsableQuestReward(currentQuest, starters, enders, disabledIds);
-            for (var index = 1; index < reader.FieldCount; index++)
+            for (var index = 0; index < rewards.Length; index++)
             {
-                var reward = Convert.ToUInt32(reader.GetValue(index)); if (reward == 0) continue;
+                var reward = Convert.ToUInt32(reader.GetValue(index + 1)); if (reward == 0) continue;
                 if (usable) AddAcquired(acquired, reward, $"quest_template reward from usable quest {currentQuest}");
                 else
                 {
@@ -228,7 +236,113 @@ public sealed class ItemCatalogService
                     AddRejected(rejected, reward, reason);
                 }
             }
+            var next = rewards.Length + 1;
+            if (startItem is not null)
+            {
+                var entry = Convert.ToUInt32(reader.GetValue(next++));
+                if (entry != 0)
+                {
+                    var usableStart = starters.Contains(currentQuest) && !disabledIds.Contains(currentQuest);
+                    if (usableStart) AddAcquired(acquired, entry, $"quest_template starting item from usable quest {currentQuest}");
+                    else AddRejected(rejected, entry, disabled.TryGetValue(currentQuest, out var comment)
+                        ? $"Ignored · quest {currentQuest} starting item belongs to a disabled quest{(string.IsNullOrWhiteSpace(comment) ? string.Empty : $" ({comment})")}."
+                        : $"Ignored · quest {currentQuest} starting item has no live quest starter.");
+                }
+            }
+            if (rewardSpell is not null)
+            {
+                var raw = Convert.ToInt64(reader.GetValue(next));
+                if (usable && raw != 0 && Math.Abs(raw) <= uint.MaxValue) reachableSpells.Add((uint)Math.Abs(raw));
+            }
         }
+    }
+
+    internal sealed record SpellCreation(IReadOnlyList<uint> CreatedItems, IReadOnlyList<uint> TriggeredOrLearnedSpells);
+
+    internal static IReadOnlyDictionary<uint, SpellCreation> ReadSpellCreationGraph(string path)
+    {
+        var file = WdbcFile.Load(path);
+        if (file.FieldCount != 234 || file.RecordSize != 936)
+            throw new InvalidDataException($"Spell.dbc has {file.FieldCount:N0} fields and {file.RecordSize:N0}-byte records; Wrath build 12340 requires 234 fields and 936-byte records.");
+        var id = new DbcColumn(0, 0, 4, "ID", DbcValueType.UInt32, true);
+        var result = new Dictionary<uint, SpellCreation>();
+        for (var row = 0; row < file.RowCount; row++)
+        {
+            var created = new HashSet<uint>(); var learned = new HashSet<uint>();
+            for (var effectIndex = 0; effectIndex < 3; effectIndex++)
+            {
+                var effect = file.GetRaw(row, new(71 + effectIndex, (71 + effectIndex) * 4, 4, $"Effect[{effectIndex}]", DbcValueType.UInt32));
+                var item = file.GetRaw(row, new(107 + effectIndex, (107 + effectIndex) * 4, 4, $"EffectItemType[{effectIndex}]", DbcValueType.UInt32));
+                var trigger = file.GetRaw(row, new(116 + effectIndex, (116 + effectIndex) * 4, 4, $"EffectTriggerSpell[{effectIndex}]", DbcValueType.UInt32));
+                if (item != 0 && effect is 24 or 66 or 157) created.Add(item);
+                if (trigger != 0 && effect is 32 or 36 or 64 or 142 or 148 or 151) learned.Add(trigger);
+            }
+            if (created.Count > 0 || learned.Count > 0) result[file.GetRaw(row, id)] = new(created.ToArray(), learned.ToArray());
+        }
+        return result;
+    }
+
+    private static async Task CollectReachableSpellCreatedItemsAsync(MySqlConnection connection, Dictionary<string, List<string>> schema, string itemTable,
+        string? dbcFolder, HashSet<uint> reachableSpells, Dictionary<uint, HashSet<string>> acquired, ICollection<string> checkedSources,
+        ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        async Task AddSpellsAsync(string requestedTable, string[] spellCandidates, string? predicate = null)
+        {
+            var table = ResolveTable(schema, requestedTable); if (table is null) { missingSources.Add($"{requestedTable} (reachable spells)"); return; }
+            var spell = ResolveColumn(schema[table], spellCandidates); if (spell is null) { missingSources.Add($"{requestedTable} (reachable spells)"); return; }
+            await using var command = new MySqlCommand($"SELECT DISTINCT {Quote(spell)} FROM {Quote(table)} WHERE {Quote(spell)}<>0{(string.IsNullOrWhiteSpace(predicate) ? string.Empty : $" AND {predicate}")}", connection);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken)) { var raw = Convert.ToInt64(reader.GetValue(0)); if (raw != 0 && Math.Abs(raw) <= uint.MaxValue) reachableSpells.Add((uint)Math.Abs(raw)); }
+            checkedSources.Add($"{table} (reachable spells)");
+        }
+
+        await AddSpellsAsync("trainer_spell", ["SpellId", "SpellID", "spell"]);
+        await AddSpellsAsync("npc_trainer", ["SpellID", "SpellId", "spell"]);
+        var actionTable = ResolveTable(schema, "playercreateinfo_action");
+        if (actionTable is not null)
+        {
+            var type = ResolveColumn(schema[actionTable], "type");
+            await AddSpellsAsync(actionTable, ["action", "Action"], type is null ? null : $"{Quote(type)}=0");
+        }
+        else missingSources.Add("playercreateinfo_action (reachable spells)");
+
+        if (string.IsNullOrWhiteSpace(dbcFolder)) { missingSources.Add("Spell.dbc (reachable create-item effects)"); return; }
+        var spellPath = Directory.Exists(dbcFolder) ? Path.Combine(dbcFolder, "Spell.dbc") : dbcFolder;
+        if (!File.Exists(spellPath)) { missingSources.Add($"Spell.dbc ({spellPath})"); return; }
+        var graph = ReadSpellCreationGraph(spellPath);
+
+        var itemColumns = schema[itemTable]; var entryColumn = RequireColumn(itemColumns, "entry");
+        var itemSpellColumns = Enumerable.Range(1, 5).Select(index => ResolveColumn(itemColumns, $"spellid_{index}", $"spellid{index}", $"SpellId{index}"))
+            .OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var itemSpells = new Dictionary<uint, uint[]>();
+        if (itemSpellColumns.Length > 0)
+        {
+            await using var command = new MySqlCommand($"SELECT {Quote(entryColumn)},{string.Join(',', itemSpellColumns.Select(Quote))} FROM {Quote(itemTable)}", connection) { CommandTimeout = 120 };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var spells = Enumerable.Range(1, reader.FieldCount - 1).Select(index => Convert.ToInt64(reader.GetValue(index))).Where(value => value != 0 && Math.Abs(value) <= uint.MaxValue).Select(value => (uint)Math.Abs(value)).Distinct().ToArray();
+                if (spells.Length > 0) itemSpells[Convert.ToUInt32(reader.GetValue(0))] = spells;
+            }
+            checkedSources.Add($"{itemTable} item spells (reachable item use/learn effects)");
+        }
+        else missingSources.Add($"{itemTable} item spell columns");
+
+        var pending = new Queue<uint>(); var queued = new HashSet<uint>(); var visited = new HashSet<uint>();
+        void Enqueue(uint spell) { if (spell != 0 && !visited.Contains(spell) && queued.Add(spell)) pending.Enqueue(spell); }
+        foreach (var spell in reachableSpells) Enqueue(spell);
+        foreach (var item in acquired.Keys.ToArray()) if (itemSpells.TryGetValue(item, out var spells)) foreach (var spell in spells) Enqueue(spell);
+        while (pending.TryDequeue(out var spell))
+        {
+            cancellationToken.ThrowIfCancellationRequested(); queued.Remove(spell); if (!visited.Add(spell) || !graph.TryGetValue(spell, out var creation)) continue;
+            foreach (var learned in creation.TriggeredOrLearnedSpells) Enqueue(learned);
+            foreach (var item in creation.CreatedItems)
+            {
+                var newlyAcquired = !acquired.ContainsKey(item); AddAcquired(acquired, item, $"Spell.dbc create-item effect from reachable spell {spell}");
+                if (newlyAcquired && itemSpells.TryGetValue(item, out var itemEffects)) foreach (var itemSpell in itemEffects) Enqueue(itemSpell);
+            }
+        }
+        checkedSources.Add("Spell.dbc (reachable create-item and learn/trigger-spell effects)");
     }
 
     private static async Task<Dictionary<uint, string>> ReadDisabledQuestsAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,

@@ -519,6 +519,7 @@ public partial class MainWindow : Window
         {
             _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession);
             _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _itemWorkbenchView.FullSqlEditRequested += async (_, request) => await OpenCompleteSqlRowAsync(request);
         }
         OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
     }
@@ -657,11 +658,25 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(_sqlWorkspaceView, "SQL Studio"); _sqlWorkspaceView.Activate();
     }
 
+    private async Task OpenCompleteSqlRowAsync(SqlGuidedEditRequest request)
+    {
+        try
+        {
+            OpenSqlWorkspace();
+            await _sqlWorkspaceView!.OpenExactRowAsync(request.Table, request.Row);
+        }
+        catch (Exception exception)
+        {
+            DesktopCrashLogger.Log("Complete SQL row navigation failed", exception);
+            await ShowErrorAsync("Could not open complete SQL row", exception.Message);
+        }
+    }
+
     private void OpenGuidedSqlRow(SqlGuidedEditRequest request)
     {
         if (request.Table.Equals("item_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); }
             _itemWorkbenchView.OpenItemRow(request.Row); OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
         }
         else if (request.Table.Equals("creature_template", StringComparison.OrdinalIgnoreCase))

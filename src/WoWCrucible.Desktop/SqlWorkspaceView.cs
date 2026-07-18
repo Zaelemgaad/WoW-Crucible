@@ -59,6 +59,23 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     public void Activate() { PopulateTables(); if (_tables.SelectedItem is null && _tables.ItemCount > 0) _tables.SelectedIndex = 0; }
 
+    public async Task OpenExactRowAsync(string tableName, IReadOnlyDictionary<string, object?> values)
+    {
+        if (_session.DatabaseCapabilities is null || _session.DatabaseProfile is null) throw new InvalidOperationException("Connect Server & SQL before opening a complete row.");
+        var table = _session.DatabaseCapabilities.FindTable(tableName) ?? throw new NotSupportedException($"The connected database has no {tableName} table.");
+        var primary = table.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase)).Select(column => column.Name).ToArray();
+        if (primary.Length == 0) throw new InvalidOperationException($"{table.Name} has no primary key, so an exact row cannot be reopened safely.");
+        var key = primary.ToDictionary(name => name, name => values.TryGetValue(name, out var value) ? value : throw new InvalidOperationException($"The supplied row is missing primary-key column {name}."), StringComparer.OrdinalIgnoreCase);
+        var row = await _service.ReadRowAsync(_session.DatabaseProfile, table, key) ?? throw new InvalidOperationException($"The exact {table.Name} row no longer exists.");
+        _suppressTableSelection = true;
+        try { PopulateTables(); _tables.SelectedItem = (_tables.ItemsSource as IEnumerable<TableChoice>)?.FirstOrDefault(choice => choice.Table.Name.Equals(table.Name, StringComparison.OrdinalIgnoreCase)); }
+        finally { _suppressTableSelection = false; }
+        _rowSearch.Text = string.Empty; _offset = 0; _page = new(table.Name, table.Columns, primary, 1, 0, 1, "exact row", [row]);
+        _rows.ItemsSource = _page.Rows; _rows.ItemTemplate = new FuncDataTemplate<SqlRowRecord>((value, _) => new TextBlock { Text = value is null ? string.Empty : RowSummary(value), TextWrapping = TextWrapping.NoWrap, Margin = new Thickness(4) });
+        _pageStatus.Text = "Exact primary-key row · 1 row"; _tabs.SelectedIndex = 0; _rows.SelectedItem = row;
+        _status.Text = $"Opened complete row {row.Display}. Every live-schema column remains editable.";
+    }
+
     private Control BrowsePage()
     {
         var refresh = Button("Refresh", async () => await LoadPageAsync(false)); var search = Button("Search", async () => { _offset = 0; await LoadPageAsync(false); });
