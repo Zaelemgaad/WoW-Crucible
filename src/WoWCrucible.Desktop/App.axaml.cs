@@ -31,6 +31,7 @@ public partial class App : Application
                 window.Opened += (_, _) => window.OpenAssetComparison(library);
             }
             if (arguments.Any(argument => IsOption(argument, "--sql-studio"))) window.Opened += (_, _) => window.OpenSqlWorkspace();
+            else if (arguments.Any(argument => IsOption(argument, "--gameobjects"))) window.Opened += (_, _) => window.OpenGameObjectWorkspace();
             var initialPaths = desktop.Args?.Where(File.Exists).ToArray() ?? [];
             if (initialPaths.Length > 0)
                 window.Opened += async (_, _) =>

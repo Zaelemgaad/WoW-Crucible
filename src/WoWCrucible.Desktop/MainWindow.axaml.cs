@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private ClientWorkspaceView? _clientWorkspaceView;
     private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
     private CreatureWorkspaceView? _creatureWorkspaceView;
+    private GameObjectWorkspaceView? _gameObjectWorkspaceView;
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
     private SqlWorkspaceView? _sqlWorkspaceView;
 
@@ -525,6 +526,16 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
     }
+    private void OpenGameObjectWorkspaceClick(object? sender, RoutedEventArgs e) => OpenGameObjectWorkspace();
+    public void OpenGameObjectWorkspace()
+    {
+        if (_gameObjectWorkspaceView is null)
+        {
+            _gameObjectWorkspaceView = new GameObjectWorkspaceView(_workspaceSession);
+            _gameObjectWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_gameObjectWorkspaceView, "Gameobjects");
+    }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
     private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e) => CloseFeatureWorkspace();
     private void OpenLayeredDbcsClick(object? sender, RoutedEventArgs e)
@@ -614,6 +625,11 @@ public partial class MainWindow : Window
         {
             if (_creatureWorkspaceView is null) { _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession); _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
             _creatureWorkspaceView.OpenCreatureRow(request.Row); OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
+        }
+        else if (request.Table.Equals("gameobject_template", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_gameObjectWorkspaceView is null) { _gameObjectWorkspaceView = new GameObjectWorkspaceView(_workspaceSession); _gameObjectWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+            _gameObjectWorkspaceView.OpenGameObjectRow(request.Row); OpenFeatureWorkspace(_gameObjectWorkspaceView, "Gameobjects");
         }
     }
 

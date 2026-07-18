@@ -326,6 +326,21 @@ var legacyCreaturePlan = CreatureTemplateAdapter.CreatePlan(creatureDraft, legac
 if (legacyCreaturePlan.Rows.Count != 3 || legacyCreaturePlan.Rows[0].Values["modelid1"] is not 1234u || legacyCreaturePlan.Rows[0].Values["modelid2"] is not 5678u || legacyCreaturePlan.Rows[1].Key.Count != 2 || legacyCreaturePlan.Rows[2].Key.Count != 2)
     throw new InvalidOperationException("Legacy creature/template/vendor/loot adaptation failed.");
 
+if (GameObjectTypeCatalog.All.Count != 36 || GameObjectTypeCatalog.Find(3).Field(1).Name != "lootId" || GameObjectTypeCatalog.Find(10).Field(19).Name != "gossipID" || GameObjectTypeCatalog.Find(33).Field(22).Name != "damageEvent")
+    throw new InvalidOperationException("The type-aware gameobject Data0–23 catalog is incomplete or misaligned with current AzerothCore.");
+var gameObjectData = new long[24]; gameObjectData[1] = 900200;
+var gameObjectDraft = new GameObjectTemplateDraft(900200, 3, 12345, "Crucible's Cache", "", "Opening", "", 1.25f, gameObjectData, "", "",
+    new(9000200, 0, 12, 34, 1, 1, -100f, 200f, 50f, 1.5f, 0, 0, 0.681639f, 0.731689f, 300, 255, 1, "", "Crucible spawn"),
+    [new(900200, 6948, 0, 25, false, 1, 0, 1, 1, "Crucible chest loot")]);
+var gameObjectPlan = GameObjectTemplateAdapter.CreatePlan(gameObjectDraft, GameObjectTemplateAdapter.CreatePortableCapabilities());
+if (gameObjectPlan.Rows.Count != 3 || gameObjectPlan.Rows[0].Values["Data1"] is not 900200L || gameObjectPlan.Rows[1].Table != "gameobject" || gameObjectPlan.Rows[2].Table != "gameobject_loot_template" || !gameObjectPlan.PreviewSql().Contains("Crucible''s Cache"))
+    throw new InvalidOperationException("Schema-aware gameobject template/spawn/loot planning failed.");
+var questObjectPlan = GameObjectTemplateAdapter.CreatePlan(gameObjectDraft with { Type = 2, Spawn = null, Loot = [], StartsQuests = [123u], EndsQuests = [456u] }, GameObjectTemplateAdapter.CreatePortableCapabilities());
+if (questObjectPlan.Rows.Count != 3 || questObjectPlan.Rows[1].Table != "gameobject_queststarter" || questObjectPlan.Rows[2].Table != "gameobject_questender")
+    throw new InvalidOperationException("Gameobject quest starter/ender planning failed.");
+try { _ = GameObjectTemplateAdapter.CreatePlan(gameObjectDraft with { Type = 5 }, GameObjectTemplateAdapter.CreatePortableCapabilities()); throw new InvalidOperationException("Gameobject loot was accepted for an incompatible type."); }
+catch (InvalidDataException) { }
+
 static IReadOnlyList<DatabaseColumnCapability> ItemColumns(params string[] names) => names.Select((name, index) => new DatabaseColumnCapability(name, "int", "int", false, "0", name == "entry" ? "PRI" : "", "", index + 1)).ToArray();
 
 var schema = DbcSchemaCatalog.Load(args[0]);

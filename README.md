@@ -27,6 +27,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Audits a server DBC against its live SQL overlay, decodes known GT class/level rows, identifies the effective server value, and exports an idempotent DBC-to-SQL migration preview without modifying the database.
 - Provides an offline-capable guided item/weapon/armor creator with all ten stat slots and all five item-spell slots, named class/subclass/quality/slot/binding choices, a live WotLK-style tooltip, SQL preview/export, and schema-aware transactional insertion when a server is connected.
 - Provides a native guided creature/NPC creator with four display choices, named faction/type/rank/class/service controls, combat and movement fields, embedded WotLK M2/SKIN preview, vendor inventory and creature-loot child rows, exact SQL preview/export, current normalized or legacy embedded model-column adaptation, and strict transactional no-overwrite insertion.
+- Provides a native guided gameobject creator covering all 36 WotLK types. Data0–Data23 are relabeled from the current AzerothCore type union without hiding any raw field; template identity, optional world spawn, chest/fishing-hole loot, quest starter/ender links, portable JSON drafts, SQL export, decoded SQL Studio handoff, and M2/SKIN preview are kept in one transactional workspace.
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
 - Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.
@@ -104,6 +105,8 @@ wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCI
 wowcrucible db query 127.0.0.1 3306 admin acore_world reviewed-query.sql --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db export 127.0.0.1 3306 admin acore_world item_template item_template.csv --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db import 127.0.0.1 3306 admin acore_world item_template reviewed-items.csv --password-env=WOW_CRUCIBLE_DB_PASSWORD
+wowcrucible db draft-template gameobject new-gameobject.json
+wowcrucible db content-plan 127.0.0.1 3306 admin acore_world gameobject new-gameobject.json --output=review.sql --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db snapshot 127.0.0.1 3306 admin old_world old-world.crucible-db-snapshot --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db snapshot-inspect old-world.crucible-db-snapshot
 wowcrucible db recovery-audit old-world.crucible-db-snapshot old-world.crucible-db-audit --baseline=matching-stock.crucible-db-snapshot
@@ -167,6 +170,12 @@ Open SQL Studio directly:
 
 ```powershell
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- --sql-studio
+```
+
+Open the decoded gameobject workspace directly:
+
+```powershell
+dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- --gameobjects
 ```
 
 Run the legacy WinForms reference shell (development comparison only):

@@ -121,7 +121,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var heading = new StackPanel { Spacing = 6 };
         heading.Children.Add(new TextBlock { Text = $"Complete row editor · {_page.Table} · {_selectedRow.Display}", FontSize = 16, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap });
         var actions = new WrapPanel(); var favorite = new Button { Content = "★ Favorite" }; favorite.Click += (_, _) => FavoriteSelected(); actions.Children.Add(favorite);
-        if (_page.Table is "item_template" or "creature_template") { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => GuidedEditRequested?.Invoke(this, new(_page.Table, _selectedRow.Values)); actions.Children.Add(guided); }
+        if (_page.Table is "item_template" or "creature_template" or "gameobject_template") { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => GuidedEditRequested?.Invoke(this, new(_page.Table, _selectedRow.Values)); actions.Children.Add(guided); }
         var delete = new Button { Content = "Delete exactly this row" }; delete.Click += (_, _) => PrepareDelete(); actions.Children.Add(delete); heading.Children.Add(actions);
         _rowEditor.Children.Add(heading); _rowEditor.Children.Add(new Grid { ColumnDefinitions = new("*,*,*"), ColumnSpacing = 8, Children = { _favoriteNotes, WithColumn(_favoriteDbc, 1), WithColumn(_favoriteMpq, 2) } });
         foreach (var column in _page.Columns)

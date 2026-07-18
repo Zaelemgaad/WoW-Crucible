@@ -93,7 +93,12 @@ public sealed class DatabaseCapabilityService
         new("crucible_creature_vendor", "npc_vendor", "entry", "creature_template", "entry", false, "AzerothCore creature vendor inventory"),
         new("crucible_creature_queststarter", "creature_queststarter", "id", "creature_template", "entry", false, "AzerothCore creature quest starter"),
         new("crucible_creature_questender", "creature_questender", "id", "creature_template", "entry", false, "AzerothCore creature quest ender"),
-        new("crucible_gameobject_spawn", "gameobject", "id", "gameobject_template", "entry", false, "AzerothCore gameobject spawn template")
+        new("crucible_gameobject_spawn", "gameobject", "id", "gameobject_template", "entry", false, "AzerothCore gameobject spawn template"),
+        new("crucible_gameobject_display", "gameobject_template", "displayId", "gameobjectdisplayinfo_dbc", "ID", false, "Client gameobject display definition mirrored by the server"),
+        new("crucible_gameobject_queststarter", "gameobject_queststarter", "id", "gameobject_template", "entry", false, "AzerothCore gameobject quest starter"),
+        new("crucible_gameobject_questender", "gameobject_questender", "id", "gameobject_template", "entry", false, "AzerothCore gameobject quest ender"),
+        new("crucible_gameobject_startquest", "gameobject_queststarter", "quest", "quest_template", "ID", false, "Quest started by a gameobject"),
+        new("crucible_gameobject_endquest", "gameobject_questender", "quest", "quest_template", "ID", false, "Quest ended by a gameobject")
     ];
 
     public static string BuildConnectionString(DatabaseConnectionProfile profile)

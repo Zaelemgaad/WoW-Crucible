@@ -240,4 +240,40 @@ public sealed class WorldContentTemplateService
         }
         await transaction.CommitAsync(cancellationToken);
     }
+
+    public async Task UpdateFirstAndInsertChildrenAsync(DatabaseConnectionProfile profile, WorldContentWritePlan plan, CancellationToken cancellationToken = default)
+    {
+        if (plan.Rows.Count == 0) throw new InvalidOperationException("The world-content plan has no primary row.");
+        var primary = plan.Rows[0]; if (primary.Key.Count == 0) throw new InvalidOperationException($"{primary.Table} has no verified identity key; refusing an ambiguous update.");
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var primaryPredicates = primary.Key.Keys.Select((key, index) => $"{ItemWritePlan.QuoteIdentifier(key)} <=> @pk{index}").ToArray();
+        await using (var count = new MySqlCommand($"SELECT COUNT(*) FROM {ItemWritePlan.QuoteIdentifier(primary.Table)} WHERE {string.Join(" AND ", primaryPredicates)}", connection, transaction))
+        {
+            var index = 0; foreach (var value in primary.Key.Values) count.Parameters.AddWithValue($"@pk{index++}", value ?? DBNull.Value);
+            if (Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken), System.Globalization.CultureInfo.InvariantCulture) != 1) throw new InvalidOperationException($"The complete key for {primary.Table} does not identify exactly one existing row.");
+        }
+        foreach (var row in plan.Rows.Skip(1))
+        {
+            if (row.Key.Count == 0) throw new InvalidOperationException($"{row.Table} has no verified identity key; refusing an unsafe child insert.");
+            var predicates = row.Key.Keys.Select((key, index) => $"{ItemWritePlan.QuoteIdentifier(key)} <=> @ck{index}").ToArray();
+            await using var exists = new MySqlCommand($"SELECT 1 FROM {ItemWritePlan.QuoteIdentifier(row.Table)} WHERE {string.Join(" AND ", predicates)} LIMIT 1", connection, transaction);
+            var index = 0; foreach (var value in row.Key.Values) exists.Parameters.AddWithValue($"@ck{index++}", value ?? DBNull.Value);
+            if (await exists.ExecuteScalarAsync(cancellationToken) is not null) throw new InvalidOperationException($"{row.Table} already contains {string.Join(", ", row.Key.Select(pair => $"{pair.Key}={pair.Value}"))}. Existing child rows are never replaced implicitly.");
+        }
+        var writable = primary.Values.Where(pair => !primary.Key.ContainsKey(pair.Key)).ToArray(); if (writable.Length == 0) throw new InvalidOperationException("The primary plan has no writable non-key fields.");
+        var assignments = writable.Select((pair, index) => $"{ItemWritePlan.QuoteIdentifier(pair.Key)}=@pv{index}").ToArray();
+        await using (var update = new MySqlCommand($"UPDATE {ItemWritePlan.QuoteIdentifier(primary.Table)} SET {string.Join(',', assignments)} WHERE {string.Join(" AND ", primaryPredicates)} LIMIT 1", connection, transaction))
+        {
+            for (var index = 0; index < writable.Length; index++) update.Parameters.AddWithValue($"@pv{index}", writable[index].Value ?? DBNull.Value);
+            var keyIndex = 0; foreach (var value in primary.Key.Values) update.Parameters.AddWithValue($"@pk{keyIndex++}", value ?? DBNull.Value);
+            var affected = await update.ExecuteNonQueryAsync(cancellationToken); if (affected is < 0 or > 1) throw new InvalidOperationException($"Expected zero or one changed primary row, but MySQL reported {affected}.");
+        }
+        foreach (var row in plan.Rows.Skip(1))
+        {
+            var parameters = row.Values.Select((_, index) => $"@p{index}").ToArray(); await using var insert = new MySqlCommand($"INSERT INTO {ItemWritePlan.QuoteIdentifier(row.Table)} ({string.Join(',', row.Values.Keys.Select(ItemWritePlan.QuoteIdentifier))}) VALUES ({string.Join(',', parameters)})", connection, transaction);
+            var index = 0; foreach (var value in row.Values.Values) insert.Parameters.AddWithValue(parameters[index++], value ?? DBNull.Value); if (await insert.ExecuteNonQueryAsync(cancellationToken) != 1) throw new InvalidOperationException($"A {row.Table} child insert did not affect exactly one row.");
+        }
+        await transaction.CommitAsync(cancellationToken);
+    }
 }
