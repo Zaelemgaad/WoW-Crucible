@@ -7,6 +7,7 @@ namespace WoWCrucible.Core;
 
 public enum SqlExportFormat { Csv, JsonLines }
 public sealed record SqlExportResult(string Path, string Table, long Rows, SqlExportFormat Format);
+public sealed record SqlQueryExportResult(string Path, int Rows, int Columns, SqlExportFormat Format);
 public sealed record SqlImportPlan(string Path, string Table, IReadOnlyList<string> Columns, long Rows, IReadOnlyList<string> Findings)
 {
     public bool CanApply => Findings.Count == 0;
@@ -63,6 +64,39 @@ public static class SqlCsvCodec
 
 public sealed class SqlTransferService
 {
+    public async Task<SqlQueryExportResult> ExportQueryResultAsync(SqlQueryResult result, string outputPath,
+        SqlExportFormat format, bool overwrite = false, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        if (result.Columns.Count == 0) throw new InvalidOperationException("The query result has no columns to export.");
+        if (result.Rows.Any(row => row.Count != result.Columns.Count)) throw new InvalidDataException("A query-result row does not match the result column count.");
+        var fullPath = Path.GetFullPath(outputPath); Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        if (File.Exists(fullPath) && !overwrite) throw new IOException($"Output already exists: {fullPath}");
+        var names = UniqueColumnNames(result.Columns); var temporary = fullPath + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true))
+            await using (var writer = new StreamWriter(stream, new UTF8Encoding(false), 65536, leaveOpen: false))
+            {
+                if (format == SqlExportFormat.Csv) await writer.WriteLineAsync(string.Join(',', names.Select(SqlCsvCodec.Encode)));
+                foreach (var row in result.Rows)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (format == SqlExportFormat.Csv) await writer.WriteLineAsync(string.Join(',', row.Select(SqlCsvCodec.Encode)));
+                    else
+                    {
+                        var value = names.Select((name, index) => new KeyValuePair<string, object?>(name, JsonValue(row[index]))).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+                        await writer.WriteLineAsync(JsonSerializer.Serialize(value));
+                    }
+                }
+                await writer.FlushAsync(cancellationToken);
+            }
+            File.Move(temporary, fullPath, overwrite);
+            return new(fullPath, result.Rows.Count, result.Columns.Count, format);
+        }
+        catch { try { File.Delete(temporary); } catch { } throw; }
+    }
+
     public async Task<SqlExportResult> ExportTableAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table, string outputPath,
         SqlExportFormat format, bool overwrite = false, CancellationToken cancellationToken = default)
     {
@@ -136,4 +170,23 @@ public sealed class SqlTransferService
         }
         catch { try { await transaction.RollbackAsync(CancellationToken.None); } catch { } throw; }
     }
+
+    private static IReadOnlyList<string> UniqueColumnNames(IReadOnlyList<string> columns)
+    {
+        var result = new string[columns.Count]; var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < columns.Count; index++)
+        {
+            var basis = string.IsNullOrWhiteSpace(columns[index]) ? $"column_{index + 1}" : columns[index]; var candidate = basis; var suffix = 2;
+            while (!used.Add(candidate)) candidate = $"{basis}_{suffix++}";
+            result[index] = candidate;
+        }
+        return result;
+    }
+
+    private static object? JsonValue(object? value) => value switch
+    {
+        byte[] bytes => "0x" + Convert.ToHexString(bytes),
+        TimeSpan duration => duration.ToString("c", CultureInfo.InvariantCulture),
+        _ => value
+    };
 }

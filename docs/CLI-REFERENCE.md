@@ -224,7 +224,7 @@ wowcrucible db account <host> <port> <login> <database> <grant|revoke> <account-
 wowcrucible db join <host> <port> <user> <database> <relationship-name> [--type=INNER|LEFT|RIGHT] [--limit=N] [--run] [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db index <host> <port> <user> <database> <table> create <name> <column[,column]> [--unique] [--apply] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db index <host> <port> <user> <database> <table> drop <name> [--apply] --password-env=ENV_NAME [--ssl=Preferred]
-wowcrucible db query <host> <port> <user> <database> <statement.sql> [--write] --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db query <host> <port> <user> <database> <statement.sql> [--output=result.csv|jsonl] [--format=csv|jsonl] [--overwrite] [--write] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db export <host> <port> <user> <database> <table> <output> [--format=csv|jsonl] [--overwrite] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db import <host> <port> <user> <database> <table> <input.csv> [--apply] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db dependency-snapshot <host> <port> <user> <database> <table> <output.json> --key=column=value [--key=column=value]... [--limit=N] [--overwrite]
@@ -252,7 +252,7 @@ Server detection reads the live `worldserver.conf`; it does not accept `.dist` t
 
 `db join` accepts a relationship name printed by `db inspect`, generates exact uniquely aliased `source__...` and `target__...` columns, and prints SQL without executing it by default. `--run` executes only that generated SELECT. `db index` likewise prints reviewed DDL by default; `--apply` is required to create or drop an index, ordinary primary-key removal is blocked, and MySQL may implicitly commit DDL.
 
-`db query` reads a UTF-8 SQL file so the statement does not need to be pasted into shell history. Without `--write`, the core service accepts only `SELECT`, `SHOW`, `DESCRIBE`, `DESC`, or `EXPLAIN`, including after leading SQL comments. Every other statement is rejected before it reaches MySQL. `--write` is the explicit automation path for a previously reviewed statement; remember that MySQL DDL can implicitly commit.
+`db query` reads a UTF-8 SQL file so the statement does not need to be pasted into shell history. Without `--write`, the core service accepts only `SELECT`, `SHOW`, `DESCRIBE`, `DESC`, or `EXPLAIN`, including after leading SQL comments. Every other statement is rejected before it reaches MySQL. A read result can be atomically exported with `--output`; CSV preserves `NULL` as `\N`, while JSONL uses JSON null and stable unique names when a query returns duplicate column labels. Binary cells are hexadecimal. Existing files require `--overwrite`, and cancellation never publishes a partial result. `--write` is the explicit automation path for a previously reviewed statement and cannot be combined with result-export switches; remember that MySQL DDL can implicitly commit.
 
 `db export` discovers the live table shape and streams the complete table to an atomically published UTF-8 CSV or newline-delimited JSON file. CSV uses `\\N` for SQL `NULL`, quotes commas/newlines correctly, and represents binary values as hexadecimal. Existing outputs require `--overwrite`.
 

@@ -4,6 +4,7 @@ using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
+using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
@@ -19,6 +20,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private sealed record TableChoice(DatabaseTableCapability Table) { public override string ToString() => $"{Table.Name}  ·  {Table.Columns.Count} columns"; }
     private sealed record RelationChoice(DatabaseRelationCapability Relation) { public override string ToString() => $"{Relation.FromTable}.{Relation.FromColumn} → {Relation.ToTable}.{Relation.ToColumn} · {(Relation.Declared ? "FK" : "inferred")}"; }
     private sealed record FieldEditor(TextBox Text, CheckBox? Null, ComboBox? InsertMode);
+    private sealed record QueryDisplayRow(int Number, IReadOnlyList<string> Columns, IReadOnlyList<object?> Values);
     private readonly DesktopWorkspaceSession _session;
     private readonly SqlWorkspaceService _service = new();
     private readonly SqlAdministrationService _administration = new();
@@ -68,7 +70,9 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _connectionStatus = Status("Not connected");
     private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly TextBox _query = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "SELECT * FROM item_template WHERE entry IN (17, 17802);" };
-    private readonly TextBox _queryOutput = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
+    private readonly ListBox _queryResults = new();
+    private readonly ComboBox _queryDisplay = new() { ItemsSource = new[] { "Complete field cards", "Compact rows" }, SelectedIndex = 0 };
+    private readonly TextBlock _querySummary = Status("Run a read-only query to inspect structured results.");
     private readonly ListBox _favorites = new();
     private readonly TabControl _tabs;
     private readonly TextBox _favoriteNotes = new() { PlaceholderText = "Optional note: what you changed or why this row matters" };
@@ -85,6 +89,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private DatabaseCapabilities? _capabilities;
     private bool _suppressSchemaSelection;
     private string? _browseTable;
+    private SqlQueryResult? _queryResult;
 
     public event EventHandler? BackRequested;
     public event EventHandler? ConnectionRequested;
@@ -106,6 +111,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _schemas.SelectionChanged += async (_, _) => { if (!_suppressSchemaSelection && _schemas.SelectedItem is string database) await SwitchSchemaAsync(database); };
         _rows.SelectionChanged += (_, _) => SelectRow();
         _rowDisplay.SelectionChanged += (_, _) => ApplyRowTemplate();
+        _queryDisplay.SelectionChanged += (_, _) => ApplyQueryResultTemplate();
         _processes.SelectionChanged += (_, _) => ShowSelectedProcess();
         _databaseUsers.SelectionChanged += (_, _) => SelectDatabaseUser();
         RefreshConnectionStatus(); RefreshFavorites(); PopulateTables(); PopulateRelations();
@@ -150,7 +156,13 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     {
         var run = AccentButton("Run read-only query"); run.Click += async (_, _) => await RunQueryAsync();
         var prepare = new Button { Content = "Prepare write statement" }; prepare.Click += (_, _) => PrepareStatement();
-        return new Grid { RowDefinitions = new("*,Auto,2*"), Children = { _query, WithRow(new WrapPanel { Children = { run, prepare, new TextBlock { Text = "SELECT / SHOW / DESCRIBE / EXPLAIN run immediately. Writes require an inline confirmation and transaction.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } }, 1), WithRow(_queryOutput, 2) } };
+        var exportCsv = new Button { Content = "Export result CSV" }; exportCsv.Click += async (_, _) => await ExportQueryResultAsync(SqlExportFormat.Csv);
+        var exportJson = new Button { Content = "Export result JSONL" }; exportJson.Click += async (_, _) => await ExportQueryResultAsync(SqlExportFormat.JsonLines);
+        var copy = new Button { Content = "Copy selected row" }; copy.Click += async (_, _) => await CopySelectedQueryRowAsync();
+        var controls = new WrapPanel { Children = { run, prepare, _queryDisplay, copy, exportCsv, exportJson, _querySummary, new TextBlock { Text = "Read queries run immediately. Writes require an inline confirmation and transaction.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } };
+        var results = new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _queryResults };
+        ApplyQueryResultTemplate();
+        return new Grid { RowDefinitions = new("2*,Auto,Auto,3*"), Children = { _query, WithRow(controls, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(results, 3) } };
     }
 
     private Control FavoritesPage()
@@ -669,7 +681,16 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     {
         if (_profile is null) { _status.Text = "Connect Server & SQL first."; return; } var sql = _query.Text ?? string.Empty;
         if (!IsReadOnly(sql)) { _status.Text = "This is not recognized as read-only. Use Prepare write statement so it cannot execute accidentally."; return; }
-        Begin("Running read-only query…"); try { var result = await _service.QueryAsync(_profile, sql, 2000, _operation!.Token); _queryOutput.Text = FormatResult(result); _status.Text = $"Returned {result.Rows.Count:N0} row(s) in {result.Duration.TotalMilliseconds:N0} ms."; } catch (Exception exception) { Fail("Query failed", exception); } finally { End(); }
+        Begin("Running read-only query…");
+        try
+        {
+            _queryResult = await _service.QueryAsync(_profile, sql, 2000, _operation!.Token);
+            _queryResults.ItemsSource = _queryResult.Rows.Select((row, index) => new QueryDisplayRow(index + 1, _queryResult.Columns, row)).ToArray();
+            ApplyQueryResultTemplate(); _querySummary.Text = $"{_queryResult.Rows.Count:N0} row(s) · {_queryResult.Columns.Count:N0} column(s) · {_queryResult.Duration.TotalMilliseconds:N0} ms";
+            _status.Text = $"Returned {_queryResult.Rows.Count:N0} structured row(s) in {_queryResult.Duration.TotalMilliseconds:N0} ms. The in-memory result can be copied or exported atomically.";
+        }
+        catch (Exception exception) { Fail("Query failed", exception); }
+        finally { End(); }
     }
 
     private void PrepareStatement()
@@ -677,8 +698,53 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         if (_profile is null) { _status.Text = "Connect Server & SQL first."; return; } var sql = _query.Text ?? string.Empty;
         if (IsReadOnly(sql)) { _status.Text = "Use Run read-only query for this statement."; return; }
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;
-        var confirm = AccentButton("Execute write transaction"); confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; var result = await _service.ExecuteAsync(_profile, sql); _queryOutput.Text = $"Affected rows: {result.AffectedRows:N0}\nDuration: {result.Duration.TotalMilliseconds:N0} ms"; _confirmation.IsVisible = false; _status.Text = "Statement committed transactionally."; } catch (Exception exception) { Fail("Statement failed", exception); } finally { confirm.IsEnabled = true; } };
+        var confirm = AccentButton("Execute write transaction"); confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; var result = await _service.ExecuteAsync(_profile, sql); _queryResult = null; _queryResults.ItemsSource = null; _querySummary.Text = $"Write result · {result.AffectedRows:N0} affected row(s) · {result.Duration.TotalMilliseconds:N0} ms"; _confirmation.IsVisible = false; _status.Text = "Statement committed transactionally."; } catch (Exception exception) { Fail("Statement failed", exception); } finally { confirm.IsEnabled = true; } };
         _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Execute this non-read-only statement against {_profile.Database}? Review it carefully. Crucible begins a transaction, but MySQL schema/DDL statements can implicitly commit and may not be rollbackable.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+    }
+
+    private void ApplyQueryResultTemplate()
+    {
+        var compact = _queryDisplay.SelectedIndex == 1;
+        _queryResults.ItemTemplate = new FuncDataTemplate<QueryDisplayRow>((row, _) =>
+        {
+            if (row is null) return new TextBlock();
+            if (compact)
+                return new TextBlock { Text = $"{row.Number:N0}\t{string.Join('\t', row.Values.Select(QueryCellText))}", FontFamily = new FontFamily("Cascadia Mono,Consolas"), TextWrapping = TextWrapping.NoWrap, Margin = new Thickness(5, 3) };
+            var values = new WrapPanel { Margin = new Thickness(3, 2) };
+            for (var index = 0; index < row.Columns.Count; index++)
+            {
+                values.Children.Add(new Border
+                {
+                    BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(4), Padding = new Thickness(7, 4), Margin = new Thickness(2),
+                    Child = new StackPanel { Children = { new TextBlock { Text = row.Columns[index], FontSize = 10, Foreground = Brush.Parse("#8995A9") }, new TextBlock { Text = QueryCellText(row.Values[index]), TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") } } }
+                });
+            }
+            return new StackPanel { Margin = new Thickness(3, 2), Children = { new TextBlock { Text = $"ROW {row.Number:N0}", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, values } };
+        });
+    }
+
+    private async Task CopySelectedQueryRowAsync()
+    {
+        if (_queryResults.SelectedItem is not QueryDisplayRow row) { _status.Text = "Select a query-result row first."; return; }
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard; if (clipboard is null) { _status.Text = "The system clipboard is unavailable."; return; }
+        await clipboard.SetTextAsync(string.Join('\t', row.Columns) + Environment.NewLine + string.Join('\t', row.Values.Select(QueryCellText)));
+        _status.Text = $"Copied query-result row {row.Number:N0} with its {_queryResult?.Columns.Count ?? row.Columns.Count:N0} column names.";
+    }
+
+    private async Task ExportQueryResultAsync(SqlExportFormat format)
+    {
+        if (_queryResult is null || _queryResult.Columns.Count == 0) { _status.Text = "Run a read-only query before exporting its result."; return; }
+        try
+        {
+            var extension = format == SqlExportFormat.Csv ? "csv" : "jsonl";
+            var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Export current in-memory query result", SuggestedFileName = $"query-result.{extension}", FileTypeChoices = [new FilePickerFileType(format == SqlExportFormat.Csv ? "CSV" : "JSON Lines") { Patterns = [$"*.{extension}"] }] });
+            var path = file?.TryGetLocalPath(); if (path is null) return;
+            Begin("Exporting current query result atomically…"); var result = await new SqlTransferService().ExportQueryResultAsync(_queryResult, path, format, overwrite: true, cancellationToken: _operation!.Token);
+            _status.Text = $"Exported {result.Rows:N0} row(s) × {result.Columns:N0} column(s) to {result.Path}.";
+        }
+        catch (OperationCanceledException) { _status.Text = "Query-result export cancelled; no partial output was published."; }
+        catch (Exception exception) { Fail("Query-result export failed", exception); }
+        finally { End(); }
     }
 
     private async Task OpenFavoriteAsync(bool openDecoded = false)
@@ -772,6 +838,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         return null;
     }
     private static string CellText(object? value) => value switch { null => string.Empty, byte[] bytes => "0x" + Convert.ToHexString(bytes), DateTime date => date.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture), IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture), _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty };
+    private static string QueryCellText(object? value) => value is null ? "<NULL>" : CellText(value);
     private static object? ParseFavoriteKey(DatabaseColumnCapability column, string? value) { if (value is null) return null; var type = column.DataType.ToLowerInvariant(); return (type.Contains("binary") || type.Contains("blob")) && value.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? Convert.FromHexString(value[2..]) : value; }
     private static object? ParseCell(DatabaseColumnCapability column, string? text)
     {

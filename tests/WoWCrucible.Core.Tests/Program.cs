@@ -1,6 +1,7 @@
 using WoWCrucible.Core;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Text.Json;
 
 if (args.Length != 2)
     throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
@@ -694,6 +695,46 @@ File.WriteAllText(sqlTransferFixture, $"id,unknown{Environment.NewLine}1,nope{En
 if (new SqlTransferService().AnalyzeCsv(sqlTransferFixture, sqlTransferTable).CanApply)
     throw new InvalidOperationException("SQL CSV dry-run accepted an unknown column or omitted a required field.");
 File.Delete(sqlTransferFixture);
+
+var queryExportRoot = Path.Combine(Path.GetTempPath(), $"crucible-query-export-{Guid.NewGuid():N}"); Directory.CreateDirectory(queryExportRoot);
+try
+{
+    var queryResult = new SqlQueryResult(["id", "id", "payload", "notes"],
+    [
+        new object?[] { 17u, 18u, new byte[] { 0xCA, 0xFE }, "Quoted, value" },
+        new object?[] { 17802u, 17803u, null, "Multi\nline" }
+    ], -1, TimeSpan.FromMilliseconds(2));
+    var queryCsv = Path.Combine(queryExportRoot, "result.csv"); var queryJson = Path.Combine(queryExportRoot, "result.jsonl"); var transfer = new SqlTransferService();
+    var csvResult = await transfer.ExportQueryResultAsync(queryResult, queryCsv, SqlExportFormat.Csv); var jsonResult = await transfer.ExportQueryResultAsync(queryResult, queryJson, SqlExportFormat.JsonLines);
+    var csvText = File.ReadAllText(queryCsv); var jsonLines = File.ReadAllLines(queryJson);
+    using var firstJson = JsonDocument.Parse(jsonLines[0]); using var secondJson = JsonDocument.Parse(jsonLines[1]);
+    if (csvResult.Rows != 2 || csvResult.Columns != 4 || jsonResult.Format != SqlExportFormat.JsonLines || !csvText.StartsWith("id,id_2,payload,notes", StringComparison.Ordinal) ||
+        !csvText.Contains("0xCAFE", StringComparison.Ordinal) || !csvText.Contains("\\N", StringComparison.Ordinal) ||
+        firstJson.RootElement.GetProperty("id_2").GetUInt32() != 18 || firstJson.RootElement.GetProperty("payload").GetString() != "0xCAFE" || secondJson.RootElement.GetProperty("payload").ValueKind != JsonValueKind.Null)
+        throw new InvalidOperationException("Structured SQL query-result export did not preserve duplicate column identities, binary values, NULL, multiline text, or atomic formats.");
+    try { await transfer.ExportQueryResultAsync(queryResult, queryCsv, SqlExportFormat.Csv); throw new InvalidOperationException("Query-result export silently overwrote an existing file."); }
+    catch (IOException) { }
+    using var queryCancelled = new CancellationTokenSource(); queryCancelled.Cancel(); var cancelledPath = Path.Combine(queryExportRoot, "cancelled.csv");
+    try { await transfer.ExportQueryResultAsync(queryResult, cancelledPath, SqlExportFormat.Csv, cancellationToken: queryCancelled.Token); throw new InvalidOperationException("A cancelled query-result export unexpectedly completed."); }
+    catch (OperationCanceledException) { }
+    if (File.Exists(cancelledPath) || Directory.EnumerateFiles(queryExportRoot, "*.tmp").Any()) throw new InvalidOperationException("A cancelled query-result export published or retained a partial file.");
+}
+finally { if (Directory.Exists(queryExportRoot)) Directory.Delete(queryExportRoot, true); }
+
+var desktopSourceRoot = Path.Combine(Directory.GetCurrentDirectory(), "src", "WoWCrucible.Desktop");
+if (Directory.Exists(desktopSourceRoot))
+{
+    var desktopSources = Directory.EnumerateFiles(desktopSourceRoot, "*.cs", SearchOption.AllDirectories).ToDictionary(path => path, File.ReadAllText);
+    var featureWindows = desktopSources.Where(pair => !Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase) &&
+        (pair.Value.Contains(": Window", StringComparison.Ordinal) || pair.Value.Contains("new Window", StringComparison.Ordinal) || pair.Value.Contains(".ShowDialog(", StringComparison.Ordinal) || pair.Value.Contains(".Show(", StringComparison.Ordinal))).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
+    var rigidConstraints = desktopSources.Where(pair => pair.Value.Contains("MinWidth =", StringComparison.Ordinal) || pair.Value.Contains("MaxWidth =", StringComparison.Ordinal) || pair.Value.Contains("MinHeight =", StringComparison.Ordinal) || pair.Value.Contains("MaxHeight =", StringComparison.Ordinal)).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
+    var markupConstraints = Directory.EnumerateFiles(desktopSourceRoot, "*.axaml", SearchOption.AllDirectories).Where(path =>
+    {
+        var markup = File.ReadAllText(path); return markup.Contains(" MinWidth=", StringComparison.Ordinal) || markup.Contains(" MaxWidth=", StringComparison.Ordinal) || markup.Contains(" MinHeight=", StringComparison.Ordinal) || markup.Contains(" MaxHeight=", StringComparison.Ordinal) || markup.Contains(" Width=\"", StringComparison.Ordinal) && !markup.Contains("d:DesignWidth=", StringComparison.Ordinal) || markup.Contains(" Height=\"", StringComparison.Ordinal) && !markup.Contains("d:DesignHeight=", StringComparison.Ordinal);
+    }).Select(path => Path.GetRelativePath(desktopSourceRoot, path)).ToArray();
+    if (featureWindows.Length > 0 || rigidConstraints.Length > 0 || markupConstraints.Length > 0)
+        throw new InvalidOperationException($"Single-window/responsive desktop contract regressed. Feature windows: {string.Join(", ", featureWindows)}; C# rigid constraints: {string.Join(", ", rigidConstraints)}; markup constraints: {string.Join(", ", markupConstraints)}.");
+}
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
 Directory.CreateDirectory(Path.Combine(serverFixture, "etc")); Directory.CreateDirectory(Path.Combine(serverFixture, "data", "dbc"));
