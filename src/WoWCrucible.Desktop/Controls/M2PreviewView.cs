@@ -11,10 +11,11 @@ using WoWCrucible.Core;
 
 namespace WoWCrucible.Desktop.Controls;
 
-public sealed class M2PreviewView : Control
+public sealed class M2PreviewView : Control, IDisposable
 {
     private M2PreviewGeometry? _geometry;
     private SKBitmap? _texture;
+    private readonly Dictionary<int, SKBitmap> _materialTextures = [];
     private float _yaw = -0.65f;
     private float _pitch = 0.35f;
     private float _zoom = 1;
@@ -25,6 +26,7 @@ public sealed class M2PreviewView : Control
     public void SetGeometry(M2PreviewGeometry geometry)
     {
         _geometry = geometry;
+        ClearMaterialTextures();
         _yaw = -0.65f;
         _pitch = 0.35f;
         _zoom = 1;
@@ -46,6 +48,7 @@ public sealed class M2PreviewView : Control
 
     public void SetDecodedTexture(RgbaTexture? texture)
     {
+        ClearMaterialTextures();
         _texture?.Dispose(); _texture = null;
         if (texture is not null)
         {
@@ -57,12 +60,41 @@ public sealed class M2PreviewView : Control
         InvalidateVisual();
     }
 
+    public void SetDecodedTextures(IReadOnlyDictionary<int, RgbaTexture> textures)
+    {
+        _texture?.Dispose(); _texture = null;
+        ClearMaterialTextures();
+        foreach (var (textureDefinitionIndex, texture) in textures) _materialTextures[textureDefinitionIndex] = CreateBitmap(texture);
+        InvalidateVisual();
+    }
+
+    private static SKBitmap CreateBitmap(RgbaTexture texture)
+    {
+        var bitmap = new SKBitmap(new SKImageInfo(texture.Width, texture.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
+        var rowBytes = checked(texture.Width * 4); var address = bitmap.GetPixels();
+        for (var row = 0; row < texture.Height; row++) Marshal.Copy(texture.Pixels, row * rowBytes, IntPtr.Add(address, row * bitmap.RowBytes), rowBytes);
+        return bitmap;
+    }
+
+    private void ClearMaterialTextures()
+    {
+        foreach (var texture in _materialTextures.Values) texture.Dispose();
+        _materialTextures.Clear();
+    }
+
+    public void Dispose()
+    {
+        _texture?.Dispose(); _texture = null;
+        ClearMaterialTextures();
+        _geometry = null;
+    }
+
     public override void Render(DrawingContext context)
     {
         base.Render(context);
         context.FillRectangle(new SolidColorBrush(Color.Parse("#090D14")), Bounds);
         if (_geometry is null) return;
-        context.Custom(new M2DrawOperation(Bounds, _geometry, _texture, _yaw, _pitch, _zoom));
+        context.Custom(new M2DrawOperation(Bounds, _geometry, _texture, _materialTextures, _yaw, _pitch, _zoom));
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
@@ -100,7 +132,7 @@ public sealed class M2PreviewView : Control
         e.Handled = true;
     }
 
-    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, SKBitmap? texture, float yaw, float pitch, float zoom) : ICustomDrawOperation
+    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, float yaw, float pitch, float zoom) : ICustomDrawOperation
     {
         public Rect Bounds => bounds;
         public bool HitTest(Avalonia.Point point) => Bounds.Contains(point);
@@ -130,9 +162,12 @@ public sealed class M2PreviewView : Control
             var sampling = Math.Max(1, (int)Math.Ceiling(triangleCount / 30_000d));
             var faces = new List<Face>(Math.Min(triangleCount, 30_000));
             var light = Vector3.Normalize(new Vector3(-0.35f, -0.65f, 0.9f));
-            for (var triangle = 0; triangle < triangleCount; triangle += sampling)
+            IReadOnlyList<M2PreviewBatch> batches = geometry.Batches.Count == 0 ? [new M2PreviewBatch(0, 0, 0, geometry.TriangleIndices.Count, null, null)] : geometry.Batches;
+            foreach (var batch in batches)
             {
-                var offset = triangle * 3;
+                var end = Math.Min(geometry.TriangleIndices.Count, batch.TriangleStart + batch.TriangleIndexCount);
+                for (var offset = batch.TriangleStart; offset + 2 < end; offset += 3 * sampling)
+                {
                 var a = transformed[geometry.TriangleIndices[offset]];
                 var b = transformed[geometry.TriangleIndices[offset + 1]];
                 var c = transformed[geometry.TriangleIndices[offset + 2]];
@@ -144,34 +179,15 @@ public sealed class M2PreviewView : Control
                 var normal = Vector3.Cross(b - a, c - a);
                 if (normal.LengthSquared() > 0.000001f) normal = Vector3.Normalize(normal);
                 var brightness = Math.Clamp(0.25f + 0.75f * Math.Abs(Vector3.Dot(normal, light)), 0.2f, 1f);
-                faces.Add(new((a.Y + b.Y + c.Y) / 3f, geometry.TriangleIndices[offset], geometry.TriangleIndices[offset + 1], geometry.TriangleIndices[offset + 2], ax, ay, bx, by, cx, cy, (byte)Math.Round(brightness * 15)));
+                faces.Add(new((a.Y + b.Y + c.Y) / 3f, geometry.TriangleIndices[offset], geometry.TriangleIndices[offset + 1], geometry.TriangleIndices[offset + 2], ax, ay, bx, by, cx, cy, (byte)Math.Round(brightness * 15), batch.TextureDefinitionIndex));
+                }
             }
             faces.Sort(static (left, right) => right.Depth.CompareTo(left.Depth));
-
-            if (texture is not null)
-            {
-                var positions = new SKPoint[faces.Count * 3]; var coordinates = new SKPoint[faces.Count * 3]; var colors = new SKColor[faces.Count * 3];
-                for (var index = 0; index < faces.Count; index++)
-                {
-                    var face = faces[index]; var offset = index * 3;
-                    positions[offset] = new(face.Ax, face.Ay); positions[offset + 1] = new(face.Bx, face.By); positions[offset + 2] = new(face.Cx, face.Cy);
-                    AddUv(offset, face.Ia); AddUv(offset + 1, face.Ib); AddUv(offset + 2, face.Ic);
-                    var shade = (byte)Math.Clamp(70 + face.Shade * 12, 0, 255); colors[offset] = colors[offset + 1] = colors[offset + 2] = new SKColor(shade, shade, shade, 255);
-                }
-                using var shader = SKShader.CreateBitmap(texture, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat);
-                using var paint = new SKPaint { IsAntialias = true, Shader = shader };
-                using var mesh = SKVertices.CreateCopy(SKVertexMode.Triangles, positions, coordinates, colors);
-                canvas.DrawVertices(mesh, SKBlendMode.Modulate, paint);
-                void AddUv(int destination, int vertex)
-                {
-                    var uv = geometry.TextureCoordinates[vertex]; coordinates[destination] = new(uv.X * texture.Width, uv.Y * texture.Height);
-                }
-            }
 
             using var fill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
             using var edge = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 0.65f, Color = new SKColor(5, 9, 15, 58) };
             using var path = new SKPath();
-            if (texture is null) foreach (var face in faces)
+            foreach (var face in faces.Where(face => texture is null && (face.TextureDefinitionIndex is not { } index || !materialTextures.ContainsKey(index))))
             {
                 var value = 48 + face.Shade * 11;
                 fill.Color = new SKColor((byte)Math.Min(220, value / 2 + 45), (byte)Math.Min(230, value), (byte)Math.Min(255, value + 24));
@@ -179,15 +195,39 @@ public sealed class M2PreviewView : Control
                 canvas.DrawPath(path, fill); canvas.DrawPath(path, edge);
             }
 
+            var texturedFaces = faces.Where(face => texture is not null || face.TextureDefinitionIndex is { } index && materialTextures.ContainsKey(index))
+                .GroupBy(face => texture is not null ? -1 : face.TextureDefinitionIndex!.Value);
+            foreach (var group in texturedFaces)
+            {
+                var activeTexture = texture ?? materialTextures[group.Key]; var groupFaces = group.ToArray();
+                var positions = new SKPoint[groupFaces.Length * 3]; var coordinates = new SKPoint[groupFaces.Length * 3]; var colors = new SKColor[groupFaces.Length * 3];
+                for (var index = 0; index < groupFaces.Length; index++)
+                {
+                    var face = groupFaces[index]; var offset = index * 3;
+                    positions[offset] = new(face.Ax, face.Ay); positions[offset + 1] = new(face.Bx, face.By); positions[offset + 2] = new(face.Cx, face.Cy);
+                    AddUv(offset, face.Ia); AddUv(offset + 1, face.Ib); AddUv(offset + 2, face.Ic);
+                    var shade = (byte)Math.Clamp(70 + face.Shade * 12, 0, 255); colors[offset] = colors[offset + 1] = colors[offset + 2] = new SKColor(shade, shade, shade, 255);
+                }
+                using var shader = SKShader.CreateBitmap(activeTexture, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat);
+                using var paint = new SKPaint { IsAntialias = true, Shader = shader };
+                using var mesh = SKVertices.CreateCopy(SKVertexMode.Triangles, positions, coordinates, colors);
+                canvas.DrawVertices(mesh, SKBlendMode.Modulate, paint);
+                void AddUv(int destination, int vertex)
+                {
+                    var uv = geometry.TextureCoordinates[vertex]; coordinates[destination] = new(uv.X * activeTexture.Width, uv.Y * activeTexture.Height);
+                }
+            }
+
             using var text = new SKPaint { IsAntialias = true, Color = new SKColor(225, 231, 240) };
             using var titleFont = new SKFont(SKTypeface.Default, 13);
             using var hintFont = new SKFont(SKTypeface.Default, 12);
             var geosets = geometry.Submeshes.Count == 0 ? "complete mesh" : $"{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} geosets";
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {faces.Count:N0} displayed faces", 12, 23, SKTextAlign.Left, titleFont, text);
+            var textureCount = texture is not null ? "manual texture" : $"{materialTextures.Count:N0} material texture(s)";
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }
 
-        private readonly record struct Face(float Depth, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy, byte Shade);
+        private readonly record struct Face(float Depth, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy, byte Shade, int? TextureDefinitionIndex);
     }
 }

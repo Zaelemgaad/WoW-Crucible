@@ -83,7 +83,7 @@ Every top-level Tools directory is assigned below, including redundant editors. 
 | Capability family | Current Crucible state | Replacement acceptance target |
 |---|---|---|
 | DBC WDBC editing | Native multi-document virtual editor, decoded fields, undo/redo, bulk clone, layer/promotion services | DBD/DB2 formats, structured import/export, domain workspaces, effective DBC+SQL view |
-| M2/SKIN preview | Native mesh, UV, bounded discovery; base geosets now filtered | Materials, texture units, CharSections composition, equipment, animation, particles, export |
+| M2/SKIN preview | Native mesh/UV, bounded discovery, base-geoset filtering, SKIN material-unit and M2 texture-lookup parsing, per-submesh embedded BLP assignment | Replaceable-slot and CharSections composition, multi-pass shaders, equipment, animation, particles, export |
 | MPQ | Native create/update/list/extract/manifest/validation/deployment; single-window workspace; files/folder-tree drag-and-drop | Tree mode, locale/listfile recovery, streaming performance, complete MPQEditor parity |
 | Server & SQL | Shared automatic WSL/local detection, complete-schema verification, native lifecycle controls, paged full-row SQL Studio, primary-key-safe insert/update/delete, declared/inferred relation navigation, streaming CSV/JSONL export, dry-run transactional CSV import, confirmed query/write path, and persistent cross-table favorites | Visual join designer, indexes/users/process administration, broader domain adapters, deployment rollback, and remaining advanced HeidiSQL parity |
 | Items & sets | Acquisition audit, full schema copy, ItemSet clone/effects | Complete guided item creator, ten stats, five spells, accurate tooltip/model preview, all target adapters |

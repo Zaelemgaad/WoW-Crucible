@@ -224,7 +224,11 @@ static int Asset(string[] args)
         var geometry = M2PreviewGeometryService.Load(args[1], visibilityMode: mode);
         Console.WriteLine($"Model\t{geometry.ModelPath}\nSkin\t{geometry.SkinPath}\nVertices\t{geometry.Vertices.Count:N0}\nGeosets\t{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} ({geometry.VisibilityMode})\nTriangles\t{geometry.TriangleIndices.Count / 3:N0}/{geometry.TotalTriangleIndices / 3:N0}\nMinimum\t{geometry.Minimum}\nMaximum\t{geometry.Maximum}");
         foreach (var slot in geometry.TextureSlots) Console.WriteLine($"TEXTURE\t{slot.Index}\t{slot.Type}\t{slot.Flags}\t{slot.EmbeddedPath ?? "<external appearance binding>"}");
+        foreach (var material in geometry.MaterialUnits) Console.WriteLine($"MATERIAL\t{material.Index}\tsubmesh={material.SubmeshIndex}\tshader={material.ShaderId}\tlookup={material.TextureLookupIndex}\ttexture={(material.TextureDefinitionIndex < 0 ? "<unresolved>" : material.TextureDefinitionIndex)}\tpasses={material.TextureCount}");
+        foreach (var batch in geometry.Batches) Console.WriteLine($"BATCH\t{submeshLabel(batch)}\tindices={batch.TriangleStart}+{batch.TriangleIndexCount}\tmaterial={batch.MaterialUnitIndex?.ToString() ?? "<none>"}\ttexture={batch.TextureDefinitionIndex?.ToString() ?? "<none>"}");
         return 0;
+
+        static string submeshLabel(M2PreviewBatch batch) => $"submesh={batch.SubmeshIndex},geoset={batch.GeosetId}";
     }
     if (args is ["workspace", var outputRoot, .. var workspaceInputs] && workspaceInputs.Length > 0)
     {
