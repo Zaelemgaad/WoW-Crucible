@@ -24,7 +24,11 @@ public partial class MainWindow : Window
     private DbcSchemaCatalog? _schemaCatalog;
     private string _schemaSource = "Built-in 12340 definitions";
     private bool _syncingScrollbars;
+    private readonly DesktopWorkspaceSession _workspaceSession = new(DesktopSettings.Load());
     private AssetComparisonView? _assetComparisonView;
+    private ItemWorkbenchView? _itemWorkbenchView;
+    private MpqWorkspaceView? _mpqWorkspaceView;
+    private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
 
     private DbcDocumentSession? Current => _activeDocument >= 0 && _activeDocument < _documents.Count ? _documents[_activeDocument] : null;
     private WdbcFile? CurrentFile => Current?.File;
@@ -49,7 +53,8 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => _assetComparisonView?.Dispose();
+        Closed += (_, _) => { _assetComparisonView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); };
+        if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
     private void DevbugModeChanged(object? sender, RoutedEventArgs e)
@@ -250,8 +255,11 @@ public partial class MainWindow : Window
         var document = Current;
         if (document is null) return;
         var before = document.File.GetRaw(selection.Row, selection.Column);
-        var dialog = new CellEditorDialog(document.File, selection.Row, selection.Column);
-        var value = await dialog.ShowDialog<string?>(this);
+        var editor = new CellEditorView(document.File, selection.Row, selection.Column);
+        var completion = new TaskCompletionSource<string?>();
+        editor.Completed += (_, value) => CompleteInlineDialog(completion, value);
+        ShowInlineDialog(editor);
+        var value = await completion.Task;
         if (value is null) return;
         try
         {
@@ -356,6 +364,56 @@ public partial class MainWindow : Window
         DesktopCrashLogger.Debug("DBC", "row-deleted", ("path", document.FullPath), ("row", row), ("new_row_count", document.File.RowCount));
     }
 
+    private void OpenSpellWorkspaceClick(object? sender, RoutedEventArgs e)
+    {
+        var document = Current;
+        var row = DbcView.SelectedSourceRow;
+        if (document is null || !Path.GetFileNameWithoutExtension(document.File.SourcePath).Equals("Spell", StringComparison.OrdinalIgnoreCase))
+        {
+            StatusText.Text = "Open Spell.dbc and select a spell row before opening the guided spell workspace.";
+            return;
+        }
+        if (row < 0) { StatusText.Text = "Select a spell row first."; return; }
+        if (document.Schema.Columns.Count <= 233)
+        {
+            _ = ShowErrorAsync("Spell schema mismatch", "The guided WotLK spell workspace requires the 3.3.5a Spell.dbc layout. Select the matching build-12340 schema first.");
+            return;
+        }
+        var view = new SpellWorkspaceView(document.File, row, document.Schema.Columns, changes => ApplySpellChanges(document, row, changes));
+        view.BackRequested += (_, _) => CloseFeatureWorkspace();
+        OpenFeatureWorkspace(view, $"Spell {document.File.GetDisplayValue(row, document.Schema.Columns[0])}");
+    }
+
+    private void ApplySpellChanges(DbcDocumentSession document, int row, IReadOnlyList<SpellFieldChange> changes)
+    {
+        var applied = new List<(DbcColumn Column, uint Before)>();
+        try
+        {
+            foreach (var change in changes)
+            {
+                var before = document.File.GetRaw(row, change.Column);
+                var semantic = DbcSemanticCatalog.Get("Spell", change.Column.Index, document.File, row);
+                if (semantic is null) document.File.SetDisplayValue(row, change.Column, change.Value);
+                else document.File.SetRaw(row, change.Column, semantic.Parse(change.Value));
+                applied.Add((change.Column, before));
+            }
+            foreach (var change in applied)
+            {
+                var after = document.File.GetRaw(row, change.Column);
+                document.History.Record(row, change.Column, change.Before, after);
+            }
+            DbcView.RefreshDocument(row);
+            RefreshTabs();
+            StatusText.Text = $"Applied {changes.Count:N0} guided spell field change(s) · Ctrl+Z to undo";
+            DesktopCrashLogger.Debug("SPELL", "guided-edit-applied", ("path", document.FullPath), ("row", row), ("fields", changes.Count));
+        }
+        catch
+        {
+            foreach (var change in applied.AsEnumerable().Reverse()) document.File.SetRaw(row, change.Column, change.Before);
+            throw;
+        }
+    }
+
     private static void RequireStructuralKey(DbcDocumentSession document)
     {
         if (document.Schema.KeyStrategy.Kind == DbcRecordKeyKind.NoStableKey)
@@ -445,41 +503,82 @@ public partial class MainWindow : Window
     }
 
     private void OpenLogsClick(object? sender, RoutedEventArgs e) => DesktopCrashLogger.OpenDirectory();
-    private async void OpenItemWorkbenchClick(object? sender, RoutedEventArgs e) => await new ItemWorkbenchWindow().ShowDialog(this);
+    private void OpenItemWorkbenchClick(object? sender, RoutedEventArgs e)
+    {
+        if (_itemWorkbenchView is null)
+        {
+            _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession);
+            _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
+    }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
+    private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e) => CloseFeatureWorkspace();
+    private void OpenMpqWorkspaceClick(object? sender, RoutedEventArgs e)
+    {
+        if (_mpqWorkspaceView is null)
+        {
+            _mpqWorkspaceView = new MpqWorkspaceView(_workspaceSession);
+            _mpqWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
+    }
+    private void OpenServerSqlClick(object? sender, RoutedEventArgs e)
+    {
+        if (_serverSqlWorkspaceView is null)
+        {
+            _serverSqlWorkspaceView = new ServerSqlWorkspaceView(_workspaceSession);
+            _serverSqlWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_serverSqlWorkspaceView, "Server & SQL");
+        _serverSqlWorkspaceView.Activate();
+    }
+
+    private async Task RestoreWorkspaceSessionAsync()
+    {
+        try
+        {
+            StatusText.Text = "Restoring the saved server workspace…";
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await _workspaceSession.DetectServerAndConnectAsync(_workspaceSession.Settings.ServerRootPath, timeout.Token);
+            StatusText.Text = $"Server ready · {_workspaceSession.Server?.CoreFamily} · {_workspaceSession.DatabaseCapabilities?.Database} · MySQL {_workspaceSession.DatabaseCapabilities?.ServerVersion}";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Saved server workspace is currently unavailable: {exception.Message}";
+        }
+    }
 
     public void OpenAssetComparison(string? libraryRoot = null)
     {
         if (_assetComparisonView is null)
         {
             _assetComparisonView = new AssetComparisonView();
-            _assetComparisonView.BackRequested += (_, _) => CloseAssetComparison();
-            AssetComparisonHost.Child = _assetComparisonView;
+            _assetComparisonView.BackRequested += (_, _) => CloseFeatureWorkspace();
         }
-
-        MainHeader.IsVisible = false;
-        NavigationPane.IsVisible = false;
-        EditorWorkspace.IsVisible = false;
-        InspectorPane.IsVisible = false;
-        MainStatusBar.IsVisible = false;
-        AssetComparisonHost.IsVisible = true;
         _assetComparisonView.Activate(libraryRoot);
+        OpenFeatureWorkspace(_assetComparisonView, "Asset Comparison");
         Dispatcher.UIThread.Post(() => _assetComparisonView.Focus(), DispatcherPriority.Input);
-        Title = "WoW Crucible — Asset Comparison";
         DesktopCrashLogger.Debug("UI", "asset-workspace-opened", ("library", libraryRoot));
     }
 
-    private void CloseAssetComparison()
+    private void OpenFeatureWorkspace(Control workspace, string title)
+    {
+        FeatureWorkspaceHost.Child = workspace;
+        FeatureWorkspaceHost.IsVisible = true;
+        MainHeader.IsVisible = NavigationPane.IsVisible = NavigationSplitter.IsVisible = EditorWorkspace.IsVisible = InspectorSplitter.IsVisible = InspectorPane.IsVisible = MainStatusBar.IsVisible = false;
+        Title = $"WoW Crucible — {title}";
+        DesktopCrashLogger.Debug("UI", "feature-workspace-opened", ("title", title), ("view", workspace.GetType().Name));
+    }
+
+    private void CloseFeatureWorkspace()
     {
         _assetComparisonView?.Suspend();
-        AssetComparisonHost.IsVisible = false;
-        MainHeader.IsVisible = true;
-        NavigationPane.IsVisible = true;
-        EditorWorkspace.IsVisible = true;
-        InspectorPane.IsVisible = true;
-        MainStatusBar.IsVisible = true;
-        Title = "WoW Crucible — Desktop Preview";
-        DesktopCrashLogger.Debug("UI", "asset-workspace-closed");
+        FeatureWorkspaceHost.IsVisible = false;
+        FeatureWorkspaceHost.Child = null;
+        MainHeader.IsVisible = NavigationPane.IsVisible = NavigationSplitter.IsVisible = EditorWorkspace.IsVisible = InspectorSplitter.IsVisible = InspectorPane.IsVisible = MainStatusBar.IsVisible = true;
+        Title = "WoW Crucible";
+        DesktopCrashLogger.Debug("UI", "feature-workspace-closed");
     }
     private async void OpenCliGuideClick(object? sender, RoutedEventArgs e)
     {
@@ -487,21 +586,22 @@ public partial class MainWindow : Window
         var text = File.Exists(path)
             ? await File.ReadAllTextAsync(path)
             : "The complete CLI reference was not found beside this build. Run wowcrucible --help or wowcrucible <group> --help for the built-in command map.";
-        var window = new Window
+        var back = new Button { Content = "← Editor", HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left };
+        back.Click += (_, _) => CloseFeatureWorkspace();
+        var view = new UserControl
         {
-            Title = "WoW Crucible — CLI guide", Width = 980, Height = 760,
-            MinWidth = 700, MinHeight = 500, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Content = new Grid
             {
-                RowDefinitions = new RowDefinitions("Auto,*"), Margin = new Thickness(16),
+                RowDefinitions = new RowDefinitions("Auto,Auto,*"), Margin = new Thickness(16),
                 Children =
                 {
-                    new TextBlock { Text = "CLI REFERENCE · searchable with Ctrl+F after opening the Markdown file in an editor", Foreground = new SolidColorBrush(Color.Parse("#C58A2B")), FontSize = 11, FontWeight = FontWeight.Bold, Margin = new Thickness(2,0,0,10) },
-                    WithGridRow(new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), FontSize = 12 }, 1)
+                    back,
+                    WithGridRow(new TextBlock { Text = "CLI REFERENCE · searchable with Ctrl+F after opening the Markdown file in an editor", Foreground = new SolidColorBrush(Color.Parse("#C58A2B")), FontSize = 11, FontWeight = FontWeight.Bold, Margin = new Thickness(2,10) }, 1),
+                    WithGridRow(new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), FontSize = 12 }, 2)
                 }
             }
         };
-        await window.ShowDialog(this);
+        OpenFeatureWorkspace(view, "CLI Guide");
     }
 
     private static T WithGridRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
@@ -563,30 +663,30 @@ public partial class MainWindow : Window
 
     private async Task<int?> PromptCloneCountAsync()
     {
-        var input = new NumericUpDown { Minimum = 2, Maximum = 100_000, Value = 100, Increment = 1, Width = 220 };
-        var dialog = new Window { Title = "Clone multiple rows", Width = 430, Height = 210, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var input = new NumericUpDown { Minimum = 2, Maximum = 100_000, Value = 100, Increment = 1, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch };
+        var completion = new TaskCompletionSource<int?>();
         var cancel = new Button { Content = "Cancel" }; var create = new Button { Content = "Create clones", Classes = { "accent" } };
-        cancel.Click += (_, _) => dialog.Close(null); create.Click += (_, _) => dialog.Close((int?)input.Value);
-        dialog.Content = new StackPanel { Margin = new Thickness(22), Spacing = 14, Children = { new TextBlock { Text = "Number of copies", FontSize = 18, FontWeight = FontWeight.SemiBold }, input, new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 8, Children = { cancel, create } } } };
-        return await dialog.ShowDialog<int?>(this);
+        cancel.Click += (_, _) => CompleteInlineDialog(completion, null); create.Click += (_, _) => CompleteInlineDialog(completion, (int?)input.Value);
+        ShowInlineDialog(new StackPanel { Spacing = 14, Children = { new TextBlock { Text = "Number of copies", FontSize = 18, FontWeight = FontWeight.SemiBold }, input, new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 8, Children = { cancel, create } } } });
+        return await completion.Task;
     }
 
     private async Task<bool> ConfirmAsync(string title, string message)
     {
-        var dialog = new Window { Title = title, Width = 520, Height = 220, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var completion = new TaskCompletionSource<bool>();
         var no = new Button { Content = "Cancel" }; var yes = new Button { Content = "Continue", Classes = { "accent" } };
-        no.Click += (_, _) => dialog.Close(false); yes.Click += (_, _) => dialog.Close(true);
-        dialog.Content = new StackPanel { Margin = new Thickness(22), Spacing = 15, Children = { new TextBlock { Text = title, FontSize = 19, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 8, Children = { no, yes } } } };
-        return await dialog.ShowDialog<bool>(this);
+        no.Click += (_, _) => CompleteInlineDialog(completion, false); yes.Click += (_, _) => CompleteInlineDialog(completion, true);
+        ShowInlineDialog(new StackPanel { Spacing = 15, Children = { new TextBlock { Text = title, FontSize = 19, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 8, Children = { no, yes } } } });
+        return await completion.Task;
     }
 
     private async Task<SaveChoice> PromptSaveAsync(string name)
     {
-        var dialog = new Window { Title = "Unsaved changes", Width = 540, Height = 230, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var completion = new TaskCompletionSource<SaveChoice>();
         var cancel = new Button { Content = "Cancel" }; var discard = new Button { Content = "Discard" }; var save = new Button { Content = "Save", Classes = { "accent" } };
-        cancel.Click += (_, _) => dialog.Close(SaveChoice.Cancel); discard.Click += (_, _) => dialog.Close(SaveChoice.Discard); save.Click += (_, _) => dialog.Close(SaveChoice.Save);
-        dialog.Content = new StackPanel { Margin = new Thickness(22), Spacing = 15, Children = { new TextBlock { Text = "Unsaved changes", FontSize = 19, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = $"Save changes to {name} before continuing?", TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 8, Children = { cancel, discard, save } } } };
-        return await dialog.ShowDialog<SaveChoice>(this);
+        cancel.Click += (_, _) => CompleteInlineDialog(completion, SaveChoice.Cancel); discard.Click += (_, _) => CompleteInlineDialog(completion, SaveChoice.Discard); save.Click += (_, _) => CompleteInlineDialog(completion, SaveChoice.Save);
+        ShowInlineDialog(new StackPanel { Spacing = 15, Children = { new TextBlock { Text = "Unsaved changes", FontSize = 19, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = $"Save changes to {name} before continuing?", TextWrapping = TextWrapping.Wrap }, new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Spacing = 8, Children = { cancel, discard, save } } } });
+        return await completion.Task;
     }
 
     private void SetBusy(string message) => StatusText.Text = message;
@@ -654,11 +754,25 @@ public partial class MainWindow : Window
 
     private async Task ShowErrorAsync(string title, string message)
     {
-        var dialog = new Window { Title = title, Width = 520, Height = 220, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        var completion = new TaskCompletionSource<bool>();
         var close = new Button { Content = "Close", HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right };
-        close.Click += (_, _) => dialog.Close();
-        dialog.Content = new StackPanel { Margin = new Thickness(22), Spacing = 14, Children = { new TextBlock { Text = title, FontSize = 19, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap }, close } };
-        await dialog.ShowDialog(this);
+        close.Click += (_, _) => CompleteInlineDialog(completion, true);
+        ShowInlineDialog(new StackPanel { Spacing = 14, Children = { new TextBlock { Text = title, FontSize = 19, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap }, close } });
+        await completion.Task;
+    }
+
+    private void ShowInlineDialog(Control content)
+    {
+        DialogContent.Content = content;
+        DialogOverlayHost.IsVisible = true;
+        Dispatcher.UIThread.Post(() => content.Focus(), DispatcherPriority.Input);
+    }
+
+    private void CompleteInlineDialog<T>(TaskCompletionSource<T> completion, T value)
+    {
+        if (!completion.TrySetResult(value)) return;
+        DialogOverlayHost.IsVisible = false;
+        DialogContent.Content = null;
     }
 
     private enum SaveChoice { Cancel, Discard, Save }

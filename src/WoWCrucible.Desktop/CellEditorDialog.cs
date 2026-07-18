@@ -8,7 +8,7 @@ using WoWCrucible.Core;
 
 namespace WoWCrucible.Desktop;
 
-internal sealed class CellEditorDialog : Window
+internal sealed class CellEditorView : UserControl
 {
     private readonly TextBox _value;
     private readonly SemanticField? _semantic;
@@ -16,16 +16,12 @@ internal sealed class CellEditorDialog : Window
     private readonly List<CheckBox> _flagChecks = [];
     private readonly ComboBox? _enumChoice;
 
-    public CellEditorDialog(WdbcFile file, int row, DbcColumn column)
+    public event EventHandler<string?>? Completed;
+
+    public CellEditorView(WdbcFile file, int row, DbcColumn column)
     {
         _semantic = DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(file.SourcePath), column.Index, file, row);
         _originalRaw = file.GetRaw(row, column);
-        Title = $"Edit {column.Name}";
-        Width = 650;
-        Height = _semantic?.Kind == SemanticKind.Flags ? 620 : 390;
-        MinWidth = 520;
-        WindowStartupLocation = WindowStartupLocation.CenterOwner;
-        CanResize = true;
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), Margin = new Thickness(22) };
         var heading = new StackPanel { Spacing = 5 };
@@ -112,9 +108,9 @@ internal sealed class CellEditorDialog : Window
         root.Children.Add(guidance);
 
         var cancel = new Button { Content = "Cancel" };
-        cancel.Click += (_, _) => Close(null);
+        cancel.Click += (_, _) => Completed?.Invoke(this, null);
         var apply = new Button { Content = "Apply change", Classes = { "accent" } };
-        apply.Click += (_, _) => Close(ResolvedValue());
+        apply.Click += (_, _) => Completed?.Invoke(this, ResolvedValue());
         var actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Spacing = 8, Children = { cancel, apply } };
         Grid.SetRow(actions, 3);
         root.Children.Add(actions);

@@ -171,10 +171,11 @@ static int Asset(string[] args)
         }
         return 0;
     }
-    if (args is ["preview-info", var previewModel])
+    if (args.Length is 2 or 3 && args[0].Equals("preview-info", StringComparison.OrdinalIgnoreCase) && (args.Length == 2 || args[2].Equals("--all-geosets", StringComparison.OrdinalIgnoreCase)))
     {
-        var geometry = M2PreviewGeometryService.Load(previewModel);
-        Console.WriteLine($"Model\t{geometry.ModelPath}\nSkin\t{geometry.SkinPath}\nVertices\t{geometry.Vertices.Count:N0}\nTriangles\t{geometry.TriangleIndices.Count / 3:N0}\nMinimum\t{geometry.Minimum}\nMaximum\t{geometry.Maximum}");
+        var mode = args.Length == 3 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
+        var geometry = M2PreviewGeometryService.Load(args[1], visibilityMode: mode);
+        Console.WriteLine($"Model\t{geometry.ModelPath}\nSkin\t{geometry.SkinPath}\nVertices\t{geometry.Vertices.Count:N0}\nGeosets\t{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} ({geometry.VisibilityMode})\nTriangles\t{geometry.TriangleIndices.Count / 3:N0}/{geometry.TotalTriangleIndices / 3:N0}\nMinimum\t{geometry.Minimum}\nMaximum\t{geometry.Maximum}");
         return 0;
     }
     if (args is ["workspace", var outputRoot, .. var workspaceInputs] && workspaceInputs.Length > 0)
@@ -186,7 +187,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2> [--all-geosets]\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Project(string[] args)
 {

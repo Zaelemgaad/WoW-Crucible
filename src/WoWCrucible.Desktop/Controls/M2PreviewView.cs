@@ -168,7 +168,8 @@ public sealed class M2PreviewView : Control
             using var text = new SKPaint { IsAntialias = true, Color = new SKColor(225, 231, 240) };
             using var titleFont = new SKFont(SKTypeface.Default, 13);
             using var hintFont = new SKFont(SKTypeface.Default, 12);
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geometry.Vertices.Count:N0} vertices · {faces.Count:N0} displayed faces", 12, 23, SKTextAlign.Left, titleFont, text);
+            var geosets = geometry.Submeshes.Count == 0 ? "complete mesh" : $"{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} geosets";
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {faces.Count:N0} displayed faces", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }

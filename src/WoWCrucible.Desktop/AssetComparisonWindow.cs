@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -19,22 +20,24 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly TextBox _directorySearch = new() { PlaceholderText = "Filter content paths…" };
     private readonly ListBox _directories = new();
     private readonly TextBox _fileSearch = new() { PlaceholderText = "Optional filename filter…" };
-    private readonly ComboBox _sourceFilter = new() { MinWidth = 180 };
-    private readonly ComboBox _sort = new() { MinWidth = 170, ItemsSource = new[] { "Source then name", "Name A–Z", "Size: largest first", "Size: smallest first" }, SelectedIndex = 0 };
+    private readonly ComboBox _sourceFilter = new();
+    private readonly ComboBox _sort = new() { ItemsSource = new[] { "Source then name", "Name A–Z", "Size: largest first", "Size: smallest first" }, SelectedIndex = 0 };
+    private readonly ComboBox _cardDensity = new() { ItemsSource = new[] { "1 column", "2 columns", "3 columns", "4 columns", "5 columns", "6 columns", "7 columns", "8 columns" }, SelectedIndex = 3 };
     private readonly Button _scanDuplicates = new() { Content = "Scan exact copies" };
     private readonly CheckBox _collapseDuplicates = new() { Content = "Collapse exact copies", IsEnabled = false };
     private readonly CheckBox _undecidedOnly = new() { Content = "Undecided only", IsChecked = true };
     private readonly CheckBox _autoAdvance = new() { Content = "Auto-advance", IsChecked = true };
-    private readonly ComboBox _previewMode = new() { MinWidth = 165, ItemsSource = new[] { "Image comparison", "Live model preview" }, SelectedIndex = 0 };
-    private readonly ComboBox _modelPicker = new() { MinWidth = 300 };
+    private readonly ComboBox _previewMode = new() { ItemsSource = new[] { "Image comparison", "Live model preview" }, SelectedIndex = 0 };
+    private readonly ComboBox _modelPicker = new();
     private readonly TextBox _modelSearch = new() { PlaceholderText = "Filter discovered M2 models…" };
-    private readonly ComboBox _modelFilter = new() { MinWidth = 150, ItemsSource = new[] { "Ready models", "All models" }, SelectedIndex = 0 };
-    private readonly TextBox _assetCategory = new() { Text = "Unsorted", MinWidth = 115, PlaceholderText = "Category" };
-    private readonly TextBox _assetNotes = new() { MinWidth = 180, PlaceholderText = "Optional decision notes" };
+    private readonly ComboBox _modelFilter = new() { ItemsSource = new[] { "Ready models", "All models" }, SelectedIndex = 0 };
+    private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Base appearance", "All geosets (diagnostic)" }, SelectedIndex = 0 };
+    private readonly TextBox _assetCategory = new() { Text = "Unsorted", PlaceholderText = "Category" };
+    private readonly TextBox _assetNotes = new() { PlaceholderText = "Optional decision notes" };
     private readonly TextBlock _projectStatus = new() { Foreground = Brush.Parse("#99A5B8"), VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _modelStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8") };
     private readonly M2PreviewView _modelView = new();
-    private readonly WrapPanel _cards = new() { Orientation = Orientation.Horizontal, ItemWidth = 176, ItemHeight = 206 };
+    private readonly UniformGrid _cards = new() { Columns = 4 };
     private readonly TextBlock _folderTitle = new() { FontSize = 17, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _folderHelp = new() { Text = "Every PNG directly in this content directory is shown from every provenance source. Choose a card, then record it in the persistent Definitive Set below.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8793A7"), FontSize = 11 };
     private readonly TextBlock _pageStatus = new() { Foreground = Brush.Parse("#8F9AAE") };
@@ -69,8 +72,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _directories.SelectionChanged += async (_, _) => await RunUiActionAsync("directory-selection", SelectDirectoryAsync); _directorySearch.TextChanged += (_, _) => FilterDirectories();
         _fileSearch.TextChanged += async (_, _) => await RunUiActionAsync("file-filter", FilterFilesAsync); _sourceFilter.SelectionChanged += async (_, _) => { if (!_settingSourceFilter) await RunUiActionAsync("source-filter", FilterFilesAsync); };
         _sort.SelectionChanged += async (_, _) => await RunUiActionAsync("sort-change", FilterFilesAsync); _collapseDuplicates.Click += async (_, _) => await RunUiActionAsync("duplicate-collapse", FilterFilesAsync); _undecidedOnly.Click += async (_, _) => await RunUiActionAsync("decision-filter", FilterFilesAsync); _scanDuplicates.Click += async (_, _) => await RunUiActionAsync("exact-copy-scan", ScanDuplicatesAsync);
+        _cardDensity.SelectionChanged += (_, _) => _cards.Columns = Math.Max(1, _cardDensity.SelectedIndex + 1);
         _previewMode.SelectionChanged += async (_, _) => { if (!_suppressPreviewModeChange) await RunUiActionAsync("preview-mode-change", ChangePreviewModeAsync); };
         _modelPicker.SelectionChanged += async (_, _) => { if (!_suppressModelSelection) await RunUiActionAsync("model-selection", LoadSelectedModelAsync); };
+        _geosetMode.SelectionChanged += async (_, _) => await RunUiActionAsync("geoset-mode-change", LoadSelectedModelAsync);
         _modelSearch.TextChanged += (_, _) => FilterModels(); _modelFilter.SelectionChanged += (_, _) => FilterModels();
         for (var index = 0; index < 2; index++) { var slot = index; _slotButtons[index].Click += (_, _) => SetActiveSlot(slot); }
         KeyDown += async (_, e) => await RunUiActionAsync("decision-shortcut", () => HandleDecisionKeyAsync(e)); SetActiveSlot(0); Content = BuildLayout();
@@ -110,14 +115,13 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         Grid.SetColumn(libraryLabel, 1); top.Children.Add(libraryLabel);
         Grid.SetColumn(_library, 2); top.Children.Add(_library); Grid.SetColumn(browse, 3); top.Children.Add(browse); Grid.SetColumn(load, 4); top.Children.Add(load);
 
-        var left = new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(10), MinWidth = 210 };
+        var left = new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(10) };
         left.Children.Add(_directorySearch); Grid.SetRow(_directories, 1); _directories.Margin = new Thickness(0, 8, 0, 0); left.Children.Add(_directories);
 
         var previous = new Button { Content = "← Previous" }; previous.Click += async (_, _) => await RunUiActionAsync("previous-page", async () => { if (_page > 0) { _page--; await RenderPageAsync(); } });
         var next = new Button { Content = "Next →" }; next.Click += async (_, _) => await RunUiActionAsync("next-page", async () => { if ((_page + 1) * PageSize < _filteredEntries.Count) { _page++; await RenderPageAsync(); } });
-        _fileSearch.MinWidth = 180;
-        var duplicateTools = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Children = { _scanDuplicates, _collapseDuplicates, _undecidedOnly, _autoAdvance, new TextBlock { Text = "Keys: K keep · A alternative · R review · X reject", VerticalAlignment = VerticalAlignment.Center, Foreground = Brush.Parse("#8793A7"), FontSize = 10, Margin = new Thickness(4, 0) } } };
-        var filters = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Children = { _fileSearch, _sourceFilter, _sort } };
+        var duplicateTools = new WrapPanel { Orientation = Orientation.Horizontal, Children = { _scanDuplicates, _collapseDuplicates, _undecidedOnly, _autoAdvance, new TextBlock { Text = "Keys: K keep · A alternative · R review · X reject", VerticalAlignment = VerticalAlignment.Center, Foreground = Brush.Parse("#8793A7"), FontSize = 10, Margin = new Thickness(4, 0) } } };
+        var filters = new WrapPanel { Orientation = Orientation.Horizontal, Children = { _fileSearch, _sourceFilter, _sort, _cardDensity } };
         _imageDirectoryTools = new StackPanel { Spacing = 8, Children = { filters, duplicateTools } };
         var keeper = AccentButton("KEEP"); keeper.Click += async (_, _) => await RunUiActionAsync("record-keeper", () => RecordCurrentAsync(AssetDecision.Keeper));
         var alternative = new Button { Content = "Alternative" }; alternative.Click += async (_, _) => await RunUiActionAsync("record-alternative", () => RecordCurrentAsync(AssetDecision.Alternative));
@@ -125,12 +129,15 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var review = new Button { Content = "Review later" }; review.Click += async (_, _) => await RunUiActionAsync("record-review", () => RecordCurrentAsync(AssetDecision.Review));
         var stage = new Button { Content = "Stage keepers…" }; stage.Click += async (_, _) => await RunUiActionAsync("stage-keepers", StageKeepersAsync);
         var revealProject = new Button { Content = "Reveal project" }; revealProject.Click += (_, _) => RevealProject();
-        var projectTools = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Children = { keeper, alternative, reject, review, _assetCategory, _assetNotes, stage, revealProject, _projectStatus } };
-        var middleHeader = new StackPanel { Spacing = 8, Margin = new Thickness(10, 10, 10, 4), Children = { _folderTitle, _folderHelp, _imageDirectoryTools, projectTools } };
-        var headerScroll = new ScrollViewer { Content = middleHeader, MaxHeight = 280, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
-        var pager = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Margin = new Thickness(10, 5), Children = { previous, next, _pageStatus } };
+        var decisionButtons = new WrapPanel { Orientation = Orientation.Horizontal, Children = { keeper, alternative, reject, review } };
+        var decisionInputs = new Grid { ColumnDefinitions = new("*,2*"), ColumnSpacing = 8, Children = { _assetCategory, WithColumn(_assetNotes, 1) } };
+        var decisionActions = new WrapPanel { Orientation = Orientation.Horizontal, Children = { stage, revealProject, _projectStatus } };
+        var projectTools = new StackPanel { Spacing = 7, Margin = new Thickness(10, 7), Children = { decisionButtons, decisionInputs, decisionActions } };
+        var middleHeader = new StackPanel { Spacing = 8, Margin = new Thickness(10, 10, 10, 4), Children = { _folderTitle, _folderHelp, _imageDirectoryTools } };
+        var headerScroll = new ScrollViewer { Content = middleHeader, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
+        var pager = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(10, 5), Children = { previous, next, _pageStatus } };
         _imagePager = pager;
-        var middle = new Grid { RowDefinitions = new("Auto,*,Auto"), MinWidth = 320 }; middle.Children.Add(headerScroll);
+        var middle = new Grid { RowDefinitions = new("Auto,*,Auto") }; middle.Children.Add(headerScroll);
         var cardScroll = new ScrollViewer { Content = _cards, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Margin = new Thickness(8) };
         _imageCardScroller = cardScroll;
         _modelOnlyCatalogNotice = new Border
@@ -152,22 +159,22 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         };
         Grid.SetRow(cardScroll, 1); middle.Children.Add(cardScroll); Grid.SetRow(_modelOnlyCatalogNotice, 1); middle.Children.Add(_modelOnlyCatalogNotice); Grid.SetRow(pager, 2); middle.Children.Add(pager);
 
-        var compare = BuildComparisonPane(); compare.MinWidth = 420;
-        var body = new Grid { ColumnDefinitions = new("0.85*,4,1.35*,4,2*") };
+        var compare = BuildComparisonPane();
+        var body = new Grid { ColumnDefinitions = new("0.85*,Auto,1.35*,Auto,2*") };
         body.Children.Add(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,1,0), Child = left });
-        var firstSplitter = new GridSplitter { Width = 4, ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }; Grid.SetColumn(firstSplitter, 1); body.Children.Add(firstSplitter);
+        var firstSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }; Grid.SetColumn(firstSplitter, 1); body.Children.Add(firstSplitter);
         Grid.SetColumn(middle, 2); body.Children.Add(middle);
-        var secondSplitter = new GridSplitter { Width = 4, ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }; Grid.SetColumn(secondSplitter, 3); body.Children.Add(secondSplitter);
+        var secondSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }; Grid.SetColumn(secondSplitter, 3); body.Children.Add(secondSplitter);
         Grid.SetColumn(compare, 4); body.Children.Add(compare);
-        var root = new Grid { RowDefinitions = new("Auto,*,Auto") }; root.Children.Add(top); Grid.SetRow(body, 1); root.Children.Add(body);
-        var status = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,1,0,0), Padding = new Thickness(14,7), Child = _status }; Grid.SetRow(status, 2); root.Children.Add(status); return root;
+        var root = new Grid { RowDefinitions = new("Auto,*,Auto,Auto") }; root.Children.Add(top); Grid.SetRow(body, 1); root.Children.Add(body); Grid.SetRow(projectTools, 2); root.Children.Add(projectTools);
+        var status = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,1,0,0), Padding = new Thickness(14,7), Child = _status }; Grid.SetRow(status, 3); root.Children.Add(status); return root;
     }
 
     private Control BuildComparisonPane()
     {
-        var zoom = new Slider { Minimum = 0.1, Maximum = 4, Value = 1, Width = 180 }; zoom.ValueChanged += (_, e) => { _zoom = e.NewValue; ApplyZoom(); };
+        var zoom = new Slider { Minimum = 0.1, Maximum = 4, Value = 1, HorizontalAlignment = HorizontalAlignment.Stretch }; zoom.ValueChanged += (_, e) => { _zoom = e.NewValue; ApplyZoom(); };
         var openLeft = new Button { Content = "Reveal left" }; openLeft.Click += (_, _) => RevealSlot(0); var openRight = new Button { Content = "Reveal right" }; openRight.Click += (_, _) => RevealSlot(1);
-        _imageComparisonTools = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Children = { new TextBlock { Text = "SYNCHRONIZED ZOOM & PAN", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, FontWeight = FontWeight.Bold, Margin = new Thickness(4, 0) }, zoom, openLeft, openRight } };
+        _imageComparisonTools = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = "SYNCHRONIZED ZOOM & PAN", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, FontWeight = FontWeight.Bold, Margin = new Thickness(4, 0) }, WithColumn(zoom, 1), WithColumn(openLeft, 2), WithColumn(openRight, 3) } };
         var toolbar = new StackPanel { Spacing = 6, Margin = new Thickness(12, 8), Children = { _previewMode, _imageComparisonTools } };
         var grid = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,*") };
         for (var index = 0; index < 2; index++)
@@ -180,10 +187,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         }
         _imageComparisonPane = grid;
         var previousModel = new Button { Content = "← Model" }; previousModel.Click += (_, _) => MoveModel(-1); var nextModel = new Button { Content = "Model →" }; nextModel.Click += (_, _) => MoveModel(1);
-        _modelSearch.MinWidth = 180; _modelPicker.MinWidth = 0; _modelPicker.HorizontalAlignment = HorizontalAlignment.Stretch;
-        var modelFilters = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Children = { _modelSearch, _modelFilter, previousModel, nextModel } };
-        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _modelStatus } };
-        var modelHeaderScroll = new ScrollViewer { Content = modelHeader, MaxHeight = 280, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
+        _modelPicker.HorizontalAlignment = HorizontalAlignment.Stretch;
+        var modelFilters = new Grid { ColumnDefinitions = new("2*,*,Auto,Auto"), ColumnSpacing = 8, Children = { _modelSearch, WithColumn(_modelFilter, 1), WithColumn(previousModel, 2), WithColumn(nextModel, 3) } };
+        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _geosetMode, _modelStatus } };
+        var modelHeaderScroll = new ScrollViewer { Content = modelHeader, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
         var modelPane = new Grid { RowDefinitions = new("Auto,*"), IsVisible = false, Children = { modelHeaderScroll } };
         var modelBorder = new Border { Background = Brush.Parse("#090D14"), BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Child = _modelView }; Grid.SetRow(modelBorder, 1); modelPane.Children.Add(modelBorder); _modelPreviewPane = modelPane;
         var previewHost = new Grid { Children = { grid, modelPane } };
@@ -358,9 +365,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var page = _filteredEntries.Skip(_page * PageSize).Take(PageSize).ToArray(); var images = new List<(Image Image, AssetComparisonEntry Entry)>();
         foreach (var entry in page)
         {
-            var image = new Image { Width = 148, Height = 148, Stretch = Stretch.Uniform };
+            var image = new Image { Stretch = Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch };
             var duplicateText = _duplicateByPath.TryGetValue(entry.FullPath, out var duplicate) ? $" · {duplicate.Entries.Count:N0} exact copies" : string.Empty; var decision = DecisionFor(entry.FullPath); var decisionText = decision is null ? string.Empty : $" · {decision}";
-            var card = new Button { Width = 170, Height = 200, Margin = new Thickness(3), Padding = new Thickness(7), HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch,
+            var card = new Button { Margin = new Thickness(3), Padding = new Thickness(7), HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch,
                 Content = new StackPanel { Spacing = 4, Children = { image, new TextBlock { Text = entry.FileName, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 11 }, new TextBlock { Text = $"{entry.Provenance} · {FormatBytes(entry.Bytes)}{duplicateText}{decisionText}", TextTrimming = TextTrimming.CharacterEllipsis, Foreground = Brush.Parse("#C58A2B"), FontSize = 10 } } } };
             card.Click += async (_, _) => await RunUiActionAsync("image-selection", () => SelectComparisonAsync(entry)); _cards.Children.Add(card); images.Add((image, entry));
         }
@@ -473,7 +480,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
         try
         {
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+            var visibilityMode = _geosetMode.SelectedIndex == 1 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath, visibilityMode), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _modelView.SetGeometry(geometry); UpdateModelStatus();
             DesktopCrashLogger.Debug("MODEL", "comparison-preview-success", ("model", model.ModelPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("texture_slots", geometry.TextureSlots.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
@@ -495,10 +503,13 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             : $"Selected texture candidate: {_selectedTexture.Provenance} · {_selectedTexture.FileName}";
         var slots = _loadedModelGeometry is null ? "Texture slots: load pending." : _loadedModelGeometry.TextureSlots.Count == 0 ? "Texture slots: none declared." : "Texture slots: " + string.Join(", ", _loadedModelGeometry.TextureSlots.Select(slot => $"{slot.Index}:{TextureTypeName(slot.Type)}{(string.IsNullOrWhiteSpace(slot.EmbeddedPath) ? string.Empty : $"={slot.EmbeddedPath}")}"));
         var dependencies = _modelDependencyGraph is null ? "Dependencies: inspection pending." : $"Dependencies: {_modelDependencyGraph.Resolved.Count:N0} resolved · {_modelDependencyGraph.ExternalBindings.Count:N0} appearance/DBC binding(s) · {_modelDependencyGraph.Blocking.Count:N0} BLOCKING";
+        var geosets = _loadedModelGeometry is null || _loadedModelGeometry.Submeshes.Count == 0
+            ? "Geosets: no SKIN submesh table; showing the complete mesh."
+            : $"Geosets: {_loadedModelGeometry.Submeshes.Count(section => section.Visible):N0} visible of {_loadedModelGeometry.Submeshes.Count:N0} · {_loadedModelGeometry.VisibilityMode} · {_loadedModelGeometry.TriangleIndices.Count / 3:N0} of {_loadedModelGeometry.TotalTriangleIndices / 3:N0} triangles";
         var previewNote = _modelOnlyDirectory
             ? "Geometry is live. Embedded/replacement texture resolution and Character layer/CharSections composition remain approximate until the full appearance plan supplies every layer."
             : "Geometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
-        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{texture}\n{slots}\n{dependencies}\n{previewNote}";
+        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{geosets}\n{texture}\n{slots}\n{dependencies}\n{previewNote}";
     }
 
     private async Task ScanDuplicatesAsync()

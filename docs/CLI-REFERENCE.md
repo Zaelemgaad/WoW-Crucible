@@ -25,7 +25,7 @@ A content project separates Assets, DBC, SQL, Manifests, Reports, and Staging ou
 
 ```text
 wowcrucible asset inspect <model.m2|building.wmo>...
-wowcrucible asset preview-info <wrath-model.m2>
+wowcrucible asset preview-info <wrath-model.m2> [--all-geosets]
 wowcrucible asset workspace <new-output-folder> <files/folders...>
 wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]
 wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]

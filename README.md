@@ -1,5 +1,7 @@
 # WoW Crucible
 
+The complete local-tool replacement contract is tracked in [`docs/TOOL-CONSOLIDATION-MATRIX.md`](docs/TOOL-CONSOLIDATION-MATRIX.md). Legacy tools are behavioral and format references during development; no worthwhile workflow is intentionally left as a permanent external dependency.
+
 > [!WARNING]
 > WoW Crucible is in very early development. Back up your files and validate generated client/server changes before using them on a live project.
 
@@ -12,6 +14,8 @@ Client formats and server integration are separate: a client-build profile decla
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
+- Keeps DBC editing, Items & Sets, MPQ work, Assets & Compare, Server & SQL, dialogs, and the CLI guide inside one splitter-driven Avalonia window; feature navigation no longer creates a pile of child windows or depends on fixed panel widths.
+- Reads the selected installed server's `worldserver.conf` (including the split Windows/WSL test layout), verifies the detected database, and shares that in-memory session with item and recovery workflows.
 - Captures a legacy world database through a SELECT-only streaming snapshot, then performs an entirely offline baseline-to-legacy audit with field-level additions, edits, removals, domain grouping, source hashes, and explicit unattributed mode when no stock baseline is available. Target translation and selective promotion remain pending.
 - Searches the live world schema for items with no known vendor, loot, quest, starting-item, profession, fishing, or spell-loot acquisition path; the result is searchable in the Avalonia item workbench and exportable from the CLI.
 - Clones a complete item to a new ID transactionally, preserving every current/custom `item_template` column and locale row, with optional item-set reassignment and strict no-overwrite behavior.
@@ -32,6 +36,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Uses geometric record capacity and single-allocation bulk cloning for large creation batches.
 - Supports cell-level undo/redo with `Ctrl+Z` and `Ctrl+Y` (structural operations begin a new history).
 - Provides a grouped Spell Workspace for general properties, costs, three effects, localized text, visuals, and links.
+- Provides that Spell Workspace natively inside the Avalonia DBC editor, with decoded field meanings and the same staged undo/atomic-save path as direct cell edits.
 - Saves atomically and creates `.bak` files before overwriting data.
 - Accepts DBC and patch-builder drag-and-drop.
 - Builds WotLK patch MPQs from edited DBCs or existing folder trees.
@@ -130,7 +135,7 @@ Specialized editors will follow the principles in [docs/UX-PRINCIPLES.md](docs/U
 
 Requirements: Windows x64 and the .NET 10 SDK.
 
-The new high-performance Avalonia desktop is available as an active migration preview. It has a static themed workspace, multi-file DBC staging, per-document undo/redo, guided decoded cell editing, safe row add/clone/bulk-clone/delete actions, background loading/search, a direct-rendered virtual WDBC viewport, and an interactive native M2/SKIN mesh preview. The established application remains available while the remaining workflows reach full feature parity.
+The high-performance Avalonia desktop is the active application. It has a static themed workspace, multi-file DBC staging, per-document undo/redo, guided item and spell editing, shared Server & SQL detection, MPQ building/browsing/deployment, legacy database recovery, background loading/search, a direct-rendered virtual WDBC viewport, responsive single-window feature routing, and an interactive native M2/SKIN mesh preview. The older WinForms source remains only as a behavior reference while each remaining capability is rebuilt natively; it is not the intended long-term shell or a runtime dependency.
 
 Turn on **DEVBUG ON** in the header for persistent diagnostic mode, or launch once with `--devbug`. Normal mode creates no routine logs. Devbug logs and its live terminal use structured action/result entries and retain only the newest three sessions.
 
@@ -150,7 +155,7 @@ Open the visual asset comparison workspace directly inside the main Crucible win
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- "--asset-compare=G:\Crucible-Extras-Processed"
 ```
 
-Run the established WinForms application:
+Run the legacy WinForms reference shell (development comparison only):
 
 ```powershell
 dotnet run --project src/WoWCrucible.App/WoWCrucible.App.csproj

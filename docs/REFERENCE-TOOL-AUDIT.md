@@ -1,5 +1,7 @@
 # Reference tool audit
 
+> Consolidation policy update: earlier notes that describe a capability as “keep external” now mean reference-only during implementation, not a permanent product boundary. The finished capability must be native and maintainable in Crucible. See [TOOL-CONSOLIDATION-MATRIX.md](TOOL-CONSOLIDATION-MATRIX.md) for the complete replacement contract.
+
 WoW Crucible uses the local legacy tools as workflow research, not as compatibility authorities. Their strongest ideas are reimplemented against Crucible's build-12340 client model and capability-detected current server adapters.
 
 Age, abandonment, poor performance, broken dependencies, or an unusable current build are never sufficient reasons to dismiss a tool. Every tool is evaluated for the problem that caused it to exist, its intended complete workflow, useful interaction patterns, format knowledge, failure modes, licensing, and whether the capability still belongs in a unified Crucible workflow. A broken implementation can still describe a feature worth rebuilding independently.
