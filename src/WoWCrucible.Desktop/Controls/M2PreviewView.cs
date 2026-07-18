@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -40,6 +41,19 @@ public sealed class M2PreviewView : Control
     {
         _texture?.Dispose(); _texture = null;
         if (!string.IsNullOrWhiteSpace(previewPath) && File.Exists(previewPath)) _texture = SKBitmap.Decode(previewPath);
+        InvalidateVisual();
+    }
+
+    public void SetDecodedTexture(RgbaTexture? texture)
+    {
+        _texture?.Dispose(); _texture = null;
+        if (texture is not null)
+        {
+            var bitmap = new SKBitmap(new SKImageInfo(texture.Width, texture.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
+            var rowBytes = checked(texture.Width * 4); var address = bitmap.GetPixels();
+            for (var row = 0; row < texture.Height; row++) Marshal.Copy(texture.Pixels, row * rowBytes, IntPtr.Add(address, row * bitmap.RowBytes), rowBytes);
+            _texture = bitmap;
+        }
         InvalidateVisual();
     }
 

@@ -51,7 +51,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private AssetComparisonIndex? _index; private IReadOnlyList<AssetComparisonEntry> _folderEntries = []; private IReadOnlyList<AssetComparisonEntry> _filteredEntries = [];
     private IReadOnlyDictionary<string, AssetComparisonDuplicateGroup> _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<AssetComparisonModel> _allModels = []; private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private Control? _imageDirectoryTools; private Control? _imageCardScroller; private Control? _imagePager; private Control? _modelOnlyCatalogNotice; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
-    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory;
+    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath;
     private Task? _modelDiscoveryTask;
     private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
 
@@ -284,7 +284,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         if (_index is null || _directories.SelectedItem is not AssetComparisonDirectory directory) { _directoryReady = false; _selectedDirectory = null; return; }
         var index = _index;
         var modelOnly = IsModelOnlyDirectory(directory);
-        _directoryReady = false; _modelsDiscovered = false; _folderEntries = []; _filteredEntries = []; _selectedTexture = null;
+        _directoryReady = false; _modelsDiscovered = false; _folderEntries = []; _filteredEntries = []; _selectedTexture = null; _resolvedModelTexturePath = null;
         _modelDiscoveryTask = null;
         _allModels = []; _folderModels = []; _modelDiscoveryScope = directory.LogicalPath; _loadedModelGeometry = null; _modelDependencyGraph = null;
         _modelView.ClearGeometry(); _modelView.SetTexture(null); ApplyDirectoryPresentation(directory, modelOnly); FilterModels(requestModelLoad: false);
@@ -399,7 +399,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         if (!_active) return;
         var activity = _activityVersion; var request = ++_imageSelectionRequest;
         _imageSelectionCancellation?.Cancel(); _imageSelectionCancellation?.Dispose(); _imageSelectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token); var token = _imageSelectionCancellation.Token;
-        _selectedTexture = entry; _modelView.SetTexture(entry.FullPath); UpdateModelStatus();
+        _selectedTexture = entry; _resolvedModelTexturePath = null; _modelView.SetTexture(entry.FullPath); UpdateModelStatus();
         var slot = _activeSlot; try
         {
             var bitmap = await Task.Run(() => new Bitmap(entry.FullPath), token); if (!IsCurrent(token, activity) || request != _imageSelectionRequest) { bitmap.Dispose(); return; } _comparisonBitmaps[slot]?.Dispose(); _comparisonBitmaps[slot] = bitmap; _comparisonImages[slot].Source = bitmap;
@@ -483,7 +483,23 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             var visibilityMode = _geosetMode.SelectedIndex == 1 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath, visibilityMode), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
-            _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _modelView.SetGeometry(geometry); UpdateModelStatus();
+            RgbaTexture? embeddedTexture = null; string? embeddedTexturePath = null;
+            if (_selectedTexture is null)
+            {
+                embeddedTexturePath = graph?.Resolved.FirstOrDefault(dependency => dependency.Kind == "embedded-texture" && dependency.SourcePath is not null && Path.GetExtension(dependency.SourcePath).Equals(".blp", StringComparison.OrdinalIgnoreCase))?.SourcePath;
+                if (embeddedTexturePath is not null)
+                {
+                    try { embeddedTexture = await Task.Run(() => BlpTextureService.Decode(embeddedTexturePath), token); }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        DesktopCrashLogger.Log($"Embedded model texture decode failed: {embeddedTexturePath}", exception); embeddedTexturePath = null;
+                    }
+                    if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+                }
+            }
+            _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _resolvedModelTexturePath = embeddedTexturePath; _modelView.SetGeometry(geometry);
+            if (_selectedTexture is null) _modelView.SetDecodedTexture(embeddedTexture);
+            UpdateModelStatus();
             DesktopCrashLogger.Debug("MODEL", "comparison-preview-success", ("model", model.ModelPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("texture_slots", geometry.TextureSlots.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (OperationCanceledException) { }
@@ -499,15 +515,17 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     {
         if (_modelPicker.SelectedItem is not AssetComparisonModel model) return;
         var texture = _selectedTexture is null
-            ? (_modelOnlyDirectory ? "Texture overlay: none selected; geometry remains available for inspection." : "No texture card selected.")
+            ? _resolvedModelTexturePath is not null ? $"Resolved embedded BLP: {Path.GetFileName(_resolvedModelTexturePath)} (first material candidate)." : (_modelOnlyDirectory ? "Texture overlay: no embedded BLP resolved; geometry remains available for inspection." : "No texture card selected.")
             : $"Selected texture candidate: {_selectedTexture.Provenance} · {_selectedTexture.FileName}";
         var slots = _loadedModelGeometry is null ? "Texture slots: load pending." : _loadedModelGeometry.TextureSlots.Count == 0 ? "Texture slots: none declared." : "Texture slots: " + string.Join(", ", _loadedModelGeometry.TextureSlots.Select(slot => $"{slot.Index}:{TextureTypeName(slot.Type)}{(string.IsNullOrWhiteSpace(slot.EmbeddedPath) ? string.Empty : $"={slot.EmbeddedPath}")}"));
         var dependencies = _modelDependencyGraph is null ? "Dependencies: inspection pending." : $"Dependencies: {_modelDependencyGraph.Resolved.Count:N0} resolved · {_modelDependencyGraph.ExternalBindings.Count:N0} appearance/DBC binding(s) · {_modelDependencyGraph.Blocking.Count:N0} BLOCKING";
         var geosets = _loadedModelGeometry is null || _loadedModelGeometry.Submeshes.Count == 0
             ? "Geosets: no SKIN submesh table; showing the complete mesh."
             : $"Geosets: {_loadedModelGeometry.Submeshes.Count(section => section.Visible):N0} visible of {_loadedModelGeometry.Submeshes.Count:N0} · {_loadedModelGeometry.VisibilityMode} · {_loadedModelGeometry.TriangleIndices.Count / 3:N0} of {_loadedModelGeometry.TotalTriangleIndices / 3:N0} triangles";
-        var previewNote = _modelOnlyDirectory
-            ? "Geometry is live. Embedded/replacement texture resolution and Character layer/CharSections composition remain approximate until the full appearance plan supplies every layer."
+        var previewNote = _resolvedModelTexturePath is not null
+            ? "Geometry and the model's first resolved embedded BLP are live. Per-material texture-unit assignment and Character layer/CharSections composition remain the next fidelity stage."
+            : _modelOnlyDirectory
+            ? "Geometry is live. Replacement texture resolution and Character layer/CharSections composition remain approximate until the full appearance plan supplies every layer."
             : "Geometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
         _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{geosets}\n{texture}\n{slots}\n{dependencies}\n{previewNote}";
     }
