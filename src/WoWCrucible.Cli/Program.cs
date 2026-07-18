@@ -970,7 +970,22 @@ static int Manifest(string[] args)
 
 static int Dbc(string[] args)
 {
-    if (args.Length > 0 && args[0] is "help" or "--help" or "-h") return DbcHelp();
+    if (args.Length > 0 && args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [--class=N] [--subclass=N] [--inventory=N] [--assets=processed-library] [--format=text|json]"); return DbcHelp(); }
+    if (args is ["item-display", var displayDbc, var displaySchema, var displayIdText, .. var displayOptions] && uint.TryParse(displayIdText, out var displayId))
+    {
+        var itemClass = ParseIntOption(displayOptions, "--class=", 0); var subclass = ParseIntOption(displayOptions, "--subclass=", 0); var inventory = ParseIntOption(displayOptions, "--inventory=", 0);
+        var assets = Option(displayOptions, "--assets="); var json = displayOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var unknown = displayOptions.Where(option => !option.StartsWith("--class=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--subclass=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--inventory=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--assets=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown item-display option: {unknown[0]}");
+        var result = ItemDisplayInfoService.Resolve(displayDbc, displaySchema == "-" ? null : displaySchema, displayId, itemClass, subclass, inventory, assets);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"DISPLAY\t{result.Id}\nMODEL\t{string.Join(" | ", result.ModelNames.Where(value => value.Length > 0))}\nICON\t{string.Join(" | ", result.InventoryIcons.Where(value => value.Length > 0))}\nGEOSETS\t{string.Join(",", result.GeosetGroups)}\nHELMET_VIS\t{string.Join(",", result.HelmetGeosetVisibility)}\nFLAGS\t0x{result.Flags:X8}\nSPELL_VISUAL\t{result.SpellVisualId}\nITEM_VISUAL\t{result.ItemVisualId}\nPARTICLE_COLOR\t{result.ParticleColorId}\nSOUND_GROUP\t{result.GroupSoundIndex}");
+            foreach (var asset in result.Assets) Console.WriteLine($"ASSET\t{asset.Kind}\t{asset.Slot}\t{asset.Name}\t{string.Join(" | ", asset.ClientPaths)}\t{(asset.ExistingPaths.Count == 0 ? "MISSING" : string.Join(" | ", asset.ExistingPaths))}");
+        }
+        return 0;
+    }
     if (args is ["itemset", "inspect", var itemSetPath, var itemSetSchema, var itemSetIdText, .. var itemSetOptions] && uint.TryParse(itemSetIdText, out var itemSetId))
     {
         var spellPath = Option(itemSetOptions, "--spell="); var unknown = itemSetOptions.Where(option => !option.StartsWith("--spell=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -1262,6 +1277,11 @@ static int Help()
 static int Fail(string message) { Console.Error.WriteLine(message); return 2; }
 
 static string? Option(IEnumerable<string> options, string prefix) => options.FirstOrDefault(option => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))?[prefix.Length..];
+static int ParseIntOption(IEnumerable<string> options, string prefix, int fallback)
+{
+    var value = options.FirstOrDefault(option => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+    return value is null ? fallback : int.TryParse(value[prefix.Length..], out var parsed) ? parsed : throw new ArgumentException($"{prefix[..^1]} must be an integer.");
+}
 static string FormatValues(IReadOnlyDictionary<string, object?> values) => values.Count == 0 ? "<missing>" : string.Join(", ", values.Select(pair => $"{pair.Key}={Convert.ToString(pair.Value, System.Globalization.CultureInfo.InvariantCulture)}"));
 static void PrintBinding(ServerTableBinding binding) => Console.Error.WriteLine($"Binding: {binding.DbcFileName} · {binding.Consumption} · SQL {binding.SqlTableName ?? "none"} · key {binding.KeyStrategy.Kind} · deploy {binding.Destinations} · restart {binding.Restart} · {binding.Profile}{(binding.SourceBacked ? " (source-backed)" : " (built-in profile)")} · {binding.SupportedRevision}");
 

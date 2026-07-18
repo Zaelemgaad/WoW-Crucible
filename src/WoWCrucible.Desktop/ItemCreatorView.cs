@@ -33,6 +33,10 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private readonly StackPanel _tooltip = new() { Spacing = 3, Margin = new Thickness(16) };
     private readonly TextBox _sql = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
     private readonly M2PreviewView _model = new(); private readonly TextBlock _modelStatus = Status("Load an extracted WotLK M2 with its companion SKIN to preview geometry.");
+    private readonly TextBox _displayDbcPath = new(); private readonly TextBox _displaySchemaPath = new(); private readonly TextBox _assetLibraryPath = new();
+    private readonly ComboBox _resolvedModels = new() { PlaceholderText = "Resolved model source" };
+    private readonly TextBlock _displayDetails = Status("Resolve the current display ID to see every ItemDisplayInfo model, texture, icon, geoset, and visual field.");
+    private ItemDisplayInfoRecord? _resolvedDisplay;
     private readonly TextBlock _status = Status("Offline portable schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _commit = AccentButton("Insert into connected database");
     private ItemWritePlan? _pendingInsert;
@@ -43,6 +47,9 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     public ItemCreatorView(DesktopWorkspaceSession session)
     {
         _session = session; _session.Changed += SessionChanged;
+        _displayDbcPath.Text = string.IsNullOrWhiteSpace(session.Settings.CoreDbcPath) ? string.Empty : Path.Combine(session.Settings.CoreDbcPath, "ItemDisplayInfo.dbc");
+        _displaySchemaPath.Text = session.Settings.SchemaDefinitionPath;
+        _assetLibraryPath.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
         _class.SelectionChanged += (_, _) => { UpdateSubclassChoices(); RefreshPreview(); };
         foreach (var number in Numbers()) number.ValueChanged += (_, _) => RefreshPreview();
         foreach (var combo in Combos().Where(combo => !ReferenceEquals(combo, _class))) combo.SelectionChanged += (_, _) => RefreshPreview();
@@ -52,9 +59,16 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         var combat = Form(("Buy price (copper)",_buy),("Sell price (copper)",_sell),("Armor",_armor),("Minimum damage",_damageMin),("Maximum damage",_damageMax),("Weapon delay (ms)",_delay),("Durability",_durability),("Raw flags",_flags));
         var editTabs = new TabControl { Items = { new TabItem { Header="Basics", Content=new ScrollViewer { Content=basics } }, new TabItem { Header="Combat & value", Content=new ScrollViewer { Content=combat } }, new TabItem { Header="10 stat slots", Content=StatsPage() }, new TabItem { Header="5 spell effects", Content=SpellsPage() } } };
 
-        var loadModel = new Button { Content = "Load extracted M2…" }; loadModel.Click += async (_, _) => await LoadModelAsync();
+        var resolveDisplay = AccentButton("Resolve current display ID"); resolveDisplay.Click += async (_, _) => await ResolveDisplayAsync(true);
+        var loadResolved = new Button { Content = "Load selected resolved model" }; loadResolved.Click += async (_, _) => await LoadResolvedModelAsync();
+        var loadModel = new Button { Content = "Load other extracted M2…" }; loadModel.Click += async (_, _) => await LoadModelAsync();
         var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _modelStatus.Text = "Model preview cleared."; };
-        var modelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { loadModel, clearModel } }, WithRow(new Border { Background=Brush.Parse("#090D14"), Child=_model },1), WithRow(_modelStatus,2) } };
+        var browseDisplay = new Button { Content = "DBC…" }; browseDisplay.Click += async (_, _) => await PickFileAsync(_displayDbcPath, "Choose ItemDisplayInfo.dbc", "*.dbc");
+        var browseSchema = new Button { Content = "Schema…" }; browseSchema.Click += async (_, _) => await PickFileAsync(_displaySchemaPath, "Choose WotLK schema XML", "*.xml");
+        var browseLibrary = new Button { Content = "Assets…" }; browseLibrary.Click += async (_, _) => await PickFolderAsync(_assetLibraryPath, "Choose processed asset library");
+        var resolverPaths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _displayDbcPath, WithColumn(browseDisplay,1), WithRow(_displaySchemaPath,1), WithRow(WithColumn(browseSchema,1),1), WithRow(_assetLibraryPath,2), WithRow(WithColumn(browseLibrary,1),2) } };
+        var modelHeader = new StackPanel { Spacing = 7, Children = { new TextBlock { Text="Live item display resolution", FontWeight=FontWeight.SemiBold }, resolverPaths, new WrapPanel { Children = { resolveDisplay, loadResolved, loadModel, clearModel } }, _resolvedModels, _displayDetails } };
+        var modelPage = new Grid { RowDefinitions = new("2*,Auto,3*,Auto"), Children = { new ScrollViewer { Content=modelHeader }, WithRow(new GridSplitter { ResizeDirection=GridResizeDirection.Rows, Background=Brush.Parse("#2B3445") },1), WithRow(new Border { Background=Brush.Parse("#090D14"), Child=_model },2), WithRow(_modelStatus,3) } };
         var previewTabs = new TabControl { Items = { new TabItem { Header="Tooltip", Content=new ScrollViewer { Content=new Border { Background=Brush.Parse("#080911"), BorderBrush=Brush.Parse("#7C6639"), BorderThickness=new Thickness(1), Margin=new Thickness(8), Child=_tooltip } } }, new TabItem { Header="3D model", Content=modelPage }, new TabItem { Header="SQL preview", Content=_sql } } };
 
         var splitter = new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background=Brush.Parse("#2B3445") };
@@ -75,7 +89,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         _damageMin.Value=Decimal(row,"dmg_min1");_damageMax.Value=Decimal(row,"dmg_max1");_delay.Value=Decimal(row,"delay");_durability.Value=Decimal(row,"MaxDurability");_itemSet.Value=Decimal(row,"itemset");_description.Text=Text(row,"description");
         for(var index=0;index<10;index++){Set(_statTypes[index],Int(row,$"stat_type{index+1}"));_statValues[index].Value=Decimal(row,$"stat_value{index+1}");}
         for(var index=0;index<5;index++){var slot=index+1;_spellIds[index].Value=Decimal(row,$"spellid_{slot}");Set(_spellTriggers[index],Int(row,$"spelltrigger_{slot}"));_spellCharges[index].Value=Decimal(row,$"spellcharges_{slot}");_spellPpm[index].Value=Decimal(row,$"spellppmRate_{slot}");_spellCooldowns[index].Value=Decimal(row,$"spellcooldown_{slot}",-1);_spellCategories[index].Value=Decimal(row,$"spellcategory_{slot}");_spellCategoryCooldowns[index].Value=Decimal(row,$"spellcategorycooldown_{slot}",-1);}
-        _loadedEntry=(uint)(_entry.Value??0);_commit.Content="Apply decoded fields to existing item";RefreshPreview();RefreshSql();_status.Text=$"Loaded live item {_loadedEntry} with decoded names. Unmapped/custom fields remain editable in SQL Studio.";
+        _loadedEntry=(uint)(_entry.Value??0);_commit.Content="Apply decoded fields to existing item";RefreshPreview();RefreshSql();_status.Text=$"Loaded live item {_loadedEntry} with decoded names. Unmapped/custom fields remain editable in SQL Studio."; _ = ResolveDisplayAsync(false);
     }
 
     private Control StatsPage()
@@ -122,10 +136,42 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private async Task CommitAsync(Button button){ if(_pendingInsert is null||_session.DatabaseProfile is null)return;try{button.IsEnabled=false;if(_loadedEntry is{ } loaded)await new SqlWorkspaceService().UpdateRowAsync(_session.DatabaseProfile,Table(),new Dictionary<string,object?>{{"entry",loaded}},_pendingInsert.Values.ToDictionary(pair=>pair.Key,pair=>(object?)pair.Value,StringComparer.OrdinalIgnoreCase));else await new ItemTemplateService().InsertAsync(_session.DatabaseProfile,_pendingInsert);_status.Text=_loadedEntry is null?"Item inserted transactionally. Restart or reload the world server as required by the detected core.":"Decoded item fields updated transactionally; custom/unmapped columns were preserved.";_confirmation.IsVisible=false;_pendingInsert=null;}catch(Exception exception){_status.Text=$"Item write failed: {exception.Message}";DesktopCrashLogger.Log("Item write failed",exception);}finally{button.IsEnabled=true;} }
     private async Task LoadModelAsync(){try{var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title="Choose an extracted WotLK M2",AllowMultiple=false,FileTypeFilter=[new FilePickerFileType("WotLK M2"){Patterns=["*.m2"]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is null)return;_modelStatus.Text="Loading model…";var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(path));_model.SetGeometry(geometry);_modelStatus.Text=$"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section=>section.Visible):N0}/{geometry.Submeshes.Count:N0} base geosets · {geometry.TriangleIndices.Count/3:N0} triangles";}catch(Exception exception){_modelStatus.Text=$"Model load failed: {exception.Message}";} }
 
+    private async Task ResolveDisplayAsync(bool loadFirstModel)
+    {
+        try
+        {
+            var displayId=(uint)(_display.Value??0); if(displayId==0){_resolvedDisplay=null;_resolvedModels.ItemsSource=Array.Empty<string>();_displayDetails.Text="Display ID 0 has no ItemDisplayInfo record.";return;}
+            var dbc=_displayDbcPath.Text?.Trim()??string.Empty; if(!File.Exists(dbc))throw new FileNotFoundException("Configure the server's ItemDisplayInfo.dbc path.",dbc);
+            _modelStatus.Text=$"Resolving display {displayId:N0}…";
+            var resolved=await Task.Run(()=>ItemDisplayInfoService.Resolve(dbc,EmptyNull(_displaySchemaPath.Text),displayId,Selected(_class),Selected(_subclass),Selected(_inventory),EmptyNull(_assetLibraryPath.Text)));
+            _resolvedDisplay=resolved; var models=resolved.ExistingModels.ToArray(); _resolvedModels.ItemsSource=models; _resolvedModels.SelectedIndex=models.Length>0?0:-1;
+            var assets=resolved.Assets.Select(asset=>$"{asset.Kind} {asset.Slot}: {asset.Name} · {(asset.ExistingPaths.Count==0?"not found in processed library":$"{asset.ExistingPaths.Count:N0} source file(s)")}");
+            _displayDetails.Text=$"Display {resolved.Id:N0} · geosets {string.Join(", ",resolved.GeosetGroups)} · helmet visibility {string.Join(", ",resolved.HelmetGeosetVisibility)} · flags 0x{resolved.Flags:X8}\nSpell visual {resolved.SpellVisualId:N0} · item visual {resolved.ItemVisualId:N0} · particle color {resolved.ParticleColorId:N0} · sound group {resolved.GroupSoundIndex:N0}\n{string.Join("\n",assets)}";
+            _modelStatus.Text=models.Length>0?$"Resolved display {displayId:N0} to {resolved.Assets.Count:N0} dependency slot(s) and {models.Length:N0} extracted model source(s).":"DBC record resolved, but no extracted M2 matched the configured processed library. Every expected client path is listed above.";
+            _session.Settings.ProcessedAssetLibraryPath=_assetLibraryPath.Text??string.Empty; _session.Settings.Save();
+            if(loadFirstModel&&models.Length>0)await LoadResolvedModelAsync();
+        }
+        catch(Exception exception){_resolvedDisplay=null;_resolvedModels.ItemsSource=Array.Empty<string>();_displayDetails.Text=$"Display resolution failed: {exception.Message}";_modelStatus.Text=_displayDetails.Text;if(loadFirstModel)DesktopCrashLogger.Log("Item display resolution failed",exception);else DesktopCrashLogger.Debug("ITEM","automatic-display-resolution-unavailable",("display_id",(uint)(_display.Value??0)),("error",exception.Message));}
+    }
+
+    private async Task LoadResolvedModelAsync()
+    {
+        if(_resolvedModels.SelectedItem is not string path||!File.Exists(path)){_modelStatus.Text="Resolve a display and select an extracted model source first.";return;}
+        try
+        {
+            _modelStatus.Text=$"Loading {Path.GetFileName(path)}…"; var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(path, visibilityMode:M2PreviewVisibilityMode.AllGeosets)); _model.SetGeometry(geometry);
+            var provenance=Path.GetDirectoryName(path); var texture=_resolvedDisplay?.Assets.Where(asset=>asset.Kind=="model-texture").SelectMany(asset=>asset.ExistingPaths).Where(candidate=>Path.GetExtension(candidate).Equals(".png",StringComparison.OrdinalIgnoreCase)).OrderByDescending(candidate=>Path.GetDirectoryName(candidate)?.Equals(provenance,StringComparison.OrdinalIgnoreCase)==true).FirstOrDefault();
+            _model.SetTexture(texture); _modelStatus.Text=$"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section=>section.Visible):N0}/{geometry.Submeshes.Count:N0} geosets · {geometry.TriangleIndices.Count/3:N0} triangles{(texture is null?" · no resolved PNG texture":$" · {Path.GetFileName(texture)}")}";
+        }
+        catch(Exception exception){_modelStatus.Text=$"Resolved model could not be rendered: {exception.Message}";DesktopCrashLogger.Log("Resolved item model preview failed",exception);}
+    }
+
     private void UpdateSubclassChoices(){ _subclass.ItemsSource=Selected(_class) switch{0=>Values((0,"Consumable"),(1,"Potion"),(2,"Elixir"),(3,"Flask"),(4,"Scroll"),(5,"Food & Drink"),(6,"Item Enhancement"),(7,"Bandage")),1=>Values((0,"Bag"),(1,"Soul Bag"),(2,"Herb Bag"),(3,"Enchanting Bag"),(4,"Engineering Bag"),(5,"Gem Bag")),2=>Values((0,"One-Handed Axe"),(1,"Two-Handed Axe"),(2,"Bow"),(3,"Gun"),(4,"One-Handed Mace"),(5,"Two-Handed Mace"),(6,"Polearm"),(7,"One-Handed Sword"),(8,"Two-Handed Sword"),(10,"Staff"),(13,"Fist Weapon"),(15,"Dagger"),(16,"Thrown"),(18,"Crossbow"),(19,"Wand"),(20,"Fishing Pole")),4=>Values((0,"Miscellaneous Armor"),(1,"Cloth"),(2,"Leather"),(3,"Mail"),(4,"Plate"),(6,"Shield"),(7,"Libram"),(8,"Idol"),(9,"Totem"),(10,"Sigil")),_=>Values((0,"Generic"))};_subclass.SelectedIndex=0; }
     private void SessionChanged(object? sender,EventArgs e)=>RefreshSchemaStatus(); private void RefreshSchemaStatus(){var cap=_session.DatabaseCapabilities;_status.Text=cap?.FindTable("item_template") is{ } table?$"Live schema ready · {cap.Database}.item_template · {table.Columns.Count:N0} columns":"Offline portable schema ready · connect Server & SQL for live deployment.";}
     public void Dispose()=>_session.Changed-=SessionChanged;
     private IStorageProvider Storage()=>TopLevel.GetTopLevel(this)?.StorageProvider??throw new InvalidOperationException("Item Creator is not attached to the main window.");
+    private async Task PickFileAsync(TextBox target,string title,string pattern){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType(title){Patterns=[pattern]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
+    private async Task PickFolderAsync(TextBox target,string title){var folders=await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions{Title=title,AllowMultiple=false});var path=folders.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
     private IEnumerable<NumericUpDown> Numbers()=>new[]{_entry,_display,_itemLevel,_requiredLevel,_buy,_sell,_flags,_armor,_damageMin,_damageMax,_delay,_durability,_itemSet}.Concat(_statValues).Concat(_spellIds).Concat(_spellCharges).Concat(_spellPpm).Concat(_spellCooldowns).Concat(_spellCategories).Concat(_spellCategoryCooldowns);
     private IEnumerable<ComboBox> Combos()=>new[]{_class,_subclass,_quality,_inventory,_bonding}.Concat(_statTypes).Concat(_spellTriggers);
     private void AddTooltip(string text,IBrush brush,double fontSize=13,FontWeight? weight=null)=>_tooltip.Children.Add(new TextBlock{Text=text,TextWrapping=TextWrapping.Wrap,Foreground=brush,FontSize=fontSize,FontWeight=weight??FontWeight.Normal});
@@ -140,4 +186,5 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private static IBrush QualityBrush(int quality)=>Brush.Parse(quality switch{0=>"#9D9D9D",1=>"#FFFFFF",2=>"#1EFF00",3=>"#0070DD",4=>"#A335EE",5=>"#FF8000",6=>"#E6281E",7=>"#00CCFF",_=>"#FFFFFF"});private static string BondingName(uint bonding)=>bonding switch{1=>"Binds when picked up",2=>"Binds when equipped",3=>"Binds when used",4 or 5=>"Quest Item",_=>""};
     private static string StatName(int type)=>type switch{0=>"Mana",1=>"Health",3=>"Agility",4=>"Strength",5=>"Intellect",6=>"Spirit",7=>"Stamina",12=>"Defense Rating",13=>"Dodge Rating",14=>"Parry Rating",15=>"Block Rating",31=>"Hit Rating",32=>"Critical Strike Rating",35=>"Resilience Rating",36=>"Haste Rating",37=>"Expertise Rating",38=>"Attack Power",39=>"Ranged Attack Power",43=>"Mana per 5 sec",44=>"Armor Penetration Rating",45=>"Spell Power",46=>"Health Regeneration",47=>"Spell Penetration",48=>"Block Value",_=>$"Stat {type}"};private static string SecondaryStatText(int type,int value)=>type switch{38=>$"Equip: Increases attack power by {value}.",39=>$"Equip: Increases ranged attack power by {value}.",43=>$"Equip: Restores {value} mana per 5 sec.",45=>$"Equip: Increases spell power by {value}.",46=>$"Equip: Restores {value} health per 5 sec.",47=>$"Equip: Increases spell penetration by {value}.",48=>$"Equip: Increases the block value of your shield by {value}.",_=>$"Equip: Improves your {StatName(type).ToLowerInvariant()} by {value}."};
     private static string Price(uint copper){var gold=copper/10000;var silver=copper%10000/100;var rest=copper%100;return $"{(gold>0?$"{gold}g ":"")}{(silver>0?$"{silver}s ":"")}{rest}c";}private static TextBlock Status(string text)=>new(){Text=text,TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#99A5B8")};private static Button AccentButton(string text){var button=new Button{Content=text};button.Classes.Add("accent");return button;}private static T WithColumn<T>(T control,int column)where T:Control{Grid.SetColumn(control,column);return control;}private static T WithRow<T>(T control,int row)where T:Control{Grid.SetRow(control,row);return control;}
+    private static string? EmptyNull(string? value)=>string.IsNullOrWhiteSpace(value)?null:value.Trim();
 }

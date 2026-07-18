@@ -48,6 +48,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _effects = new() { AcceptsReturn = true, PlaceholderText = "requiredItems:spellId, one bonus per line" }; private readonly TextBox _effectsOutput = new() { PlaceholderText = "Output ItemSet.dbc" };
 
     public event EventHandler? BackRequested;
+    public event EventHandler? SqlStudioRequested;
+    public event EventHandler? MpqWorkspaceRequested;
     public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
@@ -72,7 +74,10 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
-        root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new Grid { ColumnDefinitions = new("Auto,*"), Children = { back, WithColumn(new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, 1) } } });
+        var sqlStudio = AccentButton("SQL Studio / Favorites"); sqlStudio.Click += (_, _) => SqlStudioRequested?.Invoke(this, EventArgs.Empty);
+        var mpqMerge = new Button { Content = "MPQ patches / merge" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
+        var titleActions = new WrapPanel { Children = { sqlStudio, mpqMerge } };
+        root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, titleActions } } });
         var connection = ConnectionBar(); Grid.SetRow(connection, 1); root.Children.Add(connection);
         _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Unobtainable / cut items", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() } } };
         Grid.SetRow(_tabs, 2); root.Children.Add(_tabs);
