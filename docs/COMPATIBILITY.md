@@ -2,7 +2,7 @@
 
 WoW Crucible's primary, verified client target is World of Warcraft 3.3.5a, build 12340. Client compatibility is profile-driven so community contributors can add targets without scattering build checks throughout the editor. Server compatibility is deliberately not fixed to a bundled repack, database dump, or historical core revision.
 
-WoWDBDefs `.dbd` build ranges are now a native schema source and corpus-audit layer for WDBC tables. This improves profile authoring and cross-expansion field validation, but it does not imply that post-WotLK DB2 container formats are already readable or writable; each container family still requires an explicit verified adapter.
+WoWDBDefs `.dbd` build ranges are a native schema source and corpus-audit layer for WDBC and fixed-layout WDB2 tables. Crucible now has an explicit Cataclysm WDB2 adapter; later WDB5/WDB6/WDC families remain separate formats and are not treated as interchangeable.
 
 ## Client target profiles
 
@@ -13,9 +13,9 @@ Built-in profiles currently describe:
 | Classic 1.12.1 | 5875 | Schema ready | WDBC definition is available; full corpus round-trip validation is still required. |
 | The Burning Crusade 2.4.3 | 8606 | Schema ready | WDBC definition is available; full corpus round-trip validation is still required. |
 | Wrath of the Lich King 3.3.5a | 12340 | Verified | Primary tested WDBC and MPQ target. |
-| Cataclysm 4.3.4 | 15595 | Experimental | MPQ and WDBC-era files are understood, but DB2 editing is not implemented. |
+| Cataclysm 4.3.4 | 15595 | Experimental | Fixed-layout WDB2 read/edit/write is implemented and verified against the extracted 64,775-row Item.db2 plus synthetic side-table fixtures. Complete corpus verification and later DB2 families remain pending. |
 
-Each profile declares a stable ID, client build, schema filename, table formats, archive format, support tier, and notes. Additional JSON profiles can be placed in `%LOCALAPPDATA%\WoWCrucible\Profiles` or the application's `profiles` directory. A profile enables only capabilities implemented by the engine; selecting Cata does not mislabel a DB2 file as editable WDBC.
+Each profile declares a stable ID, client build, schema filename, table formats, archive format, support tier, and notes. Additional JSON profiles can be placed in `%LOCALAPPDATA%\WoWCrucible\Profiles` or the application's `profiles` directory. A profile enables only capabilities implemented by the engine; WDB2 files retain their own build/hash metadata and are never mislabeled as WDBC.
 
 Definition XML files provide names and types, but are not proof of safe round trips. A target moves to **Verified** only after its complete legal test corpus passes unmodified byte-for-byte round trips and representative edits.
 

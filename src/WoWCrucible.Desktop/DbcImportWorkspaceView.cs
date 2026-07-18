@@ -30,13 +30,13 @@ internal sealed class DbcImportWorkspaceView : UserControl, IDisposable
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var browse = new Button { Content = "Browse…" }; browse.Click += async (_, _) => await PickInputAsync();
         var preview = Accent("Build import preview"); preview.Click += async (_, _) => await PreviewAsync();
-        var review = new Button { Content = "Review apply to open DBC" }; review.Click += (_, _) => ReviewApply();
+        var review = new Button { Content = "Review apply to open table" }; review.Click += (_, _) => ReviewApply();
         var cancel = new Button { Content = "Cancel operation" }; cancel.Click += (_, _) => _operation?.Cancel();
         var header = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 10, Margin = new Thickness(12, 8), Children = { back, WithColumn(new StackPanel { Children = { new TextBlock { Text = $"IMPORT ROWS · {Path.GetFileName(document.File.SourcePath)}", FontSize = 18, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = "Preview-first keyed updates; appends are explicit; no row is ever deleted.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") } } }, 1) } };
         var fileRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { _input, WithColumn(browse, 1) } };
         var controls = new WrapPanel { Children = { _format, _append, _rawStrings, preview, review, cancel } };
         var settings = new StackPanel { Spacing = 8, Margin = new Thickness(12, 8), Children = { fileRow, controls,
-            new TextBlock { Text = "CSV blank numeric cells and JSON nulls mean ‘leave unchanged’; a blank decoded string intentionally clears that string. Unknown columns, duplicate targets, key changes, non-contiguous virtual appends, and stale previews are blocked. Applying is one structural batch, clears cell-level undo history, marks the open DBC dirty, and still requires the normal Save or Save As action.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") } } };
+            new TextBlock { Text = "CSV blank numeric cells and JSON nulls mean ‘leave unchanged’; a blank decoded string intentionally clears that string. Unknown columns, duplicate targets, key changes, non-contiguous virtual appends, and stale previews are blocked. Applying is one structural batch, clears cell-level undo history, marks the open client table dirty, and still requires the normal Save or Save As action.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") } } };
         var previewBorder = new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Margin = new Thickness(12, 0), Child = _preview };
         Content = new Grid { RowDefinitions = new("Auto,Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = header }, WithRow(settings, 1), WithRow(previewBorder, 2), WithRow(_confirmation, 3), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 6), Child = _status }, 4) } };
         _input.TextChanged += (_, _) => InvalidatePlan(); _format.SelectionChanged += (_, _) => InvalidatePlan(); _append.IsCheckedChanged += (_, _) => InvalidatePlan(); _rawStrings.IsCheckedChanged += (_, _) => InvalidatePlan();
@@ -59,10 +59,10 @@ internal sealed class DbcImportWorkspaceView : UserControl, IDisposable
             var progress = new Progress<(int Done, int Total)>(value => _status.Text = $"Previewing {value.Done:N0}/{value.Total:N0} input row(s)…");
             var plan = await Task.Run(() => DbcRowImportService.Preview(_document.File, _document.Schema, path, options, progress, operation.Token), operation.Token);
             operation.Token.ThrowIfCancellationRequested(); _plan = plan; _preview.Text = Render(plan);
-            _status.Text = $"Preview ready · {plan.InputRows:N0} input row(s) · {plan.UpdatedRows:N0} existing row(s) changed · {plan.AppendedRows:N0} append(s) · {plan.ChangedCells:N0} cell change(s). The open DBC is still untouched.";
+            _status.Text = $"Preview ready · {plan.InputRows:N0} input row(s) · {plan.UpdatedRows:N0} existing row(s) changed · {plan.AppendedRows:N0} append(s) · {plan.ChangedCells:N0} cell change(s). The open client table is still untouched.";
             DesktopCrashLogger.Debug("DBC", "row-import-preview", ("source", _document.File.SourcePath), ("input", plan.InputPath), ("rows", plan.InputRows), ("updated", plan.UpdatedRows), ("appended", plan.AppendedRows), ("cells", plan.ChangedCells));
         }
-        catch (OperationCanceledException) { _status.Text = "Import preview cancelled; the open DBC was untouched."; }
+        catch (OperationCanceledException) { _status.Text = "Import preview cancelled; the open client table was untouched."; }
         catch (Exception exception) { _status.Text = $"Import preview failed safely: {exception.Message}"; DesktopCrashLogger.Log("DBC import preview failed", exception); }
         finally { End(operation); }
     }
@@ -71,7 +71,7 @@ internal sealed class DbcImportWorkspaceView : UserControl, IDisposable
     {
         if (_plan is null) { _status.Text = "Build a current preview before applying. Any path or option change invalidates the previous plan."; return; }
         var cancel = new Button { Content = "Keep preview only" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;
-        var apply = Accent("Apply exact preview to open DBC"); apply.Click += (_, _) => ApplyPlan();
+        var apply = Accent("Apply exact preview to open table"); apply.Click += (_, _) => ApplyPlan();
         _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Apply {_plan.ChangedCells:N0} cell change(s) and {_plan.AppendedRows:N0} append(s) to the staged {Path.GetFileName(_document.File.SourcePath)} document? No disk file changes until Save/Save As. This structural batch clears prior cell undo history.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(apply, 2) } };
         _confirmation.IsVisible = true;
     }
@@ -83,7 +83,7 @@ internal sealed class DbcImportWorkspaceView : UserControl, IDisposable
         {
             var result = DbcRowImportService.Apply(_document.File, _plan); _document.History.Clear(); _confirmation.IsVisible = false;
             Applied?.Invoke(this, result); _status.Text = result.ChangedCells == 0 && result.AppendedRows == 0
-                ? "The preview was a no-op; the open DBC was not dirtied."
+                ? "The preview was a no-op; the open client table was not dirtied."
                 : $"Applied {result.ChangedCells:N0} cell change(s) and {result.AppendedRows:N0} append(s) in memory. Use ← Editor, review the table, then Save/Save As when ready.";
             DesktopCrashLogger.Debug("DBC", "row-import-applied", ("source", _document.File.SourcePath), ("updated", result.UpdatedRows), ("appended", result.AppendedRows), ("cells", result.ChangedCells), ("rows", result.ResultRows));
             _plan = null;

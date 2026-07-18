@@ -25,6 +25,7 @@ public sealed record TargetProfile(
     string Notes)
 {
     public bool SupportsWdbc => TableFormats.HasFlag(ClientTableFormat.Wdbc);
+    public bool SupportsDb2 => TableFormats.HasFlag(ClientTableFormat.Db2);
     public override string ToString() => $"{DisplayName} — {SupportTier}";
 }
 
@@ -45,7 +46,7 @@ public static class TargetProfileCatalog
             "Primary target. WDBC editing and patch MPQ workflows are corpus tested."),
         new("cata-15595", "Cataclysm 4.3.4 (15595)", "Cataclysm", 15595, "Cata 4.3.4 (15595).xml",
             ClientTableFormat.Wdbc | ClientTableFormat.Db2, ArchiveFormat.Mpq, TargetSupportTier.Experimental,
-            "Cata uses a mixture of WDBC and DB2-era tables. WDBC files may be opened; DB2 editing is not implemented yet.")
+            "Cata uses a mixture of WDBC and fixed-layout WDB2 tables. WDB2 read/edit/write is available through matching WoWDBDefs DBD schemas; complete corpus verification and later DB2 families remain pending.")
     ];
 
     public static IReadOnlyList<TargetProfile> Load(string? userDirectory = null, string? applicationDirectory = null)

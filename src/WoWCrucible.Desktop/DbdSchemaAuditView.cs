@@ -12,13 +12,13 @@ internal sealed class DbdSchemaAuditView : UserControl
 {
     private readonly DesktopWorkspaceSession _session;
     private readonly TextBox _definitions = new() { PlaceholderText = "WoWDBDefs definitions folder" };
-    private readonly TextBox _dbc = new() { PlaceholderText = "Server or extracted-client DBC folder" };
+    private readonly TextBox _dbc = new() { PlaceholderText = "Server or extracted-client DBC/DB2 folder" };
     private readonly TextBox _xml = new() { PlaceholderText = "Optional WDBX XML schema for a three-way comparison" };
     private readonly NumericUpDown _build = new() { Value = 12340, Minimum = 1, Maximum = int.MaxValue };
     private readonly TextBox _search = new() { PlaceholderText = "Filter table names, statuses, and messages…" };
     private readonly ComboBox _statusFilter = new() { ItemsSource = new[] { "All results", "Problems only", "Matches only", "Missing definitions/builds", "Field-count mismatches", "Empty placeholders" }, SelectedIndex = 1 };
     private readonly ListBox _results = new();
-    private readonly TextBlock _summary = Status("Choose a DBD corpus and DBC folder, then run the audit.");
+    private readonly TextBlock _summary = Status("Choose a DBD corpus and client-table folder, then run the audit.");
     private readonly TextBlock _detail = Status("Select a table to see its complete schema result.");
     private IReadOnlyList<DbdSchemaAuditRow> _rows = [];
     private CancellationTokenSource? _operation;
@@ -38,7 +38,7 @@ internal sealed class DbdSchemaAuditView : UserControl
             var grid = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(5, 3) };
             Add(grid, row.Status.ToString(), 0, row.Status == DbdAuditStatus.Match ? "#76B78B" : row.Status == DbdAuditStatus.EmptyPlaceholder ? "#A9A7C8" : "#E3A35D");
             Add(grid, row.Table, 1, "#E5EAF2", FontWeight.SemiBold);
-            Add(grid, $"WDBC {row.ActualFields}", 2); Add(grid, $"DBD {row.DbdFields?.ToString() ?? "—"}", 3); Add(grid, $"XML {row.XmlFields?.ToString() ?? "—"}", 4);
+            Add(grid, $"CLIENT {row.ActualFields}", 2); Add(grid, $"DBD {row.DbdFields?.ToString() ?? "—"}", 3); Add(grid, $"XML {row.XmlFields?.ToString() ?? "—"}", 4);
             return grid;
         });
         _results.SelectionChanged += (_, _) => ShowDetail();
@@ -49,7 +49,7 @@ internal sealed class DbdSchemaAuditView : UserControl
         var run = Accent("Audit build-aware schemas"); run.Click += async (_, _) => await AuditAsync();
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
         var definitionsBrowse = new Button { Content = "Browse…" }; definitionsBrowse.Click += async (_, _) => await PickFolderAsync(_definitions, "Select WoWDBDefs definitions");
-        var dbcBrowse = new Button { Content = "Browse…" }; dbcBrowse.Click += async (_, _) => await PickFolderAsync(_dbc, "Select DBC folder");
+        var dbcBrowse = new Button { Content = "Browse…" }; dbcBrowse.Click += async (_, _) => await PickFolderAsync(_dbc, "Select DBC/DB2 folder");
         var xmlBrowse = new Button { Content = "Browse…" }; xmlBrowse.Click += async (_, _) => await PickXmlAsync();
 
         var heading = new Border
@@ -58,7 +58,7 @@ internal sealed class DbdSchemaAuditView : UserControl
             Child = new WrapPanel { Children = { back, new TextBlock { Text = "DBD SCHEMA PROVIDER", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0), }, run, cancel } }
         };
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(12, 10) };
-        AddPath(paths, 0, "Definitions", _definitions, definitionsBrowse); AddPath(paths, 1, "DBC folder", _dbc, dbcBrowse); AddPath(paths, 2, "XML cross-check", _xml, xmlBrowse); AddPath(paths, 3, "Client build", _build, new TextBlock { Text = "12340 = WotLK 3.3.5a", Foreground = Brush.Parse("#8995A8"), VerticalAlignment = VerticalAlignment.Center });
+        AddPath(paths, 0, "Definitions", _definitions, definitionsBrowse); AddPath(paths, 1, "Tables folder", _dbc, dbcBrowse); AddPath(paths, 2, "XML cross-check", _xml, xmlBrowse); AddPath(paths, 3, "Client build", _build, new TextBlock { Text = "12340 = WotLK · 15595 = Cata", Foreground = Brush.Parse("#8995A8"), VerticalAlignment = VerticalAlignment.Center });
         var filters = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Margin = new Thickness(12, 0, 12, 8), Children = { _search, WithColumn(_statusFilter, 1) } };
         var resultGrid = new Grid { RowDefinitions = new("Auto,*,Auto,*"), RowSpacing = 5, Margin = new Thickness(12, 0, 12, 8), Children = { _summary, WithRow(_results, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(new ScrollViewer { Content = _detail }, 3) } };
         Content = new Grid { RowDefinitions = new("Auto,Auto,Auto,*"), Children = { heading, WithRow(paths, 1), WithRow(filters, 2), WithRow(resultGrid, 3) } };
@@ -100,7 +100,7 @@ internal sealed class DbdSchemaAuditView : UserControl
     private void ShowDetail()
     {
         if (_results.SelectedItem is not DbdSchemaAuditRow row) return;
-        _detail.Text = $"{row.Table}.dbc\nStatus: {row.Status}\nWDBC physical fields: {row.ActualFields:N0}\nDBD physical fields: {row.DbdFields?.ToString("N0") ?? "not resolved"}\nXML fields: {row.XmlFields?.ToString("N0") ?? "not supplied/resolved"}\n\n{row.Message}";
+        _detail.Text = $"{row.Table}\nStatus: {row.Status}\nClient-table physical fields: {row.ActualFields:N0}\nDBD physical fields: {row.DbdFields?.ToString("N0") ?? "not resolved"}\nXML fields: {row.XmlFields?.ToString("N0") ?? "not supplied/resolved"}\n\n{row.Message}";
     }
 
     private async Task PickFolderAsync(TextBox target, string title)

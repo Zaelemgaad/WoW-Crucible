@@ -87,7 +87,7 @@ The July 2026 workspace review covered the added Amaroth Toolpack directories pl
 
 ### High-value workflows to implement natively
 
-- **WoWDBDefs schema provider and cross-checker — native foundation landed.** Crucible now parses full expansion/build ranges, logical columns, arrays, localized strings, widths, signedness, ID annotations, and non-inline fields, with same-window and CLI corpus audits. The real build-12340 server corpus produces 236 exact WDBC/DBD matches, one explicit zero-byte `CharVariations` placeholder, the eight known missing-build definitions (`ChrRaces`, `Holidays`, `LockType`, `Material`, `NamesReserved`, `SkillLine`, `SoundSamplePreferences`, `WorldChunkSounds`), and one `CharHairTextures` DBD/WDBC field-count disagreement. DB2 container parsing remains separate future work.
+- **WoWDBDefs schema provider and cross-checker — native foundation landed.** Crucible parses full expansion/build ranges, logical columns, arrays, localized strings, widths, signedness, ID annotations, and non-inline fields, with same-window and CLI corpus audits. The real build-12340 server corpus produces 236 exact WDBC/DBD matches, one explicit zero-byte `CharVariations` placeholder, the eight known missing-build definitions (`ChrRaces`, `Holidays`, `LockType`, `Material`, `NamesReserved`, `SkillLine`, `SoundSamplePreferences`, `WorldChunkSounds`), and one `CharHairTextures` DBD/WDBC field-count disagreement. The fixed-layout WDB2 provider now resolves build 15595 directly from each file, preserves header/index/string-length/copy metadata, and has been exercised against the real 64,775-row Cataclysm `Item.db2`; later DB2 container families remain pending.
 - **Spell editing database workspace.** WoW Spell Editor demonstrates useful MySQL/SQLite staging, named bindings, bulk queries, and DBC export. Crucible should keep the portable DBC as the source artifact, use a project-local SQLite workspace optionally, and never confuse a staging table with AzerothCore's SQL overlays.
 - **NPC appearance generator.** Amaroth NPCGenerator's WMV `.chr` to `CreatureDisplayInfo`/`CreatureDisplayInfoExtra` plus SQL workflow is directly useful. Crucible's version should allocate/deduplicate IDs, parse the appearance source, resolve item display references, generate a client asset manifest, preview every DBC/SQL change, and deploy transactionally.
 - **Gameobject generator.** GobGenerator's model-list to `GameObjectDisplayInfo` and `gameobject_template` pipeline is valuable for bulk imported M2/WMO assets. Crucible should consume indexed MPQ/CASC paths directly, preserve provenance, allocate IDs centrally, use capability-detected current schemas, and output rollback-safe plans instead of `REPLACE` queries.
@@ -142,7 +142,7 @@ The conversion project format remains backend-neutral so a user can compare anot
 
 ### Revised implementation sequence from this audit
 
-1. Extend the landed DBD/WDBC provider into DB2 container profiles and structured import/export.
+1. Complete Cataclysm WDB2 corpus verification, then add separately verified WDB5/WDB6/WDC providers without weakening fixed-layout safety.
 2. Bind the landed dependency graph to an effective target-client index so proven inherited assets are omitted from tiny patches.
 3. Native staged modern-to-3.3.5 M2 conversion with explicit feature-loss mapping, followed by WMO support.
 4. Guided NPC appearance import and additive display/extra/SQL planning.

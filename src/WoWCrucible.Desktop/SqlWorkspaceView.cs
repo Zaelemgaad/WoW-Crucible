@@ -295,7 +295,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var clone = new Button { Content = "Clone complete row as new identity" }; clone.Click += (_, _) => BeginCreateRow(_selectedRow); actions.Children.Add(clone);
         if (CanOpenGuidedEditor(_page.Table)) { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => GuidedEditRequested?.Invoke(this, new(_page.Table, _selectedRow.Values)); actions.Children.Add(guided); }
         var delete = new Button { Content = "Delete exactly this row" }; delete.Click += (_, _) => PrepareDelete(); actions.Children.Add(delete); heading.Children.Add(actions);
-        var browseDbc = new Button { Content = "DBC…" }; browseDbc.Click += async (_, _) => await PickFavoritePathAsync(_favoriteDbc, "Select a related DBC file", "DBC", "*.dbc");
+        var browseDbc = new Button { Content = "DBC/DB2…" }; browseDbc.Click += async (_, _) => await PickFavoritePathAsync(_favoriteDbc, "Select a related client table", "DBC or DB2", "*.dbc", "*.db2");
         var browseMpq = new Button { Content = "MPQ…" }; browseMpq.Click += async (_, _) => await PickFavoritePathAsync(_favoriteMpq, "Select a related MPQ patch", "MPQ", "*.mpq");
         var dbcPath = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 5, Children = { _favoriteDbc, WithColumn(browseDbc, 1) } };
         var mpqPath = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 5, Children = { _favoriteMpq, WithColumn(browseMpq, 1) } };
@@ -711,9 +711,9 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private void RefreshFavorites() => _favorites.ItemsSource = SqlFavoriteStore.Load();
 
-    private async Task PickFavoritePathAsync(TextBox target, string title, string label, string pattern)
+    private async Task PickFavoritePathAsync(TextBox target, string title, string label, params string[] patterns)
     {
-        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(label) { Patterns = [pattern] }] });
+        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(label) { Patterns = patterns }] });
         if (files.FirstOrDefault()?.TryGetLocalPath() is { } path) target.Text = path;
     }
     private async Task LoadSchemasAsync()

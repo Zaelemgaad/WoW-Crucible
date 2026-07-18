@@ -86,22 +86,22 @@ public partial class MainWindow : Window
     {
         DesktopCrashLogger.Debug("FILE", "load-path-requested", ("path", path));
         var extension = Path.GetExtension(path);
-        return extension.Equals(".dbc", StringComparison.OrdinalIgnoreCase)
+        return extension.Equals(".dbc", StringComparison.OrdinalIgnoreCase) || extension.Equals(".db2", StringComparison.OrdinalIgnoreCase)
             ? LoadDbcAsync(path)
             : extension.Equals(".m2", StringComparison.OrdinalIgnoreCase)
                 ? LoadM2Async(path)
                 : extension.Equals(".blp", StringComparison.OrdinalIgnoreCase)
                     ? OpenTextureWorkspaceAsync(path)
-                    : ShowErrorAsync("Unsupported file", "The desktop opens DBC, M2 and BLP files directly.");
+            : ShowErrorAsync("Unsupported file", "The desktop opens DBC, WDB2 DB2, M2 and BLP files directly.");
     }
 
     private async void OpenDbcClick(object? sender, RoutedEventArgs e)
     {
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Open one or more WotLK WDBC tables",
+            Title = "Open one or more WDBC or WDB2 client tables",
             AllowMultiple = true,
-            FileTypeFilter = [new FilePickerFileType("WoW DBC tables") { Patterns = ["*.dbc"] }]
+            FileTypeFilter = [new FilePickerFileType("WoW client tables") { Patterns = ["*.dbc", "*.db2"] }]
         });
         foreach (var file in files)
         {
@@ -123,10 +123,18 @@ public partial class MainWindow : Window
             var session = await Task.Run(() =>
             {
                 var file = WdbcFile.Load(path);
-                var tableName = Path.GetFileNameWithoutExtension(path);
-                var catalog = ResolveSchemaCatalog();
-                var resolution = catalog.ResolveColumns(tableName, file.FieldCount);
-                return new DbcDocumentSession(file, resolution, _schemaSource);
+                var tableName = file.LogicalTableName;
+                if (file.ContainerKind == ClientTableContainerKind.Wdb2)
+                {
+                    var definitions = FindDbdDefinitionsPath() ?? throw new DirectoryNotFoundException("Opening WDB2 requires the WoWDBDefs definitions folder. Configure it under DBD schemas & audit.");
+                    var definition = Path.Combine(definitions, tableName + ".dbd");
+                    if (!File.Exists(definition)) throw new FileNotFoundException($"No WoWDBDefs definition exists for {tableName}.db2.", definition);
+                    var build = file.Db2Metadata?.Build ?? throw new InvalidDataException("WDB2 build metadata is missing.");
+                    var db2Resolution = DbdSchemaService.ResolveFile(definition, build, file.FieldCount, file.RecordSize);
+                    return new DbcDocumentSession(file, db2Resolution, $"{definition} · build {build}");
+                }
+                var catalog = ResolveSchemaCatalog(); var xmlResolution = catalog.ResolveColumns(tableName, file.FieldCount);
+                return new DbcDocumentSession(file, xmlResolution, _schemaSource);
             });
             _documents.Add(session);
             ActivateDocument(_documents.Count - 1);
@@ -137,7 +145,7 @@ public partial class MainWindow : Window
         {
             DesktopCrashLogger.Log("DBC open failed", exception);
             StatusText.Text = "Open failed";
-            await ShowErrorAsync("Could not open DBC", exception.Message);
+            await ShowErrorAsync("Could not open client table", exception.Message);
         }
     }
 
@@ -148,7 +156,7 @@ public partial class MainWindow : Window
         var document = _documents[index];
         DesktopCrashLogger.Debug("DBC", "document-activated", ("path", document.FullPath), ("tab", index), ("dirty", document.File.IsDirty));
         SearchBox.Text = string.Empty;
-        DbcView.SetDocument(document.File, document.Schema.Columns, Path.GetFileNameWithoutExtension(document.File.SourcePath), DecodedToggle.IsChecked == true);
+        DbcView.SetDocument(document.File, document.Schema.Columns, document.File.LogicalTableName, DecodedToggle.IsChecked == true);
         WelcomePanel.IsVisible = false;
         M2View.IsVisible = false;
         DbcHost.IsVisible = true;
@@ -180,7 +188,8 @@ public partial class MainWindow : Window
     {
         InspectorTitle.Text = Path.GetFileName(document.File.SourcePath);
         InspectorSummary.Text = $"{document.File.RowCount:N0} records · {document.File.FieldCount:N0} fields";
-        InspectorDetail.Text = $"Container  WDBC\nRecord     {document.File.RecordSize:N0} bytes\nStrings    {document.File.StringTableSize:N0} bytes\nSchema     {document.Schema.MatchKind}\nDefinition {document.SchemaSource}\nRow key    {document.Schema.KeyStrategy.DisplayName(document.Schema.Columns)}\nSource     {document.File.SourcePath}";
+        var db2 = document.File.Db2Metadata;
+        InspectorDetail.Text = $"Container  {document.File.ContainerKind.ToString().ToUpperInvariant()}\nRecord     {document.File.RecordSize:N0} bytes\nStrings    {document.File.StringTableSize:N0} bytes{(db2 is null ? string.Empty : $"\nBuild      {db2.Build:N0}\nTable hash 0x{db2.TableHash:X8}\nID range   {db2.MinId:N0}..{db2.MaxId:N0}\nCopy rows  {db2.CopyRows:N0}\nStructural {(document.File.AllowsStructuralMutation ? "editable" : "locked by side tables")}")}\nSchema     {document.Schema.MatchKind}\nDefinition {document.SchemaSource}\nRow key    {document.Schema.KeyStrategy.DisplayName(document.Schema.Columns)}\nSource     {document.File.SourcePath}";
     }
 
     private async void SaveClick(object? sender, RoutedEventArgs e) => await SaveCurrentAsync(false);
@@ -220,7 +229,7 @@ public partial class MainWindow : Window
             {
                 Title = "Save DBC as",
                 SuggestedFileName = Path.GetFileName(path),
-                FileTypeChoices = [new FilePickerFileType("WoW DBC table") { Patterns = ["*.dbc"] }]
+                FileTypeChoices = [new FilePickerFileType("WoW client table") { Patterns = [Path.GetExtension(path)] }]
             });
             path = destination?.TryGetLocalPath();
             if (path is null) return false;
@@ -1020,6 +1029,22 @@ public partial class MainWindow : Window
             _schemaCatalog = DbcSchemaCatalog.CreateBuiltIn12340();
             return _schemaCatalog;
         }
+    }
+
+    private string? FindDbdDefinitionsPath()
+    {
+        if (!string.IsNullOrWhiteSpace(_workspaceSession.Settings.DbdDefinitionsPath) && Directory.Exists(_workspaceSession.Settings.DbdDefinitionsPath))
+            return Path.GetFullPath(_workspaceSession.Settings.DbdDefinitionsPath);
+        foreach (var start in new[] { Environment.CurrentDirectory, AppContext.BaseDirectory }.Distinct(StringComparer.OrdinalIgnoreCase))
+            for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
+            {
+                foreach (var relative in new[] { Path.Combine("Tools", "WoWDBDefs", "definitions"), Path.Combine("WoWDBDefs", "definitions"), "definitions" })
+                {
+                    var candidate = Path.Combine(directory.FullName, relative);
+                    if (Directory.Exists(candidate)) return candidate;
+                }
+            }
+        return null;
     }
 
     private static string? FindSchemaDefinitionPath()

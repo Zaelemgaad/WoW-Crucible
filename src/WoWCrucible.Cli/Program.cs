@@ -1097,7 +1097,7 @@ static int Dbc(string[] args)
     if (args is ["rows", var rowsPath, var rowsSchemaPath, .. var rawIds] && rawIds.Length > 0)
     {
         var rowsFile = WdbcFile.Load(rowsPath); var tableName = Path.GetFileNameWithoutExtension(rowsPath);
-        var resolution = DbcSchemaCatalog.Load(rowsSchemaPath).ResolveColumns(tableName, rowsFile.FieldCount);
+        var resolution = ResolveClientTableSchema(rowsFile, rowsSchemaPath, tableName);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, rowsFile.FieldCount, resolution));
         var indexed = DbcRecordIdentity.IndexRows(rowsFile, resolution.Columns, resolution.KeyStrategy); var rows = new List<object>();
         foreach (var rawId in rawIds)
@@ -1121,7 +1121,7 @@ static int Dbc(string[] args)
         var rawStrings = exportOptions.Contains("--raw-string-offsets", StringComparer.OrdinalIgnoreCase); var overwrite = exportOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
         var unknown = exportOptions.Where(option => !option.StartsWith("--format=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--column=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--columns=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--id=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ids=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--raw-string-offsets", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown DBC export option: {unknown[0]}");
-        var exportFile = WdbcFile.Load(exportPath); var table = Path.GetFileNameWithoutExtension(exportPath); var resolution = DbcSchemaCatalog.Load(exportSchemaPath).ResolveColumns(table, exportFile.FieldCount);
+        var exportFile = WdbcFile.Load(exportPath); var table = Path.GetFileNameWithoutExtension(exportPath); var resolution = ResolveClientTableSchema(exportFile, exportSchemaPath, table);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(table, exportFile.FieldCount, resolution));
         var result = DbcRowExportService.Export(exportFile, resolution, exportOutput, new(format, columns, keys, rawStrings, overwrite));
         Console.Error.WriteLine($"Exported {result.ExportedRows:N0}/{result.SourceRows:N0} {table} row(s), {result.Columns.Count:N0} output columns, decoded strings={!rawStrings}: {result.OutputPath}"); return 0;
@@ -1143,7 +1143,7 @@ static int Dbc(string[] args)
             !option.Equals("--append", StringComparison.OrdinalIgnoreCase) && !option.Equals("--raw-string-offsets", StringComparison.OrdinalIgnoreCase) &&
             !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--report=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--report=text", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown DBC import option: {unknown[0]}");
-        var importFile = WdbcFile.Load(importPath); var table = Path.GetFileNameWithoutExtension(importPath); var resolution = DbcSchemaCatalog.Load(importSchemaPath).ResolveColumns(table, importFile.FieldCount);
+        var importFile = WdbcFile.Load(importPath); var table = Path.GetFileNameWithoutExtension(importPath); var resolution = ResolveClientTableSchema(importFile, importSchemaPath, table);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(table, importFile.FieldCount, resolution));
         if (output is not null)
         {
@@ -1161,7 +1161,7 @@ static int Dbc(string[] args)
             foreach (var change in plan.Changes.Take(200)) Console.WriteLine($"CHANGE\tinput={change.InputRow}\tkey={change.RecordKey?.ToString() ?? "-"}\trow={change.TargetRow}\t{change.Column}\t{change.Before}\t=>\t{change.After}");
             if (plan.Changes.Count > 200) Console.WriteLine($"MORE\t{plan.Changes.Count - 200:N0} additional cell change(s); use --report=json for the complete plan.");
         }
-        if (output is null) { Console.Error.WriteLine("Dry-run import preview only. No DBC changed; add --output=changed.dbc to apply this exact plan to a new/explicitly overwritten output."); return 0; }
+        if (output is null) { Console.Error.WriteLine($"Dry-run import preview only. No client table changed; add --output=changed{Path.GetExtension(importPath)} to apply this exact plan to a new/explicitly overwritten output."); return 0; }
         var result = DbcRowImportService.Apply(importFile, plan); output = Path.GetFullPath(output); Directory.CreateDirectory(Path.GetDirectoryName(output)!); importFile.Save(output, overwrite);
         Console.Error.WriteLine($"Applied structured import atomically: {result.UpdatedRows:N0} updated row(s), {result.AppendedRows:N0} appended row(s), {result.ChangedCells:N0} changed cell(s), {result.ResultRows:N0} result rows. Output: {output}{(overwrite ? $" · previous output backed up to {output}.bak" : string.Empty)}"); return 0;
     }
@@ -1176,7 +1176,7 @@ static int Dbc(string[] args)
         var limit = limitOption is null ? int.MaxValue : int.Parse(limitOption[8..]);
         if (limit < 1) return Fail("DBC find limit must be positive.");
         var findFile = WdbcFile.Load(findPath); var tableName = Path.GetFileNameWithoutExtension(findPath);
-        var resolution = DbcSchemaCatalog.Load(findSchemaPath).ResolveColumns(tableName, findFile.FieldCount);
+        var resolution = ResolveClientTableSchema(findFile, findSchemaPath, tableName);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, findFile.FieldCount, resolution));
         var column = resolution.Columns.FirstOrDefault(value => value.Name.Equals(findColumnName, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidDataException($"{tableName} has no named column '{findColumnName}'.");
@@ -1196,7 +1196,7 @@ static int Dbc(string[] args)
         var basePath = args[1]; var overridePath = args[2]; var schemaPath = args[3];
         var tableName = Path.GetFileNameWithoutExtension(basePath);
         var sample = WdbcFile.Load(basePath);
-        var resolution = DbcSchemaCatalog.Load(schemaPath).ResolveColumns(tableName, sample.FieldCount);
+        var resolution = ResolveClientTableSchema(sample, schemaPath, tableName);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sample.FieldCount, resolution));
         var differences = DbcPromotionService.GetDifferences(basePath, overridePath, resolution.Columns, resolution.KeyStrategy);
         if (args.Length == 5)
@@ -1215,16 +1215,16 @@ static int Dbc(string[] args)
     {
         var tableName = Path.GetFileNameWithoutExtension(promotionBasePath);
         var sample = WdbcFile.Load(promotionBasePath);
-        var resolution = DbcSchemaCatalog.Load(promotionSchemaPath).ResolveColumns(tableName, sample.FieldCount);
+        var resolution = ResolveClientTableSchema(sample, promotionSchemaPath, tableName);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sample.FieldCount, resolution));
         DbcPromotionService.Apply(promotionBasePath, promotionOverridePath, outputPath, resolution.Columns, resolution.KeyStrategy, DbcPromotionService.LoadManifest(manifestPath));
-        Console.Error.WriteLine($"Created promoted DBC: {Path.GetFullPath(outputPath)}");
+        Console.Error.WriteLine($"Created promoted client table: {Path.GetFullPath(outputPath)}");
         return 0;
     }
     if (args is ["promote", "additions", var additionsBasePath, var additionsOverridePath, var additionsSchemaPath, var additionsManifestPath, var additionsOutputPath])
     {
         var tableName = Path.GetFileNameWithoutExtension(additionsBasePath); var sample = WdbcFile.Load(additionsBasePath);
-        var resolution = DbcSchemaCatalog.Load(additionsSchemaPath).ResolveColumns(tableName, sample.FieldCount);
+        var resolution = ResolveClientTableSchema(sample, additionsSchemaPath, tableName);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sample.FieldCount, resolution));
         var manifest = DbcPromotionService.CreateAdditionsManifest(additionsBasePath, additionsOverridePath, resolution.Columns, resolution.KeyStrategy);
         if (manifest.Operations.Count == 0) { Console.Error.WriteLine($"{tableName} contains no IDs absent from the base; no output was written."); return 3; }
@@ -1242,9 +1242,9 @@ static int Dbc(string[] args)
         var unknown = cloneArguments.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.StartsWith("--manifest=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--start-id=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown clone/remap option: {unknown[0]}");
         if (values.Count == 0) return Fail("Clone/remap where requires at least one field value.");
-        var sourceFile = WdbcFile.Load(cloneSourcePath); var tableName = Path.GetFileNameWithoutExtension(cloneBasePath);
-        if (!tableName.Equals(Path.GetFileNameWithoutExtension(cloneSourcePath), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Base and source DBC table names differ.");
-        var resolution = DbcSchemaCatalog.Load(cloneSchemaPath).ResolveColumns(tableName, sourceFile.FieldCount);
+        var baseFile = WdbcFile.Load(cloneBasePath); var sourceFile = WdbcFile.Load(cloneSourcePath); var tableName = baseFile.LogicalTableName;
+        if (!baseFile.LogicalTableName.Equals(sourceFile.LogicalTableName, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Base and source client-table identities differ.");
+        var resolution = ResolveClientTableSchema(sourceFile, cloneSchemaPath, tableName);
         if (resolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(tableName, sourceFile.FieldCount, resolution));
         var column = resolution.Columns.FirstOrDefault(value => value.Name.Equals(cloneColumnName, StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidDataException($"{tableName} has no named column '{cloneColumnName}'.");
         var sourceIds = DbcRecordIdentity.IndexRows(sourceFile, resolution.Columns, resolution.KeyStrategy).Where(pair => values.Contains(Convert.ToString(sourceFile.GetDisplayValue(pair.Value, column), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty)).Select(pair => pair.Key).ToArray();
@@ -1261,10 +1261,10 @@ static int Dbc(string[] args)
         var unknown = dependencyOptions.Where(value => !value.StartsWith("--child-map=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--child-output=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--parent-output=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown clone-dependency option: {unknown[0]}");
         var parentMap = DbcCloneRemapService.Load(parentMapPath); var parentSource = WdbcFile.Load(parentSourcePath); var parentTable = Path.GetFileNameWithoutExtension(parentSourcePath);
-        var parentResolution = DbcSchemaCatalog.Load(parentSchemaPath).ResolveColumns(parentTable, parentSource.FieldCount);
+        var parentResolution = ResolveClientTableSchema(parentSource, parentSchemaPath, parentTable);
         if (parentResolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(parentTable, parentSource.FieldCount, parentResolution));
         var childBase = WdbcFile.Load(childBasePath); var childTable = Path.GetFileNameWithoutExtension(childBasePath);
-        var childResolution = DbcSchemaCatalog.Load(childSchemaPath).ResolveColumns(childTable, childBase.FieldCount);
+        var childResolution = ResolveClientTableSchema(childBase, childSchemaPath, childTable);
         if (childResolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(childTable, childBase.FieldCount, childResolution));
         var referencedIds = DbcCloneRemapService.FindReferencedIds(parentSourcePath, parentResolution.Columns, parentResolution.KeyStrategy, parentMap.Entries.Select(entry => entry.SourceId), foreignColumnName);
         var childSource = WdbcFile.Load(childSourcePath); var childBaseRows = DbcRecordIdentity.IndexRows(childBase, childResolution.Columns, childResolution.KeyStrategy); var childSourceRows = DbcRecordIdentity.IndexRows(childSource, childResolution.Columns, childResolution.KeyStrategy);
@@ -1280,7 +1280,7 @@ static int Dbc(string[] args)
     {
         if (!uint.TryParse(copySourceIdText, out var copySourceId) || !uint.TryParse(copyTargetIdText, out var copyTargetId)) return Fail("Source and target IDs must be unsigned integers.");
         var copyValues = ParseSetOptions(copyOptions); var copySample = WdbcFile.Load(copyBasePath); var copyTable = Path.GetFileNameWithoutExtension(copyBasePath);
-        var copyResolution = DbcSchemaCatalog.Load(copySchemaPath).ResolveColumns(copyTable, copySample.FieldCount);
+        var copyResolution = ResolveClientTableSchema(copySample, copySchemaPath, copyTable);
         if (copyResolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(copyTable, copySample.FieldCount, copyResolution));
         DbcRowMutationService.CopyRow(copyBasePath, copySourcePath, copyOutputPath, copyResolution.Columns, copyResolution.KeyStrategy, copySourceId, copyTargetId, copyValues);
         Console.Error.WriteLine($"Copied {copyTable} ID {copySourceId} to additive ID {copyTargetId} with {copyValues.Count:N0} field override(s): {Path.GetFullPath(copyOutputPath)}");
@@ -1290,7 +1290,7 @@ static int Dbc(string[] args)
     {
         if (!uint.TryParse(setIdText, out var setId)) return Fail("Record ID must be an unsigned integer.");
         var setValues = ParseSetOptions(setOptions); var setSample = WdbcFile.Load(setInputPath); var setTable = Path.GetFileNameWithoutExtension(setInputPath);
-        var setResolution = DbcSchemaCatalog.Load(setSchemaPath).ResolveColumns(setTable, setSample.FieldCount);
+        var setResolution = ResolveClientTableSchema(setSample, setSchemaPath, setTable);
         if (setResolution.UsedFallback) throw new InvalidDataException(SchemaRequirementMessage(setTable, setSample.FieldCount, setResolution));
         DbcRowMutationService.SetRow(setInputPath, setOutputPath, setResolution.Columns, setResolution.KeyStrategy, setId, setValues);
         Console.Error.WriteLine($"Updated {setTable} ID {setId} in an output copy with {setValues.Count:N0} field value(s): {Path.GetFullPath(setOutputPath)}");
@@ -1311,7 +1311,8 @@ static int Dbc(string[] args)
     if (args.Length != 2 || args[0] != "info") return DbcHelp(2);
     var file = WdbcFile.Load(args[1]);
     Console.WriteLine($"Path\t{Path.GetFullPath(args[1])}");
-    Console.WriteLine($"Rows\t{file.RowCount}"); Console.WriteLine($"Fields\t{file.FieldCount}"); Console.WriteLine($"StringBytes\t{file.StringTableSize}");
+    Console.WriteLine($"Container\t{file.ContainerKind.ToString().ToUpperInvariant()}"); Console.WriteLine($"Rows\t{file.RowCount}"); Console.WriteLine($"Fields\t{file.FieldCount}"); Console.WriteLine($"RecordBytes\t{file.RecordSize}"); Console.WriteLine($"StringBytes\t{file.StringTableSize}");
+    if (file.Db2Metadata is { } db2) Console.WriteLine($"Build\t{db2.Build}\nTableHash\t0x{db2.TableHash:X8}\nTimestamp\t{db2.Timestamp}\nIdRange\t{db2.MinId}..{db2.MaxId}\nLocale\t0x{db2.Locale:X8}\nIndexEntries\t{db2.IndexMap.Count}\nCopyRows\t{db2.CopyRows}\nStructuralMutation\t{file.AllowsStructuralMutation}");
     return 0;
 }
 
@@ -1392,7 +1393,7 @@ static int Mpq(string[] args)
 }
 
 static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--require=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
-static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc dbd-info <file.dbd> <build> [--format=text|json]\n  wowcrucible dbc schema-audit <definitions-root> <dbc-folder> <build> [--xml=schema.xml] [--only-problems] [--format=text|json]\n  wowcrucible dbc rows <file.dbc> <schema.xml> <id>...\n  wowcrucible dbc export <file.dbc> <schema.xml> <output.csv|json|jsonl> [--format=csv|json|jsonl] [--columns=A,B|--column=Name] [--ids=1,2|--id=N] [--raw-string-offsets] [--overwrite]\n  wowcrucible dbc import <file.dbc> <schema.xml> <input.csv|json|jsonl> [--format=csv|json|jsonl] [--append] [--raw-string-offsets] [--output=changed.dbc] [--overwrite] [--report=text|json]\n  wowcrucible dbc find <file.dbc> <schema.xml> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc promote additions <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc clone-remap where <base.dbc> <source.dbc> <schema.xml> <column> <value>... --manifest=map.json --output=merged.dbc [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source.dbc> <parent-merged.dbc> <parent-schema.xml> <parent-map.json> <foreign-column> <child-base.dbc> <child-source.dbc> <child-schema.xml> --child-map=map.json --child-output=child.dbc --parent-output=parent.dbc\n  wowcrucible dbc copy-row <base.dbc> <source.dbc> <schema.xml> <source-id> <target-id> <output.dbc> [--set=Column=Value]...\n  wowcrucible dbc set-row <input.dbc> <schema.xml> <id> <output.dbc> --set=Column=Value [...]\n  wowcrucible dbc spell-tooltip <Spell.dbc> <spell-id>... [--format=text|json]\n  wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [--assets=processed-library]\n  wowcrucible dbc item-equipped <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> <base-skin> <output.png> --inventory=N --assets=processed-library [--source=name]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]", code);
+static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc|file.db2>\n  wowcrucible dbc dbd-info <file.dbd> <build> [--format=text|json]\n  wowcrucible dbc schema-audit <definitions-root> <table-folder> <build> [--xml=schema.xml] [--only-problems] [--format=text|json]\n  wowcrucible dbc rows <file.dbc|file.db2> <schema.xml|file.dbd|definitions-folder> <id>...\n  wowcrucible dbc export <file.dbc|file.db2> <schema> <output.csv|json|jsonl> [--format=csv|json|jsonl] [--columns=A,B|--column=Name] [--ids=1,2|--id=N] [--raw-string-offsets] [--overwrite]\n  wowcrucible dbc import <file.dbc|file.db2> <schema> <input.csv|json|jsonl> [--format=csv|json|jsonl] [--append] [--raw-string-offsets] [--output=changed.dbc|db2] [--overwrite] [--report=text|json]\n  wowcrucible dbc find <file.dbc|file.db2> <schema> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base> <override> <schema> [--summary]\n  wowcrucible dbc promote apply <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc promote additions <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc clone-remap where <base> <source> <schema> <column> <value>... --manifest=map.json --output=merged.dbc|db2 [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source> <parent-merged> <parent-schema> <parent-map.json> <foreign-column> <child-base> <child-source> <child-schema> --child-map=map.json --child-output=child --parent-output=parent\n  wowcrucible dbc copy-row <base> <source> <schema> <source-id> <target-id> <output> [--set=Column=Value]...\n  wowcrucible dbc set-row <input> <schema> <id> <output> --set=Column=Value [...]\n  wowcrucible dbc spell-tooltip <Spell.dbc> <spell-id>... [--format=text|json]\n  wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [--assets=processed-library]\n  wowcrucible dbc item-equipped <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> <base-skin> <output.png> --inventory=N --assets=processed-library [--source=name]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]\n\nFor WDB2, <schema> is the matching .dbd file or WoWDBDefs definitions folder. WDB5/WDB6/WDC are not yet supported.", code);
 static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]", code);
 static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n\nWithout a path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage.", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
@@ -1449,6 +1450,17 @@ static int PrintManifestValidation(PatchManifestValidationResult validation)
 static string SchemaRequirementMessage(string tableName, int fields, DbcSchemaResolution resolution) => resolution.MatchKind == DbcSchemaMatchKind.MissingTableFallback
     ? $"A matching named schema is required; '{tableName}' is absent from the selected schema."
     : $"A matching named schema is required; '{tableName}' defines {resolution.DefinedFieldCount} fields but the DBC contains {fields}.";
+
+static DbcSchemaResolution ResolveClientTableSchema(WdbcFile file, string schemaPath, string tableName)
+{
+    var isDbd = Directory.Exists(schemaPath) || Path.GetExtension(schemaPath).Equals(".dbd", StringComparison.OrdinalIgnoreCase);
+    if (!isDbd) return DbcSchemaCatalog.Load(schemaPath).ResolveColumns(tableName, file.FieldCount);
+    tableName = file.LogicalTableName;
+    var build = file.Db2Metadata?.Build ?? throw new InvalidOperationException("A DBD schema path currently requires a WDB2 file carrying its client build. Use the matching XML definition for WDBC.");
+    var definition = Directory.Exists(schemaPath) ? Path.Combine(Path.GetFullPath(schemaPath), tableName + ".dbd") : Path.GetFullPath(schemaPath);
+    if (!File.Exists(definition)) throw new FileNotFoundException($"No DBD definition exists for {tableName}.", definition);
+    return DbdSchemaService.ResolveFile(definition, build, file.FieldCount, file.RecordSize);
+}
 
 static bool DbcRowsEqual(WdbcFile left, int leftRow, WdbcFile right, int rightRow, IReadOnlyList<DbcColumn> columns)
 {

@@ -113,15 +113,15 @@ For rapid triage, **Undecided only** hides recorded images, **Auto-advance** sel
 ## DBC information, validation, comparison, and editing
 
 ```text
-wowcrucible dbc info <file.dbc>
+wowcrucible dbc info <file.dbc|file.db2>
 wowcrucible dbc dbd-info <file.dbd> <build> [--format=text|json]
-wowcrucible dbc schema-audit <definitions-root> <dbc-folder> <build> [--xml=schema.xml] [--only-problems] [--format=text|json]
+wowcrucible dbc schema-audit <definitions-root> <table-folder> <build> [--xml=schema.xml] [--only-problems] [--format=text|json]
 wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [--class=N] [--subclass=N] [--inventory=N] [--assets=processed-library] [--format=text|json]
 wowcrucible dbc spell-tooltip <Spell.dbc> <spell-id>... [--format=text|json]
 wowcrucible dbc item-equipped <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> <base-skin.blp|image> <output.png> --inventory=N --assets=processed-library [--source=name] [--overwrite]
-wowcrucible dbc rows <file.dbc> <schema.xml> <id>...
-wowcrucible dbc export <file.dbc> <schema.xml> <output.csv|json|jsonl> [--format=csv|json|jsonl] [--columns=A,B|--column=Name] [--ids=1,2|--id=N] [--raw-string-offsets] [--overwrite]
-wowcrucible dbc find <file.dbc> <schema.xml> <field> <value>... [--count|--limit=100]
+wowcrucible dbc rows <file.dbc|file.db2> <schema.xml|file.dbd|definitions-folder> <id>...
+wowcrucible dbc export <file.dbc|file.db2> <schema> <output.csv|json|jsonl> [--format=csv|json|jsonl] [--columns=A,B|--column=Name] [--ids=1,2|--id=N] [--raw-string-offsets] [--overwrite]
+wowcrucible dbc find <file.dbc|file.db2> <schema> <field> <value>... [--count|--limit=100]
 wowcrucible dbc validate <schema.xml> <folder> [--strict] [--recursive]
 wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]
 wowcrucible dbc copy-row <base.dbc> <source.dbc> <schema.xml> <source-id> <new-id> <output.dbc> [--set=Field=Value]
@@ -132,12 +132,14 @@ wowcrucible dbc clone-remap where <base.dbc> <source.dbc> <schema.xml> <field> <
 wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]
 wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=" Variant"]
 wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]
-wowcrucible dbc import <file.dbc> <schema.xml> <input.csv|json|jsonl> [--format=csv|json|jsonl] [--append] [--raw-string-offsets] [--output=changed.dbc] [--overwrite] [--report=text|json]
+wowcrucible dbc import <file.dbc|file.db2> <schema> <input.csv|json|jsonl> [--format=csv|json|jsonl] [--append] [--raw-string-offsets] [--output=changed.dbc|db2] [--overwrite] [--report=text|json]
 ```
 
 `item-display` decodes the exact WotLK build-12340 `ItemDisplayInfo` record behind an SQL `item_template.displayid`. It reports both model names, model textures, inventory icons, all eight wearable texture components, geoset groups, helmet visibility masks, flags, spell/item visuals, particle color, and sound group. Class/subclass/inventory values order canonical object-component paths correctly; `--assets` checks only those bounded logical directories in a processed content-first library and reports every matching provenance source. Use `-` for the schema argument to use Crucible's validated built-in 25-field layout.
 
-`dbd-info` resolves one WoWDBDefs table for the requested full client expansion/build and prints its physical WDBC fields after array, localized-string, width, signedness, ID, and non-inline rules are applied. `schema-audit` compares every top-level DBC with the matching DBD build layout and optionally the existing WDBX XML corpus. An intentional zero-byte server placeholder is informational; missing build definitions and physical field-count disagreements produce review exit code `3`.
+`dbd-info` resolves one WoWDBDefs table for the requested full client expansion/build and prints its physical fields after array, localized-string, width, signedness, ID, and non-inline rules are applied. `schema-audit` compares every top-level DBC or DB2 with the matching DBD build layout and optionally the existing WDBX XML corpus. Selecting a folder one level too high fails with a likely nested-folder hint instead of reporting zero successful results. An intentional zero-byte server placeholder is informational; missing build definitions and physical field-count disagreements produce review exit code `3`.
+
+Generic row, find, export, import, compare, clone, promotion, and edit commands accept fixed-layout WDB2 input when `<schema>` is the matching `.dbd` file or the WoWDBDefs definitions folder. The WDB2 build and table hash come from the file header. Renamed outputs receive a small `.crucible-table.json` identity sidecar so they can reopen with the correct DBD. Extended ID/string-length maps and copy tables round-trip unchanged; structural row/ID edits are blocked when those dependent side tables are present. WDB5/WDB6/WDC are not yet supported.
 
 `spell-tooltip` reads the exact build-12340 English spell name, subtext, description, and aura description for each requested ID. The Items & Sets tooltip keeps one cached catalog for the configured `Spell.dbc`, refreshes it only when the file changes, and uses these decoded fields for all five item spell slots instead of displaying bare numeric IDs. Runtime `$` tokens are preserved rather than guessed.
 

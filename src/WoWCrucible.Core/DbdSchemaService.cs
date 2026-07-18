@@ -76,8 +76,13 @@ public static partial class DbdSchemaService
             if (logical.Type == DbdPrimitiveType.LocString)
             {
                 if (field.ArraySize != 1) throw new InvalidDataException($"Localized field '{field.Name}' unexpectedly declares array size {field.ArraySize:N0}.");
-                for (var locale = 0; locale < 16; locale++) Add($"{field.Name}[{Locale(locale)}]", DbcValueType.StringOffset, 4, field.IsId);
-                Add($"{field.Name}[Flags]", DbcValueType.UInt32, 4, false); continue;
+                if (build <= 12340)
+                {
+                    for (var locale = 0; locale < 16; locale++) Add($"{field.Name}[{Locale(locale)}]", DbcValueType.StringOffset, 4, field.IsId);
+                    Add($"{field.Name}[Flags]", DbcValueType.UInt32, 4, false);
+                }
+                else Add(field.Name, DbcValueType.StringOffset, Math.Max(1, field.BitWidth / 8), field.IsId);
+                continue;
             }
             for (var element = 0; element < field.ArraySize; element++)
             {
@@ -86,7 +91,7 @@ public static partial class DbdSchemaService
                 {
                     DbdPrimitiveType.String => DbcValueType.StringOffset,
                     DbdPrimitiveType.Float => DbcValueType.Float32,
-                    DbdPrimitiveType.Int when field.BitWidth == 8 => DbcValueType.Byte,
+                    DbdPrimitiveType.Int when field.BitWidth == 8 && field.Unsigned => DbcValueType.Byte,
                     DbdPrimitiveType.Int when field.Unsigned => DbcValueType.UInt32,
                     DbdPrimitiveType.Int => DbcValueType.Int32,
                     _ => DbcValueType.Raw32
@@ -98,13 +103,35 @@ public static partial class DbdSchemaService
         void Add(string name, DbcValueType type, int size, bool id) { result.Add(new(result.Count, offset, size, name, type, id)); offset += size; }
     }
 
+    public static DbcSchemaResolution ResolveFile(string definitionPath, int build, int actualFieldCount, int recordSize)
+    {
+        var definition = Load(definitionPath); var columns = ResolveColumns(definition, build);
+        if (columns.Count != actualFieldCount) throw new InvalidDataException($"{definition.TableName}.dbd build {build:N0} resolves {columns.Count:N0} physical fields, but the client table declares {actualFieldCount:N0}.");
+        var resolvedSize = columns.Count == 0 ? 0 : columns.Max(column => column.Offset + column.Size);
+        if (resolvedSize != recordSize) throw new InvalidDataException($"{definition.TableName}.dbd build {build:N0} resolves a {resolvedSize:N0}-byte record, but the client table declares {recordSize:N0} bytes.");
+        if (columns.Any(column => column.Size is not (1 or 2 or 4))) throw new NotSupportedException($"{definition.TableName}.dbd contains scalar widths outside the currently editable 8/16/32-bit WDB2 provider.");
+        var key = columns.FirstOrDefault(column => column.IsIndex);
+        return new(columns, DbcSchemaMatchKind.NamedMatch, columns.Count, key is null ? DbcRecordKeyStrategy.None : DbcRecordKeyStrategy.Physical(key.Index));
+    }
+
     public static DbdSchemaAuditSummary Audit(string definitionsRoot, string dbcRoot, int build, string? xmlSchemaPath = null)
     {
         definitionsRoot = Path.GetFullPath(definitionsRoot); dbcRoot = Path.GetFullPath(dbcRoot);
         if (!Directory.Exists(definitionsRoot)) throw new DirectoryNotFoundException($"DBD definitions folder not found: {definitionsRoot}");
-        if (!Directory.Exists(dbcRoot)) throw new DirectoryNotFoundException($"DBC folder not found: {dbcRoot}");
+        if (!Directory.Exists(dbcRoot)) throw new DirectoryNotFoundException($"Client-table folder not found: {dbcRoot}");
         var xml = !string.IsNullOrWhiteSpace(xmlSchemaPath) && File.Exists(xmlSchemaPath) ? DbcSchemaCatalog.Load(xmlSchemaPath) : null; var rows = new List<DbdSchemaAuditRow>();
-        foreach (var dbcPath in Directory.EnumerateFiles(dbcRoot, "*.dbc", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        var tablePaths = Directory.EnumerateFiles(dbcRoot, "*.dbc", SearchOption.TopDirectoryOnly).Concat(Directory.EnumerateFiles(dbcRoot, "*.db2", SearchOption.TopDirectoryOnly)).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (tablePaths.Length == 0)
+        {
+            var nested = Directory.EnumerateDirectories(dbcRoot).Select(directory => new
+            {
+                Path = directory,
+                Count = Directory.EnumerateFiles(directory, "*.dbc", SearchOption.AllDirectories).Concat(Directory.EnumerateFiles(directory, "*.db2", SearchOption.AllDirectories)).Take(2).Count()
+            }).Where(candidate => candidate.Count > 0).OrderByDescending(candidate => candidate.Count).ThenBy(candidate => candidate.Path, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
+            var hint = nested is null ? "No .dbc or .db2 files were found at that level." : $"No top-level .dbc or .db2 files were found. A likely table folder is '{nested.Path}'.";
+            throw new InvalidDataException($"Schema audit requires a folder containing client tables directly. {hint}");
+        }
+        foreach (var dbcPath in tablePaths)
         {
             var table = Path.GetFileNameWithoutExtension(dbcPath); var dbdPath = Path.Combine(definitionsRoot, table + ".dbd");
             if (new FileInfo(dbcPath).Length == 0)
@@ -112,7 +139,7 @@ public static partial class DbdSchemaService
                 int? emptyDbdFields = null;
                 try { if (File.Exists(dbdPath)) { var definition = Load(dbdPath); if (definition.ForBuild(build) is not null) emptyDbdFields = ResolveColumns(definition, build).Count; } }
                 catch { /* The placeholder itself remains valid; a separate non-empty file would surface a definition error. */ }
-                rows.Add(new(table, DbdAuditStatus.EmptyPlaceholder, 0, emptyDbdFields, null, "Intentional zero-byte placeholder; no WDBC records exist to validate."));
+                rows.Add(new(table, DbdAuditStatus.EmptyPlaceholder, 0, emptyDbdFields, null, "Intentional zero-byte placeholder; no client-table records exist to validate."));
                 continue;
             }
             int actual;
@@ -126,7 +153,7 @@ public static partial class DbdSchemaService
                 if (layout is null) { rows.Add(new(table, DbdAuditStatus.MissingBuild, actual, null, xmlFields, $"DBD has no layout covering build {build:N0}.")); continue; }
                 var dbdFields = ResolveColumns(definition, build).Count; var status = dbdFields == actual ? DbdAuditStatus.Match : DbdAuditStatus.FieldCountMismatch;
                 var xmlNote = xmlFields is null ? string.Empty : $" XML={xmlFields:N0}.";
-                rows.Add(new(table, status, actual, dbdFields, xmlFields, status == DbdAuditStatus.Match ? $"DBD and WDBC both expose {actual:N0} physical fields.{xmlNote}" : $"WDBC={actual:N0}, DBD={dbdFields:N0}.{xmlNote}"));
+                rows.Add(new(table, status, actual, dbdFields, xmlFields, status == DbdAuditStatus.Match ? $"DBD and client table both expose {actual:N0} physical fields.{xmlNote}" : $"Client={actual:N0}, DBD={dbdFields:N0}.{xmlNote}"));
             }
             catch (Exception exception) { rows.Add(new(table, DbdAuditStatus.InvalidDefinition, actual, null, xmlFields, exception.Message)); }
         }

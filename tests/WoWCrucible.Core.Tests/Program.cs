@@ -1,4 +1,5 @@
 using WoWCrucible.Core;
+using System.Buffers.Binary;
 using System.Diagnostics;
 
 if (args.Length != 2)
@@ -31,6 +32,122 @@ Values[3]
         throw new InvalidOperationException("DBD full-version build selection, localized-string expansion, arrays, or non-inline fields regressed.");
 }
 finally { if(File.Exists(dbdFixture))File.Delete(dbdFixture); }
+
+var wdb2FixtureRoot = Path.Combine(Path.GetTempPath(), $"crucible-wdb2-{Guid.NewGuid():N}");
+Directory.CreateDirectory(wdb2FixtureRoot);
+try
+{
+    var itemDbd = Path.Combine(wdb2FixtureRoot, "Item.dbd");
+    File.WriteAllText(itemDbd, """
+COLUMNS
+int ID
+int ClassID
+int SubclassID
+int Sound_override_subclassID
+int Material
+int DisplayInfoID
+int InventoryType
+int SheatheType
+
+BUILD 4.0.0.11792-4.3.4.15595
+$id$ID<32>
+ClassID<32>
+SubclassID<32>
+Sound_override_subclassID<32>
+Material<32>
+DisplayInfoID<32>
+InventoryType<32>
+SheatheType<32>
+""");
+    var itemDb2 = Path.Combine(wdb2FixtureRoot, "Item.db2");
+    var itemBytes = new byte[48 + 2 * 32 + 1];
+    "WDB2"u8.CopyTo(itemBytes);
+    BinaryPrimitives.WriteInt32LittleEndian(itemBytes.AsSpan(4, 4), 2);
+    BinaryPrimitives.WriteInt32LittleEndian(itemBytes.AsSpan(8, 4), 8);
+    BinaryPrimitives.WriteInt32LittleEndian(itemBytes.AsSpan(12, 4), 32);
+    BinaryPrimitives.WriteInt32LittleEndian(itemBytes.AsSpan(16, 4), 1);
+    BinaryPrimitives.WriteUInt32LittleEndian(itemBytes.AsSpan(20, 4), 0x50238EC2);
+    BinaryPrimitives.WriteInt32LittleEndian(itemBytes.AsSpan(24, 4), 15595);
+    BinaryPrimitives.WriteUInt32LittleEndian(itemBytes.AsSpan(40, 4), uint.MaxValue);
+    var fixtureValues = new uint[]
+    {
+        17, 2, 7, uint.MaxValue, 1, 100, 0, 3,
+        17802, 4, 1, 0, 2, 200, 13, 1
+    };
+    for (var index = 0; index < fixtureValues.Length; index++)
+        BinaryPrimitives.WriteUInt32LittleEndian(itemBytes.AsSpan(48 + index * 4, 4), fixtureValues[index]);
+    File.WriteAllBytes(itemDb2, itemBytes);
+
+    var itemTable = WdbcFile.Load(itemDb2);
+    var itemSchema = DbdSchemaService.ResolveFile(itemDbd, 15595, itemTable.FieldCount, itemTable.RecordSize);
+    if (itemTable.ContainerKind != ClientTableContainerKind.Wdb2 || itemTable.LogicalTableName != "Item" || itemTable.RowCount != 2 ||
+        itemTable.Db2Metadata is not { Build: 15595, TableHash: 0x50238EC2, Locale: uint.MaxValue } || itemSchema.Columns.Count != 8 ||
+        !Equals(itemTable.GetDisplayValue(0, itemSchema.Columns.Single(column => column.Name == "Sound_override_subclassID")), -1))
+        throw new InvalidOperationException("Fixed-layout WDB2 header, DBD layout, or signed scalar decoding regressed.");
+
+    var roundTripDb2 = Path.Combine(wdb2FixtureRoot, "Item-roundtrip.db2");
+    itemTable.SaveAs(roundTripDb2, false);
+    if (!File.ReadAllBytes(roundTripDb2).SequenceEqual(itemBytes) || !File.Exists(roundTripDb2 + ".crucible-table.json") ||
+        !File.ReadAllText(roundTripDb2 + ".crucible-table.json").Contains("\"Container\": \"Wdb2\"", StringComparison.Ordinal))
+        throw new InvalidOperationException("An unchanged renamed WDB2 did not round-trip byte-for-byte with its logical table identity.");
+    var renamedTable = WdbcFile.Load(roundTripDb2);
+    if (renamedTable.LogicalTableName != "Item" || renamedTable.Db2Metadata?.Build != 15595)
+        throw new InvalidOperationException("A renamed WDB2 did not recover its definition identity from the sidecar.");
+
+    var inventoryType = itemSchema.Columns.Single(column => column.Name == "InventoryType");
+    renamedTable.SetDisplayValue(0, inventoryType, 5);
+    var editedDb2 = Path.Combine(wdb2FixtureRoot, "Item-edited.db2");
+    renamedTable.SaveAs(editedDb2, false);
+    var editedTable = WdbcFile.Load(editedDb2);
+    if (editedTable.GetRaw(0, inventoryType) != 5 || editedTable.Db2Metadata is not { Build: 15595, TableHash: 0x50238EC2 })
+        throw new InvalidOperationException("A fixed-layout WDB2 cell edit changed metadata or did not persist.");
+    var itemIdColumn = itemSchema.Columns.Single(column => column.IsIndex);
+    var newRow = editedTable.AddBlankRow(itemIdColumn);
+    if (newRow != 2 || editedTable.RowCount != 3 || editedTable.GetRaw(newRow, itemIdColumn) != 17803)
+        throw new InvalidOperationException("A simple WDB2 could not safely allocate a new physical row and ID.");
+
+    var complexDb2 = Path.Combine(wdb2FixtureRoot, "Complex.db2");
+    var complexBytes = new byte[48 + 6 + 4 + 1 + 8];
+    "WDB2"u8.CopyTo(complexBytes);
+    BinaryPrimitives.WriteInt32LittleEndian(complexBytes.AsSpan(4, 4), 1);
+    BinaryPrimitives.WriteInt32LittleEndian(complexBytes.AsSpan(8, 4), 1);
+    BinaryPrimitives.WriteInt32LittleEndian(complexBytes.AsSpan(12, 4), 4);
+    BinaryPrimitives.WriteInt32LittleEndian(complexBytes.AsSpan(16, 4), 1);
+    BinaryPrimitives.WriteUInt32LittleEndian(complexBytes.AsSpan(20, 4), 0xAABBCCDD);
+    BinaryPrimitives.WriteInt32LittleEndian(complexBytes.AsSpan(24, 4), 15595);
+    BinaryPrimitives.WriteUInt32LittleEndian(complexBytes.AsSpan(32, 4), 10);
+    BinaryPrimitives.WriteUInt32LittleEndian(complexBytes.AsSpan(36, 4), 10);
+    BinaryPrimitives.WriteUInt32LittleEndian(complexBytes.AsSpan(40, 4), uint.MaxValue);
+    BinaryPrimitives.WriteInt32LittleEndian(complexBytes.AsSpan(44, 4), 8);
+    BinaryPrimitives.WriteInt32LittleEndian(complexBytes.AsSpan(48, 4), 1);
+    BinaryPrimitives.WriteUInt16LittleEndian(complexBytes.AsSpan(52, 2), 1);
+    BinaryPrimitives.WriteUInt32LittleEndian(complexBytes.AsSpan(54, 4), 10);
+    BinaryPrimitives.WriteUInt32LittleEndian(complexBytes.AsSpan(59, 4), 20);
+    BinaryPrimitives.WriteUInt32LittleEndian(complexBytes.AsSpan(63, 4), 10);
+    File.WriteAllBytes(complexDb2, complexBytes);
+    var complexTable = WdbcFile.Load(complexDb2);
+    var complexId = new DbcColumn(0, 0, 4, "ID", DbcValueType.UInt32, true);
+    if (complexTable.AllowsStructuralMutation || complexTable.Db2Metadata is not { CopyRows: 1 } || !complexTable.Db2Metadata.HasIndexMap)
+        throw new InvalidOperationException("WDB2 index/copy side tables were not detected.");
+    var complexRoundTrip = Path.Combine(wdb2FixtureRoot, "Complex-roundtrip.db2");
+    complexTable.SaveAs(complexRoundTrip, false);
+    if (!File.ReadAllBytes(complexRoundTrip).SequenceEqual(complexBytes))
+        throw new InvalidOperationException("A complex WDB2 did not preserve its index map and copy table byte-for-byte.");
+    try { complexTable.AddBlankRow(complexId); throw new InvalidOperationException("A complex WDB2 incorrectly allowed a structural edit."); }
+    catch (InvalidOperationException exception) when (exception.Message.Contains("side table", StringComparison.OrdinalIgnoreCase)) { }
+    try { complexTable.SetRaw(0, complexId, 11); throw new InvalidOperationException("A complex WDB2 incorrectly allowed its indexed ID to change."); }
+    catch (InvalidOperationException exception) when (exception.Message.Contains("ID index map", StringComparison.OrdinalIgnoreCase)) { }
+
+    var nestedTables = Path.Combine(wdb2FixtureRoot, "client", "DBFilesClient"); Directory.CreateDirectory(nestedTables); File.Copy(itemDb2, Path.Combine(nestedTables, "Item.db2"));
+    var db2Audit = DbdSchemaService.Audit(wdb2FixtureRoot, nestedTables, 15595);
+    if (db2Audit.Rows.Count != 1 || db2Audit.Matches != 1) throw new InvalidOperationException("The build-aware DBD audit did not validate a direct WDB2 table folder.");
+    try { _ = DbdSchemaService.Audit(wdb2FixtureRoot, Path.Combine(wdb2FixtureRoot, "client"), 15595); throw new InvalidOperationException("A schema audit one directory too high incorrectly reported zero successful results."); }
+    catch (InvalidDataException exception) when (exception.Message.Contains("DBFilesClient", StringComparison.OrdinalIgnoreCase)) { }
+}
+finally
+{
+    if (Directory.Exists(wdb2FixtureRoot)) Directory.Delete(wdb2FixtureRoot, true);
+}
 var workspaceRoot=Directory.GetParent(Directory.GetCurrentDirectory())?.FullName;var localDbdRoot=workspaceRoot is null?string.Empty:Path.Combine(workspaceRoot,"Tools","WoWDBDefs","definitions");
 if(Directory.Exists(localDbdRoot))
 {

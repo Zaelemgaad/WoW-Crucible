@@ -133,7 +133,7 @@ public static class DbcRowImportService
 
         if (schema.KeyStrategy.Kind == DbcRecordKeyKind.NoStableKey)
             warnings.Add("This table has no proven stable key. Updates use $rowIndex and are safe only while row order remains unchanged; appending is blocked.");
-        if (!changes.Any() && appendedTargets.Count == 0) warnings.Add("Every supplied value already matches the open DBC; applying this plan would be a no-op.");
+        if (!changes.Any() && appendedTargets.Count == 0) warnings.Add("Every supplied value already matches the open client table; applying this plan would be a no-op.");
         return new(inputPath, inputSha, sourceSha, options.Format, rows.Count, changedTargets.Count, appendedTargets.Count, changes, warnings, prepared);
     }
 
@@ -141,7 +141,7 @@ public static class DbcRowImportService
     {
         ArgumentNullException.ThrowIfNull(file); ArgumentNullException.ThrowIfNull(plan);
         if (!file.ComputeContentSha256().Equals(plan.SourceContentSha256, StringComparison.Ordinal))
-            throw new InvalidOperationException("The open DBC changed after this import preview. Build a new preview before applying it.");
+            throw new InvalidOperationException("The open client table changed after this import preview. Build a new preview before applying it.");
         if (plan.HasChanges) file.ReplaceContentFrom(plan.PreparedFile);
         return new(plan.UpdatedRows, plan.AppendedRows, plan.ChangedCells, plan.PreparedFile.RowCount);
     }
