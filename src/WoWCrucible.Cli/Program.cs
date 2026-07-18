@@ -508,6 +508,28 @@ static async Task<int> Server(string[] args)
         Console.Error.WriteLine($"Client-to-server plan: {plan.Entries.Count:N0} table(s), {blocked:N0} blocked/unresolved.");
         return blocked == 0 ? 0 : 3;
     }
+    if (args is ["dbc-apply", var applyServerFolder, var applyBundleRoot])
+    {
+        var applyWorkspace = await ServerWorkspaceDetector.DetectAsync(applyServerFolder);
+        var result = await new DbcSqlDeploymentBundleService().ApplyAsync(applyBundleRoot, applyWorkspace.WorldDatabase, CancellationToken.None);
+        Console.WriteLine($"RECEIPT\t{result.ReceiptPath}"); Console.WriteLine($"SERVER_SHA256\t{result.ServerSha256}");
+        Console.WriteLine($"SQL_ROWS\t{result.SqlRows}"); Console.WriteLine($"RESTART\t{result.Restart}");
+        Console.Error.WriteLine($"Verified synchronized deployment of {result.SqlRows:N0} SQL row(s) plus the server DBC. Receipt: {result.ReceiptPath}. Required next step: {result.Restart}.");
+        return 0;
+    }
+    if (args is ["dbc-rollback", var rollbackServerFolder, var receiptPath])
+    {
+        var rollbackWorkspace = await ServerWorkspaceDetector.DetectAsync(rollbackServerFolder);
+        var result = await new DbcSqlDeploymentBundleService().RollbackAsync(receiptPath, rollbackWorkspace.WorldDatabase, CancellationToken.None);
+        Console.WriteLine($"RECEIPT\t{result.ReceiptPath}"); Console.WriteLine($"SQL_ROWS\t{result.SqlRows}"); Console.WriteLine($"RESTORED_SERVER_SHA256\t{result.RestoredServerSha256 ?? "<file removed>"}");
+        Console.Error.WriteLine($"Verified rollback of {result.SqlRows:N0} SQL row(s) and the server DBC pre-image. Restart worldserver before runtime testing.");
+        return 0;
+    }
+    if (args is ["dbc-module-export", var exportBundleRoot, var moduleRoot])
+    {
+        var path = new DbcSqlDeploymentBundleService().ExportModuleMigration(exportBundleRoot, moduleRoot); Console.WriteLine(path);
+        Console.Error.WriteLine($"Exported the reviewed idempotent world migration without connecting to a database: {path}"); return 0;
+    }
     if (args is ["bindings", var bindingFolder, .. var bindingOptions])
     {
         var source = Option(bindingOptions, "--source=");
@@ -520,9 +542,9 @@ static async Task<int> Server(string[] args)
     }
     if (args is ["dbc-audit", var auditFolder, var dbcInput, var schemaPath, .. var auditOptions])
     {
-        var source = Option(auditOptions, "--source="); var migration = Option(auditOptions, "--migration=");
+        var source = Option(auditOptions, "--source="); var migration = Option(auditOptions, "--migration="); var bundleOutput = Option(auditOptions, "--bundle=");
         var showAll = auditOptions.Any(option => option.Equals("--all", StringComparison.OrdinalIgnoreCase)); var summaryOnly = auditOptions.Any(option => option.Equals("--summary", StringComparison.OrdinalIgnoreCase));
-        var unknown = auditOptions.Where(option => !option.StartsWith("--source=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--migration=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--all", StringComparison.OrdinalIgnoreCase) && !option.Equals("--summary", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var unknown = auditOptions.Where(option => !option.StartsWith("--source=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--migration=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--bundle=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--all", StringComparison.OrdinalIgnoreCase) && !option.Equals("--summary", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown server dbc-audit option: {unknown[0]}");
         var auditWorkspace = await ServerWorkspaceDetector.DetectAsync(auditFolder);
         var dbcPath = File.Exists(dbcInput) ? Path.GetFullPath(dbcInput) : Path.Combine(auditWorkspace.DbcPath, Path.GetFileName(dbcInput));
@@ -543,6 +565,12 @@ static async Task<int> Server(string[] args)
         {
             File.WriteAllText(migration, DbcSqlAuditService.CreateIdempotentMigration(audit));
             Console.Error.WriteLine($"Wrote idempotent DBC-to-SQL migration preview: {Path.GetFullPath(migration)}");
+        }
+        if (bundleOutput is not null)
+        {
+            var serverDbcPath = Path.Combine(auditWorkspace.DbcPath, Path.GetFileName(dbcPath));
+            var bundle = new DbcSqlDeploymentBundleService().Create(bundleOutput, auditWorkspace.WorldDatabase, audit, resolution, schemaPath, serverDbcPath);
+            Console.Error.WriteLine($"Created verified portable DBC/SQL deployment bundle for {bundle.Plan.Rows.Count:N0} row(s): {bundle.RootPath}");
         }
         return audit.MismatchCount == 0 ? 0 : 3;
     }
@@ -566,7 +594,7 @@ static async Task<int> Server(string[] args)
 
 static int ServerHelp(int code = 0)
 {
-    var text = "Usage:\n  wowcrucible server detect <installed-server-folder>\n  wowcrucible server inspect <installed-server-folder>\n  wowcrucible server bindings <installed-server-folder> [--source=core-source]\n  wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all|--summary] [--migration=output.sql]\n  wowcrucible server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=review-folder]";
+    var text = "Usage:\n  wowcrucible server detect <installed-server-folder>\n  wowcrucible server inspect <installed-server-folder>\n  wowcrucible server bindings <installed-server-folder> [--source=core-source]\n  wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all|--summary] [--migration=output.sql] [--bundle=folder]\n  wowcrucible server dbc-apply <installed-server-folder> <bundle-folder>\n  wowcrucible server dbc-rollback <installed-server-folder> <deployment-receipt.json>\n  wowcrucible server dbc-module-export <bundle-folder> <module-root>\n  wowcrucible server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=review-folder]";
     if (code == 0) Console.WriteLine(text); else Console.Error.WriteLine(text); return code;
 }
 

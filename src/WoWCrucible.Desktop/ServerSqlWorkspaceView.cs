@@ -24,6 +24,12 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _legacyIncludes = new() { AcceptsReturn = true, PlaceholderText = "Optional table globs to include, one per line" };
     private readonly TextBox _legacyExcludes = new() { AcceptsReturn = true, PlaceholderText = "Optional table globs to exclude, one per line" };
     private readonly TextBlock _legacyStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
+    private readonly TextBox _syncSourceDbc = new() { PlaceholderText = "Edited source DBC" };
+    private readonly TextBox _syncSchema = new() { PlaceholderText = "Matching WotLK schema XML" };
+    private readonly TextBox _syncBundle = new() { PlaceholderText = "New or existing deployment-bundle folder" };
+    private readonly TextBox _syncReceipt = new() { PlaceholderText = "Deployment receipt for rollback" };
+    private readonly TextBlock _syncStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
+    private readonly Border _syncConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _detect = AccentButton("Detect server and connect");
     private readonly Button _test = AccentButton("Test and use connection");
     private readonly ServerLifecycleService _lifecycle = new();
@@ -62,6 +68,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                 new TabItem { Header = "Manual SQL", Content = manual },
                 new TabItem { Header = "Server controls", Content = LifecyclePage() },
                 new TabItem { Header = "Session overview", Content = SummaryCard() },
+                new TabItem { Header = "DBC + SQL deployment", Content = DbcSqlDeploymentPage() },
                 new TabItem { Header = "Recover legacy SQL edits", Content = LegacyRecoveryPage() }
             }
         };
@@ -176,6 +183,142 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             }
         };
     }
+
+    private Control DbcSqlDeploymentPage()
+    {
+        if (string.IsNullOrWhiteSpace(_syncSchema.Text)) _syncSchema.Text = _session.Settings.SchemaDefinitionPath;
+        var source = new Button { Content = "Edited DBC…" }; source.Click += async (_, _) => await PickSyncFileAsync(_syncSourceDbc, "Select the edited source DBC", "DBC", "*.dbc");
+        var schema = new Button { Content = "Schema XML…" }; schema.Click += async (_, _) => await PickSyncFileAsync(_syncSchema, "Select the matching schema XML", "XML schema", "*.xml");
+        var bundle = new Button { Content = "Bundle folder…" }; bundle.Click += async (_, _) => await PickBundleFolderAsync();
+        var receipt = new Button { Content = "Receipt…" }; receipt.Click += async (_, _) => await PickSyncFileAsync(_syncReceipt, "Select a deployment receipt", "Crucible deployment receipt", "deployment-receipt.json", "*.json");
+        var fields = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto,Auto,Auto"), ColumnSpacing = 7, RowSpacing = 7 };
+        AddPickerRow(fields, _syncSourceDbc, source, 0); AddPickerRow(fields, _syncSchema, schema, 1); AddPickerRow(fields, _syncBundle, bundle, 2); AddPickerRow(fields, _syncReceipt, receipt, 3);
+        var plan = AccentButton("Audit and create frozen bundle"); plan.Click += async (_, _) => await CreateSyncBundleAsync();
+        var apply = AccentButton("Review synchronized apply"); apply.Click += (_, _) => ReviewSyncApply();
+        var rollback = new Button { Content = "Review exact rollback" }; rollback.Click += (_, _) => ReviewSyncRollback();
+        var module = new Button { Content = "Export module migration…" }; module.Click += async (_, _) => await ExportModuleMigrationAsync();
+        return new ScrollViewer
+        {
+            Content = new StackPanel
+            {
+                Margin = new Thickness(16), Spacing = 12,
+                Children =
+                {
+                    new TextBlock { Text = "Diagnose and deploy one effective DBC change", FontSize = 22, FontWeight = FontWeight.SemiBold },
+                    new TextBlock
+                    {
+                        Text = "Crucible resolves how the detected core consumes this table, compares the edited DBC with the live SQL overlay, freezes the exact SQL and server-file pre-image, stages a one-file client patch manifest, and writes audit/migrate/rollback artifacts. Apply refuses any DBC or SQL row that changed after review.",
+                        TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7"))
+                    },
+                    fields,
+                    new WrapPanel { Children = { plan, apply, rollback, module } },
+                    _syncConfirmation,
+                    new Border { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _syncStatus }
+                }
+            }
+        };
+    }
+
+    private async Task CreateSyncBundleAsync()
+    {
+        if (_session.Server is not { } server || _session.DatabaseProfile is not { } profile || _session.DatabaseCapabilities is not { } capabilities)
+        { _syncStatus.Text = "Detect the installed server and verify SQL before creating a synchronized deployment bundle."; return; }
+        BeginOperation("Auditing the edited DBC against its effective live SQL overlay…");
+        try
+        {
+            var dbcPath = Path.GetFullPath(_syncSourceDbc.Text ?? string.Empty); var schemaPath = Path.GetFullPath(_syncSchema.Text ?? string.Empty); var bundlePath = Path.GetFullPath(_syncBundle.Text ?? string.Empty);
+            var dbc = WdbcFile.Load(dbcPath); var resolution = DbcSchemaCatalog.Load(schemaPath).ResolveColumns(Path.GetFileNameWithoutExtension(dbcPath), dbc.FieldCount);
+            if (resolution.UsedFallback) throw new InvalidDataException("The selected XML does not contain an exact named schema matching this DBC layout.");
+            var sourceRoot = Directory.Exists(_session.Settings.CoreSourcePath) ? _session.Settings.CoreSourcePath : null;
+            var binding = ServerTableBindingCatalog.ApplySchemaKey(ServerTableBindingCatalog.ResolveFile(server.CoreFamily, dbcPath, sourceRoot), resolution);
+            if (binding.Consumption != ServerTableConsumption.SqlOverlayed || binding.SqlTableName is null)
+                throw new InvalidOperationException($"{binding.DbcFileName} is classified as {binding.Consumption} by {binding.Profile}; a synchronized SQL-overlay bundle is not applicable. Destinations: {binding.Destinations}.");
+            var table = capabilities.FindTable(binding.SqlTableName) ?? throw new InvalidDataException($"The connected world database has no expected overlay table {binding.SqlTableName}.");
+            var audit = await new DbcSqlAuditService().AuditAsync(profile, binding, dbcPath, resolution, table, _operation!.Token);
+            var serverDbc = Path.Combine(server.DbcPath, binding.DbcFileName);
+            var result = await Task.Run(() => new DbcSqlDeploymentBundleService().Create(bundlePath, profile, audit, resolution, schemaPath, serverDbc), _operation.Token);
+            _syncBundle.Text = result.RootPath;
+            _syncStatus.Text = $"Bundle created and hash-verified · {result.Plan.Rows.Count:N0} SQL row(s) · {binding.DescribeRow(result.Plan.Rows[0].Key)} through {binding.DescribeRow(result.Plan.Rows[^1].Key)}.\nServer target: {serverDbc}\nClient manifest: {Path.Combine(result.RootPath, result.Plan.ClientManifestFile)}\nRequired after apply: {result.Plan.Restart}. Nothing was deployed yet.";
+        }
+        catch (OperationCanceledException) { _syncStatus.Text = "DBC/SQL bundle creation cancelled."; }
+        catch (Exception exception) { _syncStatus.Text = $"Bundle creation failed safely: {exception.Message}"; DesktopCrashLogger.Log("DBC/SQL deployment bundle creation failed", exception); }
+        finally { EndOperation(); }
+    }
+
+    private void ReviewSyncApply()
+    {
+        try
+        {
+            if (_session.DatabaseProfile is null) throw new InvalidOperationException("Connect Server & SQL first.");
+            var bundle = new DbcSqlDeploymentBundleService().Load(_syncBundle.Text ?? string.Empty); var cancel = new Button { Content = "Cancel" }; var confirm = AccentButton("Apply DBC + SQL transaction");
+            cancel.Click += (_, _) => _syncConfirmation.IsVisible = false; confirm.Click += async (_, _) => await ApplySyncBundleAsync(confirm);
+            _syncConfirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Apply the frozen bundle to {bundle.Plan.Database.Database}? This verifies the exact SQL pre-image and server DBC hash, updates {bundle.Plan.Rows.Count:N0} SQL row(s), backs up and atomically replaces {bundle.Plan.ServerDbcPath}, verifies both destinations, then commits. A receipt is required for rollback.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } };
+            _syncConfirmation.IsVisible = true;
+        }
+        catch (Exception exception) { _syncStatus.Text = $"Apply review failed safely: {exception.Message}"; }
+    }
+
+    private async Task ApplySyncBundleAsync(Button button)
+    {
+        if (_session.DatabaseProfile is null) return; BeginOperation("Applying and verifying the frozen DBC/SQL deployment…"); button.IsEnabled = false;
+        try
+        {
+            var result = await new DbcSqlDeploymentBundleService().ApplyAsync(_syncBundle.Text ?? string.Empty, _session.DatabaseProfile, _operation!.Token);
+            _syncReceipt.Text = result.ReceiptPath; _syncConfirmation.IsVisible = false;
+            _syncStatus.Text = $"Deployment verified · {result.SqlRows:N0} SQL row(s) · server SHA-256 {result.ServerSha256}.\nReceipt: {result.ReceiptPath}\nNext: {result.Restart}.";
+        }
+        catch (Exception exception) { _syncStatus.Text = $"Deployment failed and uncommitted work was restored: {exception.Message}"; DesktopCrashLogger.Log("DBC/SQL synchronized deployment failed", exception); }
+        finally { button.IsEnabled = true; EndOperation(); }
+    }
+
+    private void ReviewSyncRollback()
+    {
+        try
+        {
+            if (_session.DatabaseProfile is null) throw new InvalidOperationException("Connect Server & SQL first.");
+            var receiptPath = Path.GetFullPath(_syncReceipt.Text ?? string.Empty); if (!File.Exists(receiptPath)) throw new FileNotFoundException("Select the exact deployment receipt first.", receiptPath);
+            var cancel = new Button { Content = "Cancel" }; var confirm = new Button { Content = "Restore reviewed pre-image" };
+            cancel.Click += (_, _) => _syncConfirmation.IsVisible = false; confirm.Click += async (_, _) => await RollbackSyncBundleAsync(confirm);
+            _syncConfirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = "Rollback first verifies that the current server DBC and SQL rows still equal the applied receipt. If anything changed afterward it refuses to overwrite that work. Otherwise it restores the exact SQL pre-image and verified DBC backup transactionally.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } };
+            _syncConfirmation.IsVisible = true;
+        }
+        catch (Exception exception) { _syncStatus.Text = $"Rollback review failed safely: {exception.Message}"; }
+    }
+
+    private async Task RollbackSyncBundleAsync(Button button)
+    {
+        if (_session.DatabaseProfile is null) return; BeginOperation("Verifying and restoring the deployment pre-image…"); button.IsEnabled = false;
+        try
+        {
+            var result = await new DbcSqlDeploymentBundleService().RollbackAsync(_syncReceipt.Text ?? string.Empty, _session.DatabaseProfile, _operation!.Token);
+            _syncConfirmation.IsVisible = false; _syncStatus.Text = $"Rollback verified · {result.SqlRows:N0} SQL row(s) and the server DBC pre-image restored. Restart worldserver before runtime testing.";
+        }
+        catch (Exception exception) { _syncStatus.Text = $"Rollback refused or failed safely: {exception.Message}"; DesktopCrashLogger.Log("DBC/SQL synchronized rollback failed", exception); }
+        finally { button.IsEnabled = true; EndOperation(); }
+    }
+
+    private async Task ExportModuleMigrationAsync()
+    {
+        try
+        {
+            var folders = await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Select the AzerothCore module root", AllowMultiple = false }); var root = folders.FirstOrDefault()?.TryGetLocalPath(); if (root is null) return;
+            var path = new DbcSqlDeploymentBundleService().ExportModuleMigration(_syncBundle.Text ?? string.Empty, root); _syncStatus.Text = $"Exported the reviewed idempotent world migration without touching the live database:\n{path}";
+        }
+        catch (Exception exception) { _syncStatus.Text = $"Module migration export failed safely: {exception.Message}"; }
+    }
+
+    private async Task PickSyncFileAsync(TextBox target, string title, string label, params string[] patterns)
+    {
+        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(label) { Patterns = patterns }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path;
+    }
+
+    private async Task PickBundleFolderAsync()
+    {
+        var folders = await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Select an existing bundle or a parent for a new bundle", AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return;
+        _syncBundle.Text = File.Exists(Path.Combine(path, "deployment-plan.json")) ? path : Path.Combine(path, $"dbc-sql-deployment-{DateTimeOffset.Now:yyyyMMdd-HHmmss}");
+    }
+
+    private static void AddPickerRow(Grid grid, Control input, Control button, int row) { Grid.SetRow(input, row); grid.Children.Add(input); Grid.SetRow(button, row); Grid.SetColumn(button, 1); grid.Children.Add(button); }
 
     private async Task BrowseServerAsync()
     {

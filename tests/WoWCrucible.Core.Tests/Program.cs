@@ -1145,6 +1145,47 @@ if (incidentAudit.Rows.Count(row => row.Status == DbcSqlRowStatus.SqlOverridesDb
 var incidentMigration = DbcSqlAuditService.CreateIdempotentMigration(incidentAudit);
 if (!incidentMigration.Contains("`gtregenmpperspt_dbc`") || !incidentMigration.Contains("(900,") || !incidentMigration.Contains("ON DUPLICATE KEY UPDATE"))
     throw new InvalidOperationException("The DBC/SQL audit did not produce an idempotent migration preview.");
+var deploymentBundleFixture = Path.Combine(Path.GetTempPath(), $"crucible-dbc-sql-bundle-{Guid.NewGuid():N}");
+var deploymentBundleSource = Path.Combine(Path.GetTempPath(), $"crucible-gtregen-source-{Guid.NewGuid():N}.dbc");
+var deploymentBundleServer = Path.Combine(Path.GetTempPath(), $"crucible-gtregen-server-{Guid.NewGuid():N}.dbc");
+incidentDbc.Save(deploymentBundleSource, false); File.Copy(generatedKeyPath, deploymentBundleServer);
+try
+{
+    var bundleAudit = incidentAudit with { DbcPath = deploymentBundleSource };
+    var bundleService = new DbcSqlDeploymentBundleService();
+    var bundle = bundleService.Create(deploymentBundleFixture, new("127.0.0.1", 3306, "fixture", "secret-never-serialized", "fixture_world"),
+        bundleAudit, generatedSchema, args[0], deploymentBundleServer, Enumerable.Range(900, 100).Select(value => (uint)value));
+    var loadedBundle = bundleService.Load(deploymentBundleFixture);
+    var migrationText = File.ReadAllText(Path.Combine(deploymentBundleFixture, loadedBundle.Plan.MigrationSqlFile));
+    var rollbackText = File.ReadAllText(Path.Combine(deploymentBundleFixture, loadedBundle.Plan.RollbackSqlFile));
+    if (loadedBundle.Plan.Rows.Count != 100 || loadedBundle.Plan.Database.User != "fixture" || loadedBundle.Plan.Database.Database != "fixture_world" ||
+        JsonSerializer.Serialize(loadedBundle.Plan).Contains("secret-never-serialized", StringComparison.Ordinal) ||
+        !migrationText.Contains("(900,1", StringComparison.Ordinal) || !rollbackText.Contains("(900,0", StringComparison.Ordinal) ||
+        !PatchManifestService.Validate(PatchManifestService.Load(Path.Combine(deploymentBundleFixture, loadedBundle.Plan.ClientManifestFile))).Passed)
+        throw new InvalidOperationException("The synchronized DBC/SQL deployment bundle did not preserve its exact payload, SQL pre-image, or secret-free target identity.");
+    var moduleFixture = Path.Combine(Path.GetTempPath(), $"crucible-module-{Guid.NewGuid():N}");
+    var moduleMigration = bundleService.ExportModuleMigration(deploymentBundleFixture, moduleFixture);
+    if (!File.Exists(moduleMigration) || !moduleMigration.Contains(Path.Combine("data", "sql", "db-world"), StringComparison.OrdinalIgnoreCase) || File.ReadAllText(moduleMigration) != migrationText)
+        throw new InvalidOperationException("Portable AzerothCore module migration export did not preserve the reviewed bundle SQL.");
+    Directory.Delete(moduleFixture, true);
+    var staleBundleFixture = deploymentBundleFixture + "-stale";
+    try
+    {
+        _ = bundleService.Create(staleBundleFixture, new("127.0.0.1", 3306, "fixture", "secret", "fixture_world"),
+            incidentAudit, generatedSchema, args[0], deploymentBundleServer, Enumerable.Range(900, 100).Select(value => (uint)value));
+        throw new InvalidOperationException("A deployment bundle was created after its audited DBC values changed.");
+    }
+    catch (InvalidDataException exception) when (exception.Message.Contains("changed after audit", StringComparison.OrdinalIgnoreCase)) { }
+    finally { if (Directory.Exists(staleBundleFixture)) Directory.Delete(staleBundleFixture, true); }
+    var migrationPath = Path.Combine(deploymentBundleFixture, loadedBundle.Plan.MigrationSqlFile); File.AppendAllText(migrationPath, "-- tampered");
+    try { _ = bundleService.Load(deploymentBundleFixture); throw new InvalidOperationException("A changed deployment-bundle migration was accepted."); }
+    catch (InvalidDataException exception) when (exception.Message.Contains("migration SQL changed", StringComparison.OrdinalIgnoreCase)) { }
+}
+finally
+{
+    if (Directory.Exists(deploymentBundleFixture)) Directory.Delete(deploymentBundleFixture, true);
+    File.Delete(deploymentBundleSource); File.Delete(deploymentBundleServer);
+}
 var aliasAudit = new DbcSqlAuditResult(manaBinding, generatedKeyPath, "ID", [new(1, "row 1", DbcSqlRowStatus.SqlOverridesDbc, new Dictionary<string, object?> { ["TextureVariation[0]"] = "Character\\Test.blp" }, new Dictionary<string, object?>())], new Dictionary<string, string> { ["TextureVariation[0]"] = "TextureVariation_1" });
 if (!DbcSqlAuditService.CreateIdempotentMigration(aliasAudit).Contains("`TextureVariation_1`", StringComparison.Ordinal))
     throw new InvalidOperationException("DBC-to-SQL migration did not use the inspected SQL alias for an array field.");

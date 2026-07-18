@@ -210,7 +210,10 @@ Client indexes are resumable and distinguish active, backup, inactive-locale, an
 wowcrucible server detect <installed-server-folder>
 wowcrucible server inspect <installed-server-folder>
 wowcrucible server bindings <installed-server-folder> [--source=core-source]
-wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--summary] [--migration=sync.sql]
+wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--summary] [--migration=sync.sql] [--bundle=folder]
+wowcrucible server dbc-apply <installed-server-folder> <bundle-folder>
+wowcrucible server dbc-rollback <installed-server-folder> <deployment-receipt.json>
+wowcrucible server dbc-module-export <bundle-folder> <module-root>
 wowcrucible server client-plan <installed-server-folder> <effective-dbc-folder> [--source=core-source] [--output=plan.json] [--stage=review-folder]
 wowcrucible db inspect <host> <port> <user> <database> --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db schemas <host> <port> <user> <database> --password-env=ENV_NAME [--ssl=Preferred]
@@ -241,6 +244,8 @@ wowcrucible db spell-inspect <host> <port> <user> <database> <spell-id> [--passw
 ```
 
 Server detection reads the live `worldserver.conf`; it does not accept `.dist` templates. Database passwords should be passed through an environment variable so they do not enter command history. DBC audits report the effective runtime value when the core applies an SQL overlay and can export an idempotent migration without applying it.
+
+`--bundle` creates a new portable, secret-free deployment directory only after an exact named schema and a proven SQL-overlay binding succeed. It copies and hashes the edited DBC and schema, records the live server DBC hash and exact SQL pre-image, writes read-only audit/idempotent migration/exact rollback SQL, and emits a one-entry `DBFilesClient` patch manifest. `dbc-apply` revalidates every bundle artifact and target, locks and compares the reviewed SQL rows, performs the SQL migration and atomic server-DBC replacement with a verified backup, verifies parity before committing, and writes a receipt. `dbc-rollback` requires that receipt and refuses to overwrite either destination if it changed after apply. `dbc-module-export` copies the already reviewed migration into a collision-safe `data/sql/db-world` filename without connecting to MySQL.
 
 `db schemas` lists every database visible to the login. The desktop SQL Studio uses the same discovery to switch locally among world, characters, auth, or other accessible schemas; it does not rewrite the shared server workspace's saved world-database target. A favorite records its database and complete primary key and switches back to that schema when reopened.
 
