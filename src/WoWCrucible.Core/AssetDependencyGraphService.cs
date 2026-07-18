@@ -25,13 +25,13 @@ public static class AssetDependencyGraphService
                 continue;
             }
             if (string.IsNullOrWhiteSpace(slot.EmbeddedPath)) { dependencies.Add(new("embedded-texture", $"slot:{slot.Index}", AssetDependencyState.Missing, null, [], $"Embedded texture slot {slot.Index} has no client path.")); continue; }
-            dependencies.Add(ResolveClientPath(index, model.Provenance, slot.EmbeddedPath));
+            dependencies.Add(ResolveClientAsset(index, model.Provenance, slot.EmbeddedPath));
         }
         if (!dependencies.Any(dependency => dependency.Kind == "skin")) dependencies.Add(new("skin", Combine(model.LogicalPath, stem + "00.skin"), AssetDependencyState.Missing, null, [], "No valid companion SKIN is present."));
         return new(model, dependencies);
     }
 
-    private static AssetDependencyResolution ResolveClientPath(AssetComparisonIndex index, string provenance, string rawClientPath)
+    public static AssetDependencyResolution ResolveClientAsset(AssetComparisonIndex index, string provenance, string rawClientPath)
     {
         var clientPath = PatchInputMapper.NormalizeArchivePath(rawClientPath); var directory = Path.GetDirectoryName(clientPath) ?? string.Empty; var name = Path.GetFileName(clientPath);
         if (provenance.Equals("Loose", StringComparison.OrdinalIgnoreCase) && index.LooseContentRoot is { } loose)

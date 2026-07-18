@@ -230,6 +230,14 @@ static int Asset(string[] args)
 
         static string submeshLabel(M2PreviewBatch batch) => $"submesh={batch.SubmeshIndex},geoset={batch.GeosetId}";
     }
+    if (args is ["appearance-info", var charSectionsPath, var logicalPath, var modelFile])
+    {
+        var identity = CharacterAppearanceService.Infer(logicalPath, modelFile) ?? throw new InvalidDataException("The logical path/model name does not identify a supported playable race and sex.");
+        var skins = CharacterAppearanceService.LoadBaseSkins(charSectionsPath, identity);
+        Console.WriteLine($"Character\t{identity.RaceName}\t{identity.SexName}\tRaceID={identity.RaceId}\tSexID={identity.SexId}\nBaseSkins\t{skins.Count:N0}");
+        foreach (var skin in skins) Console.WriteLine($"SKIN\t{skin.Id}\tvariation={skin.VariationIndex}\tcolor={skin.ColorIndex}\tflags=0x{skin.Flags:X}\t{skin.TexturePath}");
+        return 0;
+    }
     if (args is ["workspace", var outputRoot, .. var workspaceInputs] && workspaceInputs.Length > 0)
     {
         var workspace = NativeAssetConversionService.CreateWorkspace(workspaceInputs, outputRoot);
@@ -239,7 +247,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset texture-info <file.blp>\n  wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]\n  wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]\n  wowcrucible asset texture-validate <file-or-folder> [--recursive]\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2> [--all-geosets]\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]\n  wowcrucible asset library-repair <library-folder> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset texture-info <file.blp>\n  wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]\n  wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]\n  wowcrucible asset texture-validate <file-or-folder> [--recursive]\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2> [--all-geosets]\n  wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]\n  wowcrucible asset library-repair <library-folder> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Project(string[] args)
 {

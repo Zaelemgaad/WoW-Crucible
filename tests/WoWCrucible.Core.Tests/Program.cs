@@ -89,6 +89,11 @@ if (previewGeometry.Vertices.Count != 3 || previewGeometry.TriangleIndices.Count
     allGeosetGeometry.TriangleIndices.Count != 6 || allGeosetGeometry.Submeshes.Count(section => section.Visible) != 2 || previewGeometry.Minimum.X != -1f || previewGeometry.Maximum.Z != 1f || previewGeometry.TextureSlots.Count != 1 || previewGeometry.TextureSlots[0].EmbeddedPath != embeddedFixturePath || previewGeometry.TextureSlots[0].Flags != 3 ||
     previewGeometry.MaterialUnits.Count != 1 || previewGeometry.MaterialUnits[0].SubmeshIndex != 0 || previewGeometry.MaterialUnits[0].TextureDefinitionIndex != 0 || previewGeometry.Batches.Count != 1 || previewGeometry.Batches[0].TextureDefinitionIndex != 0)
     throw new InvalidOperationException("Native M2/SKIN preview geometry parsing failed.");
+var bloodElfFemale = CharacterAppearanceService.Infer(@"Character\BloodElf\Female", "BloodElfFemale.M2");
+if (bloodElfFemale is null || bloodElfFemale.RaceId != 10 || bloodElfFemale.SexId != 1) throw new InvalidOperationException("Character appearance inference did not distinguish Blood Elf female from male.");
+var bloodElfSkins = CharacterAppearanceService.LoadBaseSkins(Path.Combine(args[1], "CharSections.dbc"), bloodElfFemale);
+if (bloodElfSkins.Count < 10 || bloodElfSkins[0].ColorIndex != 0 || !bloodElfSkins[0].TexturePath.EndsWith(@"BloodElfFemaleSkin00_00.blp", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("CharSections base-skin discovery did not expose the real Blood Elf female appearance records.");
 var modernModel = Path.Combine(assetFixture, "modern.m2");
 using (var stream = File.Create(modernModel)) using (var writer = new BinaryWriter(stream))
 {

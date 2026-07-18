@@ -705,7 +705,7 @@ public partial class MainWindow : Window
     {
         if (_assetComparisonView is null)
         {
-            _assetComparisonView = new AssetComparisonView();
+            _assetComparisonView = new AssetComparisonView(_workspaceSession);
             _assetComparisonView.BackRequested += (_, _) => CloseFeatureWorkspace();
         }
         _assetComparisonView.Activate(libraryRoot);

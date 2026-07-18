@@ -188,7 +188,7 @@ public static class AssetComparisonService
         }
     }
 
-    private static bool FilesAreIdentical(string leftPath, string rightPath, CancellationToken cancellationToken)
+    public static bool FilesAreIdentical(string leftPath, string rightPath, CancellationToken cancellationToken = default)
     {
         const int BufferSize = 1024 * 1024;
         using var left = new FileStream(leftPath, FileMode.Open, FileAccess.Read, FileShare.Read, BufferSize, FileOptions.SequentialScan);
