@@ -2,6 +2,7 @@ using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
@@ -21,7 +22,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _password = new() { PasswordChar = '●', HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
-    private readonly TextBox _search = new() { PlaceholderText = "Filter by ID, name, quality, level, or set ID…" };
+    private readonly TextBox _search = new() { PlaceholderText = "Filter loaded scan; enter an exact item ID and press Enter…" };
     private readonly ComboBox _classification = new()
     {
         ItemsSource = new[] { "No known acquisition path", "Known acquisition path", "All item_template rows" },
@@ -61,6 +62,12 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         });
         _items.SelectionChanged += (_, _) => { if (_items.SelectedItem is ItemCatalogEntry item) { _cloneSource.Text = item.Entry.ToString(); _cloneResult.Text = $"Selected {item.Entry:N0} — {item.Name}\nQuality: {QualityName(item.Quality)} · Item level: {item.ItemLevel} · Set: {(item.ItemSetId == 0 ? "none" : item.ItemSetId)}"; } };
         _search.TextChanged += (_, _) => ApplyAuditFilter();
+        _search.KeyDown += async (_, args) =>
+        {
+            if (args.Key != Key.Enter) return; args.Handled = true;
+            if (uint.TryParse(_search.Text?.Trim(), out var exactId) && exactId > 0) { _inspectId.Text = exactId.ToString(); await InspectExactAsync(); }
+            else if (_audit is null) await AuditAsync();
+        };
         _classification.SelectionChanged += (_, _) => ApplyAuditFilter();
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
@@ -207,7 +214,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private void ApplyAuditFilter()
     {
-        if (_audit is null) return; var query = _search.Text?.Trim() ?? string.Empty;
+        if (_audit is null) { _status.Text = "Run the full acquisition scan, or enter an exact numeric item ID here and press Enter for immediate inspection."; return; } var query = _search.Text?.Trim() ?? string.Empty;
         if (uint.TryParse(query, out var exactId) && exactId > 0)
         {
             var exact = _audit.AllItems.FirstOrDefault(item => item.Entry == exactId);
