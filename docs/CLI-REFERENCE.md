@@ -116,6 +116,7 @@ wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--
 wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]
 wowcrucible mpq create <archive.mpq> <files/folders...>
 wowcrucible mpq update <small-patch.mpq> <files/folders...>
+wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]
 ```
 
 Filters accept text or `*`, `?`, and `**` globs. `--content-only` excludes `(listfile)`, `(attributes)`, and `(signature)` metadata. JSON output separates entry properties for scripts.
@@ -123,6 +124,8 @@ Filters accept text or `*`, `?`, and `**` globs. `--content-only` excludes `(lis
 If an archive opens but only exposes StormLib `File000...` placeholders, Crucible reports those entries as unresolved names rather than calling the MPQ incompatible. Supply a compatible external path corpus with `--listfile=paths.txt` to recover known client paths before filtering or extraction.
 
 `update` is transaction-safe but copies the archive first and refuses archives larger than 2 GiB. Treat large client/mod layers as immutable inputs and build a small manifest-driven patch instead.
+
+`merge` treats every source MPQ as immutable. Repeated internal paths are SHA-256 checked and then compared byte-for-byte; exact copies are stored once. Different bytes at the same internal path block output by default. `--conflicts=earlier` or `--conflicts=later` is an explicit global precedence choice. Hash-only `File000...` names and duplicate locale variants are blocked unless their real paths can be resolved safely.
 
 ## Manifest-first patches
 
@@ -158,6 +161,7 @@ wowcrucible server bindings <installed-server-folder> [--source=core-source]
 wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--summary] [--migration=sync.sql]
 wowcrucible server client-plan <installed-server-folder> <effective-dbc-folder> [--source=core-source] [--output=plan.json] [--stage=review-folder]
 wowcrucible db inspect <host> <port> <user> <database> --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db query <host> <port> <user> <database> <statement.sql> [--write] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=ENV_NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
 wowcrucible db snapshot-inspect <snapshot-file> [--quick]
 wowcrucible db recovery-audit <legacy-snapshot> <output.crucible-db-audit> [--baseline=stock-snapshot] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
@@ -167,6 +171,8 @@ wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [
 ```
 
 Server detection reads the live `worldserver.conf`; it does not accept `.dist` templates. Database passwords should be passed through an environment variable so they do not enter command history. DBC audits report the effective runtime value when the core applies an SQL overlay and can export an idempotent migration without applying it.
+
+`db query` reads a UTF-8 SQL file so the statement does not need to be pasted into shell history. Without `--write`, the core service accepts only `SELECT`, `SHOW`, `DESCRIBE`, `DESC`, or `EXPLAIN`, including after leading SQL comments. Every other statement is rejected before it reaches MySQL. `--write` is the explicit automation path for a previously reviewed statement; remember that MySQL DDL can implicitly commit.
 
 `db snapshot` is phase one of legacy SQL recovery. It issues only fixed metadata queries and `SELECT` statements, requests a consistent read-only transaction where the server supports one, streams base-table rows without loading the database into memory, and publishes the compressed artifact atomically. By default it verifies that the selected schema looks like a world database and excludes known auth/character runtime-state tables while retaining reusable definitions such as `mail_loot_template`, `instance_template`, `guild_rewards`, and `pet_levelstats`. Repeat `--include` or `--exclude` for table-name globs. `--include-sensitive` deliberately removes the runtime-state safety filter; those captured rows may themselves contain account secrets even though the live connection password is never serialized.
 

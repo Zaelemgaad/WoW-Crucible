@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
     private CreatureWorkspaceView? _creatureWorkspaceView;
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
+    private SqlWorkspaceView? _sqlWorkspaceView;
 
     private DbcDocumentSession? Current => _activeDocument >= 0 && _activeDocument < _documents.Count ? _documents[_activeDocument] : null;
     private WdbcFile? CurrentFile => Current?.File;
@@ -56,7 +57,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { _assetComparisonView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); };
+        Closed += (_, _) => { _assetComparisonView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -587,6 +588,33 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_serverSqlWorkspaceView, "Server & SQL");
         _serverSqlWorkspaceView.Activate();
+    }
+    private void OpenSqlWorkspaceClick(object? sender, RoutedEventArgs e) => OpenSqlWorkspace();
+    public void OpenSqlWorkspace()
+    {
+        if (_sqlWorkspaceView is null)
+        {
+            _sqlWorkspaceView = new SqlWorkspaceView(_workspaceSession);
+            _sqlWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _sqlWorkspaceView.GuidedEditRequested += (_, request) => OpenGuidedSqlRow(request);
+            _sqlWorkspaceView.OpenDbcRequested += async (_, path) => { CloseFeatureWorkspace(); await LoadDbcAsync(path); };
+            _sqlWorkspaceView.OpenMpqRequested += async (_, path) => await OpenIndexedArchiveAsync(path);
+        }
+        OpenFeatureWorkspace(_sqlWorkspaceView, "SQL Studio"); _sqlWorkspaceView.Activate();
+    }
+
+    private void OpenGuidedSqlRow(SqlGuidedEditRequest request)
+    {
+        if (request.Table.Equals("item_template", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+            _itemWorkbenchView.OpenItemRow(request.Row); OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
+        }
+        else if (request.Table.Equals("creature_template", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_creatureWorkspaceView is null) { _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession); _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+            _creatureWorkspaceView.OpenCreatureRow(request.Row); OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
+        }
     }
 
     private async Task RestoreWorkspaceSessionAsync()

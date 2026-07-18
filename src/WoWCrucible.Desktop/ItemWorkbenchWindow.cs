@@ -14,6 +14,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 {
     private readonly DesktopWorkspaceSession _session;
     private readonly ItemCreatorView _creator;
+    private readonly TabControl _tabs;
     private readonly TextBox _host = new() { Text = "127.0.0.1", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly NumericUpDown _port = new() { Value = 3306, Minimum = 1, Maximum = 65535, HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBox _user = new() { HorizontalAlignment = HorizontalAlignment.Stretch };
@@ -53,11 +54,13 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new Grid { ColumnDefinitions = new("Auto,*"), Children = { back, WithColumn(new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, 1) } } });
         var connection = ConnectionBar(); Grid.SetRow(connection, 1); root.Children.Add(connection);
-        var tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Unobtainable / cut items", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() } } };
-        Grid.SetRow(tabs, 2); root.Children.Add(tabs);
+        _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Unobtainable / cut items", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() } } };
+        Grid.SetRow(_tabs, 2); root.Children.Add(_tabs);
         var statusBorder = new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,1,0,0), Padding = new Thickness(14,7), Child = _status };
         Grid.SetRow(statusBorder, 3); root.Children.Add(statusBorder); Content = root;
     }
+
+    public void OpenItemRow(IReadOnlyDictionary<string, object?> row) { _creator.LoadRow(row); _tabs.SelectedIndex = 0; _status.Text = "Loaded the selected SQL row into the decoded item editor. The SQL Studio row editor remains available for every custom/unknown column."; }
 
     private Control ConnectionBar()
     {
@@ -75,7 +78,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     {
         var audit = AccentButton("Scan acquisition paths"); audit.Click += async (_, _) => await AuditAsync();
         var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), Margin = new Thickness(0,0,0,10) }; header.Children.Add(audit); Grid.SetColumn(_search, 1); _search.Margin = new Thickness(10,0); header.Children.Add(_search); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
-        var note = new TextBlock { Text = "“No known path” means no vendor, loot, quest reward/choice, starting-item, prospecting, milling, disenchanting, fishing, or spell-loot source was found in the live schema. Script-created items still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        var note = new TextBlock { Text = "“No known path” means no vendor, direct/reachable loot, linked starter→ender quest reward, starting-item, prospecting, milling, disenchanting, fishing, or spell-loot source was found in the live schema. Reference-pool control rows are not mistaken for item drops, and orphaned quest templates are not treated as playable acquisition. Script-created items still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
         return new Grid { RowDefinitions = new("Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(note, 1), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 2) } };
     }
 

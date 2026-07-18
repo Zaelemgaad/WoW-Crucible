@@ -39,6 +39,10 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private readonly ListBox _browserItems = new() { SelectionMode = SelectionMode.Multiple };
     private readonly TextBlock _browserStatus = StatusText("Open an MPQ to browse it.");
     private IReadOnlyList<MpqFileEntry> _allArchiveEntries = [];
+    private readonly ListBox _mergeInputs = new() { SelectionMode = SelectionMode.Multiple };
+    private readonly List<string> _mergePaths = [];
+    private readonly ComboBox _mergePolicy = new() { ItemsSource = Enum.GetValues<MpqMergeConflictPolicy>(), SelectedItem = MpqMergeConflictPolicy.BlockDifferentEntries };
+    private readonly TextBlock _mergeStatus = StatusText("Merge deliberately small patches without modifying any source archive.");
     private CancellationTokenSource? _operation;
 
     public event EventHandler? BackRequested;
@@ -63,6 +67,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12,8), Children = { back, WithColumn(new TextBlock { Text = "MPQ PATCHES & ARCHIVES", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, 1) } };
         _tabs.Items.Add(new TabItem { Header = "Patch builder", Content = BuildBuilderPage() });
         _tabs.Items.Add(new TabItem { Header = "Archive browser", Content = BuildBrowserPage() });
+        _tabs.Items.Add(new TabItem { Header = "Merge small patches", Content = BuildMergePage() });
         _tabs.Items.Add(new TabItem { Header = "Client deployment", Content = BuildDeploymentPage() });
         Content = new Grid { RowDefinitions = new("Auto,*"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,0,1), Child = heading }, WithRow(_tabs, 1) } };
     }
@@ -138,6 +143,38 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         var toolbar = new WrapPanel { Children = { open, listfile, extractSelected, extractAll, cancel } };
         var paths = new Grid { ColumnDefinitions = new("2*,*,2*"), ColumnSpacing = 8, Children = { _archivePath, WithColumn(_externalListfile, 1), WithColumn(_browserSearch, 2) } };
         return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), Margin = new Thickness(8), RowSpacing = 8, Children = { toolbar, WithRow(paths, 1), WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _browserItems }, 2), WithRow(_browserStatus, 3) } };
+    }
+
+    private Control BuildMergePage()
+    {
+        var add = AccentButton("Add source MPQs"); add.Click += async (_, _) => { var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Select small patch MPQs to merge", AllowMultiple = true, FileTypeFilter = [new FilePickerFileType("MPQ patches") { Patterns = ["*.mpq"] }] }); foreach (var path in files.Select(file => file.TryGetLocalPath()).OfType<string>()) if (!_mergePaths.Contains(path, StringComparer.OrdinalIgnoreCase)) _mergePaths.Add(path); RefreshMergeInputs(); };
+        var remove = new Button { Content = "Remove selected" }; remove.Click += (_, _) => { var selected = _mergeInputs.SelectedItems?.OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase) ?? []; _mergePaths.RemoveAll(selected.Contains); RefreshMergeInputs(); };
+        var earlier = new Button { Content = "Move earlier" }; earlier.Click += (_, _) => MoveMergeInput(-1);
+        var later = new Button { Content = "Move later" }; later.Click += (_, _) => MoveMergeInput(1);
+        var clear = new Button { Content = "Clear" }; clear.Click += (_, _) => { _mergePaths.Clear(); RefreshMergeInputs(); };
+        var merge = AccentButton("Merge into new MPQ…"); merge.Click += async (_, _) => await MergePatchesAsync();
+        var policy = new StackPanel { Children = { new TextBlock { Text = "Different-byte path conflict policy" }, _mergePolicy } };
+        var explanation = new TextBlock { Text = "Exact duplicate internal paths are verified by SHA-256 and byte-for-byte comparison, then stored once. Different bytes at the same path block the merge by default. Choosing earlier/later archive is an explicit global conflict decision; source MPQs are always immutable.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
+        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), Margin = new Thickness(12), Children = { new WrapPanel { Children = { add, remove, earlier, later, clear, policy, merge } }, WithRow(explanation, 1), WithRow(_mergeInputs, 2), WithRow(_mergeStatus, 3) } };
+    }
+
+    private void RefreshMergeInputs() { _mergeInputs.ItemsSource = _mergePaths.ToArray(); _mergeStatus.Text = $"{_mergePaths.Count:N0} source patch(es). Listed order controls earlier/later conflict precedence."; }
+    private void MoveMergeInput(int direction) { if (_mergeInputs.SelectedItem is not string path) return; var index = _mergePaths.FindIndex(value => value.Equals(path, StringComparison.OrdinalIgnoreCase)); var target = index + direction; if (index < 0 || target < 0 || target >= _mergePaths.Count) return; (_mergePaths[index], _mergePaths[target]) = (_mergePaths[target], _mergePaths[index]); RefreshMergeInputs(); _mergeInputs.SelectedItem = path; }
+
+    private async Task MergePatchesAsync()
+    {
+        if (_mergePaths.Count < 2) { _mergeStatus.Text = "Add at least two source MPQs."; return; }
+        var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Save merged patch MPQ", SuggestedFileName = "patch-merged.MPQ", FileTypeChoices = [new FilePickerFileType("MPQ patch") { Patterns = ["*.mpq"] }] }); var output = file?.TryGetLocalPath(); if (output is null) return;
+        BeginOperation(); try
+        {
+            var inputs = _mergePaths.ToArray(); var policy = _mergePolicy.SelectedItem is MpqMergeConflictPolicy selected ? selected : MpqMergeConflictPolicy.BlockDifferentEntries; var progress = new Progress<(int Done, int Total, string Path)>(value => _mergeStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}");
+            var result = await Task.Run(() => new MpqMergeService().Merge(inputs, output, policy, string.IsNullOrWhiteSpace(_externalListfile.Text) ? null : _externalListfile.Text, progress, _operation!.Token), _operation!.Token);
+            _mergeStatus.Text = result.Conflicts.Count > 0 && result.OutputFiles == 0
+                ? $"Merge blocked: {result.Conflicts.Count:N0} different-byte internal path conflict(s). No output was created.\n" + string.Join("\n", result.Conflicts.Take(100).Select(conflict => conflict.ArchivePath))
+                : $"Created {result.OutputPath} with {result.OutputFiles:N0} files. Deduplicated {result.ExactDuplicates:N0} exact copies; resolved {result.Conflicts.Count:N0} explicit different-byte conflict(s) using {result.Policy}.";
+        }
+        catch (OperationCanceledException) { _mergeStatus.Text = "Merge cancelled; source archives were untouched."; }
+        catch (Exception exception) { _mergeStatus.Text = $"Merge failed safely: {exception.Message}"; DesktopCrashLogger.Log("MPQ merge failed", exception); }
     }
 
     private Control BuildDeploymentPage()

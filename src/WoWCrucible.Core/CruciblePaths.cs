@@ -9,6 +9,7 @@ public static class CruciblePaths
     public static string SettingsDirectory => Path.Combine(DataRoot, "Settings");
     public static string SettingsFile => Path.Combine(SettingsDirectory, "settings.json");
     public static string DesktopSettingsFile => Path.Combine(SettingsDirectory, "desktop.json");
+    public static string SqlFavoritesFile => Path.Combine(SettingsDirectory, "sql-favorites.json");
     public static string ProfilesDirectory => Path.Combine(DataRoot, "Profiles");
     public static string LogDirectory => Path.Combine(DataRoot, "Logs");
     public static string CrashLogDirectory => Path.Combine(LogDirectory, "Crashes");

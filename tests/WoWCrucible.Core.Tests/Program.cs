@@ -279,6 +279,11 @@ if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Value
     throw new InvalidOperationException("Capability-aware item mapping or SQL escaping failed.");
 if (gapStatsPlan.Values["StatsCount"] is not 1 || gapStatsPlan.Values["stat_type1"] is not 7 || gapStatsPlan.Values["stat_value1"] is not 75 || gapStatsPlan.Values["stat_type2"] is not 0)
     throw new InvalidOperationException("Trinity item stat slots were not compacted before StatsCount was calculated.");
+if (ItemCatalogService.IsDirectLootItem(17, 1_072_025) || !ItemCatalogService.IsDirectLootItem(17, 0) ||
+    ItemCatalogService.IsLinkedQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint>()) || !ItemCatalogService.IsLinkedQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }))
+    throw new InvalidOperationException("Item acquisition evidence confused loot references or unlinked quest rewards with direct player acquisition.");
+if (!SqlWorkspaceService.IsReadOnlyStatement("-- reviewed\nSELECT * FROM item_template") || SqlWorkspaceService.IsReadOnlyStatement("/* not read-only */ UPDATE item_template SET name='bad'"))
+    throw new InvalidOperationException("SQL Studio read-only routing could execute a write through the immediate query path.");
 
 var modernCreatureTable = new DatabaseTableCapability("creature_template", ItemColumns("entry", "name", "subname", "minlevel", "maxlevel", "faction", "npcflag", "rank", "type", "family", "unit_class", "speed_walk", "speed_run", "HealthModifier", "ManaModifier", "ArmorModifier", "DamageModifier", "BaseAttackTime", "RangeAttackTime", "unit_flags", "unit_flags2", "dynamicflags", "type_flags", "lootid", "pickpocketloot", "skinloot", "mingold", "maxgold", "AIName", "ScriptName", "RegenHealth", "VerifiedBuild"));
 var modernCreatureModelTable = new DatabaseTableCapability("creature_template_model", ItemColumns("CreatureID", "Idx", "CreatureDisplayID", "DisplayScale", "Probability", "VerifiedBuild"));
@@ -710,9 +715,19 @@ PatchManifestService.Save(manifestPath, "Classless test", "patch-X.mpq", manifes
 if (PatchManifestService.Load(manifestPath).Policy?.ExpectedEntryCount != 1) throw new InvalidOperationException("Manifest policy did not survive save/load.");
 var builtDirectory = Path.Combine(layerRoot, "built"); Directory.CreateDirectory(builtDirectory); PatchManifestService.Build(manifestPath, builtDirectory);
 if (!patchService.Contains(Path.Combine(builtDirectory, "patch-X.mpq"), "DBFilesClient\\SpellCastTimes.dbc")) throw new InvalidOperationException("Manifest-driven patch build failed.");
-var builtPatch = Path.Combine(builtDirectory, "patch-X.mpq"); var loadedManifest = PatchManifestService.Load(manifestPath);
-if (!PatchManifestService.Validate(loadedManifest, builtPatch).Passed) throw new InvalidOperationException("Built MPQ did not validate against its manifest.");
-patchService.Update(builtPatch, PatchInputMapper.Map([animationPath]));
+    var builtPatch = Path.Combine(builtDirectory, "patch-X.mpq"); var loadedManifest = PatchManifestService.Load(manifestPath);
+    if (!PatchManifestService.Validate(loadedManifest, builtPatch).Passed) throw new InvalidOperationException("Built MPQ did not validate against its manifest.");
+    var mergeA = Path.Combine(builtDirectory, "merge-a.mpq"); var mergeB = Path.Combine(builtDirectory, "merge-b.mpq"); var mergeConflict = Path.Combine(builtDirectory, "merge-conflict.mpq");
+    patchService.Create(mergeA, PatchInputMapper.Map([Path.Combine(overrideLayer, "SpellCastTimes.dbc")]));
+    patchService.Create(mergeB, PatchInputMapper.Map([Path.Combine(overrideLayer, "SpellCastTimes.dbc"), animationPath]));
+    var mergedPatch = Path.Combine(builtDirectory, "merge-output.mpq"); var merged = new MpqMergeService().Merge([mergeA, mergeB], mergedPatch);
+    if (merged.OutputFiles != 2 || merged.ExactDuplicates != 1 || merged.Conflicts.Count != 0 || !patchService.Contains(mergedPatch, "DBFilesClient\\SpellCastTimes.dbc") || !patchService.Contains(mergedPatch, "DBFilesClient\\AnimationData.dbc"))
+        throw new InvalidOperationException("MPQ merge failed to preserve unique paths and byte-deduplicate identical paths.");
+    patchService.Create(mergeConflict, PatchInputMapper.Map([castTimesSource]));
+    var blockedMergePath = Path.Combine(builtDirectory, "merge-blocked.mpq"); var blockedMerge = new MpqMergeService().Merge([mergeA, mergeConflict], blockedMergePath);
+    if (blockedMerge.OutputFiles != 0 || blockedMerge.Conflicts.Count != 1 || File.Exists(blockedMergePath))
+        throw new InvalidOperationException("MPQ merge did not block a different-byte internal-path conflict before creating output.");
+    patchService.Update(builtPatch, PatchInputMapper.Map([animationPath]));
 File.AppendAllText(Path.Combine(overrideLayer, "SpellCastTimes.dbc"), "size mismatch");
 var mismatchedArchive = PatchManifestService.Validate(loadedManifest, builtPatch);
 if (mismatchedArchive.Passed || !mismatchedArchive.Errors.Any(error => error.Code == "UnexpectedArchiveEntry") || !mismatchedArchive.Errors.Any(error => error.Code == "SizeMismatch"))

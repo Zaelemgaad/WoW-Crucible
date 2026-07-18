@@ -60,6 +60,8 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     private readonly M2PreviewView _model = new();
     private readonly TextBlock _modelStatus = Status("Load an extracted M2/SKIN to preview the chosen creature appearance geometry.");
     private WorldContentWritePlan? _pendingPlan;
+    private readonly Button _commit = AccentButton("Insert into connected world database");
+    private uint? _loadedEntry;
 
     public event EventHandler? BackRequested;
 
@@ -95,14 +97,27 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         };
         var workspace = new Grid { ColumnDefinitions = new("3*,Auto,2*"), Children = { editor, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(preview, 2) } };
         var export = new Button { Content = "Export SQL…" }; export.Click += async (_, _) => await ExportAsync();
-        var insert = AccentButton("Insert into connected world database"); insert.Click += (_, _) => PrepareInsert();
-        var actions = new WrapPanel { Children = { export, insert, _status } };
+        _commit.Click += (_, _) => PrepareInsert();
+        var actions = new WrapPanel { Children = { export, _commit, _status } };
         Content = new Grid
         {
             RowDefinitions = new("Auto,*,Auto,Auto"),
             Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(actions, 2), WithRow(_confirmation, 3) }
         };
         RefreshPreview(); RefreshSchemaStatus();
+    }
+
+    public void OpenCreatureRow(IReadOnlyDictionary<string, object?> row)
+    {
+        _entry.Value = Decimal(row, "entry", 1); _name.Text = Text(row, "name"); _subname.Text = Text(row, "subname");
+        _minLevel.Value = Decimal(row, "minlevel", 1); _maxLevel.Value = Decimal(row, "maxlevel", 1); Set(_faction, Int(row, "faction")); Set(_rank, Int(row, "rank")); Set(_type, Int(row, "type")); Set(_unitClass, Int(row, "unit_class"));
+        _family.Value = Decimal(row, "family"); _scale.Value = Decimal(row, "scale", 1); _walk.Value = Decimal(row, "speed_walk", 1); _run.Value = Decimal(row, "speed_run", 1.14286m);
+        _health.Value = Decimal(row, "HealthModifier", 1); _mana.Value = Decimal(row, "ManaModifier", 1); _armor.Value = Decimal(row, "ArmorModifier", 1); _damage.Value = Decimal(row, "DamageModifier", 1);
+        _baseAttack.Value = Decimal(row, "BaseAttackTime", 2000); _rangeAttack.Value = Decimal(row, "RangeAttackTime", 2000); _unitFlags.Value = Decimal(row, "unit_flags"); _unitFlags2.Value = Decimal(row, "unit_flags2"); _dynamicFlags.Value = Decimal(row, "dynamicflags"); _typeFlags.Value = Decimal(row, "type_flags");
+        _loot.Value = Decimal(row, "lootid"); _pickpocket.Value = Decimal(row, "pickpocketloot"); _skinLoot.Value = Decimal(row, "skinloot"); _minGold.Value = Decimal(row, "mingold"); _maxGold.Value = Decimal(row, "maxgold"); _aiName.Text = Text(row, "AIName"); _scriptName.Text = Text(row, "ScriptName"); _regen.IsChecked = Int(row, "RegenHealth") != 0;
+        var flags = (uint)Decimal(row, "npcflag"); foreach (var flag in _npcFlags) flag.Box.IsChecked = (flags & flag.Flag) != 0;
+        for (var index = 0; index < 4; index++) _displayIds[index].Value = Decimal(row, $"modelid{index + 1}");
+        _loadedEntry = (uint)(_entry.Value ?? 0); _commit.Content = "Apply decoded fields to existing creature"; RefreshPreview(); _status.Text = $"Loaded creature {_loadedEntry} into the decoded editor. Normalized model/vendor/loot child rows can be reviewed in SQL Studio.";
     }
 
     private Control IdentityForm() => Form(
@@ -232,11 +247,12 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         try
         {
             if (!_session.DatabaseTested || _session.DatabaseProfile is null) { _status.Text = "Connect and verify Server & SQL before inserting. SQL export remains available offline."; return; }
-            _pendingPlan = Plan();
+            _pendingPlan = Plan(); if (_loadedEntry is { } loaded && (uint)(_entry.Value ?? 0) != loaded) throw new InvalidOperationException("The decoded editor will not silently change a primary creature ID. Clone or migrate it explicitly instead.");
+            var editing = _loadedEntry is not null;
             var cancel = new Button { Content = "Cancel" }; var confirm = AccentButton($"Confirm creature {(uint)(_entry.Value ?? 0)} insert");
             cancel.Click += (_, _) => { _pendingPlan = null; _confirmation.IsVisible = false; };
-            confirm.Click += async (_, _) => await InsertAsync(confirm);
-            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Insert '{_name.Text}' and {_pendingPlan.Rows.Count - 1:N0} model row(s) transactionally? Existing identities are refused, never replaced.", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center }, WithColumn(cancel, 1), WithColumn(confirm, 2) } };
+            confirm.Content = editing ? $"Confirm creature {_loadedEntry} update" : $"Confirm creature {(uint)(_entry.Value ?? 0)} insert"; confirm.Click += async (_, _) => await InsertAsync(confirm);
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = editing ? $"Update Crucible's decoded creature_template fields for '{_name.Text}'? Normalized model/vendor/loot child rows remain separately reviewable." : $"Insert '{_name.Text}' and {_pendingPlan.Rows.Count - 1:N0} related row(s) transactionally? Existing identities are refused, never replaced.", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center }, WithColumn(cancel, 1), WithColumn(confirm, 2) } };
             _confirmation.IsVisible = true;
         }
         catch (Exception exception) { _status.Text = $"Cannot insert: {exception.Message}"; }
@@ -245,7 +261,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     private async Task InsertAsync(Button button)
     {
         if (_pendingPlan is null || _session.DatabaseProfile is null) return;
-        try { button.IsEnabled = false; await new WorldContentTemplateService().InsertAsync(_session.DatabaseProfile, _pendingPlan); _status.Text = "Creature template inserted transactionally. Add vendor/quest/loot links as needed, then reload creature_template or restart worldserver."; _pendingPlan = null; _confirmation.IsVisible = false; }
+        try { button.IsEnabled = false; if (_loadedEntry is { } loaded) await new SqlWorkspaceService().UpdateRowAsync(_session.DatabaseProfile, _session.DatabaseCapabilities?.FindTable("creature_template") ?? throw new InvalidOperationException("Live creature schema is unavailable."), new Dictionary<string, object?> { ["entry"] = loaded }, _pendingPlan.Rows[0].Values); else await new WorldContentTemplateService().InsertAsync(_session.DatabaseProfile, _pendingPlan); _status.Text = _loadedEntry is null ? "Creature template and related rows inserted transactionally. Reload creature_template or restart worldserver." : "Decoded creature_template fields updated transactionally; related child tables and custom columns were preserved."; _pendingPlan = null; _confirmation.IsVisible = false; }
         catch (Exception exception) { _status.Text = $"Creature insert failed: {exception.Message}"; DesktopCrashLogger.Log("Creature insert failed", exception); }
         finally { button.IsEnabled = true; }
     }
@@ -271,6 +287,11 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     private static ComboBox Choices(params (int Value, string Name)[] values) => new() { ItemsSource = values.Select(value => new Choice(value.Value, value.Name)).ToArray(), SelectedIndex = 0 };
     private static int Selected(ComboBox combo) => combo.SelectedItem is Choice choice ? choice.Value : 0;
     private static string SelectedName(ComboBox combo) => combo.SelectedItem is Choice choice ? choice.Name : string.Empty;
+    private static void Set(ComboBox combo, int value) { if (combo.ItemsSource is IEnumerable<Choice> values) combo.SelectedItem = values.FirstOrDefault(item => item.Value == value) ?? values.FirstOrDefault(); }
+    private static object? Value(IReadOnlyDictionary<string, object?> row, string name) => row.FirstOrDefault(pair => pair.Key.Equals(name, StringComparison.OrdinalIgnoreCase)).Value;
+    private static decimal Decimal(IReadOnlyDictionary<string, object?> row, string name, decimal fallback = 0) { try { return Convert.ToDecimal(Value(row, name) ?? fallback, System.Globalization.CultureInfo.InvariantCulture); } catch { return fallback; } }
+    private static int Int(IReadOnlyDictionary<string, object?> row, string name) { try { return Convert.ToInt32(Value(row, name) ?? 0, System.Globalization.CultureInfo.InvariantCulture); } catch { return 0; } }
+    private static string Text(IReadOnlyDictionary<string, object?> row, string name) => Convert.ToString(Value(row, name), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
     private static TextBlock Status(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8") };
     private static Button AccentButton(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
     private static T WithColumn<T>(T control, int column) where T : Control { Grid.SetColumn(control, column); return control; }

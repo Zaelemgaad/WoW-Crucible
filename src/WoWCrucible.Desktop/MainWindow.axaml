@@ -44,6 +44,7 @@
                     <Button HorizontalContentAlignment="Left" Content="▣  Client workshop" Click="OpenClientWorkspaceClick" />
                     <Button HorizontalContentAlignment="Left" Content="⬡  Assets &amp; compare" Click="OpenAssetComparisonClick" />
                     <Button HorizontalContentAlignment="Left" Content="⚙  Server &amp; SQL" Click="OpenServerSqlClick" />
+                    <Button HorizontalContentAlignment="Left" Content="▤  SQL studio" Click="OpenSqlWorkspaceClick" />
                 </StackPanel>
                 <Border Grid.Row="3" Padding="10" CornerRadius="6" Background="#131925" BorderBrush="#273044" BorderThickness="1">
                     <StackPanel Spacing="5">

@@ -472,6 +472,20 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
     if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
     if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
     var profile = new DatabaseConnectionProfile(host, port, user, password, database, ssl);
+    if (operation.Equals("query", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 6 || args[5].StartsWith("--", StringComparison.Ordinal)) return Fail("db query requires a UTF-8 .sql file after the database name.");
+        var queryOptions = args[6..]; var write = queryOptions.Any(option => option.Equals("--write", StringComparison.OrdinalIgnoreCase));
+        var unknown = queryOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--write", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown query option: {unknown[0]}");
+        var sql = await File.ReadAllTextAsync(args[5], cancellationToken);
+        if (write)
+        {
+            var result = await new SqlWorkspaceService().ExecuteAsync(profile, sql, cancellationToken); Console.WriteLine($"AffectedRows\t{result.AffectedRows}\nDurationMs\t{result.Duration.TotalMilliseconds:0}"); return 0;
+        }
+        var query = await new SqlWorkspaceService().QueryAsync(profile, sql, 10000, cancellationToken); Console.WriteLine(string.Join('\t', query.Columns)); foreach (var row in query.Rows) Console.WriteLine(string.Join('\t', row.Select(value => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture))));
+        Console.Error.WriteLine($"Returned {query.Rows.Count:N0} row(s) in {query.Duration.TotalMilliseconds:N0} ms. Use --write only for an intentionally reviewed non-query statement."); return 0;
+    }
     if (operation.Equals("snapshot", StringComparison.OrdinalIgnoreCase))
     {
         var includes = rawOptions.Where(option => option.StartsWith("--include=", StringComparison.OrdinalIgnoreCase)).Select(option => option[10..]).ToArray();
@@ -519,7 +533,7 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
     return DatabaseHelp(2);
 }
 
-static int DatabaseHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]\n  wowcrucible db snapshot-inspect <snapshot-file> [--quick]\n  wowcrucible db recovery-audit <legacy-snapshot> <output.crucible-db-audit> [--baseline=stock-snapshot] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]\n  wowcrucible db recovery-inspect <audit-file> [--quick]\n  wowcrucible db item-audit <host> <port> <user> <database> [--password-env=NAME] [--output=report.json]\n  wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=\" Variant\"] [--itemset=ID]\n\nSnapshot capture is SELECT-only and excludes known auth/character runtime state by default. recovery-audit is completely offline: with a baseline it records baseline-to-legacy deltas; without one it labels rows unattributed candidates. No recovery audit is executable SQL, no-PK tables are blocked from row inference, and removals are never implicitly approved. --include-sensitive is an explicit override. Passwords are read from WOW_CRUCIBLE_DB_PASSWORD by default and are never accepted as command arguments.", code);
+static int DatabaseHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db query <host> <port> <user> <database> <statement.sql> [--write] [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]\n  wowcrucible db snapshot-inspect <snapshot-file> [--quick]\n  wowcrucible db recovery-audit <legacy-snapshot> <output.crucible-db-audit> [--baseline=stock-snapshot] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]\n  wowcrucible db recovery-inspect <audit-file> [--quick]\n  wowcrucible db item-audit <host> <port> <user> <database> [--password-env=NAME] [--output=report.json]\n  wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=\" Variant\"] [--itemset=ID]\n\nSnapshot capture is SELECT-only and excludes known auth/character runtime state by default. query reads SQL from a file so statements and secrets do not need to enter shell history; --write is explicit. recovery-audit is completely offline: with a baseline it records baseline-to-legacy deltas; without one it labels rows unattributed candidates. No recovery audit is executable SQL, no-PK tables are blocked from row inference, and removals are never implicitly approved. --include-sensitive is an explicit override. Passwords are read from WOW_CRUCIBLE_DB_PASSWORD by default and are never accepted as command arguments.", code);
 
 static bool RecoveryAuditNeedsReview(LegacyDatabaseAuditManifest manifest) =>
     manifest.Mode == LegacyDatabaseAuditMode.Unattributed ||
@@ -805,18 +819,30 @@ static int Mpq(string[] args)
                 Console.Error.WriteLine($"Extracted {files.Length:N0} file(s) to {Path.GetFullPath(args[2])} in {timer.Elapsed.TotalSeconds:0.##}s.");
                 return 0;
             }
+        case "merge" when args.Length >= 4:
+            {
+                var options = args[2..]; var inputArchives = options.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray();
+                var listFile = Option(options, "--listfile="); var conflictText = Option(options, "--conflicts=") ?? "block";
+                var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--conflicts=", StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (unknown.Length > 0) return Fail($"Unknown merge option: {unknown[0]}");
+                var policy = conflictText.ToLowerInvariant() switch { "block" => MpqMergeConflictPolicy.BlockDifferentEntries, "earlier" => MpqMergeConflictPolicy.PreferEarlierArchive, "later" => MpqMergeConflictPolicy.PreferLaterArchive, _ => throw new ArgumentException("--conflicts must be block, earlier, or later.") };
+                var result = new MpqMergeService().Merge(inputArchives, args[1], policy, listFile, new Progress<(int Done, int Total, string Path)>(value => Console.Error.WriteLine($"Merge\t{value.Done:N0}/{value.Total:N0}\t{value.Path}")));
+                foreach (var conflict in result.Conflicts) Console.WriteLine($"CONFLICT\t{conflict.ArchivePath}\t{string.Join('|', conflict.Sources)}\t{string.Join('|', conflict.Sha256)}");
+                if (result.OutputFiles == 0 && result.Conflicts.Count > 0) { Console.Error.WriteLine($"Merge blocked by {result.Conflicts.Count:N0} different-byte internal path conflict(s); source archives and output were not modified."); return 3; }
+                Console.Error.WriteLine($"Merged {result.InputArchives:N0} source patches into {result.OutputPath}: {result.OutputFiles:N0} files, {result.ExactDuplicates:N0} exact duplicate(s), {result.Conflicts.Count:N0} explicitly resolved conflict(s) using {result.Policy}."); return 0;
+            }
         case "create" when args.Length >= 3:
             var createEntries = PatchInputMapper.Map(args[2..]); PrintCompatibility(createEntries, null); service.Create(args[1], createEntries); return 0;
         case "update" when args.Length >= 3:
             var updateEntries = PatchInputMapper.Map(args[2..]); PrintCompatibility(updateEntries, null); service.Update(args[1], updateEntries); return 0;
         default:
-            return Fail("Usage:\n  wowcrucible mpq list <archive.mpq> [filter]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>");
+            return MpqHelp(2);
     }
 }
 
 static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--require=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
 static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc rows <file.dbc> <schema.xml> <id>...\n  wowcrucible dbc find <file.dbc> <schema.xml> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc promote additions <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc clone-remap where <base.dbc> <source.dbc> <schema.xml> <column> <value>... --manifest=map.json --output=merged.dbc [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source.dbc> <parent-merged.dbc> <parent-schema.xml> <parent-map.json> <foreign-column> <child-base.dbc> <child-source.dbc> <child-schema.xml> --child-map=map.json --child-output=child.dbc --parent-output=parent.dbc\n  wowcrucible dbc copy-row <base.dbc> <source.dbc> <schema.xml> <source-id> <target-id> <output.dbc> [--set=Column=Value]...\n  wowcrucible dbc set-row <input.dbc> <schema.xml> <id> <output.dbc> --set=Column=Value [...]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]", code);
-static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>", code);
+static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
 {
     var anonymous = files.Count(file => ClientArchiveIndexService.IsAnonymous(file.ArchivePath));
@@ -827,7 +853,7 @@ static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLin
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
+    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 

@@ -14,11 +14,12 @@ Client formats and server integration are separate: a client-build profile decla
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
+- Includes a same-window SQL Studio with filtered/paged schema browsing, every live row column, primary-key-safe complete-row editing, read queries, separately confirmed write statements, and persistent favorites for arbitrary item/creature/pet/quest/other rows. Favorites can retain notes plus optional related DBC and MPQ paths and route known tables into decoded guided editors without hiding custom columns.
 - Starts, stops, and restarts auth/world servers natively from the shared Server & SQL workspace. WSL shutdown sends `SIGINT` and waits for graceful completion; a locally launched worldserver receives `saveall` before shutdown. Crucible does not execute the workspace's PowerShell wrapper scripts or force-kill an unowned server process.
 - Keeps DBC editing, Items & Sets, MPQ work, Assets & Compare, Server & SQL, dialogs, and the CLI guide inside one splitter-driven Avalonia window; feature navigation no longer creates a pile of child windows or depends on fixed panel widths.
 - Reads the selected installed server's `worldserver.conf` (including the split Windows/WSL test layout), verifies the detected database, and shares that in-memory session with item and recovery workflows.
 - Captures a legacy world database through a SELECT-only streaming snapshot, then performs an entirely offline baseline-to-legacy audit with field-level additions, edits, removals, domain grouping, source hashes, and explicit unattributed mode when no stock baseline is available. Target translation and selective promotion remain pending.
-- Searches the live world schema for items with no known vendor, loot, quest, starting-item, profession, fishing, or spell-loot acquisition path; the result is searchable in the Avalonia item workbench and exportable from the CLI.
+- Searches the live world schema for items with no known vendor, direct/reachable loot, linked starter→ender quest, starting-item, profession, fishing, or spell-loot acquisition path; it does not confuse nonzero loot-reference control rows with awarded item IDs or orphaned quest-template rewards with playable quests. The result is searchable in the Avalonia item workbench and exportable from the CLI.
 - Clones a complete item to a new ID transactionally, preserving every current/custom `item_template` column and locale row, with optional item-set reassignment and strict no-overwrite behavior.
 - Inspects and clones `ItemSet.dbc` rows with explicit member-ID remapping, resolves set-bonus spell names, and edits all eight bonus slots into a separate output DBC.
 - Detects an installed AzerothCore/TrinityCore workspace from its live `worldserver.conf`, automatically imports server DBC and world-database settings, and supports split Windows-folder/WSL-server launchers such as the bundled test workspace.
@@ -44,6 +45,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Builds WotLK patch MPQs from edited DBCs or existing folder trees.
 - Displays editable internal MPQ paths and preserves folder hierarchy.
 - Opens existing MPQ patches and safely adds or replaces files while keeping a `.bak` copy.
+- Merges multiple small patch MPQs without mutating sources: duplicate paths are verified by SHA-256 and byte-for-byte comparison, exact copies are stored once, and different-byte path conflicts block output unless earlier/later archive precedence is explicitly selected.
 - Installs verified patch MPQs into a selected client and deletes that client's exact `Cache` folder only after a successful update; GUI builds written directly into the configured client `Data` folder do the same automatically.
 - Remembers server `data\\dbc` and WoW client `Data` paths for future open, sync, and patch dialogs.
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
@@ -99,6 +101,7 @@ wowcrucible server inspect "C:\path\to\installed-server"
 wowcrucible server bindings "C:\path\to\installed-server" [--source="C:\path\to\core-source"]
 wowcrucible server dbc-audit "C:\path\to\installed-server" gtRegenMPPerSpt.dbc schema.xml [--source="C:\path\to\core-source"] [--all] [--migration=sync.sql]
 wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
+wowcrucible db query 127.0.0.1 3306 admin acore_world reviewed-query.sql --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db snapshot 127.0.0.1 3306 admin old_world old-world.crucible-db-snapshot --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db snapshot-inspect old-world.crucible-db-snapshot
 wowcrucible db recovery-audit old-world.crucible-db-snapshot old-world.crucible-db-audit --baseline=matching-stock.crucible-db-snapshot
@@ -119,6 +122,7 @@ wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json] [--list
 wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N] [--listfile=paths.txt]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
 wowcrucible mpq update patch-W.MPQ file-or-folder [...]
+wowcrucible mpq merge patch-merged.MPQ patch-A.MPQ patch-B.MPQ [...] --conflicts=block
 wowcrucible manifest create classless.json patch-W.mpq changed-files-folder [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]
 wowcrucible manifest list classless.json
 wowcrucible manifest validate classless.json [existing-patch.mpq]
@@ -155,6 +159,12 @@ Open the visual asset comparison workspace directly inside the main Crucible win
 
 ```powershell
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- "--asset-compare=G:\Crucible-Extras-Processed"
+```
+
+Open SQL Studio directly:
+
+```powershell
+dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- --sql-studio
 ```
 
 Run the legacy WinForms reference shell (development comparison only):
