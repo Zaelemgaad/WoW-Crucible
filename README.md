@@ -35,6 +35,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Parses WoWDBDefs `.dbd` build ranges using full expansion versions, expands logical arrays/localized strings to exact physical WDBC columns, and audits an entire DBC directory in a responsive same-window schema workspace with optional WDBX XML cross-checking. Intentional zero-byte placeholders are reported separately from corrupt files.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
 - Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.
+- Exports a loaded DBC from a modular same-window workspace to atomic CSV, JSONL, or JSON with selectable physical columns, exact/ranged record-key filters, invariant numeric values, decoded strings by default, optional raw string offsets, and explicit `$recordKey`/`$rowIndex` identity metadata. The CLI exposes the same streaming export for large audits.
 - Stages multiple open DBC files at once and switches between them without reloading.
 - Decodes known 3.3.5a enum and bit-flag fields into readable names, with raw mode and lossless enum/flag editors.
 - Resolves and safely extends DBC string tables.
@@ -94,6 +95,7 @@ wowcrucible asset preview-info extracted-wrath-model.m2
 wowcrucible asset workspace native-conversion-project modern-assets-folder [more-files ...]
 wowcrucible dbc info Spell.dbc
 wowcrucible dbc rows CreatureModelData.dbc schema.xml 1332 1333 1334
+wowcrucible dbc export Spell.dbc schema.xml spell-audit.jsonl --columns=ID,Name_Lang[enUS],Effect[0] --ids=133,116
 wowcrucible dbc find CreatureDisplayInfo.dbc schema.xml ModelID 6000 6001 6002 [--count|--limit=100]
 wowcrucible dbc validate "WotLK 3.3.5 (12340).xml" dbc-folder [--strict] [--recursive]
 wowcrucible dbc compare base\Spell.dbc override\Spell.dbc "WotLK 3.3.5 (12340).xml"

@@ -25,6 +25,7 @@
                         <Button Margin="0,0,8,0" Content="Open M2" Click="OpenM2Click" />
                         <Button Margin="0,0,8,0" Content="Save" Click="SaveClick" />
                         <Button Margin="0,0,8,0" Content="Save As" Click="SaveAsClick" />
+                        <Button Margin="0,0,8,0" Content="Export rows" Click="OpenDbcExportClick" />
                         <Button Margin="0,0,8,0" Content="Close" Click="CloseDocumentClick" />
                         <Button Margin="0,0,8,0" Content="Logs" Click="OpenLogsClick" />
                         <Button Margin="0,0,8,0" Content="CLI Guide" Click="OpenCliGuideClick" />

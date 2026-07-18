@@ -810,6 +810,40 @@ if (generatedComparison.AddedRows != 1 || generatedComparison.ModifiedRows != 1 
 var generatedDifferences = DbcPromotionService.GetDifferences(generatedBasePath, generatedOverridePath, generatedSchema.Columns, generatedSchema.KeyStrategy);
 if (!generatedDifferences.Any(difference => difference.Id == 900 && difference.ColumnName == "Data") || !generatedDifferences.Any(difference => difference.Id == 1100 && difference.ColumnIndex == -1))
     throw new InvalidOperationException("Generated-key differences did not report row 900 and appended row 1100 by virtual ID.");
+var generatedExportPreview = DbcRowExportService.Preview(WdbcFile.Load(generatedKeyPath), generatedSchema, ["Data"], [900, 999]);
+if (generatedExportPreview.MatchingRows != 2 || generatedExportPreview.Columns.SequenceEqual(["$recordKey", "$rowIndex", "Data"]) == false ||
+    Convert.ToUInt32(generatedExportPreview.Rows[0]["$recordKey"]) != 900 || Convert.ToInt32(generatedExportPreview.Rows[0]["$rowIndex"]) != 900)
+    throw new InvalidOperationException("Schema-aware DBC export did not retain virtual GT record identity independently from physical float data.");
+var generatedCsvExport = Path.Combine(Path.GetTempPath(), $"crucible-gt-export-{Guid.NewGuid():N}.csv");
+var generatedExportResult = DbcRowExportService.Export(WdbcFile.Load(generatedKeyPath), generatedSchema, generatedCsvExport, new(DbcRowExportFormat.Csv, ["Data"], [900, 999]));
+var generatedCsvLines = File.ReadAllLines(generatedCsvExport);
+if (generatedExportResult.ExportedRows != 2 || generatedCsvLines.Length != 3 || generatedCsvLines[0] != "$recordKey,$rowIndex,Data" || !generatedCsvLines[1].StartsWith("900,900,", StringComparison.Ordinal))
+    throw new InvalidOperationException("Atomic CSV DBC export omitted metadata, selected keys, or invariant physical values.");
+File.Delete(generatedCsvExport);
+var generatedJsonExport = Path.Combine(Path.GetTempPath(), $"crucible-gt-export-{Guid.NewGuid():N}.json");
+DbcRowExportService.Export(WdbcFile.Load(generatedKeyPath), generatedSchema, generatedJsonExport, new(DbcRowExportFormat.Json, ["Data"], [900, 999]));
+using (var generatedJson = System.Text.Json.JsonDocument.Parse(File.ReadAllText(generatedJsonExport)))
+    if (generatedJson.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array || generatedJson.RootElement.GetArrayLength() != 2)
+        throw new InvalidOperationException("DBC JSON array export did not produce a complete valid array.");
+File.Delete(generatedJsonExport);
+var cancelledExport = Path.Combine(Path.GetTempPath(), $"crucible-gt-cancelled-{Guid.NewGuid():N}.csv"); using (var exportCancellation = new CancellationTokenSource())
+{
+    exportCancellation.Cancel();
+    try { _ = DbcRowExportService.Export(WdbcFile.Load(generatedKeyPath), generatedSchema, cancelledExport, new(DbcRowExportFormat.Csv), cancellationToken: exportCancellation.Token); throw new InvalidOperationException("A cancelled DBC export was published."); }
+    catch (OperationCanceledException) { }
+}
+if (File.Exists(cancelledExport) || Directory.EnumerateFiles(Path.GetDirectoryName(cancelledExport)!, Path.GetFileName(cancelledExport) + ".crucible-*.tmp").Any())
+    throw new InvalidOperationException("Cancelled DBC export left a published or temporary partial file.");
+var spellExportFile = WdbcFile.Load(Path.Combine(args[1], "Spell.dbc")); var spellExportSchema = schema.ResolveColumns("Spell", spellExportFile.FieldCount);
+var spellJsonLinesExport = Path.Combine(Path.GetTempPath(), $"crucible-spell-export-{Guid.NewGuid():N}.jsonl");
+DbcRowExportService.Export(spellExportFile, spellExportSchema, spellJsonLinesExport, new(DbcRowExportFormat.JsonLines, ["ID", "Name_Lang[enUS]", "Description_Lang[enUS]", "Effect[0]"], [133]));
+using (var spellExportJson = System.Text.Json.JsonDocument.Parse(File.ReadAllText(spellJsonLinesExport)))
+    if (spellExportJson.RootElement.GetProperty("$recordKey").GetUInt32() != 133 || spellExportJson.RootElement.GetProperty("Name_Lang[enUS]").GetString() != "Fireball" || spellExportJson.RootElement.GetProperty("Description_Lang[enUS]").GetString()?.Length == 0)
+        throw new InvalidOperationException("JSONL DBC export did not decode schema string offsets and preserve selected spell fields.");
+var rawSpellPreview = DbcRowExportService.Preview(spellExportFile, spellExportSchema, ["Name_Lang[enUS]"], [133], rawStringOffsets: true);
+if (rawSpellPreview.Rows[0]["Name_Lang[enUS]"] is not uint)
+    throw new InvalidOperationException("DBC export raw-string mode did not expose the physical string-table offset.");
+File.Delete(spellJsonLinesExport);
 File.Delete(generatedBasePath); File.Delete(generatedOverridePath);
 
 var azerothBindings = ServerTableBindingCatalog.BuiltIn(ServerCoreFamily.AzerothCore);

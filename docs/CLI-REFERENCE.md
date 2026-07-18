@@ -120,6 +120,7 @@ wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [
 wowcrucible dbc spell-tooltip <Spell.dbc> <spell-id>... [--format=text|json]
 wowcrucible dbc item-equipped <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> <base-skin.blp|image> <output.png> --inventory=N --assets=processed-library [--source=name] [--overwrite]
 wowcrucible dbc rows <file.dbc> <schema.xml> <id>...
+wowcrucible dbc export <file.dbc> <schema.xml> <output.csv|json|jsonl> [--format=csv|json|jsonl] [--columns=A,B|--column=Name] [--ids=1,2|--id=N] [--raw-string-offsets] [--overwrite]
 wowcrucible dbc find <file.dbc> <schema.xml> <field> <value>... [--count|--limit=100]
 wowcrucible dbc validate <schema.xml> <folder> [--strict] [--recursive]
 wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]
@@ -140,6 +141,8 @@ wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id>
 `spell-tooltip` reads the exact build-12340 English spell name, subtext, description, and aura description for each requested ID. The Items & Sets tooltip keeps one cached catalog for the configured `Spell.dbc`, refreshes it only when the file changes, and uses these decoded fields for all five item spell slots instead of displaying bare numeric IDs. Runtime `$` tokens are preserved rather than guessed.
 
 `item-equipped` composes a resolved armor display onto a chosen character base-skin atlas and writes a PNG suitable for inspection or the native character renderer. Wear textures are grouped by provenance; Crucible selects the most complete single source unless `--source` names one explicitly, and never silently mixes patch variants. The result also reports the inventory-aware character geoset selection needed for the equipped mesh.
+
+`export` streams schema-aware rows without modifying the DBC. CSV, JSON Lines, and JSON array output always include `$recordKey` and `$rowIndex`; virtual `AutoGenerate` GT identities therefore remain separate from their physical float data. Strings are decoded by default, while `--raw-string-offsets` is an explicit binary-diagnostic mode. Column and record-key filters are exact, missing requested names/keys fail, existing outputs are refused unless `--overwrite` is explicit, and a cancelled export never publishes its temporary file. The same choices are available from **Export rows** in the loaded DBC toolbar, including inclusive key ranges in the visual workspace.
 
 `validate` is non-recursive by default and fails when the selected folder has no top-level DBCs. Use `--recursive` intentionally for a directory tree. `--strict` treats raw fallback schemas as failures.
 
