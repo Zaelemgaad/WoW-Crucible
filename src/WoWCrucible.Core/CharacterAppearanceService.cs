@@ -1,6 +1,11 @@
 namespace WoWCrucible.Core;
 
 public sealed record CharacterAppearanceIdentity(uint RaceId, uint SexId, string RaceName, string SexName);
+public enum CharacterSectionKind : uint { Skin = 0, Face = 1, FacialHair = 2, Hair = 3, Underwear = 4, Custom1 = 5, Custom2 = 6, Custom3 = 7 }
+public sealed record CharacterSection(uint Id, uint RaceId, uint SexId, CharacterSectionKind Kind, uint Flags, uint VariationIndex, uint ColorIndex, string? Texture0, string? Texture1, string? Texture2)
+{
+    public override string ToString() => $"{Kind} · style {VariationIndex:N0} · color {ColorIndex:N0} · record {Id:N0} · flags 0x{Flags:X}";
+}
 public sealed record CharacterBaseSkin(uint Id, uint RaceId, uint SexId, uint Flags, uint VariationIndex, uint ColorIndex, string TexturePath)
 {
     public override string ToString() => $"Skin {ColorIndex:N0} · record {Id:N0} · {Path.GetFileName(TexturePath)} · flags 0x{Flags:X}";
@@ -33,16 +38,28 @@ public static class CharacterAppearanceService
 
     public static IReadOnlyList<CharacterBaseSkin> LoadBaseSkins(string charSectionsPath, CharacterAppearanceIdentity identity)
     {
+        return LoadSections(charSectionsPath, identity).Where(section => section.Kind == CharacterSectionKind.Skin && !string.IsNullOrWhiteSpace(section.Texture0))
+            .Select(section => new CharacterBaseSkin(section.Id, section.RaceId, section.SexId, section.Flags, section.VariationIndex, section.ColorIndex, section.Texture0!))
+            .OrderBy(skin => skin.VariationIndex).ThenBy(skin => skin.ColorIndex).ThenBy(skin => skin.Id).ToArray();
+    }
+
+    public static IReadOnlyList<CharacterSection> LoadSections(string charSectionsPath, CharacterAppearanceIdentity identity)
+    {
         var file = WdbcFile.Load(charSectionsPath);
         if (file.FieldCount != Columns.Length || file.RecordSize != 40) throw new InvalidDataException($"CharSections.dbc has {file.FieldCount:N0} fields and {file.RecordSize:N0}-byte records; Wrath build 12340 requires 10 fields and 40-byte records.");
-        var result = new List<CharacterBaseSkin>();
+        var result = new List<CharacterSection>();
         for (var row = 0; row < file.RowCount; row++)
         {
-            if (file.GetRaw(row, Columns[1]) != identity.RaceId || file.GetRaw(row, Columns[2]) != identity.SexId || file.GetRaw(row, Columns[3]) != 0) continue;
-            var texture = Convert.ToString(file.GetDisplayValue(row, Columns[4]), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(texture)) continue;
-            result.Add(new(file.GetRaw(row, Columns[0]), identity.RaceId, identity.SexId, file.GetRaw(row, Columns[7]), file.GetRaw(row, Columns[8]), file.GetRaw(row, Columns[9]), PatchInputMapper.NormalizeArchivePath(texture)));
+            if (file.GetRaw(row, Columns[1]) != identity.RaceId || file.GetRaw(row, Columns[2]) != identity.SexId) continue;
+            var rawKind = file.GetRaw(row, Columns[3]); if (rawKind > 7) continue;
+            result.Add(new(file.GetRaw(row, Columns[0]), identity.RaceId, identity.SexId, (CharacterSectionKind)rawKind, file.GetRaw(row, Columns[7]), file.GetRaw(row, Columns[8]), file.GetRaw(row, Columns[9]),
+                Texture(4), Texture(5), Texture(6)));
+            string? Texture(int column)
+            {
+                var value = Convert.ToString(file.GetDisplayValue(row, Columns[column]), System.Globalization.CultureInfo.InvariantCulture);
+                return string.IsNullOrWhiteSpace(value) ? null : PatchInputMapper.NormalizeArchivePath(value);
+            }
         }
-        return result.OrderBy(skin => skin.VariationIndex).ThenBy(skin => skin.ColorIndex).ThenBy(skin => skin.Id).ToArray();
+        return result.OrderBy(section => section.Kind).ThenBy(section => section.VariationIndex).ThenBy(section => section.ColorIndex).ThenBy(section => section.Id).ToArray();
     }
 }

@@ -20,7 +20,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     {
         public override string ToString() => $"{Provenance} · {Path.GetFileName(FullPath)}{(ExactEquivalent ? " · exact-equivalent" : string.Empty)}";
     }
-    private sealed record AppearancePlan(CharacterAppearanceIdentity? Identity, IReadOnlyList<CharacterBaseSkin> Skins, CharacterBaseSkin? SelectedSkin, IReadOnlyList<AppearanceSourceChoice> Sources, string? SelectedSourcePath, string Message);
+    private sealed record AppearancePlan(CharacterAppearanceIdentity? Identity, IReadOnlyList<CharacterBaseSkin> Skins, CharacterBaseSkin? SelectedSkin,
+        IReadOnlyList<CharacterSection> Faces, CharacterSection? SelectedFace, IReadOnlyList<CharacterSection> FacialHair, CharacterSection? SelectedFacialHair,
+        IReadOnlyList<CharacterSection> Hair, CharacterSection? SelectedHair, CharacterSection? Underwear,
+        IReadOnlyList<AppearanceSourceChoice> Sources, AppearanceSourceChoice? SelectedSource, string Message);
     private readonly TextBox _library = new() { Text = Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty };
     private readonly TextBox _directorySearch = new() { PlaceholderText = "Filter content paths…" };
     private readonly ListBox _directories = new();
@@ -38,6 +41,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly ComboBox _modelFilter = new() { ItemsSource = new[] { "Ready models", "All models" }, SelectedIndex = 0 };
     private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Base appearance", "All geosets (diagnostic)" }, SelectedIndex = 0 };
     private readonly ComboBox _skinPicker = new() { PlaceholderText = "No CharSections base skins loaded" };
+    private readonly ComboBox _facePicker = new() { PlaceholderText = "No face layers" };
+    private readonly ComboBox _facialHairPicker = new() { PlaceholderText = "No facial-hair layers" };
+    private readonly ComboBox _hairPicker = new() { PlaceholderText = "No hair layers" };
     private readonly ComboBox _appearanceSourcePicker = new() { PlaceholderText = "Choose the texture provenance…" };
     private readonly TextBlock _appearanceStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), FontSize = 11 };
     private readonly TextBox _assetCategory = new() { Text = "Unsorted", PlaceholderText = "Category" };
@@ -60,7 +66,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private AssetComparisonIndex? _index; private IReadOnlyList<AssetComparisonEntry> _folderEntries = []; private IReadOnlyList<AssetComparisonEntry> _filteredEntries = [];
     private IReadOnlyDictionary<string, AssetComparisonDuplicateGroup> _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<AssetComparisonModel> _allModels = []; private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private Control? _imageDirectoryTools; private Control? _imageCardScroller; private Control? _imagePager; private Control? _modelOnlyCatalogNotice; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
-    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath; private int _resolvedModelTextureCount;
+    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath; private int _resolvedModelTextureCount; private bool _appearanceComposed;
     private Task? _modelDiscoveryTask;
     private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _suppressAppearanceSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
 
@@ -87,6 +93,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _modelPicker.SelectionChanged += async (_, _) => { if (!_suppressModelSelection) await RunUiActionAsync("model-selection", LoadSelectedModelAsync); };
         _geosetMode.SelectionChanged += async (_, _) => await RunUiActionAsync("geoset-mode-change", LoadSelectedModelAsync);
         _skinPicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-skin-change", LoadSelectedModelAsync); };
+        _facePicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-face-change", LoadSelectedModelAsync); };
+        _facialHairPicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-facial-hair-change", LoadSelectedModelAsync); };
+        _hairPicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-hair-change", LoadSelectedModelAsync); };
         _appearanceSourcePicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-source-change", LoadSelectedModelAsync); };
         _modelSearch.TextChanged += (_, _) => FilterModels(); _modelFilter.SelectionChanged += (_, _) => FilterModels();
         for (var index = 0; index < 2; index++) { var slot = index; _slotButtons[index].Click += (_, _) => SetActiveSlot(slot); }
@@ -202,7 +211,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _modelPicker.HorizontalAlignment = HorizontalAlignment.Stretch;
         var modelFilters = new Grid { ColumnDefinitions = new("2*,*,Auto,Auto"), ColumnSpacing = 8, Children = { _modelSearch, WithColumn(_modelFilter, 1), WithColumn(previousModel, 2), WithColumn(nextModel, 3) } };
         var appearanceHeader = new TextBlock { Text = "CHARSECTIONS BASE APPEARANCE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") };
-        var appearancePickers = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { _skinPicker, WithColumn(_appearanceSourcePicker, 1) } };
+        var appearancePickers = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Children = { _skinPicker, WithColumn(_appearanceSourcePicker, 1), WithCell(_facePicker, 1, 0), WithCell(_facialHairPicker, 1, 1), WithCell(_hairPicker, 2, 0) } };
         var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _geosetMode, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
         var modelHeaderScroll = new ScrollViewer { Content = modelHeader, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
         var modelPane = new Grid { RowDefinitions = new("Auto,*"), IsVisible = false, Children = { modelHeaderScroll } };
@@ -298,7 +307,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         if (_index is null || _directories.SelectedItem is not AssetComparisonDirectory directory) { _directoryReady = false; _selectedDirectory = null; return; }
         var index = _index;
         var modelOnly = IsModelOnlyDirectory(directory);
-        _directoryReady = false; _modelsDiscovered = false; _folderEntries = []; _filteredEntries = []; _selectedTexture = null; _resolvedModelTexturePath = null; _resolvedModelTextureCount = 0;
+        _directoryReady = false; _modelsDiscovered = false; _folderEntries = []; _filteredEntries = []; _selectedTexture = null; _resolvedModelTexturePath = null; _resolvedModelTextureCount = 0; _appearanceComposed = false;
         _modelDiscoveryTask = null;
         _allModels = []; _folderModels = []; _modelDiscoveryScope = directory.LogicalPath; _loadedModelGeometry = null; _modelDependencyGraph = null;
         _modelView.ClearGeometry(); _modelView.SetTexture(null); ApplyDirectoryPresentation(directory, modelOnly); FilterModels(requestModelLoad: false);
@@ -497,10 +506,11 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             var visibilityMode = _geosetMode.SelectedIndex == 1 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath, visibilityMode), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
-            var requestedSkin = _skinPicker.SelectedItem as CharacterBaseSkin; var requestedSource = (_appearanceSourcePicker.SelectedItem as AppearanceSourceChoice)?.FullPath;
-            var appearance = await Task.Run(() => BuildAppearancePlan(model, requestedSkin, requestedSource, token), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+            var requestedSkin = _skinPicker.SelectedItem as CharacterBaseSkin; var requestedFace = _facePicker.SelectedItem as CharacterSection; var requestedFacialHair = _facialHairPicker.SelectedItem as CharacterSection; var requestedHair = _hairPicker.SelectedItem as CharacterSection; var requestedSource = (_appearanceSourcePicker.SelectedItem as AppearanceSourceChoice)?.FullPath;
+            var appearance = await Task.Run(() => BuildAppearancePlan(model, requestedSkin, requestedFace, requestedFacialHair, requestedHair, requestedSource, token), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             ApplyAppearancePlan(appearance);
             var embeddedTextures = new Dictionary<int, RgbaTexture>(); string? embeddedTexturePath = null;
+            _appearanceComposed = false;
             if (_selectedTexture is null)
             {
                 var usedTextureDefinitions = geometry.Batches.Where(batch => batch.TextureDefinitionIndex is not null).Select(batch => batch.TextureDefinitionIndex!.Value).Distinct().ToHashSet();
@@ -520,20 +530,19 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                     }
                     if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
                 }
-                if (appearance.SelectedSourcePath is { } appearancePath)
+                if (appearance.SelectedSource is not null)
                 {
-                    var bodySlots = geometry.TextureSlots.Where(slot => usedTextureDefinitions.Contains(slot.Index) && slot.Type == 1).Select(slot => slot.Index).ToArray();
-                    if (bodySlots.Length > 0)
+                    try
                     {
-                        try
-                        {
-                            var bodyTexture = await Task.Run(() => BlpTextureService.Decode(appearancePath), token);
-                            foreach (var slot in bodySlots) embeddedTextures[slot] = bodyTexture;
-                            embeddedTexturePath ??= appearancePath;
-                        }
-                        catch (Exception exception) when (exception is not OperationCanceledException) { DesktopCrashLogger.Log($"Character base-skin decode failed: {appearancePath}", exception); }
-                        if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+                        var decodedAppearance = await Task.Run(() => DecodeAppearance(appearance, token), token);
+                        foreach (var slot in geometry.TextureSlots.Where(slot => usedTextureDefinitions.Contains(slot.Index) && slot.Type == 1)) embeddedTextures[slot.Index] = decodedAppearance.Body;
+                        if (decodedAppearance.Hair is not null) foreach (var slot in geometry.TextureSlots.Where(slot => usedTextureDefinitions.Contains(slot.Index) && slot.Type == 6)) embeddedTextures[slot.Index] = decodedAppearance.Hair;
+                        embeddedTexturePath ??= appearance.SelectedSource.FullPath;
+                        _appearanceComposed = true;
+                        if (decodedAppearance.Missing.Count > 0) _appearanceStatus.Text += $" Missing from '{appearance.SelectedSource.Provenance}': {string.Join(", ", decodedAppearance.Missing)}.";
                     }
+                    catch (Exception exception) when (exception is not OperationCanceledException) { DesktopCrashLogger.Log($"Character appearance composition failed: {appearance.SelectedSource.FullPath}", exception); }
+                    if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
                 }
             }
             _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _resolvedModelTexturePath = embeddedTexturePath; _resolvedModelTextureCount = embeddedTextures.Count; _modelView.SetGeometry(geometry);
@@ -550,29 +559,38 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         }
     }
 
-    private AppearancePlan BuildAppearancePlan(AssetComparisonModel model, CharacterBaseSkin? requestedSkin, string? requestedSource, CancellationToken token)
+    private AppearancePlan BuildAppearancePlan(AssetComparisonModel model, CharacterBaseSkin? requestedSkin, CharacterSection? requestedFace, CharacterSection? requestedFacialHair, CharacterSection? requestedHair, string? requestedSource, CancellationToken token)
     {
         var identity = CharacterAppearanceService.Infer(model.LogicalPath, model.FileName);
-        if (identity is null) return new(null, [], null, [], null, "This model path does not identify a playable race and sex; CharSections appearance binding does not apply.");
+        if (identity is null) return EmptyAppearance(null, "This model path does not identify a playable race and sex; CharSections appearance binding does not apply.");
         var dbcPath = Path.Combine(_session.Settings.CoreDbcPath, "CharSections.dbc");
-        if (!File.Exists(dbcPath)) return new(identity, [], null, [], null, $"Detected {identity.RaceName} {identity.SexName}, but CharSections.dbc is unavailable. Point Server & SQL at a server DBC folder to enable real base skins.");
-        var skins = CharacterAppearanceService.LoadBaseSkins(dbcPath, identity); token.ThrowIfCancellationRequested();
-        if (skins.Count == 0) return new(identity, [], null, [], null, $"CharSections.dbc has no base-skin records for {identity.RaceName} {identity.SexName}.");
+        if (!File.Exists(dbcPath)) return EmptyAppearance(identity, $"Detected {identity.RaceName} {identity.SexName}, but CharSections.dbc is unavailable. Point Server & SQL at a server DBC folder to enable real appearances.");
+        var sections = CharacterAppearanceService.LoadSections(dbcPath, identity); token.ThrowIfCancellationRequested();
+        var skins = sections.Where(section => section.Kind == CharacterSectionKind.Skin && section.Texture0 is not null).Select(section => new CharacterBaseSkin(section.Id, section.RaceId, section.SexId, section.Flags, section.VariationIndex, section.ColorIndex, section.Texture0!)).ToArray();
+        if (skins.Length == 0) return EmptyAppearance(identity, $"CharSections.dbc has no base-skin records for {identity.RaceName} {identity.SexName}.");
         var selectedSkin = requestedSkin is not null && requestedSkin.RaceId == identity.RaceId && requestedSkin.SexId == identity.SexId
             ? skins.FirstOrDefault(skin => skin.Id == requestedSkin.Id) ?? skins[0] : skins[0];
-        if (_index is null) return new(identity, skins, selectedSkin, [], null, "The asset index is unavailable, so the selected CharSections texture cannot be resolved.");
+        var faces = sections.Where(section => section.Kind == CharacterSectionKind.Face && section.ColorIndex == selectedSkin.ColorIndex).ToArray();
+        var facialHair = sections.Where(section => section.Kind == CharacterSectionKind.FacialHair).ToArray();
+        var hair = sections.Where(section => section.Kind == CharacterSectionKind.Hair).ToArray();
+        var underwear = sections.FirstOrDefault(section => section.Kind == CharacterSectionKind.Underwear && section.ColorIndex == selectedSkin.ColorIndex);
+        var selectedFace = Pick(faces, requestedFace); var selectedFacialHair = Pick(facialHair, requestedFacialHair); var selectedHair = Pick(hair, requestedHair);
+        if (_index is null) return new(identity, skins, selectedSkin, faces, selectedFace, facialHair, selectedFacialHair, hair, selectedHair, underwear, [], null, "The asset index is unavailable, so the selected CharSections textures cannot be resolved.");
         var resolution = AssetDependencyGraphService.ResolveClientAsset(_index, model.Provenance, selectedSkin.TexturePath);
         var paths = (resolution.SourcePath is not null ? new[] { resolution.SourcePath } : resolution.Candidates).ToArray();
         var exactEquivalent = paths.Length > 1 && paths.Skip(1).All(path => AssetComparisonService.FilesAreIdentical(paths[0], path, token));
         var sources = paths.Select(path => new AppearanceSourceChoice(SourceName(_index, path), path, exactEquivalent)).OrderBy(source => source.Provenance, StringComparer.OrdinalIgnoreCase).ToArray();
-        var selectedPath = sources.FirstOrDefault(source => source.FullPath.Equals(requestedSource, StringComparison.OrdinalIgnoreCase))?.FullPath;
-        selectedPath ??= sources.Length == 1 || exactEquivalent ? sources.FirstOrDefault()?.FullPath : null;
+        var selectedSource = sources.FirstOrDefault(source => source.FullPath.Equals(requestedSource, StringComparison.OrdinalIgnoreCase));
+        selectedSource ??= sources.Length == 1 || exactEquivalent ? sources.FirstOrDefault() : null;
         var message = sources.Length == 0
             ? $"{identity.RaceName} {identity.SexName} · skin {selectedSkin.ColorIndex}: required texture is missing from the processed library."
-            : selectedPath is null
+            : selectedSource is null
                 ? $"{identity.RaceName} {identity.SexName} · skin {selectedSkin.ColorIndex}: {sources.Length:N0} non-identical provenance variants exist. Choose the source that belongs to this model/client; Crucible will not guess."
-                : $"{identity.RaceName} {identity.SexName} · skin {selectedSkin.ColorIndex}: applying {SourceName(_index, selectedPath)} to the model's body texture slot{(exactEquivalent ? " (all listed candidates are byte-for-byte identical)" : string.Empty)}.";
-        return new(identity, skins, selectedSkin, sources, selectedPath, message);
+                : $"{identity.RaceName} {identity.SexName} · skin {selectedSkin.ColorIndex}: composing body, face, underwear, scalp, and hair from {selectedSource.Provenance}{(exactEquivalent ? " (all listed base candidates are byte-for-byte identical)" : string.Empty)}.";
+        return new(identity, skins, selectedSkin, faces, selectedFace, facialHair, selectedFacialHair, hair, selectedHair, underwear, sources, selectedSource, message);
+
+        static CharacterSection? Pick(IReadOnlyList<CharacterSection> options, CharacterSection? requested)
+            => requested is null ? options.FirstOrDefault() : options.FirstOrDefault(option => option.Id == requested.Id) ?? options.FirstOrDefault();
     }
 
     private void ApplyAppearancePlan(AppearancePlan plan)
@@ -581,10 +599,45 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         try
         {
             _skinPicker.ItemsSource = plan.Skins; _skinPicker.SelectedItem = plan.SelectedSkin; _skinPicker.IsEnabled = plan.Skins.Count > 0;
-            _appearanceSourcePicker.ItemsSource = plan.Sources; _appearanceSourcePicker.SelectedItem = plan.SelectedSourcePath is null ? null : plan.Sources.FirstOrDefault(source => source.FullPath.Equals(plan.SelectedSourcePath, StringComparison.OrdinalIgnoreCase)); _appearanceSourcePicker.IsEnabled = plan.Sources.Count > 0;
+            _facePicker.ItemsSource = plan.Faces; _facePicker.SelectedItem = plan.SelectedFace; _facePicker.IsEnabled = plan.Faces.Count > 0;
+            _facialHairPicker.ItemsSource = plan.FacialHair; _facialHairPicker.SelectedItem = plan.SelectedFacialHair; _facialHairPicker.IsEnabled = plan.FacialHair.Count > 0;
+            _hairPicker.ItemsSource = plan.Hair; _hairPicker.SelectedItem = plan.SelectedHair; _hairPicker.IsEnabled = plan.Hair.Count > 0;
+            _appearanceSourcePicker.ItemsSource = plan.Sources; _appearanceSourcePicker.SelectedItem = plan.SelectedSource; _appearanceSourcePicker.IsEnabled = plan.Sources.Count > 0;
             _appearanceStatus.Text = plan.Message;
         }
         finally { _suppressAppearanceSelection = false; }
+    }
+
+    private static AppearancePlan EmptyAppearance(CharacterAppearanceIdentity? identity, string message) => new(identity, [], null, [], null, [], null, [], null, null, [], null, message);
+
+    private sealed record DecodedAppearance(RgbaTexture Body, RgbaTexture? Hair, IReadOnlyList<string> Missing);
+    private DecodedAppearance DecodeAppearance(AppearancePlan plan, CancellationToken token)
+    {
+        if (_index is null || plan.SelectedSource is null) throw new InvalidOperationException("A selected appearance provenance is required.");
+        var missing = new List<string>(); var layers = new List<CharacterTextureLayer>();
+        var body = BlpTextureService.Decode(plan.SelectedSource.FullPath); token.ThrowIfCancellationRequested();
+        Add(plan.Underwear?.Texture1, CharacterTextureRegion.Torso); Add(plan.Underwear?.Texture0, CharacterTextureRegion.Pelvis);
+        Add(plan.SelectedFace?.Texture1, CharacterTextureRegion.FaceUpper); Add(plan.SelectedFace?.Texture0, CharacterTextureRegion.FaceLower);
+        Add(plan.SelectedFacialHair?.Texture1, CharacterTextureRegion.FaceUpper); Add(plan.SelectedFacialHair?.Texture0, CharacterTextureRegion.FaceLower);
+        Add(plan.SelectedHair?.Texture2, CharacterTextureRegion.FaceUpper); Add(plan.SelectedHair?.Texture1, CharacterTextureRegion.FaceLower);
+        RgbaTexture? hair = null;
+        var hairPath = Resolve(plan.SelectedHair?.Texture0);
+        if (hairPath is not null) hair = BlpTextureService.Decode(hairPath);
+        token.ThrowIfCancellationRequested();
+        return new(CharacterTextureComposer.Compose(body, layers), hair, missing);
+
+        void Add(string? clientPath, CharacterTextureRegion region)
+        {
+            var path = Resolve(clientPath); if (path is null) return;
+            layers.Add(new(BlpTextureService.Decode(path), region)); token.ThrowIfCancellationRequested();
+        }
+        string? Resolve(string? clientPath)
+        {
+            if (string.IsNullOrWhiteSpace(clientPath)) return null;
+            var resolution = AssetDependencyGraphService.ResolveClientAsset(_index, plan.SelectedSource.Provenance, clientPath);
+            if (resolution.SourcePath is not null) return resolution.SourcePath;
+            missing.Add(Path.GetFileName(clientPath)); return null;
+        }
     }
 
     private static string SourceName(AssetComparisonIndex index, string path)
@@ -595,15 +648,17 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     {
         if (_modelPicker.SelectedItem is not AssetComparisonModel model) return;
         var texture = _selectedTexture is null
-            ? _resolvedModelTexturePath is not null ? $"Resolved {_resolvedModelTextureCount:N0} embedded material BLP(s); first: {Path.GetFileName(_resolvedModelTexturePath)}." : (_modelOnlyDirectory ? "Texture overlay: no embedded BLP resolved; geometry remains available for inspection." : "No texture card selected.")
+            ? _resolvedModelTexturePath is not null ? $"Resolved {_resolvedModelTextureCount:N0} material texture(s); first source: {Path.GetFileName(_resolvedModelTexturePath)}." : (_modelOnlyDirectory ? "Texture overlay: no embedded or appearance BLP resolved; geometry remains available for inspection." : "No texture card selected.")
             : $"Selected texture candidate: {_selectedTexture.Provenance} · {_selectedTexture.FileName}";
         var slots = _loadedModelGeometry is null ? "Texture slots: load pending." : _loadedModelGeometry.TextureSlots.Count == 0 ? "Texture slots: none declared." : "Texture slots: " + string.Join(", ", _loadedModelGeometry.TextureSlots.Select(slot => $"{slot.Index}:{TextureTypeName(slot.Type)}{(string.IsNullOrWhiteSpace(slot.EmbeddedPath) ? string.Empty : $"={slot.EmbeddedPath}")}"));
         var dependencies = _modelDependencyGraph is null ? "Dependencies: inspection pending." : $"Dependencies: {_modelDependencyGraph.Resolved.Count:N0} resolved · {_modelDependencyGraph.ExternalBindings.Count:N0} appearance/DBC binding(s) · {_modelDependencyGraph.Blocking.Count:N0} BLOCKING";
         var geosets = _loadedModelGeometry is null || _loadedModelGeometry.Submeshes.Count == 0
             ? "Geosets: no SKIN submesh table; showing the complete mesh."
             : $"Geosets: {_loadedModelGeometry.Submeshes.Count(section => section.Visible):N0} visible of {_loadedModelGeometry.Submeshes.Count:N0} · {_loadedModelGeometry.VisibilityMode} · {_loadedModelGeometry.TriangleIndices.Count / 3:N0} of {_loadedModelGeometry.TotalTriangleIndices / 3:N0} triangles";
-        var previewNote = _resolvedModelTexturePath is not null
-            ? "Geometry and first-pass per-submesh texture-unit assignment are live. Multi-pass shader blending and Character layer/CharSections composition remain fidelity stages."
+        var previewNote = _appearanceComposed
+            ? "Geometry, per-submesh materials, and the selected CharSections body/face/facial-hair/underwear/scalp/hair appearance are live. Equipment, animation, and multi-pass shaders remain fidelity stages."
+            : _resolvedModelTexturePath is not null
+            ? "Geometry and first-pass per-submesh texture-unit assignment are live. Unresolved replaceable slots and multi-pass shader blending remain fidelity stages."
             : _modelOnlyDirectory
             ? "Geometry is live. Replacement texture resolution and Character layer/CharSections composition remain approximate until the full appearance plan supplies every layer."
             : "Geometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
@@ -769,4 +824,5 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private static string FormatBytes(long bytes) => bytes >= 1024L * 1024 * 1024 ? $"{bytes / (1024d * 1024 * 1024):0.##} GiB" : bytes >= 1024L * 1024 ? $"{bytes / (1024d * 1024):0.##} MiB" : bytes >= 1024 ? $"{bytes / 1024d:0.#} KiB" : $"{bytes:N0} B";
     private static string TextureTypeName(uint type) => type switch { 0 => "embedded", 1 => "body+clothes", 2 => "cape", 6 => "hair/beard", 8 => "fur", 11 => "creature-skin-1", 12 => "creature-skin-2", 13 => "creature-skin-3", _ => $"replaceable-{type}" };
     private static T WithColumn<T>(T control, int column) where T : Control { Grid.SetColumn(control, column); return control; }
+    private static T WithCell<T>(T control, int row, int column) where T : Control { Grid.SetRow(control, row); Grid.SetColumn(control, column); return control; }
 }

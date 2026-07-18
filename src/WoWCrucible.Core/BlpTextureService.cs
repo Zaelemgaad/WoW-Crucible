@@ -381,6 +381,8 @@ public static class BlpTextureService
     private static IReadOnlyList<BlpMipLevel> ParseMipTable(byte[] header, int offsetsStart, int sizesStart, int width, int height,
         long streamStart, long streamLength, int minimumDataOffset, Func<int, int, int> minimumPayloadSize, ICollection<string> warnings)
     {
+        if (U32(header, offsetsStart) == uint.MaxValue && U32(header, sizesStart) is var firstEnd && firstEnd > minimumDataOffset && firstEnd <= streamLength - streamStart + 1)
+            return ParseCumulativeEndMipTable(header, sizesStart, width, height, streamStart, streamLength, minimumDataOffset, minimumPayloadSize, warnings);
         var mips = new List<BlpMipLevel>();
         var ranges = new List<(long Start, long End, int Index)>();
         var sawEmpty = false; var maximumMipCount = 1 + (int)Math.Floor(Math.Log2(Math.Max(width, height)));
@@ -435,6 +437,29 @@ public static class BlpTextureService
         }
         if (mips.Count == 0 || mips[0].Index != 0) throw new InvalidDataException("The BLP has no top-level mip payload.");
         return mips;
+    }
+
+    private static IReadOnlyList<BlpMipLevel> ParseCumulativeEndMipTable(byte[] header, int endsStart, int width, int height,
+        long streamStart, long streamLength, int minimumDataOffset, Func<int, int, int> minimumPayloadSize, ICollection<string> warnings)
+    {
+        var result = new List<BlpMipLevel>(); var maximumMipCount = 1 + (int)Math.Floor(Math.Log2(Math.Max(width, height))); long previousEnd = 0;
+        for (var index = 0; index < Math.Min(16, maximumMipCount); index++)
+        {
+            var declaredEnd = U32(header, endsStart + index * 4); if (declaredEnd == 0) break;
+            var mipWidth = Math.Max(1, width >> index); var mipHeight = Math.Max(1, height >> index); var minimum = minimumPayloadSize(mipWidth, mipHeight);
+            var offset = index == 0 ? (long)declaredEnd - minimum : previousEnd;
+            var end = Math.Min((long)declaredEnd, streamLength - streamStart); var size = end - offset;
+            if (offset < minimumDataOffset || size < minimum || end <= offset)
+            {
+                if (result.Count > 0) { warnings.Add($"Stopped before malformed recovered trailing mip {index} in the legacy cumulative-end table."); break; }
+                throw new InvalidDataException("The legacy cumulative-end mip table could not produce a valid top-level payload.");
+            }
+            if (declaredEnd > streamLength - streamStart) warnings.Add($"Clamped recovered mip {index}'s cumulative end by {declaredEnd - (streamLength - streamStart):N0} byte(s) at EOF.");
+            result.Add(new(index, mipWidth, mipHeight, checked((int)offset), checked((int)size))); previousEnd = declaredEnd;
+        }
+        if (result.Count == 0) throw new InvalidDataException("The legacy cumulative-end mip table contains no usable mip levels.");
+        warnings.Add("Recovered a legacy exporter mip table whose offset entries are 0xFFFFFFFF and whose size entries contain cumulative payload ends.");
+        return result;
     }
 
     private static IReadOnlyList<string> MipWarnings(bool declaresMipmaps, IReadOnlyList<BlpMipLevel> mips)

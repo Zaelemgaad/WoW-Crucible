@@ -238,6 +238,20 @@ static int Asset(string[] args)
         foreach (var skin in skins) Console.WriteLine($"SKIN\t{skin.Id}\tvariation={skin.VariationIndex}\tcolor={skin.ColorIndex}\tflags=0x{skin.Flags:X}\t{skin.TexturePath}");
         return 0;
     }
+    if (args is ["appearance-compose", var baseTexturePath, var outputPng, .. var composeOptions])
+    {
+        var knownPrefixes = new[] { "--torso=", "--pelvis=", "--face-upper=", "--face-lower=", "--facial-upper=", "--facial-lower=", "--scalp-upper=", "--scalp-lower=" };
+        var unknown = composeOptions.Where(option => !knownPrefixes.Any(prefix => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) throw new ArgumentException($"Unknown appearance-compose option(s): {string.Join(", ", unknown)}");
+        var layers = new List<CharacterTextureLayer>();
+        Add("--torso=", CharacterTextureRegion.Torso); Add("--pelvis=", CharacterTextureRegion.Pelvis); Add("--face-upper=", CharacterTextureRegion.FaceUpper); Add("--face-lower=", CharacterTextureRegion.FaceLower);
+        Add("--facial-upper=", CharacterTextureRegion.FaceUpper); Add("--facial-lower=", CharacterTextureRegion.FaceLower); Add("--scalp-upper=", CharacterTextureRegion.FaceUpper); Add("--scalp-lower=", CharacterTextureRegion.FaceLower);
+        var composed = CharacterTextureComposer.Compose(BlpTextureService.Decode(baseTexturePath), layers);
+        BlpTextureService.WritePng(outputPng, composed, composeOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase));
+        Console.WriteLine($"Composed\t{composed.Width}x{composed.Height}\t{layers.Count:N0} layer(s)\t{Path.GetFullPath(outputPng)}");
+        return 0;
+        void Add(string prefix, CharacterTextureRegion region) { var path = Option(composeOptions, prefix); if (path is not null) layers.Add(new(BlpTextureService.Decode(path), region)); }
+    }
     if (args is ["workspace", var outputRoot, .. var workspaceInputs] && workspaceInputs.Length > 0)
     {
         var workspace = NativeAssetConversionService.CreateWorkspace(workspaceInputs, outputRoot);
@@ -247,7 +261,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset texture-info <file.blp>\n  wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]\n  wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]\n  wowcrucible asset texture-validate <file-or-folder> [--recursive]\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2> [--all-geosets]\n  wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]\n  wowcrucible asset library-repair <library-folder> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset texture-info <file.blp>\n  wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]\n  wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]\n  wowcrucible asset texture-validate <file-or-folder> [--recursive]\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2> [--all-geosets]\n  wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>\n  wowcrucible asset appearance-compose <base.blp> <output.png> [component options] [--overwrite]\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]\n  wowcrucible asset library-repair <library-folder> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Project(string[] args)
 {

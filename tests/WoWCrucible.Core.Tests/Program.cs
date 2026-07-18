@@ -45,6 +45,15 @@ for (var pixel = 0; pixel < 64; pixel++) { rawBytes[148 + pixel * 4] = texturePi
 File.WriteAllBytes(rawBlp, rawBytes); var rawDecoded = BlpTextureService.Decode(rawBlp);
 if (BlpTextureService.Inspect(rawBlp).Encoding != "BGRA8888" || !rawDecoded.Pixels.SequenceEqual(texturePixels))
     throw new InvalidOperationException("Native raw BGRA BLP2 decoding changed channel or alpha bytes.");
+var cumulativeBlp = Path.Combine(textureFixture, "fixture-cumulative-ends.blp"); var cumulativeBytes = File.ReadAllBytes(autoBlp);
+for (var mip = 0; mip < 16; mip++)
+{
+    var offset = BitConverter.ToUInt32(cumulativeBytes, 20 + mip * 4); var size = BitConverter.ToUInt32(cumulativeBytes, 84 + mip * 4);
+    BitConverter.GetBytes(uint.MaxValue).CopyTo(cumulativeBytes, 20 + mip * 4); BitConverter.GetBytes(offset == 0 || size == 0 ? 0u : checked(offset + size)).CopyTo(cumulativeBytes, 84 + mip * 4);
+}
+File.WriteAllBytes(cumulativeBlp, cumulativeBytes); var cumulativeInfo = BlpTextureService.Inspect(cumulativeBlp); var cumulativeDecoded = BlpTextureService.Decode(cumulativeBlp);
+if (cumulativeDecoded.Width != 8 || cumulativeDecoded.Height != 8 || !cumulativeInfo.Warnings.Any(warning => warning.Contains("cumulative", StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("Native BLP inspection did not recover the legacy cumulative-end mip-table exporter defect.");
 var phantomBlp = Path.Combine(textureFixture, "fixture-phantom-mip.blp"); var phantomBytes = File.ReadAllBytes(autoBlp);
 BitConverter.GetBytes((uint)phantomBytes.Length).CopyTo(phantomBytes, 20 + 4 * 4); BitConverter.GetBytes(uint.MaxValue).CopyTo(phantomBytes, 84 + 4 * 4); File.WriteAllBytes(phantomBlp, phantomBytes);
 var phantomInfo = BlpTextureService.Inspect(phantomBlp);
@@ -94,6 +103,15 @@ if (bloodElfFemale is null || bloodElfFemale.RaceId != 10 || bloodElfFemale.SexI
 var bloodElfSkins = CharacterAppearanceService.LoadBaseSkins(Path.Combine(args[1], "CharSections.dbc"), bloodElfFemale);
 if (bloodElfSkins.Count < 10 || bloodElfSkins[0].ColorIndex != 0 || !bloodElfSkins[0].TexturePath.EndsWith(@"BloodElfFemaleSkin00_00.blp", StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException("CharSections base-skin discovery did not expose the real Blood Elf female appearance records.");
+var bloodElfSections = CharacterAppearanceService.LoadSections(Path.Combine(args[1], "CharSections.dbc"), bloodElfFemale);
+if (!bloodElfSections.Any(section => section.Kind == CharacterSectionKind.Face && section.Texture0 is not null && section.Texture1 is not null) || !bloodElfSections.Any(section => section.Kind == CharacterSectionKind.Hair && section.Texture1 is not null && section.Texture2 is not null) || !bloodElfSections.Any(section => section.Kind == CharacterSectionKind.Underwear))
+    throw new InvalidOperationException("CharSections full appearance discovery omitted face, hair, or underwear component layers.");
+var atlasPixels = Enumerable.Repeat((byte)255, 256 * 256 * 4).ToArray(); var upperPixels = new byte[128 * 32 * 4];
+for (var offset = 0; offset < upperPixels.Length; offset += 4) { upperPixels[offset] = 12; upperPixels[offset + 1] = 34; upperPixels[offset + 2] = 56; upperPixels[offset + 3] = 255; }
+var composedAtlas = CharacterTextureComposer.Compose(new(256, 256, atlasPixels), [new(new(128, 32, upperPixels), CharacterTextureRegion.FaceUpper)]);
+var insideUpper = (160 * 256) * 4; var outsideUpper = (159 * 256) * 4;
+if (composedAtlas.Pixels[insideUpper] != 12 || composedAtlas.Pixels[insideUpper + 1] != 34 || composedAtlas.Pixels[insideUpper + 2] != 56 || composedAtlas.Pixels[outsideUpper] != 255)
+    throw new InvalidOperationException("Native character atlas composition did not constrain the face-upper layer to its verified Wrath region.");
 var modernModel = Path.Combine(assetFixture, "modern.m2");
 using (var stream = File.Create(modernModel)) using (var writer = new BinaryWriter(stream))
 {
