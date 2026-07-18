@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private MpqWorkspaceView? _mpqWorkspaceView;
     private ClientWorkspaceView? _clientWorkspaceView;
     private TextureWorkspaceView? _textureWorkspaceView;
+    private MapWorkspaceView? _mapWorkspaceView;
     private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
     private DbdSchemaAuditView? _dbdSchemaAuditView;
     private DbcExportWorkspaceView? _dbcExportWorkspaceView;
@@ -69,7 +70,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
+        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -92,7 +93,9 @@ public partial class MainWindow : Window
                 ? LoadM2Async(path)
                 : extension.Equals(".blp", StringComparison.OrdinalIgnoreCase)
                     ? OpenTextureWorkspaceAsync(path)
-            : ShowErrorAsync("Unsupported file", "The desktop opens DBC, WDB2 DB2, M2 and BLP files directly.");
+                    : extension.Equals(".adt", StringComparison.OrdinalIgnoreCase) || extension.Equals(".wdt", StringComparison.OrdinalIgnoreCase) || extension.Equals(".wdl", StringComparison.OrdinalIgnoreCase)
+                        ? OpenMapWorkspaceAsync(path)
+            : ShowErrorAsync("Unsupported file", "The desktop opens DBC, WDB2 DB2, M2, BLP, ADT, WDT, and WDL files directly.");
     }
 
     private async void OpenDbcClick(object? sender, RoutedEventArgs e)
@@ -725,6 +728,13 @@ public partial class MainWindow : Window
     }
 
     private void OpenTextureWorkspaceClick(object? sender, RoutedEventArgs e) => OpenTextureWorkspace();
+    private void OpenMapWorkspaceClick(object? sender, RoutedEventArgs e) => OpenMapWorkspace();
+    public void OpenMapWorkspace(string? path = null)
+    {
+        if (_mapWorkspaceView is null) { _mapWorkspaceView = new MapWorkspaceView(); _mapWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+        OpenFeatureWorkspace(_mapWorkspaceView, "Maps & World"); if (!string.IsNullOrWhiteSpace(path)) _ = _mapWorkspaceView.OpenAsync(path);
+    }
+    private async Task OpenMapWorkspaceAsync(string path) { OpenMapWorkspace(); await _mapWorkspaceView!.OpenAsync(path); }
     public void OpenTextureWorkspace(string? path = null)
     {
         if (_textureWorkspaceView is null)

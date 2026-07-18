@@ -51,6 +51,7 @@
                         <Button HorizontalContentAlignment="Left" Click="OpenBehaviorWorkspaceClick"><TextBlock Text="⌘  Behaviors &amp; dialogue" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenMpqWorkspaceClick"><TextBlock Text="◇  MPQ patches" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenClientWorkspaceClick"><TextBlock Text="▣  Client workshop" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenMapWorkspaceClick"><TextBlock Text="▦  Maps &amp; world" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenTextureWorkspaceClick"><TextBlock Text="▧  Texture lab" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenAssetComparisonClick"><TextBlock Text="⬡  Assets &amp; compare" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenNativeConversionClick"><TextBlock Text="⇄  Modern asset conversion" TextWrapping="Wrap" /></Button>

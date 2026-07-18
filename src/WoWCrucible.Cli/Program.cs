@@ -68,6 +68,22 @@ static int Tooling(string[] args)
 static int Asset(string[] args)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["map-info", var mapPath, .. var mapOptions])
+    {
+        var json = mapOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var includeCells = mapOptions.Contains("--cells", StringComparer.OrdinalIgnoreCase);
+        var unknown = mapOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.Equals("--cells", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset map-info option: {unknown[0]}");
+        var inspection = MapAssetInspectionService.Inspect(mapPath);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(inspection, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"Path\t{inspection.Path}\nKind\t{inspection.Kind}\nVersion\t{inspection.Version}\nGrid\t{inspection.GridWidth}x{inspection.GridHeight}\nPresent\t{inspection.PresentCells:N0}/{inspection.Cells.Count:N0}\nWorldTile\t{inspection.TileX?.ToString() ?? "-"},{inspection.TileY?.ToString() ?? "-"}\nHeight\t{inspection.MinimumHeight?.ToString("R") ?? "-"}..{inspection.MaximumHeight?.ToString("R") ?? "-"}\nTextures\t{inspection.TexturePaths.Count:N0}\nModels\t{inspection.ModelPaths.Count:N0}\nWMOs\t{inspection.WmoPaths.Count:N0}\nHeaderFlags\t0x{inspection.HeaderFlags:X}");
+            foreach (var chunk in inspection.Chunks) Console.WriteLine($"CHUNK\t{chunk.Id}\tcount={chunk.Occurrences:N0}\tbytes={chunk.PayloadBytes:N0}");
+            foreach (var finding in inspection.Findings) Console.WriteLine($"FINDING\t{finding}");
+            if (includeCells) foreach (var cell in inspection.Cells.Where(cell => cell.Present)) Console.WriteLine($"CELL\t{cell.X},{cell.Y}\tflags=0x{cell.Flags:X}\tarea={cell.AreaId?.ToString() ?? "-"}\tholes=0x{cell.Holes?.ToString("X") ?? "-"}\theight={cell.MinimumHeight?.ToString("R") ?? "-"}..{cell.MaximumHeight?.ToString("R") ?? "-"}");
+        }
+        return inspection.Findings.Any(finding => finding.StartsWith("MVER", StringComparison.Ordinal)) ? 3 : 0;
+    }
     if (args is ["texture-info", var texturePath])
     {
         var info = BlpTextureService.Inspect(texturePath);
@@ -1546,6 +1562,8 @@ static IReadOnlyList<MpqFileEntry> LoadMpqIndex(PatchArchiveService service, str
 }
 static int GroupHelp(string message, int code)
 {
+    if (message.Contains("wowcrucible asset texture-info", StringComparison.Ordinal))
+        message = message.Replace("Usage:\n", "Usage:\n  wowcrucible asset map-info <file.adt|wdt|wdl> [--cells] [--format=text|json]\n", StringComparison.Ordinal);
     if (message.Contains("wowcrucible db query", StringComparison.Ordinal))
         message += "\n\nDatabase objects:\n  wowcrucible db objects <host> <port> <user> <database> [--type=view|trigger|procedure|function|event] [--format=text|json]\n  wowcrucible db object-show <host> <port> <user> <database> <type> <name> [--format=text|json]\n  wowcrucible db object-export <host> <port> <user> <database> <output.sql> [--overwrite]\n  wowcrucible db object-drop <host> <port> <user> <database> <type> <name> [--apply]\n  wowcrucible db view-set <host> <port> <user> <database> <name> <select.sql> [--apply]\n  wowcrucible db event-state <host> <port> <user> <database> <name> <enable|disable> [--apply]\n\nTarget-bound synchronization:\n  wowcrucible db sync-plan <host> <port> <user> <database> <verified-audit> <plan.json> [--include=glob]... [--include-removals] [--auto-remap] [--remap-start=ID] [--maximum=N] [--overwrite]\n  wowcrucible db sync-inspect <plan.json> [--sql=preview.sql] [--overwrite]\n  wowcrucible db sync-apply <host> <port> <user> <database> <plan.json> <receipt.json> [--apply] [--overwrite]\n  wowcrucible db sync-rollback <host> <port> <user> <database> <receipt.json> [--apply]\n\nObject mutations and synchronization apply/rollback are dry-run unless --apply is explicit. Guided views accept exactly one independently validated SELECT; synchronization requires a verified baseline comparison, exact primary keys, target preimage matches, and a rollback receipt. Automatic collision remapping is opt-in and every source-to-target ID plus rewritten recognized reference is printed for review.\n\nRead-only query batches: add --batch to execute up to 32 semicolon-delimited SELECT/SHOW/DESCRIBE/EXPLAIN statements from one SQL file. Use --batch-format=text|json for independently shaped, labeled result sets. Batches reject --write and single-result --output switches; SELECT file output is always blocked.";
     if (code == 0) Console.WriteLine(message); else Console.Error.WriteLine(message); return code;

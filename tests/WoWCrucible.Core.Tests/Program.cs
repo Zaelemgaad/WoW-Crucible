@@ -382,6 +382,24 @@ File.WriteAllBytes(wotlkModel, wotlkBytes); File.WriteAllText(Path.Combine(asset
 var compatibleModel = NativeAssetConversionService.Inspect(wotlkModel);
 if (compatibleModel.Compatibility != AssetCompatibility.AlreadyWotlk335 || compatibleModel.Version != 264 || compatibleModel.Dependencies.Count != 1)
     throw new InvalidOperationException("Native asset inspection did not recognize a Wrath M2 and its skin dependency.");
+var mapWdt = Path.Combine(assetFixture, "fixture.wdt"); var mainFixture = new byte[64 * 64 * 8]; BitConverter.GetBytes((uint)1).CopyTo(mainFixture, 0); BitConverter.GetBytes((uint)3).CopyTo(mainFixture, (64 * 64 - 1) * 8);
+using (var stream = File.Create(mapWdt)) using (var writer = new BinaryWriter(stream)) { WriteMapChunk(writer, "MVER", BitConverter.GetBytes((uint)18)); WriteMapChunk(writer, "MPHD", new byte[32]); WriteMapChunk(writer, "MAIN", mainFixture); }
+var wdtInspection = MapAssetInspectionService.Inspect(mapWdt);
+if (wdtInspection.Kind != MapAssetKind.Wdt || wdtInspection.Version != 18 || wdtInspection.PresentCells != 2 || !wdtInspection.Cells[0].Present || !wdtInspection.Cells[^1].Present || wdtInspection.GridWidth != 64)
+    throw new InvalidOperationException("Native WDT MAIN tile inspection failed.");
+var mapWdl = Path.Combine(assetFixture, "fixture.wdl"); var maofFixture = new byte[64 * 64 * 4]; BitConverter.GetBytes((uint)(12 + 8 + maofFixture.Length)).CopyTo(maofFixture, 5 * 4); var mareFixture = new byte[1090];
+for (var height = 0; height < 545; height++) BitConverter.GetBytes((short)(height - 100)).CopyTo(mareFixture, height * 2);
+using (var stream = File.Create(mapWdl)) using (var writer = new BinaryWriter(stream)) { WriteMapChunk(writer, "MVER", BitConverter.GetBytes((uint)18)); WriteMapChunk(writer, "MAOF", maofFixture); WriteMapChunk(writer, "MARE", mareFixture); }
+var wdlInspection = MapAssetInspectionService.Inspect(mapWdl); var wdlCell = wdlInspection.Cells.Single(cell => cell.Present);
+if (wdlInspection.Kind != MapAssetKind.Wdl || wdlInspection.PresentCells != 1 || wdlCell.X != 5 || wdlCell.Y != 0 || wdlCell.MinimumHeight != -100 || wdlCell.MaximumHeight != 444)
+    throw new InvalidOperationException("Native WDL MAOF/MARE presence or horizon-height inspection failed.");
+var mapAdt = Path.Combine(assetFixture, "fixture_31_33.adt"); var mcnkFixture = new byte[128 + 8 + 145 * 4];
+BitConverter.GetBytes((uint)3).CopyTo(mcnkFixture, 4); BitConverter.GetBytes((uint)4).CopyTo(mcnkFixture, 8); BitConverter.GetBytes((uint)136).CopyTo(mcnkFixture, 0x14); BitConverter.GetBytes((uint)12).CopyTo(mcnkFixture, 0x34); BitConverter.GetBytes((uint)1).CopyTo(mcnkFixture, 0x3C); BitConverter.GetBytes(100f).CopyTo(mcnkFixture, 0x70);
+System.Text.Encoding.ASCII.GetBytes("TVCM").CopyTo(mcnkFixture, 128); BitConverter.GetBytes((uint)(145 * 4)).CopyTo(mcnkFixture, 132); for (var height = 0; height < 145; height++) BitConverter.GetBytes((float)height).CopyTo(mcnkFixture, 136 + height * 4);
+using (var stream = File.Create(mapAdt)) using (var writer = new BinaryWriter(stream)) { WriteMapChunk(writer, "MVER", BitConverter.GetBytes((uint)18)); WriteMapChunk(writer, "MCNK", mcnkFixture); }
+var adtInspection = MapAssetInspectionService.Inspect(mapAdt); var adtCell = adtInspection.Cells.Single(cell => cell.Present);
+if (adtInspection.Kind != MapAssetKind.Adt || adtInspection.TileX != 31 || adtInspection.TileY != 33 || adtCell.X != 3 || adtCell.Y != 4 || adtCell.AreaId != 12 || adtCell.Holes != 1 || adtCell.MinimumHeight != 100f || adtCell.MaximumHeight != 244f)
+    throw new InvalidOperationException("Native ADT MCNK coordinate, area, holes, or MCVT height inspection failed.");
 var geometryModelPath = Path.Combine(assetFixture, "geometry.m2"); var geometryBytes = new byte[0x300];
 System.Text.Encoding.ASCII.GetBytes("MD20").CopyTo(geometryBytes, 0); BitConverter.GetBytes((uint)264).CopyTo(geometryBytes, 4); BitConverter.GetBytes((uint)3).CopyTo(geometryBytes, 0x3C); BitConverter.GetBytes((uint)0x130).CopyTo(geometryBytes, 0x40);
 const int fixtureBoneOffset = 0x220; const int fixtureAttachmentOffset = 0x278; const int fixtureAttachmentLookupOffset = 0x2A0;
@@ -1989,4 +2007,10 @@ static void RewriteRecoveryArtifact(
     }
     using var rewrittenManifestStream = destinationArchive.CreateEntry("manifest.json").Open();
     System.Text.Json.JsonSerializer.Serialize(rewrittenManifestStream, manifest, json);
+}
+
+static void WriteMapChunk(BinaryWriter writer, string id, byte[] payload)
+{
+    if (id.Length != 4) throw new ArgumentException("A map chunk ID must contain four characters.", nameof(id));
+    writer.Write(System.Text.Encoding.ASCII.GetBytes(new string(id.Reverse().ToArray()))); writer.Write((uint)payload.Length); writer.Write(payload);
 }
