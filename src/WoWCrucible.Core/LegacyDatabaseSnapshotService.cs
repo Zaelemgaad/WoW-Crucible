@@ -112,21 +112,21 @@ public sealed class LegacyDatabaseSnapshotService
     private static readonly string[] SensitiveStatePatterns =
     [
         // Authentication/realm state.
-        "account", "account_access", "account_banned", "account_muted", "auth_*", "ip_banned", "logs", "logs_ip_actions",
+        "account", "account_*", "auth_*", "ip_banned", "logs", "logs_ip_actions", "rbac_account_*",
         "realm", "realmcharacters", "realmlist", "secret_digest", "uptime",
         // Character/account runtime state. Patterns are intentionally narrow: world definitions such as
         // mail_loot_template, instance_template, guild_rewards, and pet_levelstats must remain capturable.
         "account_data", "account_instance_times", "account_tutorial", "addons", "arena_team", "arena_team_member", "arena_team_stats",
-        "auctionhouse", "banned_addons", "bugreport", "calendar_events", "calendar_invites", "channels", "characters", "character_account_data",
+        "auctionbidders", "auctionhouse", "banned_addons", "battleground_deserters", "bugreport", "calendar_events", "calendar_invites", "channels", "channels_bans", "channels_rights", "characters", "character_*",
         "character_achievement", "character_achievement_progress", "character_action", "character_aura", "character_banned", "character_battleground_data",
         "character_battleground_random", "character_declinedname", "character_equipmentsets", "character_gifts", "character_glyphs", "character_homebind",
         "character_instance", "character_inventory", "character_pet", "character_pet_declinedname", "character_queststatus*", "character_reputation",
         "character_skills", "character_social", "character_spell", "character_spell_cooldown", "character_stats", "character_talent", "character_void_storage",
         "corpse", "game_event_condition_save", "game_event_save", "gm_subsurvey", "gm_survey", "gm_ticket", "group_instance", "group_member", "groups",
         "guild", "guild_achievement", "guild_bank_eventlog", "guild_bank_item", "guild_bank_right", "guild_bank_tab", "guild_eventlog", "guild_member",
-        "guild_member_withdraw", "guild_newslog", "guild_rank", "instance", "instance_reset", "item_instance", "item_loot_items", "item_loot_money",
-        "lag_reports", "lfg_data", "mail", "mail_items", "pet_aura", "pet_spell", "pet_spell_cooldown", "petition", "petition_sign",
-        "pool_quest_save", "pvpstats_*", "quest_tracker", "reserved_name", "respawn", "warden_action", "worldstates"
+        "guild_member_withdraw", "guild_newslog", "guild_rank", "instance", "instance_reset", "instance_saved_go_state_data", "item_instance", "item_loot_items", "item_loot_money", "item_loot_storage", "item_refund_instance", "item_soulbound_trade_data",
+        "lag_reports", "lfg_data", "log_*", "mail", "mail_items", "mail_server_character", "pet_aura", "pet_spell", "pet_spell_cooldown", "petition", "petition_sign",
+        "pool_quest_save", "pvpstats_*", "quest_tracker", "recovery_item", "reserved_name", "respawn", "creature_respawn", "gameobject_respawn", "spam_reports", "warden_action", "world_state", "worldstates"
     ];
 
     public async Task<LegacyDatabaseSnapshotResult> CaptureAsync(
@@ -329,7 +329,7 @@ public sealed class LegacyDatabaseSnapshotService
             }
             if (manifest.Tables.Sum(table => table.Rows) != manifest.TotalRows) findings.Add("Manifest total row count does not equal the sum of its table row counts.");
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (exception is not OperationCanceledException and not OutOfMemoryException and not AccessViolationException)
         {
             findings.Add(exception.Message);
         }
@@ -355,7 +355,7 @@ public sealed class LegacyDatabaseSnapshotService
         {
             var included = includes.Length == 0 || includes.Any(pattern => GlobMatches(table.Name, pattern));
             var explicitlyExcluded = excludes.Any(pattern => GlobMatches(table.Name, pattern));
-            var sensitive = !options.IncludeSensitiveState && SensitiveStatePatterns.Any(pattern => GlobMatches(table.Name, pattern));
+            var sensitive = !options.IncludeSensitiveState && IsSensitiveStateTable(table.Name);
             if (included && !explicitlyExcluded && !sensitive) selected.Add(table);
             else excluded.Add(table.Name);
         }
@@ -376,6 +376,9 @@ public sealed class LegacyDatabaseSnapshotService
         var expression = "^" + Regex.Escape(pattern.Trim()).Replace("\\*", ".*").Replace("\\?", ".") + "$";
         return Regex.IsMatch(value, expression, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
     }
+
+    public static bool IsSensitiveStateTable(string tableName) =>
+        SensitiveStatePatterns.Any(pattern => GlobMatches(tableName, pattern));
 
     private static bool IsSha256(string? value) => value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F');
 

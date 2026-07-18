@@ -11,7 +11,7 @@ public static class CrucibleContentProjectService
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
 
-    public static CrucibleContentProject Create(string rootPath, string name, string targetProfile = "wotlk-335a-12340", string? assetLibrary = null)
+    public static CrucibleContentProject Create(string rootPath, string name, string targetProfile = TargetProfileCatalog.DefaultProfileId, string? assetLibrary = null)
     {
         rootPath = Path.GetFullPath(rootPath); Directory.CreateDirectory(rootPath); var projectPath = Path.Combine(rootPath, "project.crucible.json");
         if (File.Exists(projectPath)) throw new IOException($"A Crucible content project already exists at {projectPath}");

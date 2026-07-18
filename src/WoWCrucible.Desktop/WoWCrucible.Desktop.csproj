@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Branding\WoWCrucible.ico</ApplicationIcon>
     <!-- A copied single-file build must carry Avalonia's native renderer libraries
          with it. Without this, Windows reports a misleading "Unknown Hard Error". -->
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
@@ -19,6 +20,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <AvaloniaResource Include="Assets\Branding\WoWCrucible.ico" />
+    <AvaloniaResource Include="Assets\Branding\WoWCrucible-128.png" />
     <ProjectReference Include="..\WoWCrucible.Core\WoWCrucible.Core.csproj" />
     <None Include="..\..\third_party\StormLib\win-x64\StormLib.dll"
           Link="StormLib.dll"

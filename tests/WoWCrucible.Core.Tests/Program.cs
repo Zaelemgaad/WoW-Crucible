@@ -91,8 +91,9 @@ var looseOnlyEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, 
 var exactDuplicates = AssetComparisonService.FindExactDuplicates(comparisonEntries);
 var comparisonModels = AssetComparisonService.GetDirectoryModels(comparisonIndex, @"Character\BloodElf\Female");
 var ancestorModels = AssetComparisonService.GetRelevantModels(comparisonIndex, @"Character\BloodElf\Female\Hair");
+var unrelatedModels = AssetComparisonService.GetRelevantModels(comparisonIndex, @"Character\Human\Female\Hair");
 if (comparisonIndex.TotalPngFiles != 9 || matchingDirectory.ProvenanceSources != 3 || comparisonEntries.Count != 4 || comparisonEntries.Select(entry => entry.FileName).Distinct().Count() != 4 ||
-    looseOnlyEntries.Count != 1 || looseOnlyEntries[0].Provenance != "ExtendedSkins" || exactDuplicates.Count != 1 || exactDuplicates[0].Entries.Count != 2 || exactDuplicates[0].RecoverableBytes != 3 || comparisonModels.Count != 1 || comparisonModels[0].Compatibility != AssetModelCompatibility.Ready || ancestorModels.DiscoveryScope != @"Character\BloodElf\Female" || ancestorModels.Models.Count != 1)
+    looseOnlyEntries.Count != 1 || looseOnlyEntries[0].Provenance != "ExtendedSkins" || exactDuplicates.Count != 1 || exactDuplicates[0].Entries.Count != 2 || exactDuplicates[0].RecoverableBytes != 3 || comparisonModels.Count != 1 || comparisonModels[0].Compatibility != AssetModelCompatibility.Ready || ancestorModels.DiscoveryScope != @"Character\BloodElf\Female" || ancestorModels.Models.Count != 1 || unrelatedModels.Models.Count != 0)
     throw new InvalidOperationException("Directory-first visual comparison did not merge matching provenance sources after Loose consolidation.");
 var definitivePath = DefinitiveAssetProjectService.DefaultPath(comparisonRoot); var definitive = DefinitiveAssetProjectService.LoadOrCreate(definitivePath, comparisonRoot);
 definitive = DefinitiveAssetProjectService.RecordTexture(definitivePath, definitive, comparisonEntries[0], AssetDecision.Keeper, "Race", "fixture keeper");
@@ -164,16 +165,61 @@ if (!recoverableConsolidation.Applied || recoverableConsolidation.CatalogRebuild
 Directory.Delete(catalogBlocker); var rebuiltCatalog = BulkAssetLibraryService.RebuildCatalog(recoverableLibrary); var recoveredJournal = System.Text.Json.JsonSerializer.Deserialize<LooseAssetConsolidationJournal>(File.ReadAllText(recoverableConsolidation.JournalPath));
 if (!File.Exists(rebuiltCatalog) || recoveredJournal?.CatalogCompletedUtc is null || recoveredJournal.CatalogRebuildError is not null || File.ReadAllText(rebuiltCatalog).Contains("Reports", StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException("The catalog could not be rebuilt independently or its journal did not record recovery.");
+
+var aggregateLibrary = Path.Combine(assetFixture, "aggregate-sidecar"); var aggregateContent = Path.Combine(aggregateLibrary, "Archives", "Content");
+var aggregatePng = Path.Combine(aggregateContent, "Character", "CacheTest", "patch-one", "one.png");
+var aggregateModel = Path.Combine(aggregateContent, "Creature", "ModelOnly", "patch-model", "geometry.m2");
+var aggregateSkin = Path.Combine(aggregateContent, "Creature", "ModelOnly", "patch-model", "geometry00.skin");
+Directory.CreateDirectory(Path.GetDirectoryName(aggregatePng)!); Directory.CreateDirectory(Path.GetDirectoryName(aggregateModel)!);
+File.WriteAllText(aggregatePng, "png"); File.Copy(geometryModelPath, aggregateModel); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), aggregateSkin);
+File.WriteAllText(Path.Combine(aggregateLibrary, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(aggregateLibrary, aggregateLibrary, 1, DateTimeOffset.UtcNow, 0, [])));
+var aggregateCatalog = BulkAssetLibraryService.RebuildCatalog(aggregateLibrary); var aggregateSidecar = Path.Combine(aggregateLibrary, AssetComparisonService.AggregateSidecarFileName);
+var validAggregateIndex = AssetComparisonService.BuildIndex(aggregateLibrary);
+var modelOnlyDirectory = validAggregateIndex.Directories.SingleOrDefault(directory => directory.LogicalPath == @"Creature\ModelOnly");
+if (!File.Exists(aggregateSidecar) || validAggregateIndex.Source != AssetComparisonIndexSource.Sidecar || modelOnlyDirectory is null || modelOnlyDirectory.PngFiles != 0 || modelOnlyDirectory.M2Files != 1 || modelOnlyDirectory.SkinFiles != 1)
+    throw new InvalidOperationException("A valid aggregate sidecar was not loaded or its model-only directory disappeared from navigation.");
+
+var stalePng = Path.Combine(aggregateContent, "Character", "CacheStale", "patch-two", "stale.png"); Directory.CreateDirectory(Path.GetDirectoryName(stalePng)!); File.WriteAllText(stalePng, "stale");
+File.AppendAllText(aggregateCatalog, $"Characters,PNG,patch-two,{Path.GetRelativePath(aggregateLibrary, stalePng)},{new FileInfo(stalePng).Length}{Environment.NewLine}");
+var staleFallbackIndex = AssetComparisonService.BuildIndex(aggregateLibrary);
+if (staleFallbackIndex.Source != AssetComparisonIndexSource.Catalog || !staleFallbackIndex.Directories.Any(directory => directory.LogicalPath == @"Character\CacheStale") || Directory.EnumerateFiles(aggregateLibrary, "*.tmp", SearchOption.TopDirectoryOnly).Any())
+    throw new InvalidOperationException("A stale aggregate sidecar was trusted, or its atomic catalog fallback/cache refresh failed.");
+if (AssetComparisonService.BuildIndex(aggregateLibrary).Source != AssetComparisonIndexSource.Sidecar)
+    throw new InvalidOperationException("The aggregate cache rebuilt from a stale sidecar was not reusable on the next open.");
+
+File.WriteAllText(aggregateSidecar, "{ definitely-not-json");
+var corruptSidecarFallbackIndex = AssetComparisonService.BuildIndex(aggregateLibrary);
+if (corruptSidecarFallbackIndex.Source != AssetComparisonIndexSource.Catalog || !corruptSidecarFallbackIndex.Directories.Any(directory => directory.LogicalPath == @"Creature\ModelOnly"))
+    throw new InvalidOperationException("A corrupt aggregate sidecar did not fall back to the catalog and preserve model-only paths.");
+File.WriteAllText(aggregateCatalog, $@"category,format,source,relative_path,bytes{Environment.NewLine}Other,PNG,patch-bad,Archives\Content\..\Outside\patch-bad\escape.png,1{Environment.NewLine}");
+var unsafeCatalogFallbackIndex = AssetComparisonService.BuildIndex(aggregateLibrary);
+if (unsafeCatalogFallbackIndex.Source != AssetComparisonIndexSource.FileSystem || unsafeCatalogFallbackIndex.Directories.Any(directory => directory.LogicalPath.Split('\\', '/').Contains("..")))
+    throw new InvalidOperationException("An unsafe logical path from a tampered catalog was exposed or cached instead of falling back to the filesystem.");
+File.WriteAllText(aggregateCatalog, "not,a,valid,catalog");
+var corruptCatalogFallbackIndex = AssetComparisonService.BuildIndex(aggregateLibrary);
+if (corruptCatalogFallbackIndex.Source != AssetComparisonIndexSource.FileSystem || !corruptCatalogFallbackIndex.Directories.Any(directory => directory.LogicalPath == @"Creature\ModelOnly"))
+    throw new InvalidOperationException("A corrupt asset catalog did not fall back safely to the filesystem.");
+using (var cancelledAggregate = new CancellationTokenSource())
+{
+    cancelledAggregate.Cancel();
+    try { _ = AssetComparisonService.BuildIndex(aggregateLibrary, cancelledAggregate.Token); throw new InvalidOperationException("Asset aggregate indexing ignored cancellation."); }
+    catch (OperationCanceledException) { }
+}
+File.Delete(aggregateSidecar); Directory.CreateDirectory(aggregateSidecar);
+var catalogWithBlockedSidecar = BulkAssetLibraryService.RebuildCatalog(aggregateLibrary);
+if (!File.Exists(catalogWithBlockedSidecar) || Directory.EnumerateFiles(aggregateLibrary, $"{AssetComparisonService.AggregateSidecarFileName}.*.tmp", SearchOption.TopDirectoryOnly).Any())
+    throw new InvalidOperationException("A nonessential sidecar write failure poisoned a committed catalog rebuild or left temporary files behind.");
 Directory.Delete(assetFixture, true); Directory.Delete(conversionWorkspacePath, true);
 
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));
 if (targetProfiles.Count != 4 || TargetProfileCatalog.Find(targetProfiles, null).ClientBuild != 12340 ||
     targetProfiles.Single(profile => profile.ClientBuild == 15595).SupportTier != TargetSupportTier.Experimental)
     throw new InvalidOperationException("Built-in target profiles are incomplete or the verified default changed.");
-var contentProjectRoot = Path.Combine(Path.GetTempPath(), $"crucible-content-project-{Guid.NewGuid():N}"); CrucibleContentProjectService.Create(contentProjectRoot, "Fixture project");
+var contentProjectRoot = Path.Combine(Path.GetTempPath(), $"crucible-content-project-{Guid.NewGuid():N}"); var defaultContentProject = CrucibleContentProjectService.Create(contentProjectRoot, "Fixture project");
 var firstIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.CreatureDisplayInfo, 3, 100, [100u, 102u], "fixture displays").Reservation.Values;
 var secondIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.CreatureDisplayInfo, 2, 100, [100u, 102u], "more displays").Reservation.Values;
-if (!firstIds.SequenceEqual([101u, 103u, 104u]) || !secondIds.SequenceEqual([105u, 106u]) || CrucibleContentProjectService.LoadRegistry(contentProjectRoot).Reservations.Count != 2 || !Directory.Exists(Path.Combine(contentProjectRoot, "Staging")))
+if (defaultContentProject.TargetProfile != TargetProfileCatalog.DefaultProfileId || TargetProfileCatalog.Find(targetProfiles, defaultContentProject.TargetProfile).Id != TargetProfileCatalog.DefaultProfileId ||
+    !firstIds.SequenceEqual([101u, 103u, 104u]) || !secondIds.SequenceEqual([105u, 106u]) || CrucibleContentProjectService.LoadRegistry(contentProjectRoot).Reservations.Count != 2 || !Directory.Exists(Path.Combine(contentProjectRoot, "Staging")))
     throw new InvalidOperationException("Portable content-project ID reservations collided with occupied or previously reserved IDs.");
 Directory.Delete(contentProjectRoot, true);
 var customProfileDirectory = Path.Combine(Path.GetTempPath(), $"crucible-custom-profile-{Guid.NewGuid():N}");
@@ -668,6 +714,10 @@ if (selectedSnapshotTables.Count != 7 || selectedSnapshotTables.Any(table => tab
     !selectedSnapshotTables.Any(table => table.Name == "guild_rewards") || !selectedSnapshotTables.Any(table => table.Name == "pet_levelstats") ||
     !excludedSnapshotTables.Contains("character_inventory") || !excludedSnapshotTables.Contains("item_view"))
     throw new InvalidOperationException("Legacy SQL snapshot safety did not retain world definitions while excluding account/character state and views.");
+var newlyCoveredSensitiveTables = new[] { "rbac_account_permissions", "auctionbidders", "character_arena_stats", "character_fishingsteps", "item_refund_instance", "item_soulbound_trade_data", "creature_respawn", "gameobject_respawn", "recovery_item" };
+if (newlyCoveredSensitiveTables.Any(table => !LegacyDatabaseSnapshotService.IsSensitiveStateTable(table)) ||
+    new[] { "mail_loot_template", "instance_template", "guild_rewards", "pet_levelstats", "linked_respawn" }.Any(LegacyDatabaseSnapshotService.IsSensitiveStateTable))
+    throw new InvalidOperationException("Legacy SQL snapshot sensitive-state coverage regressed or swallowed reusable world definitions.");
 var deliberatelySensitive = LegacyDatabaseSnapshotService.SelectTables(snapshotSchemas, new(IncludeSensitiveState: true), true, out _);
 if (deliberatelySensitive.Count != 13 || !LegacyDatabaseSnapshotService.GlobMatches("creature_template", "creature_*") || LegacyDatabaseSnapshotService.GlobMatches("item_template", "creature_*"))
     throw new InvalidOperationException("Legacy SQL snapshot explicit inclusion or table glob matching failed.");
@@ -691,6 +741,16 @@ var snapshotManifest = new LegacyDatabaseSnapshotManifest(LegacyDatabaseSnapshot
     new([], [], false, ["account"]), [snapshotTable], 1,
     LegacyDatabaseSnapshotService.ComputeSchemaAggregateHash([(snapshotTable.Name, snapshotTable.SchemaSha256)]),
     LegacyDatabaseSnapshotService.ComputeAggregateHash([(snapshotTable.Name, snapshotTable.RowsSha256, snapshotTable.Rows)]), true, true);
+var incompleteBaselineIdentity = snapshotManifest with { Source = snapshotManifest.Source with { CoreIdentity = new Dictionary<string, string> { ["core_version"] = "fixture", ["revision"] = "one" } } };
+var incompleteLegacyIdentity = snapshotManifest with { Source = snapshotManifest.Source with { CoreIdentity = new Dictionary<string, string> { ["CORE_VERSION"] = "fixture" } } };
+var differentLegacyIdentity = snapshotManifest with { Source = snapshotManifest.Source with { CoreIdentity = new Dictionary<string, string> { ["core_version"] = "different", ["revision"] = "one" } } };
+if (LegacyDatabaseAuditService.DetermineBaselineIdentity(incompleteBaselineIdentity, incompleteLegacyIdentity) != LegacyDatabaseBaselineIdentity.Unknown ||
+    LegacyDatabaseAuditService.DetermineBaselineIdentity(incompleteBaselineIdentity, differentLegacyIdentity) != LegacyDatabaseBaselineIdentity.DifferentCoreIdentity ||
+    LegacyDatabaseAuditService.DetermineBaselineIdentity(incompleteBaselineIdentity, incompleteBaselineIdentity) != LegacyDatabaseBaselineIdentity.MatchingCoreIdentity)
+    throw new InvalidOperationException("Legacy recovery overclaimed or missed baseline core-identity confidence.");
+if (LegacyDatabaseDomainCatalog.Classify("player_class_stats") != LegacyDatabaseContentDomain.ClassesAndRaces ||
+    LegacyDatabaseDomainCatalog.Classify("player_race_stats") != LegacyDatabaseContentDomain.ClassesAndRaces)
+    throw new InvalidOperationException("Legacy recovery failed to classify current AzerothCore class/race stat tables.");
 using (var stream = File.Create(snapshotArtifact))
 using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Create))
 {
@@ -701,6 +761,141 @@ using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Comp
 var snapshotInspection = new LegacyDatabaseSnapshotService().InspectAsync(snapshotArtifact).GetAwaiter().GetResult();
 if (!snapshotInspection.Valid || snapshotInspection.Manifest?.TotalRows != 1 || System.Text.Json.JsonSerializer.Serialize(snapshotInspection.Manifest).Contains("password", StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException($"Portable legacy SQL snapshot validation failed: {string.Join("; ", snapshotInspection.Findings)}");
+
+var recoveryRoot = Path.Combine(layerRoot, "legacy-recovery"); Directory.CreateDirectory(recoveryRoot);
+var baselineRecoverySnapshot = Path.Combine(recoveryRoot, "stock.crucible-db-snapshot");
+var legacyRecoverySnapshot = Path.Combine(recoveryRoot, "legacy.crucible-db-snapshot");
+var noKeySchema = snapshotSchema with { Name = "custom_no_key", PrimaryKey = [] };
+var textKeySchema = snapshotSchema with
+{
+    Name = "custom_text_key",
+    PrimaryKey = ["name"],
+    Columns = [snapshotColumns[1] with { Ordinal = 1, Key = "PRI" }]
+};
+var bitKeySchema = snapshotSchema with
+{
+    Name = "custom_bit_key",
+    PrimaryKey = ["mask"],
+    Columns = [snapshotColumns[0] with { Name = "mask", DataType = "bit", ColumnType = "bit(8)" }]
+};
+var unchangedTextKeySchema = textKeySchema with { Name = "custom_text_key_unchanged" };
+WriteRecoverySnapshotFixture(baselineRecoverySnapshot, "stock_world",
+    (snapshotSchema, "[[\"1\",\"Sword\"],[\"2\",\"Shield\"]]"),
+    (noKeySchema, "[[\"1\",\"baseline\"]]"),
+    (textKeySchema, "[[\"a\"],[\"B\"]]"),
+    (unchangedTextKeySchema, "[[\"a\"],[\"B\"]]"),
+    (bitKeySchema, "[[\"2\"],[\"10\"]]"));
+WriteRecoverySnapshotFixture(legacyRecoverySnapshot, "legacy_world",
+    (snapshotSchema, "[[\"1\",\"Crucible Sword\"],[\"3\",\"Axe\"]]"),
+    (noKeySchema, "[[\"1\",\"custom\"]]"),
+    (textKeySchema, "[[\"a\"],[\"C\"]]"),
+    (unchangedTextKeySchema, "[[\"a\"],[\"B\"]]"),
+    (bitKeySchema, "[[\"2\"],[\"11\"]]"));
+var recoveryService = new LegacyDatabaseAuditService();
+var recoveryArtifact = Path.Combine(recoveryRoot, "changes.crucible-db-audit");
+var recoveryResult = recoveryService.AuditAsync(legacyRecoverySnapshot, recoveryArtifact, baselineRecoverySnapshot).GetAwaiter().GetResult();
+var recoveryItem = recoveryResult.Manifest.Tables.Single(table => table.Name == "item_template");
+var recoveryNoKey = recoveryResult.Manifest.Tables.Single(table => table.Name == "custom_no_key");
+var recoveryTextKey = recoveryResult.Manifest.Tables.Single(table => table.Name == "custom_text_key");
+var recoveryBitKey = recoveryResult.Manifest.Tables.Single(table => table.Name == "custom_bit_key");
+var recoveryUnchangedTextKey = recoveryResult.Manifest.Tables.Single(table => table.Name == "custom_text_key_unchanged");
+var recoveryChanges = ReadRecoveryChanges(recoveryService, recoveryArtifact, "item_template");
+if (recoveryResult.Manifest.Mode != LegacyDatabaseAuditMode.BaselineCompared || recoveryResult.Manifest.BaselineIdentity != LegacyDatabaseBaselineIdentity.MatchingCoreIdentity ||
+    recoveryResult.Manifest.PromotionReady || recoveryItem.AddedRows != 1 || recoveryItem.ModifiedRows != 1 || recoveryItem.RemovedRows != 1 || recoveryItem.ChangedFields != 5 ||
+    recoveryNoKey.Status != LegacyDatabaseTableAuditStatus.BlockedNoPrimaryKey || recoveryNoKey.ChangeRecords != 0 ||
+    recoveryTextKey.Status != LegacyDatabaseTableAuditStatus.BlockedIncompatibleSchema || recoveryTextKey.ChangeRecords != 0 ||
+    recoveryUnchangedTextKey.Status != LegacyDatabaseTableAuditStatus.Unchanged || recoveryUnchangedTextKey.ChangeRecords != 0 ||
+    recoveryBitKey.Status != LegacyDatabaseTableAuditStatus.Changed || recoveryBitKey.AddedRows != 1 || recoveryBitKey.RemovedRows != 1 ||
+    recoveryChanges.Count != 3 || recoveryChanges.Single(change => change.Kind == LegacyDatabaseRowChangeKind.Modified).Fields.Single().Column != "name" ||
+    recoveryChanges.Any(change => change.PromotionApproved))
+    throw new InvalidOperationException("Baseline-to-legacy SQL recovery audit did not preserve safe field-level additions, edits, removals, or no-PK blocking.");
+var recoveryInspection = recoveryService.InspectAsync(recoveryArtifact).GetAwaiter().GetResult();
+if (!recoveryInspection.Valid || recoveryInspection.Manifest?.Legacy.ArtifactSha256.Length != 64)
+    throw new InvalidOperationException($"Legacy SQL recovery audit validation failed: {string.Join("; ", recoveryInspection.Findings)}");
+
+AssertRehashedRecoveryTamperRejected(recoveryService, recoveryArtifact, Path.Combine(recoveryRoot, "tampered-domain.crucible-db-audit"), "domain",
+    manifest => manifest with
+    {
+        Tables = manifest.Tables.Select(table => table.Name == "item_template" ? table with { Domain = LegacyDatabaseContentDomain.Pets } : table).ToArray()
+    });
+AssertRehashedRecoveryTamperRejected(recoveryService, recoveryArtifact, Path.Combine(recoveryRoot, "tampered-status.crucible-db-audit"), "status",
+    manifest => manifest with
+    {
+        Tables = manifest.Tables.Select(table => table.Name == "item_template" ? table with { Status = LegacyDatabaseTableAuditStatus.Unchanged } : table).ToArray()
+    });
+AssertRehashedRecoveryTamperRejected(recoveryService, recoveryArtifact, Path.Combine(recoveryRoot, "tampered-key.crucible-db-audit"), "key", changeMutation: (table, changes) =>
+    table == "item_template"
+        ? changes.Select((change, index) => index == 0
+            ? change with { Key = change.Key.Select((part, partIndex) => partIndex == 0 ? part with { Value = LegacyDatabaseAuditValue.Missing } : part).ToArray() }
+            : change).ToArray()
+        : changes);
+AssertRehashedRecoveryTamperRejected(recoveryService, recoveryArtifact, Path.Combine(recoveryRoot, "tampered-value.crucible-db-audit"), "semantics", changeMutation: (table, changes) =>
+    table == "item_template"
+        ? changes.Select(change => change.Kind == LegacyDatabaseRowChangeKind.Added
+            ? change with
+            {
+                Fields = change.Fields.Select((field, index) => index == 0
+                    ? field with { Baseline = new(LegacyDatabaseAuditValueState.Scalar, "forged baseline") }
+                    : field).ToArray()
+            }
+            : change).ToArray()
+        : changes);
+
+var emptyBaselineSnapshot = Path.Combine(recoveryRoot, "empty-stock.crucible-db-snapshot");
+var emptyLegacySnapshot = Path.Combine(recoveryRoot, "empty-legacy.crucible-db-snapshot");
+var emptyBaselineOnlySchema = snapshotSchema with { Name = "empty_baseline_only" };
+var emptyLegacyOnlySchema = snapshotSchema with { Name = "empty_legacy_only" };
+WriteRecoverySnapshotFixture(emptyBaselineSnapshot, "stock_world", (emptyBaselineOnlySchema, "[]"));
+WriteRecoverySnapshotFixture(emptyLegacySnapshot, "legacy_world", (emptyLegacyOnlySchema, "[]"));
+var emptyComparedArtifact = Path.Combine(recoveryRoot, "empty-one-sided.crucible-db-audit");
+var emptyCompared = recoveryService.AuditAsync(emptyLegacySnapshot, emptyComparedArtifact, emptyBaselineSnapshot).GetAwaiter().GetResult();
+var emptyComparedInspection = recoveryService.InspectAsync(emptyComparedArtifact).GetAwaiter().GetResult();
+if (!emptyComparedInspection.Valid || emptyCompared.Manifest.TotalChangeRecords != 0 || emptyCompared.Manifest.Tables.Any(table => table.ChangeRecords != 0))
+    throw new InvalidOperationException($"One-sided empty SQL tables did not produce a valid zero-change audit: {string.Join("; ", emptyComparedInspection.Findings)}");
+
+var emptyUnattributedArtifact = Path.Combine(recoveryRoot, "empty-unattributed.crucible-db-audit");
+var emptyUnattributed = recoveryService.AuditAsync(emptyLegacySnapshot, emptyUnattributedArtifact).GetAwaiter().GetResult();
+var emptyUnattributedInspection = recoveryService.InspectAsync(emptyUnattributedArtifact).GetAwaiter().GetResult();
+if (!emptyUnattributedInspection.Valid || emptyUnattributed.Manifest.TotalChangeRecords != 0 || emptyUnattributed.Manifest.Tables.Single().ChangeRecords != 0)
+    throw new InvalidOperationException($"Baseline-free empty SQL tables did not produce a valid zero-change audit: {string.Join("; ", emptyUnattributedInspection.Findings)}");
+
+var invalidRecoverySnapshot = Path.Combine(recoveryRoot, "invalid-cell.crucible-db-snapshot");
+WriteRecoverySnapshotFixture(invalidRecoverySnapshot, "legacy_world", (snapshotSchema, "[[\"1\",true]]"));
+var preservedRecoveryHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(recoveryArtifact)));
+try
+{
+    _ = recoveryService.AuditAsync(invalidRecoverySnapshot, recoveryArtifact, baselineRecoverySnapshot, new(Overwrite: true)).GetAwaiter().GetResult();
+    throw new InvalidOperationException("Recovery audit accepted a noncanonical snapshot value.");
+}
+catch (InvalidDataException exception) when (exception.Message.Contains("neither null", StringComparison.OrdinalIgnoreCase)) { }
+if (Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(recoveryArtifact))) != preservedRecoveryHash ||
+    !recoveryService.InspectAsync(recoveryArtifact).GetAwaiter().GetResult().Valid)
+    throw new InvalidOperationException("A failed overwrite audit destroyed or changed the previous valid artifact.");
+
+var binaryNumericSnapshot = Path.Combine(recoveryRoot, "binary-numeric.crucible-db-snapshot");
+WriteRecoverySnapshotFixture(binaryNumericSnapshot, "legacy_world", (snapshotSchema, "[[{\"$binary\":\"AQ==\"},\"Binary key\"]]"));
+AssertRecoverySnapshotRejected(recoveryService, binaryNumericSnapshot, Path.Combine(recoveryRoot, "binary-numeric.crucible-db-audit"), "numeric column encoded as $binary");
+var nullNonNullableSnapshot = Path.Combine(recoveryRoot, "null-nonnullable.crucible-db-snapshot");
+WriteRecoverySnapshotFixture(nullNonNullableSnapshot, "legacy_world", (snapshotSchema, "[[\"1\",null]]"));
+AssertRecoverySnapshotRejected(recoveryService, nullNonNullableSnapshot, Path.Combine(recoveryRoot, "null-nonnullable.crucible-db-audit"), "null in a non-nullable column");
+
+var unattributedArtifact = Path.Combine(recoveryRoot, "unattributed.crucible-db-audit");
+var unattributed = recoveryService.AuditAsync(legacyRecoverySnapshot, unattributedArtifact).GetAwaiter().GetResult();
+var unattributedItem = unattributed.Manifest.Tables.Single(table => table.Name == "item_template");
+if (unattributed.Manifest.Mode != LegacyDatabaseAuditMode.Unattributed || unattributed.Manifest.Baseline is not null || unattributedItem.UnattributedRows != 2 ||
+    unattributedItem.AddedRows != 0 || ReadRecoveryChanges(recoveryService, unattributedArtifact, "item_template").Any(change => change.Attribution != LegacyDatabaseAuditAttribution.Unattributed))
+    throw new InvalidOperationException("Baseline-free SQL recovery incorrectly labeled stock rows as proven custom additions or edits.");
+
+var protectedLegacyHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(legacyRecoverySnapshot)));
+try
+{
+    _ = recoveryService.AuditAsync(legacyRecoverySnapshot, legacyRecoverySnapshot, baselineRecoverySnapshot, new(Overwrite: true)).GetAwaiter().GetResult();
+    throw new InvalidOperationException("Legacy recovery allowed an audit output to alias and overwrite its input snapshot.");
+}
+catch (ArgumentException) { }
+if (Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(legacyRecoverySnapshot))) != protectedLegacyHash)
+    throw new InvalidOperationException("Legacy recovery modified an input snapshot while rejecting an aliased output path.");
+
 using (var stream = File.Open(snapshotArtifact, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
 using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Update))
 {
@@ -714,3 +909,131 @@ if (corruptSnapshotInspection.Valid || !corruptSnapshotInspection.Findings.Any(f
 Directory.Delete(layerRoot, true);
 
 Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, layered comparison, manifest build, and MPQ workflows.");
+
+static void WriteRecoverySnapshotFixture(string path, string database, params (LegacyDatabaseTableSchema Schema, string RowsJson)[] sources)
+{
+    var tables = new List<LegacyDatabaseSnapshotTable>();
+    using (var stream = File.Create(path))
+    using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Create))
+    {
+        foreach (var source in sources)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(source.RowsJson);
+            using var document = System.Text.Json.JsonDocument.Parse(bytes);
+            var rows = document.RootElement.GetArrayLength();
+            var entryName = $"tables/{Uri.EscapeDataString(source.Schema.Name)}.rows.json";
+            var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+            tables.Add(new(source.Schema.Name, source.Schema.TableType, source.Schema.Engine, source.Schema.Collation, source.Schema.Comment,
+                rows, source.Schema.PrimaryKey, source.Schema.Columns, LegacyDatabaseSnapshotService.ComputeSchemaHash(source.Schema), entryName,
+                source.Schema.PrimaryKey.Count == 0 ? "capture-order (table has no primary key)" : string.Join(',', source.Schema.PrimaryKey), rows, bytes.Length, hash));
+            using var rowsStream = archive.CreateEntry(entryName).Open(); rowsStream.Write(bytes);
+        }
+        var ordered = tables.OrderBy(table => table.Name, StringComparer.Ordinal).ToArray();
+        var manifest = new LegacyDatabaseSnapshotManifest(LegacyDatabaseSnapshotService.ArtifactFormat, LegacyDatabaseSnapshotService.ArtifactFormatVersion,
+            "fixture", DateTimeOffset.UtcNow, new(database, "fixture server", "fixture database", "utf8", "utf8_general_ci",
+                new Dictionary<string, string> { ["core_version"] = "same-stock-revision" }), new([], [], false, ["account"]), ordered,
+            ordered.Sum(table => table.Rows), LegacyDatabaseSnapshotService.ComputeSchemaAggregateHash(ordered.Select(table => (table.Name, table.SchemaSha256))),
+            LegacyDatabaseSnapshotService.ComputeAggregateHash(ordered.Select(table => (table.Name, table.RowsSha256, table.Rows))), true, true);
+        using var manifestStream = archive.CreateEntry("manifest.json").Open();
+        System.Text.Json.JsonSerializer.Serialize(manifestStream, manifest, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+    }
+}
+
+static List<LegacyDatabaseRowChange> ReadRecoveryChanges(LegacyDatabaseAuditService service, string artifact, string table)
+{
+    var result = new List<LegacyDatabaseRowChange>();
+    var enumerator = service.ReadChangesAsync(artifact, table).GetAsyncEnumerator();
+    try { while (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult()) result.Add(enumerator.Current); }
+    finally { enumerator.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+    return result;
+}
+
+static void AssertRecoverySnapshotRejected(LegacyDatabaseAuditService service, string snapshot, string output, string scenario)
+{
+    try
+    {
+        _ = service.AuditAsync(snapshot, output).GetAwaiter().GetResult();
+    }
+    catch (InvalidDataException)
+    {
+        if (File.Exists(output)) throw new InvalidOperationException($"Recovery published an artifact after rejecting {scenario}.");
+        return;
+    }
+    if (File.Exists(output)) File.Delete(output);
+    throw new InvalidOperationException($"Recovery accepted a snapshot containing {scenario}.");
+}
+
+static void AssertRehashedRecoveryTamperRejected(
+    LegacyDatabaseAuditService service,
+    string source,
+    string destination,
+    string expectedFinding,
+    Func<LegacyDatabaseAuditManifest, LegacyDatabaseAuditManifest>? manifestMutation = null,
+    Func<string, IReadOnlyList<LegacyDatabaseRowChange>, IReadOnlyList<LegacyDatabaseRowChange>>? changeMutation = null)
+{
+    RewriteRecoveryArtifact(source, destination, manifestMutation, changeMutation);
+    var inspection = service.InspectAsync(destination, verifyChanges: true).GetAwaiter().GetResult();
+    if (inspection.Valid || !inspection.Findings.Any(finding => finding.Contains(expectedFinding, StringComparison.OrdinalIgnoreCase)) ||
+        inspection.Findings.Any(finding => finding.Contains("hash mismatch", StringComparison.OrdinalIgnoreCase)))
+        throw new InvalidOperationException($"A fully rehashed recovery artifact with invalid {expectedFinding} semantics was not rejected cleanly: {string.Join("; ", inspection.Findings)}");
+    try
+    {
+        _ = ReadRecoveryChanges(service, destination, "item_template");
+        throw new InvalidOperationException($"ReadChangesAsync consumed a fully rehashed recovery artifact with invalid {expectedFinding} semantics.");
+    }
+    catch (InvalidDataException) { }
+}
+
+static void RewriteRecoveryArtifact(
+    string source,
+    string destination,
+    Func<LegacyDatabaseAuditManifest, LegacyDatabaseAuditManifest>? manifestMutation,
+    Func<string, IReadOnlyList<LegacyDatabaseRowChange>, IReadOnlyList<LegacyDatabaseRowChange>>? changeMutation)
+{
+    var json = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.General) { WriteIndented = true };
+    json.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+    LegacyDatabaseAuditManifest manifest;
+    var changeEntries = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+    using (var input = File.OpenRead(source))
+    using (var archive = new System.IO.Compression.ZipArchive(input, System.IO.Compression.ZipArchiveMode.Read))
+    {
+        using var manifestStream = archive.GetEntry("manifest.json")!.Open();
+        manifest = System.Text.Json.JsonSerializer.Deserialize<LegacyDatabaseAuditManifest>(manifestStream, json)
+                   ?? throw new InvalidDataException("Recovery fixture manifest is empty.");
+        foreach (var table in manifest.Tables.Where(table => table.DataEntry is not null))
+        {
+            using var entryStream = archive.GetEntry(table.DataEntry!)!.Open();
+            using var memory = new MemoryStream(); entryStream.CopyTo(memory);
+            changeEntries[table.DataEntry!] = memory.ToArray();
+        }
+    }
+
+    var rewrittenTables = new List<LegacyDatabaseTableAudit>(manifest.Tables.Count);
+    foreach (var table in manifest.Tables)
+    {
+        if (table.DataEntry is null) { rewrittenTables.Add(table); continue; }
+        var changes = System.Text.Json.JsonSerializer.Deserialize<List<LegacyDatabaseRowChange>>(changeEntries[table.DataEntry], json)
+                      ?? throw new InvalidDataException($"Recovery fixture changes are empty for {table.Name}.");
+        var rewritten = changeMutation?.Invoke(table.Name, changes) ?? changes;
+        var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(rewritten, json);
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+        changeEntries[table.DataEntry] = bytes;
+        rewrittenTables.Add(table with { UncompressedBytes = bytes.Length, ChangesSha256 = hash });
+    }
+    manifest = manifest with { Tables = rewrittenTables };
+    manifest = manifest with
+    {
+        ChangesSha256 = LegacyDatabaseSnapshotService.ComputeAggregateHash(manifest.Tables.Where(table => table.DataEntry is not null)
+            .OrderBy(table => table.Name, StringComparer.Ordinal).Select(table => (table.Name, table.ChangesSha256!, table.ChangeRecords)))
+    };
+    manifest = manifestMutation?.Invoke(manifest) ?? manifest;
+
+    using var output = File.Create(destination);
+    using var destinationArchive = new System.IO.Compression.ZipArchive(output, System.IO.Compression.ZipArchiveMode.Create);
+    foreach (var entry in changeEntries.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+    {
+        using var entryStream = destinationArchive.CreateEntry(entry.Key).Open(); entryStream.Write(entry.Value);
+    }
+    using var rewrittenManifestStream = destinationArchive.CreateEntry("manifest.json").Open();
+    System.Text.Json.JsonSerializer.Serialize(rewrittenManifestStream, manifest, json);
+}

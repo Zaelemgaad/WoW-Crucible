@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 
 namespace WoWCrucible.Core;
 
-public sealed record AssetComparisonDirectory(string LogicalPath, int PngFiles, int ProvenanceSources);
+public sealed record AssetComparisonDirectory(string LogicalPath, int PngFiles, int ProvenanceSources, int M2Files = 0, int SkinFiles = 0);
 public sealed record AssetComparisonEntry(string LogicalPath, string Provenance, string FileName, string FullPath, long Bytes);
 public enum AssetModelCompatibility { Ready, MissingSkin, RequiresConversion, Invalid }
 public sealed record AssetComparisonModel(string LogicalPath, string Provenance, string FileName, string ModelPath, string? SkinPath, AssetModelCompatibility Compatibility, uint? Version, string Status)
@@ -14,31 +14,38 @@ public sealed record AssetComparisonDuplicateGroup(string Sha256, long Bytes, IR
 {
     public long RecoverableBytes => Bytes * (Entries.Count - 1L);
 }
-public sealed record AssetComparisonIndex(string LibraryRoot, string ContentRoot, IReadOnlyList<AssetComparisonDirectory> Directories, int TotalPngFiles, string? LooseContentRoot = null);
+public enum AssetComparisonIndexSource { Sidecar, Catalog, FileSystem }
+public sealed record AssetComparisonIndex(string LibraryRoot, string ContentRoot, IReadOnlyList<AssetComparisonDirectory> Directories, int TotalPngFiles,
+    string? LooseContentRoot = null, AssetComparisonIndexSource Source = AssetComparisonIndexSource.FileSystem);
 
 public static class AssetComparisonService
 {
-    private const string ArchivePrefix = "Archives\\Content\\";
-    private const string LoosePrefix = "Loose\\Content\\";
+    public const string AggregateSidecarFileName = AssetComparisonAggregateCache.FileName;
+    private const int MaximumModelAncestorScopes = 4;
 
     public static AssetComparisonIndex BuildIndex(string libraryRoot, CancellationToken cancellationToken = default)
     {
         libraryRoot = Path.GetFullPath(libraryRoot); var contentRoot = Path.Combine(libraryRoot, "Archives", "Content"); var looseContentRoot = Path.Combine(libraryRoot, "Loose", "Content");
         if (!Directory.Exists(contentRoot) && !Directory.Exists(looseContentRoot)) throw new DirectoryNotFoundException($"No content-first archive or loose folder exists under: {libraryRoot}");
         var catalog = Path.Combine(libraryRoot, "asset-catalog.csv");
-        var counts = new Dictionary<string, (int Files, HashSet<string> Sources)>(StringComparer.OrdinalIgnoreCase);
-        if (File.Exists(catalog)) ReadCatalog(catalog, counts, cancellationToken);
-        else
+        AssetComparisonAggregateDirectory[] aggregates;
+        var source = AssetComparisonIndexSource.FileSystem;
+        if (File.Exists(catalog) && AssetComparisonAggregateCache.TryLoad(libraryRoot, catalog, cancellationToken, out aggregates))
+            source = AssetComparisonIndexSource.Sidecar;
+        else if (File.Exists(catalog))
         {
-            foreach (var root in new[] { contentRoot, looseContentRoot }.Where(Directory.Exists))
-            foreach (var file in Directory.EnumerateFiles(root, "*.png", SearchOption.AllDirectories))
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested(); AddRelative(Path.GetRelativePath(libraryRoot, file), counts);
+                aggregates = AssetComparisonAggregateCache.ReadCatalog(catalog, cancellationToken);
+                source = AssetComparisonIndexSource.Catalog;
+                AssetComparisonAggregateCache.TryWrite(libraryRoot, catalog, aggregates, cancellationToken);
             }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception exception) when (exception is not OutOfMemoryException and not AccessViolationException) { aggregates = AssetComparisonAggregateCache.ScanFileSystem(libraryRoot, new[] { contentRoot, looseContentRoot }.Where(Directory.Exists), cancellationToken); }
         }
-        var directories = counts.Select(pair => new AssetComparisonDirectory(pair.Key, pair.Value.Files, pair.Value.Sources.Count))
-            .OrderBy(directory => directory.LogicalPath, StringComparer.OrdinalIgnoreCase).ToArray();
-        return new(libraryRoot, contentRoot, directories, directories.Sum(directory => directory.PngFiles), Directory.Exists(looseContentRoot) ? looseContentRoot : null);
+        else aggregates = AssetComparisonAggregateCache.ScanFileSystem(libraryRoot, new[] { contentRoot, looseContentRoot }.Where(Directory.Exists), cancellationToken);
+        var directories = aggregates.Select(aggregate => new AssetComparisonDirectory(aggregate.LogicalPath, aggregate.PngFiles, aggregate.PngProvenanceSources.Length, aggregate.M2Files, aggregate.SkinFiles)).ToArray();
+        return new(libraryRoot, contentRoot, directories, directories.Sum(directory => directory.PngFiles), Directory.Exists(looseContentRoot) ? looseContentRoot : null, source);
     }
 
     public static IReadOnlyList<AssetComparisonEntry> GetDirectoryPngs(AssetComparisonIndex index, string logicalPath)
@@ -101,7 +108,7 @@ public static class AssetComparisonService
             cancellationToken.ThrowIfCancellationRequested();
             var result = new List<AssetComparisonModel>();
             var directory = Path.GetFullPath(Path.Combine(index.ContentRoot, scope)); EnsureInside(index.ContentRoot, directory);
-            if (Directory.Exists(directory)) AddArchiveModels(result, index.ContentRoot, scope, directory, cancellationToken);
+            if (Directory.Exists(directory)) AddArchiveModels(result, scope, directory, cancellationToken);
             if (index.LooseContentRoot is { } looseRoot)
             {
                 var looseDirectory = Path.GetFullPath(Path.Combine(looseRoot, scope)); EnsureInside(looseRoot, looseDirectory);
@@ -112,55 +119,32 @@ public static class AssetComparisonService
         return (logicalPath, []);
     }
 
-    private static void ReadCatalog(string catalog, Dictionary<string, (int Files, HashSet<string> Sources)> counts, CancellationToken cancellationToken)
-    {
-        using var reader = new StreamReader(catalog, Encoding.UTF8, true, 1024 * 1024); _ = reader.ReadLine(); string? line;
-        while ((line = reader.ReadLine()) is not null)
-        {
-            cancellationToken.ThrowIfCancellationRequested(); var fields = ParseCsv(line);
-            if (fields.Count < 5 || !fields[1].Equals("PNG", StringComparison.OrdinalIgnoreCase)) continue;
-            AddRelative(fields[3], counts);
-        }
-    }
-
-    private static void AddRelative(string relative, Dictionary<string, (int Files, HashSet<string> Sources)> counts)
-    {
-        relative = relative.Replace('/', '\\'); string logical; string provenance;
-        if (relative.StartsWith(ArchivePrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            var parts = relative[ArchivePrefix.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2) return; provenance = parts[^2]; logical = parts.Length == 2 ? string.Empty : string.Join('\\', parts[..^2]);
-        }
-        else if (relative.StartsWith(LoosePrefix, StringComparison.OrdinalIgnoreCase))
-        {
-            var parts = relative[LoosePrefix.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 1) return; provenance = "Loose"; logical = parts.Length == 1 ? string.Empty : string.Join('\\', parts[..^1]);
-        }
-        else return;
-        if (!counts.TryGetValue(logical, out var value)) value = (0, new(StringComparer.OrdinalIgnoreCase));
-        value.Files++; value.Sources.Add(provenance); counts[logical] = value;
-    }
-
     private static void AddEntry(List<AssetComparisonEntry> result, string logicalPath, string provenance, string file)
     {
         var info = new FileInfo(file); result.Add(new(logicalPath, provenance, info.Name, info.FullName, info.Length));
     }
 
-    private static void AddArchiveModels(List<AssetComparisonModel> result, string contentRoot, string scope, string directory, CancellationToken cancellationToken)
+    private static void AddArchiveModels(List<AssetComparisonModel> result, string scope, string directory, CancellationToken cancellationToken)
     {
-        foreach (var modelPath in Directory.EnumerateFiles(directory, "*.m2", SearchOption.AllDirectories))
+        // Content-first layout is <logical path>\<provenance>\<files>. Only
+        // inspect the direct provenance layer for this scope. A recursive walk
+        // here can accidentally turn a category fallback such as "Character"
+        // into an 80k-model probe of the entire library.
+        foreach (var provenanceDirectory in Directory.EnumerateDirectories(directory))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var relative = Path.GetRelativePath(contentRoot, modelPath); var parts = relative.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2) continue;
-            var provenance = parts[^2]; var logical = parts.Length == 2 ? string.Empty : string.Join(Path.DirectorySeparatorChar, parts[..^2]);
-            result.Add(ProbeModel(logical, provenance, modelPath));
+            var provenance = Path.GetFileName(provenanceDirectory);
+            foreach (var modelPath in Directory.EnumerateFiles(provenanceDirectory, "*.m2", SearchOption.TopDirectoryOnly))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                result.Add(ProbeModel(scope, provenance, modelPath));
+            }
         }
     }
 
     private static void AddLooseModels(List<AssetComparisonModel> result, string looseRoot, string directory, CancellationToken cancellationToken)
     {
-        foreach (var modelPath in Directory.EnumerateFiles(directory, "*.m2", SearchOption.AllDirectories))
+        foreach (var modelPath in Directory.EnumerateFiles(directory, "*.m2", SearchOption.TopDirectoryOnly))
         {
             cancellationToken.ThrowIfCancellationRequested();
             result.Add(ProbeModel(Path.GetDirectoryName(Path.GetRelativePath(looseRoot, modelPath)) ?? string.Empty, "Loose", modelPath));
@@ -195,11 +179,11 @@ public static class AssetComparisonService
 
     private static IEnumerable<string> LogicalAncestors(string path)
     {
-        var current = path;
-        while (true)
+        var current = path; var yielded = 0;
+        while (!string.IsNullOrEmpty(current) && yielded < MaximumModelAncestorScopes)
         {
             yield return current;
-            if (string.IsNullOrEmpty(current)) yield break;
+            yielded++;
             var parent = Path.GetDirectoryName(current); if (parent is null || parent.Equals(current, StringComparison.OrdinalIgnoreCase)) yield break; current = parent;
         }
     }
@@ -219,23 +203,6 @@ public static class AssetComparisonService
             if (leftRead == 0) return true;
             if (!leftBuffer.AsSpan(0, leftRead).SequenceEqual(rightBuffer.AsSpan(0, rightRead))) return false;
         }
-    }
-
-    private static IReadOnlyList<string> ParseCsv(string line)
-    {
-        var fields = new List<string>(); var value = new StringBuilder(); var quoted = false;
-        for (var index = 0; index < line.Length; index++)
-        {
-            var character = line[index];
-            if (character == '"')
-            {
-                if (quoted && index + 1 < line.Length && line[index + 1] == '"') { value.Append('"'); index++; }
-                else quoted = !quoted;
-            }
-            else if (character == ',' && !quoted) { fields.Add(value.ToString()); value.Clear(); }
-            else value.Append(character);
-        }
-        fields.Add(value.ToString()); return fields;
     }
 
     private static void EnsureInside(string root, string path)

@@ -14,7 +14,7 @@ Exit codes are consistent across workflows:
 ## Portable content projects and ID reservations
 
 ```text
-wowcrucible project create <folder> <name> [--target=wotlk-335a-12340] [--asset-library=folder]
+wowcrucible project create <folder> <name> [--target=wotlk-12340] [--asset-library=folder]
 wowcrucible project status <project-folder>
 wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]
 ```
@@ -69,9 +69,13 @@ Asset libraries use a content-first comparison layout. For example, `Archives\pa
 
 Comparison is directory-first because expansions frequently rename equivalent assets. `compare-folders` searches logical content paths and reports PNG/source counts; `compare-files` lists every direct PNG from every provenance folder in the selected path without requiring filenames to match. The Avalonia **Assets & compare** workspace exposes the same model visually with paged, lazy thumbnails and two comparison slots.
 
+`library-catalog` also writes `asset-comparison-index.json`, a compact versioned acceleration sidecar containing PNG, M2, and SKIN directory aggregates. Asset Compare validates it against the Crucible-managed CSV and falls back to the CSV or live filesystem if it is missing, stale, corrupt, unsafe, or unwritable. The sidecar is disposable metadata—not an asset manifest or trust boundary—and failure to write it never turns a successfully committed catalog into a failed library operation. Re-run `library-catalog` after deliberately editing or replacing the CSV outside Crucible.
+
 Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`, or choose **Assets & compare** from the main navigation. It replaces the current workspace inside the same application window instead of opening a separate window; **← Editor** returns to the previous workspace. Its directory, cards, and preview columns have draggable splitters, tool groups wrap, and the configuration headers scroll when vertical space is limited so resizing does not strand controls off-screen.
 
 Selecting `Character\BloodElf\Female`, for example, shows all direct PNGs under every provenance leaf in that shared logical path; it does not guess that differently named files are equivalent. Libraries created or consolidated by current Crucible builds no longer depend on a separate `Loose` source tree.
+
+M2 discovery is deliberately lazy: normal PNG directory selection performs no model scan. A model-only directory starts discovery automatically; otherwise it begins only after choosing **Live model preview**. Parent fallback is limited to four direct content/provenance scopes and never recursively sweeps a category or the library root. The CLI `asset models` command uses the same bounded rule.
 
 The visual workspace can sort cards by source/name, filename, or file size in either direction. `Scan exact copies` first narrows candidates by byte length, verifies SHA-256, and finally performs a streaming byte-for-byte comparison. It only labels exact groups and enables a collapsed comparison view; it never deletes source or processed assets. The preview-pane selector can switch from synchronized left/right images to compatible WotLK M2 + SKIN sources found by the automatic model browser. The embedded model view is live and rotatable; applying a selected PNG uses the model's real first UV map but remains an explicitly labeled candidate preview until replaceable slots and full `CharSections` composition are resolved.
 
@@ -156,6 +160,8 @@ wowcrucible server client-plan <installed-server-folder> <effective-dbc-folder> 
 wowcrucible db inspect <host> <port> <user> <database> --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=ENV_NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
 wowcrucible db snapshot-inspect <snapshot-file> [--quick]
+wowcrucible db recovery-audit <legacy-snapshot> <output.crucible-db-audit> [--baseline=stock-snapshot] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
+wowcrucible db recovery-inspect <audit-file> [--quick]
 wowcrucible db item-audit <host> <port> <user> <database> [--password-env=ENV_NAME] [--output=report.json]
 wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=" Variant"] [--itemset=ID]
 ```
@@ -164,7 +170,9 @@ Server detection reads the live `worldserver.conf`; it does not accept `.dist` t
 
 `db snapshot` is phase one of legacy SQL recovery. It issues only fixed metadata queries and `SELECT` statements, requests a consistent read-only transaction where the server supports one, streams base-table rows without loading the database into memory, and publishes the compressed artifact atomically. By default it verifies that the selected schema looks like a world database and excludes known auth/character runtime-state tables while retaining reusable definitions such as `mail_loot_template`, `instance_template`, `guild_rewards`, and `pet_levelstats`. Repeat `--include` or `--exclude` for table-name globs. `--include-sensitive` deliberately removes the runtime-state safety filter; those captured rows may themselves contain account secrets even though the live connection password is never serialized.
 
-`db snapshot-inspect` performs offline schema, entry, byte-count, row-count, and SHA-256 integrity checks. The default also decodes every row structure; `--quick` still reads and hashes every table but skips structural decoding. Snapshot comparison against a verified baseline, domain grouping, dependency analysis, three-way target translation, and selective SQL promotion are not implemented in phase one.
+`db snapshot-inspect` performs offline schema, entry, byte-count, row-count, and SHA-256 integrity checks. The default also decodes every row structure; `--quick` still reads and hashes every table but skips structural decoding.
+
+`db recovery-audit` is the read-only phase-two boundary. With `--baseline`, it emits an atomic, compressed, source-hash-bound audit containing keyed added, modified, and removed rows plus exact before/after field values. Without a baseline, it labels every emitted row an **unattributed candidate** instead of pretending stock rows are custom work. Tables are grouped into content domains for review. A table without a primary key, a collation-dependent/textual key that snapshot format v1 cannot order portably, another incompatible key, a partial schema, or an excluded counterpart is reported but never compared by capture order. Known runtime-state tables remain excluded unless `--include-sensitive` is explicit. `db recovery-inspect` verifies the audit offline; `--quick` still hashes all change streams. The artifact always records `PromotionReady=false`: dependency closure, target translation, ID remapping, selection, SQL generation, and deployment remain later phases.
 
 `item-audit` discovers the current schema instead of assuming one core revision. It checks vendor, creature/gameobject/item/mail/pickpocket/skinning/disenchant/fishing/spell/reference/prospecting/milling loot, character starting items, and every quest reward/choice slot that exists. The report calls an item **no known acquisition path**, not certainly unobtainable, because custom server scripts can grant items without a database relationship.
 

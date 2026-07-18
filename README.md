@@ -12,7 +12,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
-- Captures a legacy world database through a SELECT-only, streaming phase-one snapshot into an atomic compressed artifact with schema/primary-key metadata, exact row counts, and integrity hashes; three-way change auditing and selective promotion remain the next SQL-recovery phase.
+- Captures a legacy world database through a SELECT-only streaming snapshot, then performs an entirely offline baseline-to-legacy audit with field-level additions, edits, removals, domain grouping, source hashes, and explicit unattributed mode when no stock baseline is available. Target translation and selective promotion remain pending.
 - Searches the live world schema for items with no known vendor, loot, quest, starting-item, profession, fishing, or spell-loot acquisition path; the result is searchable in the Avalonia item workbench and exportable from the CLI.
 - Clones a complete item to a new ID transactionally, preserving every current/custom `item_template` column and locale row, with optional item-set reassignment and strict no-overwrite behavior.
 - Inspects and clones `ItemSet.dbc` rows with explicit member-ID remapping, resolves set-bonus spell names, and edits all eight bonus slots into a separate output DBC.
@@ -45,8 +45,8 @@ Client formats and server integration are separate: a client-build profile decla
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
 - Builds content-first asset libraries where provenance is inserted immediately before each file, keeping every archive and imported-folder version of the same Character/UI/World directory adjacent instead of splitting sources into separate trees. New loose-file scans and extracted-folder imports write directly into that layout.
 - Consolidates older `Loose\Content` libraries into the same content-first tree with a read-only dry run, strict all-or-nothing blocking for non-identical destination conflicts, byte-for-byte duplicate verification, and a durable apply journal.
-- Visually compares PNG assets by content directory rather than filename: fast catalog indexing, path/source/name filters, selectable filename/source/file-size sorting, cancellable SHA-256 plus byte-for-byte exact-copy grouping and collapsing, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions and provenance, and direct Explorer reveal. Duplicate inspection never deletes files.
-- Opens **Assets & compare** inside the existing Crucible window, with an explicit return-to-editor action, resizable split panes, wrapped tool groups, and scrollable configuration headers so controls remain reachable when the window is resized.
+- Visually compares PNG assets by content directory rather than filename: a versioned compact sidecar opened the current 162.5 MB test catalog in roughly 0.15 seconds, includes model-only M2/SKIN paths, falls back safely when stale/corrupt/unwritable, and never replaces the CSV as the durable source. Path/source/name filters, selectable filename/source/file-size sorting, cancellable SHA-256 plus byte-for-byte exact-copy grouping, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions, provenance, and direct Explorer reveal remain non-destructive.
+- Opens **Assets & compare** inside the existing Crucible window, with an explicit return-to-editor action, resizable split panes, wrapped tool groups, and scrollable configuration headers so controls remain reachable when the window is resized. M2 discovery stays idle during ordinary PNG browsing, starts automatically for model-only paths or explicitly for Live model preview, and searches only bounded direct provenance scopes instead of recursively probing the whole asset library.
 - Builds resumable client indexes with per-archive SHA-256 identities and reusable MPQ content catalogs, detects active/inactive locales, backup/custom subdirectory scopes and renamed build-12340 executables, marks anonymous hash-only entries explicitly, recovers names from local/cross-client path corpora, and resumes indexed extraction without rescanning giant archives or rewriting already-complete files.
 - Includes a visual Client Inspector for indexing/resuming a whole installation, color-coded archive scopes, loose runtime/config/AddOn inventory, plain-language compatibility guidance, content-category summaries, direct archive browsing, and provenance-preserving extraction.
 - Turns an extracted/effective client DBC directory into a reviewed client-to-server deployment plan: byte identity, row/field counts, current-core consumer, SQL-overlay warning, restart requirement, unresolved layer conflicts, portable JSON, and separate non-live staging trees for the patch and server DBC candidates.
@@ -94,6 +94,8 @@ wowcrucible server dbc-audit "C:\path\to\installed-server" gtRegenMPPerSpt.dbc s
 wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db snapshot 127.0.0.1 3306 admin old_world old-world.crucible-db-snapshot --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db snapshot-inspect old-world.crucible-db-snapshot
+wowcrucible db recovery-audit old-world.crucible-db-snapshot old-world.crucible-db-audit --baseline=matching-stock.crucible-db-snapshot
+wowcrucible db recovery-inspect old-world.crucible-db-audit
 wowcrucible client install-patch patch-Z.MPQ "C:\Games\WoW" [--name=patch-Z.MPQ]
 wowcrucible client clear-cache "C:\Games\WoW"
 wowcrucible client index "C:\Games\WoW" client-index [--no-hash] [--listfile=known-paths.txt] [--client-exe=Wow.exe]
@@ -171,7 +173,7 @@ The corpus test runner accepts a WDBX 12340 definition XML and a directory conta
 ## Roadmap
 
 1. Connect the new portable content-project/ID registry to live DBC and SQL occupancy scans and unified validation/change plans.
-2. Add **Legacy SQL Recovery & Promotion**: capture a portable, credential-free audit first; derive intended changes with a three-way baseline → legacy-edited → target comparison; then let the user selectively promote approved item, class/race, pet, spell, creature, and related-table changes. The default path remains read-only and never carries deletions into the target implicitly.
+2. Complete **Legacy SQL Recovery & Promotion** beyond the implemented snapshot and offline baseline audit: add core-specific dependency closure, explicit selection, baseline → legacy-edited → target conflict analysis, collision-safe ID remapping, SQL/rollback preview, and transactional deployment. The default path remains read-only and never carries deletions into the target implicitly.
 3. Add a WoWDBDefs DBD provider and cross-check it against WDBX definitions per target build.
 4. Add BLP preview/conversion plus recursive M2/WMO/ADT asset dependency validation.
 5. Expand the Spell Workspace with named flags, searchable references, related-table navigation, and optional project-local SQLite bulk editing.

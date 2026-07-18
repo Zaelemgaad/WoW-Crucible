@@ -4,6 +4,13 @@ using WoWCrucible.Core;
 var devbugRequested = args.Any(argument => argument.Equals("--devbug", StringComparison.OrdinalIgnoreCase));
 var commandArguments = args.Where(argument => !argument.Equals("--devbug", StringComparison.OrdinalIgnoreCase)).ToArray();
 using var devbug = CliDevbugSession.TryStart(devbugRequested, args);
+using var cancellation = new CancellationTokenSource();
+ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+{
+    eventArgs.Cancel = true;
+    cancellation.Cancel();
+};
+Console.CancelKeyPress += cancelHandler;
 var exitCode = 0;
 
 try
@@ -11,7 +18,7 @@ try
     exitCode = commandArguments.Length == 0 || commandArguments[0] is "help" or "--help" or "-h" ? Help() : commandArguments[0].ToLowerInvariant() switch
     {
         "dbc" => Dbc(commandArguments[1..]),
-        "db" => Database(commandArguments[1..]).GetAwaiter().GetResult(),
+        "db" => Database(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "server" => Server(commandArguments[1..]).GetAwaiter().GetResult(),
         "client" => Client(commandArguments[1..]),
         "asset" => Asset(commandArguments[1..]),
@@ -21,11 +28,20 @@ try
         _ => Fail($"Unknown command: {commandArguments[0]}")
     };
 }
+catch (OperationCanceledException)
+{
+    Console.Error.WriteLine("Cancelled.");
+    exitCode = 130;
+}
 catch (Exception ex)
 {
     Console.Error.WriteLine($"ERROR: {ex.Message}");
     devbug?.RecordException(ex);
     exitCode = 1;
+}
+finally
+{
+    Console.CancelKeyPress -= cancelHandler;
 }
 
 devbug?.Complete(exitCode);
@@ -177,7 +193,7 @@ static int Project(string[] args)
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ProjectHelp();
     if (args is ["create", var root, var name, .. var createOptions])
     {
-        var target = Option(createOptions, "--target=") ?? "wotlk-335a-12340"; var library = Option(createOptions, "--asset-library=");
+        var target = Option(createOptions, "--target=") ?? TargetProfileCatalog.DefaultProfileId; var library = Option(createOptions, "--asset-library=");
         var unknown = createOptions.Where(option => !option.StartsWith("--target=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--asset-library=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown project create option: {unknown[0]}");
         var project = CrucibleContentProjectService.Create(root, name, target, library); Console.Error.WriteLine($"Created {project.Name} at {Path.GetFullPath(root)}\nTarget: {project.TargetProfile}\nID registry: {Path.Combine(Path.GetFullPath(root), project.IdRegistryFile)}"); return 0;
     }
@@ -198,7 +214,7 @@ static int Project(string[] args)
     return ProjectHelp(2);
 }
 
-static int ProjectHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible project create <folder> <name> [--target=wotlk-335a-12340] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, Race, Class, Faction, Mount, Quest, Custom", code);
+static int ProjectHelp(int code = 0) => GroupHelp($"Usage:\n  wowcrucible project create <folder> <name> [--target={TargetProfileCatalog.DefaultProfileId}] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, Race, Class, Faction, Mount, Quest, Custom", code);
 
 static int Client(string[] args)
 {
@@ -369,9 +385,61 @@ static int ServerHelp(int code = 0)
     if (code == 0) Console.WriteLine(text); else Console.Error.WriteLine(text); return code;
 }
 
-static async Task<int> Database(string[] args)
+static async Task<int> Database(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return DatabaseHelp();
+    if (args[0].Equals("recovery-audit", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 3) return DatabaseHelp(2);
+        var auditOptions = args[3..];
+        var baselineOptions = auditOptions.Where(option => option.StartsWith("--baseline=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (baselineOptions.Length > 1) return Fail("Specify --baseline only once.");
+        var baseline = baselineOptions.Length == 0 ? null : baselineOptions[0][11..];
+        if (baselineOptions.Length == 1 && string.IsNullOrWhiteSpace(baseline)) return Fail("--baseline requires a non-empty snapshot path.");
+        var includes = auditOptions.Where(option => option.StartsWith("--include=", StringComparison.OrdinalIgnoreCase)).Select(option => option[10..]).ToArray();
+        var excludes = auditOptions.Where(option => option.StartsWith("--exclude=", StringComparison.OrdinalIgnoreCase)).Select(option => option[10..]).ToArray();
+        var includeSensitive = auditOptions.Any(option => option.Equals("--include-sensitive", StringComparison.OrdinalIgnoreCase));
+        var overwrite = auditOptions.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase));
+        var unknown = auditOptions.Where(option => !option.StartsWith("--baseline=", StringComparison.OrdinalIgnoreCase) &&
+            !option.StartsWith("--include=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--exclude=", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--include-sensitive", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown recovery-audit option: {unknown[0]}");
+        var progress = new Progress<LegacyDatabaseAuditProgress>(value =>
+            Console.Error.WriteLine(value.Table is null ? value.Stage : $"{value.Stage}\t{value.CompletedTables:N0}/{value.TotalTables:N0}\t{value.Table}\t{value.Rows:N0} change record(s)"));
+        var result = await new LegacyDatabaseAuditService().AuditAsync(args[1], args[2], baseline,
+            new(includes, excludes, includeSensitive, overwrite), progress, cancellationToken);
+        foreach (var table in result.Manifest.Tables.Where(table => table.Status != LegacyDatabaseTableAuditStatus.Unchanged))
+        {
+            Console.WriteLine($"TABLE\t{table.Domain}\t{table.Status}\t{table.Name}\t+{table.AddedRows}\t~{table.ModifiedRows}\t-{table.RemovedRows}\t?{table.UnattributedRows}\t{table.ChangedFields} fields");
+            foreach (var finding in table.Findings) Console.Error.WriteLine($"FINDING\t{table.Name}\t{finding}");
+        }
+        foreach (var warning in result.Manifest.Warnings) Console.Error.WriteLine($"WARNING: {warning}");
+        Console.Error.WriteLine($"Legacy SQL recovery audit complete: {result.Manifest.TotalChangeRecords:N0} row record(s), {result.Manifest.TotalChangedFields:N0} field value(s), {result.Manifest.Tables.Count:N0} table(s).\nMode: {result.Manifest.Mode}; baseline identity: {result.Manifest.BaselineIdentity}.\nArtifact: {result.Path}\nThis is read-only evidence, not executable SQL.");
+        return RecoveryAuditNeedsReview(result.Manifest) ? 3 : 0;
+    }
+    if (args[0].Equals("recovery-inspect", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 2) return DatabaseHelp(2);
+        var inspectOptions = args[2..];
+        var quick = inspectOptions.Any(option => option.Equals("--quick", StringComparison.OrdinalIgnoreCase));
+        var unknown = inspectOptions.Where(option => !option.Equals("--quick", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown recovery-inspect option: {unknown[0]}");
+        var inspection = await new LegacyDatabaseAuditService().InspectAsync(args[1], verifyChanges: !quick, cancellationToken);
+        if (inspection.Manifest is { } manifest)
+        {
+            var tables = manifest.Tables ?? [];
+            Console.WriteLine($"Format\t{manifest.Format}\t{manifest.FormatVersion}\nCreatedUtc\t{manifest.CreatedUtc:O}\nMode\t{manifest.Mode}\nBaselineIdentity\t{manifest.BaselineIdentity}\nTables\t{tables.Count}\nChangeRecords\t{manifest.TotalChangeRecords}\nChangedFields\t{manifest.TotalChangedFields}\nChangesSha256\t{manifest.ChangesSha256}\nPromotionReady\t{manifest.PromotionReady}");
+            foreach (var table in tables)
+            {
+                Console.WriteLine($"TABLE\t{table.Domain}\t{table.Status}\t{table.Name}\t{table.ChangeRecords}\t{table.ChangedFields}\t{string.Join(',', table.PrimaryKey ?? [])}");
+                foreach (var finding in table.Findings ?? []) Console.Error.WriteLine($"FINDING\t{table.Name}\t{finding}");
+            }
+            foreach (var warning in manifest.Warnings ?? []) Console.Error.WriteLine($"WARNING: {warning}");
+        }
+        foreach (var finding in inspection.Findings) Console.Error.WriteLine($"INVALID\t{finding}");
+        Console.Error.WriteLine(inspection.Valid ? $"Recovery audit is valid ({(quick ? "hash-only" : "full change-record verification")})." : "Recovery audit validation failed.");
+        return !inspection.Valid ? 3 : inspection.Manifest is { } validManifest && RecoveryAuditNeedsReview(validManifest) ? 3 : 0;
+    }
     if (args[0].Equals("snapshot-inspect", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 2) return DatabaseHelp(2);
@@ -379,7 +447,7 @@ static async Task<int> Database(string[] args)
         var quick = inspectOptions.Any(option => option.Equals("--quick", StringComparison.OrdinalIgnoreCase));
         var unknown = inspectOptions.Where(option => !option.Equals("--quick", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown snapshot-inspect option: {unknown[0]}");
-        var inspection = await new LegacyDatabaseSnapshotService().InspectAsync(args[1], verifyRows: !quick);
+        var inspection = await new LegacyDatabaseSnapshotService().InspectAsync(args[1], verifyRows: !quick, cancellationToken);
         if (inspection.Manifest is { } manifest)
         {
             Console.WriteLine($"Format\t{manifest.Format}\t{manifest.FormatVersion}\nCapturedUtc\t{manifest.CapturedUtc:O}\nDatabase\t{manifest.Source?.Database ?? "<missing>"}\nServer\t{manifest.Source?.ServerVersion ?? "<missing>"}\nTables\t{manifest.Tables?.Count ?? 0}\nRows\t{manifest.TotalRows}\nSchemaSha256\t{manifest.SchemaSha256}\nContentSha256\t{manifest.ContentSha256}\nConsistentSnapshot\t{manifest.ConsistentSnapshotStarted}\nReadOnlyTransaction\t{manifest.ReadOnlyTransactionEnforced}");
@@ -415,7 +483,7 @@ static async Task<int> Database(string[] args)
         if (unknown.Length > 0) return Fail($"Unknown snapshot option: {unknown[0]}");
         var progress = new Progress<LegacyDatabaseSnapshotProgress>(value =>
             Console.Error.WriteLine(value.Table is null ? $"{value.Stage}" : $"{value.Stage}\t{value.CompletedTables:N0}/{value.TotalTables:N0}\t{value.Table}\t{value.Rows:N0} rows"));
-        var result = await new LegacyDatabaseSnapshotService().CaptureAsync(profile, args[5], new(includes, excludes, includeSensitive, overwrite), progress);
+        var result = await new LegacyDatabaseSnapshotService().CaptureAsync(profile, args[5], new(includes, excludes, includeSensitive, overwrite), progress, cancellationToken);
         Console.Error.WriteLine($"Read-only legacy world snapshot complete: {result.Manifest.Tables.Count:N0} table(s), {result.Manifest.TotalRows:N0} row(s), {result.ArtifactBytes / (1024d * 1024):0.##} MiB.\nArtifact: {result.Path}\nSchema: {result.Manifest.SchemaSha256}\nContent: {result.Manifest.ContentSha256}\nConsistent snapshot: {result.Manifest.ConsistentSnapshotStarted}; database-enforced read-only: {result.Manifest.ReadOnlyTransactionEnforced}.\nExcluded by safety/filters: {result.Manifest.Policy.ExcludedTables.Count:N0} table(s).");
         return 0;
     }
@@ -450,7 +518,16 @@ static async Task<int> Database(string[] args)
     return DatabaseHelp(2);
 }
 
-static int DatabaseHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]\n  wowcrucible db snapshot-inspect <snapshot-file> [--quick]\n  wowcrucible db item-audit <host> <port> <user> <database> [--password-env=NAME] [--output=report.json]\n  wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=\" Variant\"] [--itemset=ID]\n\nSnapshot capture is SELECT-only, streams base-table rows into a compressed portable artifact, and excludes known auth/character runtime-state tables by default. --include-sensitive is an explicit override; --quick still verifies every data hash but skips row-structure decoding. Passwords are read from WOW_CRUCIBLE_DB_PASSWORD by default and are never accepted as command arguments.", code);
+static int DatabaseHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]\n  wowcrucible db snapshot-inspect <snapshot-file> [--quick]\n  wowcrucible db recovery-audit <legacy-snapshot> <output.crucible-db-audit> [--baseline=stock-snapshot] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]\n  wowcrucible db recovery-inspect <audit-file> [--quick]\n  wowcrucible db item-audit <host> <port> <user> <database> [--password-env=NAME] [--output=report.json]\n  wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=\" Variant\"] [--itemset=ID]\n\nSnapshot capture is SELECT-only and excludes known auth/character runtime state by default. recovery-audit is completely offline: with a baseline it records baseline-to-legacy deltas; without one it labels rows unattributed candidates. No recovery audit is executable SQL, no-PK tables are blocked from row inference, and removals are never implicitly approved. --include-sensitive is an explicit override. Passwords are read from WOW_CRUCIBLE_DB_PASSWORD by default and are never accepted as command arguments.", code);
+
+static bool RecoveryAuditNeedsReview(LegacyDatabaseAuditManifest manifest) =>
+    manifest.Mode == LegacyDatabaseAuditMode.Unattributed ||
+    manifest.BaselineIdentity != LegacyDatabaseBaselineIdentity.MatchingCoreIdentity ||
+    (manifest.Warnings?.Count ?? 0) > 1 ||
+    (manifest.Tables ?? []).Any(table => table.Status is LegacyDatabaseTableAuditStatus.BlockedNoPrimaryKey or
+        LegacyDatabaseTableAuditStatus.BlockedIncompatibleSchema or LegacyDatabaseTableAuditStatus.NotCaptured or
+        LegacyDatabaseTableAuditStatus.SchemaChanged or LegacyDatabaseTableAuditStatus.BaselineTableOnly ||
+        table.RemovedRows > 0 || (table.Findings?.Count ?? 0) > 0);
 
 static int Manifest(string[] args)
 {
@@ -749,7 +826,7 @@ static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLin
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, audit item acquisition paths, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
+    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 

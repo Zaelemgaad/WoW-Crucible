@@ -9,6 +9,7 @@
             <Setter Property="Background" Value="#0B0E13" />
             <Setter Property="Foreground" Value="#E8EBF2" />
             <Setter Property="FontFamily" Value="avares://Avalonia.Fonts.Inter/Assets#Inter" />
+            <Setter Property="Icon" Value="/Assets/Branding/WoWCrucible.ico" />
         </Style>
         <Style Selector="Button">
             <Setter Property="Background" Value="#1B2230" />

@@ -36,6 +36,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly M2PreviewView _modelView = new();
     private readonly WrapPanel _cards = new() { Orientation = Orientation.Horizontal, ItemWidth = 176, ItemHeight = 206 };
     private readonly TextBlock _folderTitle = new() { FontSize = 17, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _folderHelp = new() { Text = "Every PNG directly in this content directory is shown from every provenance source. Choose a card, then record it in the persistent Definitive Set below.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8793A7"), FontSize = 11 };
     private readonly TextBlock _pageStatus = new() { Foreground = Brush.Parse("#8F9AAE") };
     private readonly TextBlock _status = new() { Text = "Choose a content-first asset library.", Foreground = Brush.Parse("#99A5B8") };
     private readonly Image[] _comparisonImages = [new() { Stretch = Stretch.Uniform }, new() { Stretch = Stretch.Uniform }];
@@ -46,9 +47,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly List<Bitmap> _thumbnailBitmaps = [];
     private AssetComparisonIndex? _index; private IReadOnlyList<AssetComparisonEntry> _folderEntries = []; private IReadOnlyList<AssetComparisonEntry> _filteredEntries = [];
     private IReadOnlyDictionary<string, AssetComparisonDuplicateGroup> _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase);
-    private IReadOnlyList<AssetComparisonModel> _allModels = []; private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
-    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph;
-    private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
+    private IReadOnlyList<AssetComparisonModel> _allModels = []; private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private Control? _imageDirectoryTools; private Control? _imageCardScroller; private Control? _imagePager; private Control? _modelOnlyCatalogNotice; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
+    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory;
+    private Task? _modelDiscoveryTask;
+    private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
 
     public event EventHandler? BackRequested;
 
@@ -61,13 +63,14 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             ColumnDefinitions = new("*,Auto"), Margin = new Thickness(3, 2), Children =
             {
                 new TextBlock { Text = string.IsNullOrEmpty(item.LogicalPath) ? "(archive root)" : item.LogicalPath, TextTrimming = TextTrimming.CharacterEllipsis },
-                WithColumn(new TextBlock { Text = $"{item.PngFiles:N0} · {item.ProvenanceSources:N0} src", Foreground = Brush.Parse("#7F8A9F"), FontSize = 10, Margin = new Thickness(8,0,0,0) }, 1)
+                WithColumn(new TextBlock { Text = DirectoryAssetSummary(item), TextTrimming = TextTrimming.CharacterEllipsis, Foreground = Brush.Parse("#7F8A9F"), FontSize = 10, Margin = new Thickness(8,0,0,0) }, 1)
             }
         });
         _directories.SelectionChanged += async (_, _) => await RunUiActionAsync("directory-selection", SelectDirectoryAsync); _directorySearch.TextChanged += (_, _) => FilterDirectories();
         _fileSearch.TextChanged += async (_, _) => await RunUiActionAsync("file-filter", FilterFilesAsync); _sourceFilter.SelectionChanged += async (_, _) => { if (!_settingSourceFilter) await RunUiActionAsync("source-filter", FilterFilesAsync); };
         _sort.SelectionChanged += async (_, _) => await RunUiActionAsync("sort-change", FilterFilesAsync); _collapseDuplicates.Click += async (_, _) => await RunUiActionAsync("duplicate-collapse", FilterFilesAsync); _undecidedOnly.Click += async (_, _) => await RunUiActionAsync("decision-filter", FilterFilesAsync); _scanDuplicates.Click += async (_, _) => await RunUiActionAsync("exact-copy-scan", ScanDuplicatesAsync);
-        _previewMode.SelectionChanged += async (_, _) => await RunUiActionAsync("preview-mode-change", ChangePreviewModeAsync); _modelPicker.SelectionChanged += async (_, _) => await RunUiActionAsync("model-selection", LoadSelectedModelAsync);
+        _previewMode.SelectionChanged += async (_, _) => { if (!_suppressPreviewModeChange) await RunUiActionAsync("preview-mode-change", ChangePreviewModeAsync); };
+        _modelPicker.SelectionChanged += async (_, _) => { if (!_suppressModelSelection) await RunUiActionAsync("model-selection", LoadSelectedModelAsync); };
         _modelSearch.TextChanged += (_, _) => FilterModels(); _modelFilter.SelectionChanged += (_, _) => FilterModels();
         for (var index = 0; index < 2; index++) { var slot = index; _slotButtons[index].Click += (_, _) => SetActiveSlot(slot); }
         KeyDown += async (_, e) => await RunUiActionAsync("decision-shortcut", () => HandleDecisionKeyAsync(e)); SetActiveSlot(0); Content = BuildLayout();
@@ -79,7 +82,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var requestedRoot = string.IsNullOrWhiteSpace(libraryRoot) ? null : Path.GetFullPath(libraryRoot);
         var changedRoot = requestedRoot is not null && !requestedRoot.Equals(_library.Text, StringComparison.OrdinalIgnoreCase);
         if (changedRoot) _library.Text = requestedRoot;
-        _workspaceCancellation.Cancel(); _workspaceCancellation.Dispose(); _workspaceCancellation = new(); _active = true; _activityVersion++; _scanDuplicates.IsEnabled = true;
+        _workspaceCancellation.Cancel(); _workspaceCancellation.Dispose(); _workspaceCancellation = new();
+        _directoryCancellation?.Dispose(); _directoryCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token);
+        if (!_modelsDiscovered) _modelDiscoveryTask = null;
+        _active = true; _activityVersion++; _scanDuplicates.IsEnabled = true;
         if ((!_initialIndexRequested || changedRoot) && !string.IsNullOrWhiteSpace(_library.Text) && Directory.Exists(_library.Text))
         {
             _initialIndexRequested = true;
@@ -112,6 +118,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _fileSearch.MinWidth = 180;
         var duplicateTools = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Children = { _scanDuplicates, _collapseDuplicates, _undecidedOnly, _autoAdvance, new TextBlock { Text = "Keys: K keep · A alternative · R review · X reject", VerticalAlignment = VerticalAlignment.Center, Foreground = Brush.Parse("#8793A7"), FontSize = 10, Margin = new Thickness(4, 0) } } };
         var filters = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Children = { _fileSearch, _sourceFilter, _sort } };
+        _imageDirectoryTools = new StackPanel { Spacing = 8, Children = { filters, duplicateTools } };
         var keeper = AccentButton("KEEP"); keeper.Click += async (_, _) => await RunUiActionAsync("record-keeper", () => RecordCurrentAsync(AssetDecision.Keeper));
         var alternative = new Button { Content = "Alternative" }; alternative.Click += async (_, _) => await RunUiActionAsync("record-alternative", () => RecordCurrentAsync(AssetDecision.Alternative));
         var reject = new Button { Content = "Reject" }; reject.Click += async (_, _) => await RunUiActionAsync("record-reject", () => RecordCurrentAsync(AssetDecision.Rejected));
@@ -119,12 +126,31 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var stage = new Button { Content = "Stage keepers…" }; stage.Click += async (_, _) => await RunUiActionAsync("stage-keepers", StageKeepersAsync);
         var revealProject = new Button { Content = "Reveal project" }; revealProject.Click += (_, _) => RevealProject();
         var projectTools = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Children = { keeper, alternative, reject, review, _assetCategory, _assetNotes, stage, revealProject, _projectStatus } };
-        var middleHeader = new StackPanel { Spacing = 8, Margin = new Thickness(10, 10, 10, 4), Children = { _folderTitle, new TextBlock { Text = "Every PNG directly in this content directory is shown from every provenance source. Choose a card, then record it in the persistent Definitive Set below.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8793A7"), FontSize = 11 }, filters, duplicateTools, projectTools } };
+        var middleHeader = new StackPanel { Spacing = 8, Margin = new Thickness(10, 10, 10, 4), Children = { _folderTitle, _folderHelp, _imageDirectoryTools, projectTools } };
         var headerScroll = new ScrollViewer { Content = middleHeader, MaxHeight = 280, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
         var pager = new WrapPanel { Orientation = Orientation.Horizontal, ItemHeight = 34, Margin = new Thickness(10, 5), Children = { previous, next, _pageStatus } };
+        _imagePager = pager;
         var middle = new Grid { RowDefinitions = new("Auto,*,Auto"), MinWidth = 320 }; middle.Children.Add(headerScroll);
         var cardScroll = new ScrollViewer { Content = _cards, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Margin = new Thickness(8) };
-        Grid.SetRow(cardScroll, 1); middle.Children.Add(cardScroll); Grid.SetRow(pager, 2); middle.Children.Add(pager);
+        _imageCardScroller = cardScroll;
+        _modelOnlyCatalogNotice = new Border
+        {
+            IsVisible = false,
+            Margin = new Thickness(12),
+            Padding = new Thickness(18),
+            BorderBrush = Brush.Parse("#2B3445"),
+            BorderThickness = new Thickness(1),
+            Child = new TextBlock
+            {
+                Text = "This is a model-asset path. Use the Live model preview, model search, and model selector on the right to inspect its M2/SKIN variants.",
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = Brush.Parse("#99A5B8"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Center
+            }
+        };
+        Grid.SetRow(cardScroll, 1); middle.Children.Add(cardScroll); Grid.SetRow(_modelOnlyCatalogNotice, 1); middle.Children.Add(_modelOnlyCatalogNotice); Grid.SetRow(pager, 2); middle.Children.Add(pager);
 
         var compare = BuildComparisonPane(); compare.MinWidth = 420;
         var body = new Grid { ColumnDefinitions = new("0.85*,4,1.35*,4,2*") };
@@ -168,7 +194,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     {
         if (!_active) return;
         var token = _workspaceCancellation.Token; var activity = _activityVersion; var request = ++_indexRequest;
-        _status.Text = "Reading the catalog and grouping PNGs by content directory…";
+        _status.Text = "Reading the asset catalog and grouping content directories…";
         var libraryRoot = _library.Text ?? string.Empty;
         var stopwatch = Stopwatch.StartNew();
         DesktopCrashLogger.Debug("ASSET", "index-start", ("library", libraryRoot));
@@ -179,9 +205,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             _index = index;
             _projectPath = DefinitiveAssetProjectService.DefaultPath(libraryRoot); _project = DefinitiveAssetProjectService.LoadOrCreate(_projectPath, libraryRoot); UpdateProjectStatus();
             FilterDirectories();
-            _status.Text = $"Indexed {_index.TotalPngFiles:N0} PNGs across {_index.Directories.Count:N0} content directories.";
-            DesktopCrashLogger.Log($"Asset comparison indexed {_index.TotalPngFiles:N0} PNGs across {_index.Directories.Count:N0} content directories from {libraryRoot}", null);
-            DesktopCrashLogger.Debug("ASSET", "index-success", ("library", libraryRoot), ("pngs", _index.TotalPngFiles), ("directories", _index.Directories.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
+            var modelDirectories = _index.Directories.Count(directory => directory.M2Files > 0 || directory.SkinFiles > 0);
+            _status.Text = $"Indexed {_index.TotalPngFiles:N0} PNG previews across {_index.Directories.Count:N0} content directories, including {modelDirectories:N0} with model assets, via {IndexSourceLabel(_index.Source)}.";
+            DesktopCrashLogger.Log($"Asset comparison indexed {_index.TotalPngFiles:N0} PNG previews across {_index.Directories.Count:N0} content directories ({modelDirectories:N0} with model assets) from {libraryRoot}", null);
+            DesktopCrashLogger.Debug("ASSET", "index-success", ("library", libraryRoot), ("pngs", _index.TotalPngFiles), ("directories", _index.Directories.Count), ("model_directories", modelDirectories), ("index_source", _index.Source), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (OperationCanceledException) { }
         catch (Exception exception)
@@ -197,27 +224,94 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _directories.ItemsSource = _index.Directories.Where(directory => query.Length == 0 || directory.LogicalPath.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
     }
 
+    private static string DirectoryAssetSummary(AssetComparisonDirectory directory)
+    {
+        if (directory.M2Files == 0 && directory.SkinFiles == 0)
+            return $"{directory.PngFiles:N0} PNG · {directory.ProvenanceSources:N0} src";
+        if (directory.PngFiles == 0)
+            return $"{directory.M2Files:N0} M2 · {directory.SkinFiles:N0} SKIN";
+        return $"{directory.PngFiles:N0} PNG · {directory.M2Files:N0} M2";
+    }
+
+    private static string IndexSourceLabel(AssetComparisonIndexSource source) => source switch
+    {
+        AssetComparisonIndexSource.Sidecar => "the compact cache",
+        AssetComparisonIndexSource.Catalog => "the CSV catalog",
+        _ => "a filesystem scan"
+    };
+
+    private static bool IsModelOnlyDirectory(AssetComparisonDirectory directory) =>
+        directory.PngFiles == 0 && (directory.M2Files > 0 || directory.SkinFiles > 0);
+
+    private void ApplyDirectoryPresentation(AssetComparisonDirectory directory, bool modelOnly)
+    {
+        _selectedDirectory = directory;
+        _modelOnlyDirectory = modelOnly;
+        _imageDirectoryTools?.IsVisible = !modelOnly;
+        _imageCardScroller?.IsVisible = !modelOnly;
+        _imagePager?.IsVisible = !modelOnly;
+        _modelOnlyCatalogNotice?.IsVisible = modelOnly;
+        _folderHelp.Text = modelOnly
+            ? $"This logical path contains model assets ({directory.M2Files:N0} M2 · {directory.SkinFiles:N0} SKIN) rather than PNG previews. Crucible opens Live model preview automatically and resolves nearby models plus their dependencies."
+            : "Every PNG directly in this content directory is shown from every provenance source. Choose a card, then record it in the persistent Definitive Set below.";
+    }
+
+    private async Task PresentModelOnlyDirectoryAsync()
+    {
+        if (_previewMode.SelectedIndex != 1)
+        {
+            _suppressPreviewModeChange = true;
+            try { _previewMode.SelectedIndex = 1; }
+            finally { _suppressPreviewModeChange = false; }
+        }
+        await ChangePreviewModeAsync();
+    }
+
     private async Task SelectDirectoryAsync()
     {
         if (!_active) return;
         var activity = _activityVersion; var request = ++_directoryRequest;
         _directoryCancellation?.Cancel(); _directoryCancellation?.Dispose(); _directoryCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token); var token = _directoryCancellation.Token;
-        _imageSelectionCancellation?.Cancel(); _modelCancellation?.Cancel(); _duplicateScanCancellation?.Cancel(); _scanDuplicates.IsEnabled = true;
-        if (_index is null || _directories.SelectedItem is not AssetComparisonDirectory directory) return;
+        _thumbnailCancellation?.Cancel(); _imageSelectionCancellation?.Cancel(); _modelCancellation?.Cancel(); _duplicateScanCancellation?.Cancel();
+        _thumbnailRequest++; _imageSelectionRequest++; _modelRequest++; _scanDuplicates.IsEnabled = true;
+        if (_index is null || _directories.SelectedItem is not AssetComparisonDirectory directory) { _directoryReady = false; _selectedDirectory = null; return; }
         var index = _index;
-        _folderTitle.Text = string.IsNullOrEmpty(directory.LogicalPath) ? "(archive root)" : directory.LogicalPath; _status.Text = "Reading direct PNG variants…";
+        var modelOnly = IsModelOnlyDirectory(directory);
+        _directoryReady = false; _modelsDiscovered = false; _folderEntries = []; _filteredEntries = []; _selectedTexture = null;
+        _modelDiscoveryTask = null;
+        _allModels = []; _folderModels = []; _modelDiscoveryScope = directory.LogicalPath; _loadedModelGeometry = null; _modelDependencyGraph = null;
+        _modelView.ClearGeometry(); _modelView.SetTexture(null); ApplyDirectoryPresentation(directory, modelOnly); FilterModels(requestModelLoad: false);
+        foreach (var bitmap in _thumbnailBitmaps) bitmap.Dispose(); _thumbnailBitmaps.Clear(); _cards.Children.Clear(); _pageStatus.Text = "Loading directory…";
+        _folderTitle.Text = string.IsNullOrEmpty(directory.LogicalPath) ? "(archive root)" : directory.LogicalPath;
+        _status.Text = modelOnly ? "Reading model assets and resolving preview dependencies…" : "Reading direct PNG variants…";
+        _modelStatus.Text = modelOnly
+            ? "Waiting for this model-only content path to finish loading…"
+            : "Model discovery is idle. Switch to Live model preview when you want Crucible to inspect nearby M2 files.";
         var stopwatch = Stopwatch.StartNew();
         try
         {
             var entries = await Task.Run(() => AssetComparisonService.GetDirectoryPngs(index, directory.LogicalPath), token);
             if (!IsCurrent(token, activity) || request != _directoryRequest) return;
-            var discovered = await Task.Run(() => AssetComparisonService.GetRelevantModels(index, directory.LogicalPath, token), token);
-            if (!IsCurrent(token, activity) || request != _directoryRequest) return;
-            _folderEntries = entries; _selectedTexture = null; _loadedModelGeometry = null; _modelDependencyGraph = null; _modelView.ClearGeometry(); _modelView.SetTexture(null); _allModels = discovered.Models; _modelDiscoveryScope = discovered.DiscoveryScope; FilterModels();
-            _modelStatus.Text = _allModels.Count == 0 ? "No M2 files were found in this path or its parent content paths." : $"Discovered {_allModels.Count:N0} M2 file(s) under '{_modelDiscoveryScope}', including {_allModels.Count(model => model.Compatibility == AssetModelCompatibility.Ready):N0} ready for live preview.";
+            // The catalog is an acceleration index, not the source of truth for
+            // the files currently on disk. Reconcile presentation with the live
+            // directory reads so a stale cache can never hide newly added PNGs.
+            modelOnly = entries.Count == 0 && (directory.M2Files > 0 || directory.SkinFiles > 0);
+            _folderEntries = entries; _directoryReady = true;
+            ApplyDirectoryPresentation(directory, modelOnly);
+            _modelStatus.Text = modelOnly
+                ? "Resolving nearby M2 models for this model-only content path…"
+                : "Model discovery is idle. Switch to Live model preview when you want Crucible to inspect nearby M2 files.";
             _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase); _collapseDuplicates.IsChecked = false; _collapseDuplicates.IsEnabled = false;
             var sources = new[] { "All patch sources" }.Concat(_folderEntries.Select(entry => entry.Provenance).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase)).ToArray();
             _settingSourceFilter = true; _sourceFilter.ItemsSource = sources; _sourceFilter.SelectedIndex = 0; _settingSourceFilter = false; await FilterFilesAsync();
+            if (!IsCurrent(token, activity) || request != _directoryRequest) return;
+            if (modelOnly || _previewMode.SelectedIndex == 1)
+            {
+                await EnsureModelsDiscoveredAsync();
+                if (!IsCurrent(token, activity) || request != _directoryRequest) return;
+                if (modelOnly) await PresentModelOnlyDirectoryAsync();
+                else await ChangePreviewModeAsync();
+            }
             DesktopCrashLogger.Debug("ASSET", "directory-selected", ("path", directory.LogicalPath), ("pngs", _folderEntries.Count), ("sources", sources.Length - 1), ("models", _folderModels.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (OperationCanceledException) { }
@@ -252,6 +346,15 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var activity = _activityVersion; var request = ++_thumbnailRequest;
         _thumbnailCancellation?.Cancel(); _thumbnailCancellation?.Dispose(); _thumbnailCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token); var token = _thumbnailCancellation.Token;
         foreach (var bitmap in _thumbnailBitmaps) bitmap.Dispose(); _thumbnailBitmaps.Clear(); _cards.Children.Clear();
+        if (_modelOnlyDirectory)
+        {
+            var readyModels = _allModels.Count(model => model.Compatibility == AssetModelCompatibility.Ready);
+            _pageStatus.Text = _allModels.Count == 0 ? "No M2 models discovered." : $"{_allModels.Count:N0} M2 discovered · {readyModels:N0} ready";
+            _status.Text = _selectedDirectory is null
+                ? $"Model-only content path · {_allModels.Count:N0} M2 discovered · {readyModels:N0} ready for live preview."
+                : $"Model-only content path · {_selectedDirectory.M2Files:N0} M2 · {_selectedDirectory.SkinFiles:N0} SKIN · {readyModels:N0} ready for live preview.";
+            return;
+        }
         var page = _filteredEntries.Skip(_page * PageSize).Take(PageSize).ToArray(); var images = new List<(Image Image, AssetComparisonEntry Entry)>();
         foreach (var entry in page)
         {
@@ -311,24 +414,67 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         if (_imageComparisonPane is not null) _imageComparisonPane.IsVisible = !modelMode;
         if (_modelPreviewPane is not null) _modelPreviewPane.IsVisible = modelMode;
         if (_imageComparisonTools is not null) _imageComparisonTools.IsVisible = !modelMode;
-        if (modelMode) await LoadSelectedModelAsync();
+        if (modelMode)
+        {
+            await EnsureModelsDiscoveredAsync();
+            await LoadSelectedModelAsync();
+        }
         else { _modelRequest++; _modelCancellation?.Cancel(); }
+    }
+
+    private Task EnsureModelsDiscoveredAsync()
+    {
+        if (!_active || !_directoryReady || _modelsDiscovered || _index is null || _selectedDirectory is null) return Task.CompletedTask;
+        return _modelDiscoveryTask ??= DiscoverModelsAsync(_index, _selectedDirectory);
+    }
+
+    private async Task DiscoverModelsAsync(AssetComparisonIndex index, AssetComparisonDirectory directory)
+    {
+        var activity = _activityVersion; var request = _directoryRequest; var token = _directoryCancellation?.Token ?? _workspaceCancellation.Token;
+        _modelStatus.Text = "Discovering nearby M2 models…";
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var discovered = await Task.Run(() => AssetComparisonService.GetRelevantModels(index, directory.LogicalPath, token), token);
+            if (!IsCurrent(token, activity) || request != _directoryRequest || !ReferenceEquals(directory, _selectedDirectory)) return;
+            _allModels = discovered.Models; _modelDiscoveryScope = discovered.DiscoveryScope; _modelsDiscovered = true;
+            FilterModels(requestModelLoad: false, preferReady: _modelOnlyDirectory);
+            _modelStatus.Text = _allModels.Count == 0
+                ? "No M2 files were found in this path or its bounded parent scopes."
+                : $"Discovered {_allModels.Count:N0} M2 file(s) under '{_modelDiscoveryScope}', including {_allModels.Count(model => model.Compatibility == AssetModelCompatibility.Ready):N0} ready for live preview.";
+            DesktopCrashLogger.Debug("MODEL", "comparison-discovery-success", ("path", directory.LogicalPath), ("scope", _modelDiscoveryScope), ("models", _allModels.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception)
+        {
+            if (!IsCurrent(token, activity) || request != _directoryRequest) return;
+            _modelDiscoveryTask = null;
+            ReportFailure("model-discovery-failed", "Could not discover nearby models", exception, ("path", directory.LogicalPath));
+        }
     }
 
     private async Task LoadSelectedModelAsync()
     {
         if (!_active || _previewMode.SelectedIndex != 1) return;
-        var activity = _activityVersion; var request = ++_modelRequest;
-        _modelCancellation?.Cancel(); _modelCancellation?.Dispose(); _modelCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token); var token = _modelCancellation.Token;
-        if (_modelPicker.SelectedItem is not AssetComparisonModel model) { _modelStatus.Text = "No model matches the current model filter."; return; }
+        var activity = _activityVersion; var directoryRequest = _directoryRequest; var request = ++_modelRequest;
+        _modelCancellation?.Cancel(); _modelCancellation?.Dispose();
+        var directoryToken = _directoryCancellation?.Token ?? _workspaceCancellation.Token;
+        _modelCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token, directoryToken); var token = _modelCancellation.Token;
+        if (_modelPicker.SelectedItem is not AssetComparisonModel model)
+        {
+            _modelStatus.Text = _allModels.Count == 0
+                ? "No M2 files were found in this path or its parent content paths."
+                : $"{_allModels.Count:N0} M2 file(s) were discovered, but none match the current model filter. Choose All models to inspect compatibility details.";
+            return;
+        }
         if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _modelDependencyGraph = null; _modelView.ClearGeometry(); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
         _modelStatus.Text = $"Loading {model.FileName}…";
         var stopwatch = Stopwatch.StartNew();
         DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
         try
         {
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath), token); if (!IsCurrent(token, activity) || request != _modelRequest) return;
-            var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model), token); if (!IsCurrent(token, activity) || request != _modelRequest) return;
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+            var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _modelView.SetGeometry(geometry); UpdateModelStatus();
             DesktopCrashLogger.Debug("MODEL", "comparison-preview-success", ("model", model.ModelPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("texture_slots", geometry.TextureSlots.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
@@ -344,10 +490,15 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private void UpdateModelStatus()
     {
         if (_modelPicker.SelectedItem is not AssetComparisonModel model) return;
-        var texture = _selectedTexture is null ? "No texture card selected." : $"Selected texture candidate: {_selectedTexture.Provenance} · {_selectedTexture.FileName}";
+        var texture = _selectedTexture is null
+            ? (_modelOnlyDirectory ? "Texture overlay: none selected; geometry remains available for inspection." : "No texture card selected.")
+            : $"Selected texture candidate: {_selectedTexture.Provenance} · {_selectedTexture.FileName}";
         var slots = _loadedModelGeometry is null ? "Texture slots: load pending." : _loadedModelGeometry.TextureSlots.Count == 0 ? "Texture slots: none declared." : "Texture slots: " + string.Join(", ", _loadedModelGeometry.TextureSlots.Select(slot => $"{slot.Index}:{TextureTypeName(slot.Type)}{(string.IsNullOrWhiteSpace(slot.EmbeddedPath) ? string.Empty : $"={slot.EmbeddedPath}")}"));
         var dependencies = _modelDependencyGraph is null ? "Dependencies: inspection pending." : $"Dependencies: {_modelDependencyGraph.Resolved.Count:N0} resolved · {_modelDependencyGraph.ExternalBindings.Count:N0} appearance/DBC binding(s) · {_modelDependencyGraph.Blocking.Count:N0} BLOCKING";
-        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{texture}\n{slots}\n{dependencies}\nGeometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
+        var previewNote = _modelOnlyDirectory
+            ? "Geometry is live. Embedded/replacement texture resolution and Character layer/CharSections composition remain approximate until the full appearance plan supplies every layer."
+            : "Geometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
+        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{texture}\n{slots}\n{dependencies}\n{previewNote}";
     }
 
     private async Task ScanDuplicatesAsync()
@@ -381,12 +532,23 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private void ApplyZoom() { for (var index = 0; index < 2; index++) if (_comparisonBitmaps[index] is { } bitmap) { _comparisonImages[index].Width = bitmap.PixelSize.Width * _zoom; _comparisonImages[index].Height = bitmap.PixelSize.Height * _zoom; } }
     private void SyncScroll(int source) { if (_syncingScroll) return; _syncingScroll = true; _comparisonScrolls[source == 0 ? 1 : 0].Offset = _comparisonScrolls[source].Offset; _syncingScroll = false; }
     private void RevealSlot(int slot) { if (_comparisonImages[slot].Tag is not AssetComparisonEntry entry) return; Process.Start(new ProcessStartInfo("explorer.exe") { UseShellExecute = true, ArgumentList = { "/select,", entry.FullPath } }); }
-    private void FilterModels()
+    private void FilterModels(bool requestModelLoad = true, bool preferReady = false)
     {
         var query = _modelSearch.Text?.Trim() ?? string.Empty; IEnumerable<AssetComparisonModel> models = _allModels;
         if (_modelFilter.SelectedIndex == 0) models = models.Where(model => model.Compatibility == AssetModelCompatibility.Ready);
         if (query.Length > 0) models = models.Where(model => model.FileName.Contains(query, StringComparison.OrdinalIgnoreCase) || model.Provenance.Contains(query, StringComparison.OrdinalIgnoreCase) || model.LogicalPath.Contains(query, StringComparison.OrdinalIgnoreCase));
-        _folderModels = models.ToArray(); _modelPicker.ItemsSource = _folderModels; _modelPicker.SelectedIndex = _folderModels.Count > 0 ? 0 : -1;
+        _folderModels = models.ToArray();
+        var selectedIndex = _folderModels.Count == 0 ? -1 : 0;
+        if (preferReady)
+        {
+            var firstReady = Array.FindIndex(_folderModels.ToArray(), model => model.Compatibility == AssetModelCompatibility.Ready);
+            if (firstReady >= 0) selectedIndex = firstReady;
+        }
+        _suppressModelSelection = true;
+        try { _modelPicker.ItemsSource = _folderModels; _modelPicker.SelectedIndex = selectedIndex; }
+        finally { _suppressModelSelection = false; }
+        if (requestModelLoad && _active && _previewMode.SelectedIndex == 1)
+            _ = RunUiActionAsync("model-filter-selection", LoadSelectedModelAsync);
     }
 
     private void MoveModel(int offset)

@@ -389,7 +389,7 @@ public static class BulkAssetLibraryService
 
     private static string WriteCatalog(BulkAssetLibraryPlan plan, CancellationToken cancellationToken = default)
     {
-        var path = Path.Combine(plan.LibraryRoot, "asset-catalog.csv"); var temp = path + ".tmp";
+        var path = Path.Combine(plan.LibraryRoot, "asset-catalog.csv"); var temp = path + ".tmp"; var aggregates = new AssetComparisonAggregateBuilder();
         try
         {
             using (var writer = new StreamWriter(temp, false, new UTF8Encoding(true), 1024 * 1024))
@@ -402,9 +402,16 @@ public static class BulkAssetLibraryService
                     var relative = Path.GetRelativePath(plan.LibraryRoot, file); var extension = Path.GetExtension(file).TrimStart('.').ToUpperInvariant();
                     var source = CatalogSource(relative);
                     writer.WriteLine($"{Csv(Classify(relative))},{Csv(extension)},{Csv(source)},{Csv(relative)},{new FileInfo(file).Length}");
+                    aggregates.Add(relative, extension);
                 }
             }
-            File.Move(temp, path, true); return path;
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temp, path, true);
+            // The catalog is the durable primary output. Its compact acceleration
+            // sidecar is best-effort and must never turn a committed catalog into a
+            // reported failure; BuildIndex can recreate it on the next open.
+            AssetComparisonAggregateCache.TryWrite(plan.LibraryRoot, path, aggregates.Build(), CancellationToken.None);
+            return path;
         }
         catch
         {
