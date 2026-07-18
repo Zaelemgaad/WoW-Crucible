@@ -58,9 +58,16 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         _session = session; _creator = new ItemCreatorView(session); _creator.ReferenceLookupRequested += (_, request) => ReferenceLookupRequested?.Invoke(this, request); _session.Changed += SessionChanged; LoadDefaults(); PopulateSessionConnection();
         _items.ItemTemplate = new FuncDataTemplate<ItemCatalogEntry>((item, _) =>
         {
-            var panel = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), Margin = new Thickness(3, 2) };
+            var panel = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), Margin = new Thickness(3, 3), ColumnSpacing = 8 };
             if (item is null) return panel;
-            AddCell(panel, item.Entry.ToString("N0"), 0, FontWeight.SemiBold); AddCell(panel, item.Name, 1); AddCell(panel, QualityName(item.Quality), 2); AddCell(panel, $"iLvl {item.ItemLevel}", 3); AddCell(panel, item.ItemSetId == 0 ? "No set" : $"Set {item.ItemSetId}", 4); return panel;
+            AddCell(panel, item.Entry.ToString("N0"), 0, FontWeight.SemiBold);
+            var identity = new StackPanel { Spacing = 2, Children = { new TextBlock { Text = item.Name, TextWrapping = TextWrapping.Wrap } } };
+            var explanation = item.HasKnownAcquisitionPath
+                ? $"Known path · {string.Join("; ", item.AcquisitionSources.Take(2))}"
+                : item.NoPathReview.FirstOrDefault() ?? "No accepted acquisition evidence found.";
+            identity.Children.Add(new TextBlock { Text = explanation, TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = new SolidColorBrush(Color.Parse(item.HasKnownAcquisitionPath ? "#79B58A" : "#D4A45F")) });
+            Grid.SetColumn(identity, 1); panel.Children.Add(identity);
+            AddCell(panel, QualityName(item.Quality), 2); AddCell(panel, $"iLvl {item.ItemLevel}", 3); AddCell(panel, item.ItemSetId == 0 ? "No set" : $"Set {item.ItemSetId}", 4); return panel;
         });
         _items.SelectionChanged += (_, _) => { if (_items.SelectedItem is ItemCatalogEntry item) { _cloneSource.Text = item.Entry.ToString(); _cloneResult.Text = $"Selected {item.Entry:N0} — {item.Name}\nQuality: {QualityName(item.Quality)} · Item level: {item.ItemLevel} · Set: {(item.ItemSetId == 0 ? "none" : item.ItemSetId)}"; } };
         _search.TextChanged += (_, _) => ApplyAuditFilter();
@@ -115,7 +122,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var rowActions = new WrapPanel { Children = { edit, fullSql, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
         var exact = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _inspectId, WithColumn(inspect, 1), rowActions } };
         var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
-        var note = new TextBlock { Text = "“No known path” means no vendor, achievement, direct/reachable loot, usable quest reward/start item, character-start, profession/disenchant/fishing/spell-loot, or causally reachable Spell.dbc create-item source was found. Exact numeric search reports no-path, known-path, or absent instead of leaving an ambiguous empty list. Reference controls, disabled quests, orphaned rewards, and unreachable spells are not mistaken for playable acquisition. Custom scripts still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        var note = new TextBlock { Text = "Every row now shows why its path was accepted or rejected. “No known path” means no vendor, achievement, direct/reachable loot, usable quest reward/start item, character-start, profession/disenchant/fishing/spell-loot, or causally reachable Spell.dbc create-item source was found. Exact numeric search reports no-path, known-path, or absent instead of leaving an ambiguous empty list. Reference controls, disabled quests, orphaned rewards, and unreachable spells are not mistaken for playable acquisition. Custom scripts still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
         return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(exact, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
@@ -146,7 +153,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private async Task AuditAsync()
     {
-        SetBusy("Scanning every known SQL and DBC acquisition source…"); DesktopCrashLogger.Debug("ITEM", "acquisition-audit-start", ("host", _host.Text), ("database", _database.Text), ("dbc", _acquisitionDbc.Text)); try { _audit = await new ItemCatalogService().AuditAsync(Profile(), EmptyNull(_acquisitionDbc.Text)); ApplyAuditFilter(); _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} / {_audit.TotalItems:N0} no known path"; _status.Text = $"Checked {_audit.CheckedSources.Count:N0} source families; {_audit.MissingSources.Count:N0} unavailable or unconfigured."; DesktopCrashLogger.Debug("ITEM", "acquisition-audit-success", ("total_items", _audit.TotalItems), ("no_known_path", _audit.NoKnownAcquisitionPath.Count), ("checked_sources", _audit.CheckedSources.Count), ("missing_sources", _audit.MissingSources.Count)); }
+        SetBusy("Scanning every known SQL and DBC acquisition source…"); DesktopCrashLogger.Debug("ITEM", "acquisition-audit-start", ("host", _host.Text), ("database", _database.Text), ("dbc", _acquisitionDbc.Text)); try { _audit = await new ItemCatalogService().AuditAsync(Profile(), EmptyNull(_acquisitionDbc.Text)); ApplyAuditFilter(); _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} no path · {_audit.ObtainableItems:N0} known · {_audit.TotalItems:N0} total"; _status.Text = $"Checked {_audit.CheckedSources.Count:N0} source families; {_audit.MissingSources.Count:N0} unavailable or unconfigured. Enter any exact ID to pin and explain it."; DesktopCrashLogger.Debug("ITEM", "acquisition-audit-success", ("total_items", _audit.TotalItems), ("no_known_path", _audit.NoKnownAcquisitionPath.Count), ("checked_sources", _audit.CheckedSources.Count), ("missing_sources", _audit.MissingSources.Count)); }
         catch (Exception exception) { await ErrorAsync("Acquisition audit failed", exception); }
     }
 

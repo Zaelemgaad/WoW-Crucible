@@ -3,9 +3,11 @@ using MySqlConnector;
 
 namespace WoWCrucible.Core;
 
-public sealed record ItemCatalogEntry(uint Entry, string Name, int Quality, int ItemLevel, uint ItemSetId, IReadOnlyList<string> AcquisitionSources)
+public sealed record ItemCatalogEntry(uint Entry, string Name, int Quality, int ItemLevel, uint ItemSetId,
+    IReadOnlyList<string> AcquisitionSources, IReadOnlyList<string>? ReviewNotes = null)
 {
     public bool HasKnownAcquisitionPath => AcquisitionSources.Count > 0;
+    public IReadOnlyList<string> NoPathReview => ReviewNotes ?? [];
 }
 public sealed record ItemAcquisitionAudit(string Database, DateTimeOffset AuditedUtc, IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources,
     int TotalItems, int ObtainableItems, IReadOnlyList<ItemCatalogEntry> NoKnownAcquisitionPath,
@@ -61,9 +63,11 @@ public sealed class ItemCatalogService
         var scan = await ScanAsync(profile, dbcFolder, cancellationToken);
         var item = scan.Items.FirstOrDefault(candidate => candidate.Entry == entry);
         var accepted = item?.AcquisitionSources.Select(source => $"Accepted · {source}").ToArray() ?? [];
-        var rejected = scan.Rejected.TryGetValue(entry, out var findings)
-            ? findings.Order(StringComparer.OrdinalIgnoreCase).ToArray()
-            : item is null || item.HasKnownAcquisitionPath ? [] : ["No vendor, direct/reachable loot, usable quest reward, SQL/DBC starting-item, prospecting, milling, disenchanting, fishing, or spell-loot row references this item in the checked coverage."];
+        var rejected = item?.NoPathReview.Count > 0
+            ? item.NoPathReview
+            : scan.Rejected.TryGetValue(entry, out var findings)
+                ? findings.Order(StringComparer.OrdinalIgnoreCase).ToArray()
+                : item is null || item.HasKnownAcquisitionPath ? [] : [NoEvidenceMessage];
         return new(item, accepted, rejected, scan.CheckedSources, scan.MissingSources);
     }
 
@@ -108,12 +112,17 @@ public sealed class ItemCatalogService
             while (await reader.ReadAsync(cancellationToken))
             {
                 var entry = Convert.ToUInt32(reader.GetValue(0)); var sources = acquired.TryGetValue(entry, out var found) ? found.Order(StringComparer.OrdinalIgnoreCase).ToArray() : [];
-                items.Add(new(entry, Convert.ToString(reader.GetValue(1)) ?? string.Empty, Convert.ToInt32(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3)), Convert.ToUInt32(reader.GetValue(4)), sources));
+                var review = sources.Length > 0 ? [] : rejected.TryGetValue(entry, out var rejectedFindings)
+                    ? rejectedFindings.Order(StringComparer.OrdinalIgnoreCase).ToArray()
+                    : [NoEvidenceMessage];
+                items.Add(new(entry, Convert.ToString(reader.GetValue(1)) ?? string.Empty, Convert.ToInt32(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3)), Convert.ToUInt32(reader.GetValue(4)), sources, review));
             }
         return new(items, rejected,
             checkedSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
             missingSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray());
     }
+
+    private const string NoEvidenceMessage = "No accepted acquisition row was found in the checked SQL and DBC coverage. Custom scripts and core code still require manual review.";
 
     public static IReadOnlySet<uint> ReadCharStartOutfitItems(string path)
     {

@@ -143,10 +143,11 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     {
         _favorites.ItemTemplate = new FuncDataTemplate<SqlRowFavorite>((item, _) => item is null ? new TextBlock() : new StackPanel { Margin = new Thickness(4), Children = { new TextBlock { Text = $"{item.Label}  ·  {item.Database}.{item.Table}", FontWeight = FontWeight.SemiBold }, new TextBlock { Text = $"{string.Join(", ", item.Key.Select(pair => $"{pair.Key}={pair.Value}"))}{(string.IsNullOrWhiteSpace(item.Notes) ? string.Empty : $"  ·  {item.Notes}")}{(string.IsNullOrWhiteSpace(item.DbcPath) ? string.Empty : $"  ·  DBC {item.DbcPath}")}{(string.IsNullOrWhiteSpace(item.MpqPath) ? string.Empty : $"  ·  MPQ {item.MpqPath}")}", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") } } });
         var open = AccentButton("Open selected favorite"); open.Click += async (_, _) => await OpenFavoriteAsync();
+        var decoded = new Button { Content = "Open favorite in decoded editor" }; decoded.Click += async (_, _) => await OpenFavoriteAsync(true);
         var remove = new Button { Content = "Remove favorite" }; remove.Click += (_, _) => { if (_favorites.SelectedItem is SqlRowFavorite favorite) { SqlFavoriteStore.Remove(favorite.Identity); RefreshFavorites(); } };
         var openDbc = new Button { Content = "Open linked DBC" }; openDbc.Click += (_, _) => { if (_favorites.SelectedItem is SqlRowFavorite { DbcPath: { Length: > 0 } path }) OpenDbcRequested?.Invoke(this, path); };
         var openMpq = new Button { Content = "Open linked MPQ" }; openMpq.Click += (_, _) => { if (_favorites.SelectedItem is SqlRowFavorite { MpqPath: { Length: > 0 } path }) OpenMpqRequested?.Invoke(this, path); };
-        return new Grid { RowDefinitions = new("Auto,*"), Children = { new WrapPanel { Children = { open, remove, openDbc, openMpq } }, WithRow(_favorites, 1) } };
+        return new Grid { RowDefinitions = new("Auto,*"), Children = { new WrapPanel { Children = { open, decoded, remove, openDbc, openMpq } }, WithRow(_favorites, 1) } };
     }
 
     private Control DependencyPage()
@@ -242,9 +243,13 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var heading = new StackPanel { Spacing = 6 };
         heading.Children.Add(new TextBlock { Text = $"Complete row editor · {_page.Table} · {_selectedRow.Display}", FontSize = 16, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap });
         var actions = new WrapPanel(); var favorite = new Button { Content = "★ Favorite" }; favorite.Click += (_, _) => FavoriteSelected(); actions.Children.Add(favorite);
-        if (IsSharedWorldSchema() && (_page.Table is "item_template" or "creature_template" or "gameobject_template" or "quest_template" || BehaviorDomainCatalog.All.Any(domain => domain.TableName.Equals(_page.Table, StringComparison.OrdinalIgnoreCase)))) { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => GuidedEditRequested?.Invoke(this, new(_page.Table, _selectedRow.Values)); actions.Children.Add(guided); }
+        if (CanOpenGuidedEditor(_page.Table)) { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => GuidedEditRequested?.Invoke(this, new(_page.Table, _selectedRow.Values)); actions.Children.Add(guided); }
         var delete = new Button { Content = "Delete exactly this row" }; delete.Click += (_, _) => PrepareDelete(); actions.Children.Add(delete); heading.Children.Add(actions);
-        _rowEditor.Children.Add(heading); _rowEditor.Children.Add(new Grid { ColumnDefinitions = new("*,*,*"), ColumnSpacing = 8, Children = { _favoriteNotes, WithColumn(_favoriteDbc, 1), WithColumn(_favoriteMpq, 2) } });
+        var browseDbc = new Button { Content = "DBC…" }; browseDbc.Click += async (_, _) => await PickFavoritePathAsync(_favoriteDbc, "Select a related DBC file", "DBC", "*.dbc");
+        var browseMpq = new Button { Content = "MPQ…" }; browseMpq.Click += async (_, _) => await PickFavoritePathAsync(_favoriteMpq, "Select a related MPQ patch", "MPQ", "*.mpq");
+        var dbcPath = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 5, Children = { _favoriteDbc, WithColumn(browseDbc, 1) } };
+        var mpqPath = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 5, Children = { _favoriteMpq, WithColumn(browseMpq, 1) } };
+        _rowEditor.Children.Add(heading); _rowEditor.Children.Add(new Grid { ColumnDefinitions = new("*,*,*"), ColumnSpacing = 8, Children = { _favoriteNotes, WithColumn(dbcPath, 1), WithColumn(mpqPath, 2) } });
         foreach (var column in _page.Columns)
         {
             var value = _selectedRow.Values.GetValueOrDefault(column.Name); var text = new TextBox { Text = CellText(value), IsReadOnly = column.Extra.Contains("GENERATED", StringComparison.OrdinalIgnoreCase) || column.Extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase) };
@@ -625,7 +630,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Execute this non-read-only statement against {_profile.Database}? Review it carefully. Crucible begins a transaction, but MySQL schema/DDL statements can implicitly commit and may not be rollbackable.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
     }
 
-    private async Task OpenFavoriteAsync()
+    private async Task OpenFavoriteAsync(bool openDecoded = false)
     {
         if (_favorites.SelectedItem is not SqlRowFavorite favorite || _profile is null) return;
         try
@@ -641,6 +646,11 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             _rows.ItemsSource = _page.Rows; _rows.ItemTemplate = new FuncDataTemplate<SqlRowRecord>((value, _) => new TextBlock { Text = value is null ? string.Empty : RowSummary(value), TextWrapping = TextWrapping.NoWrap, Margin = new Thickness(4) });
             _pageStatus.Text = "Exact primary-key favorite · 1 row"; _tabs.SelectedIndex = 0; _rows.SelectedItem = row;
             _status.Text = $"Opened exact favorite {row.Display}. No broad text-search substitution was used.";
+            if (openDecoded)
+            {
+                if (!CanOpenGuidedEditor(table.Name)) _status.Text = $"Opened exact favorite {row.Display}, but {table.Name} has no guided editor yet; every field remains available here.";
+                else GuidedEditRequested?.Invoke(this, new(table.Name, row.Values));
+            }
         }
         catch (OperationCanceledException) { _status.Text = "Favorite lookup cancelled."; }
         catch (Exception exception) { Fail("Favorite lookup failed", exception); }
@@ -648,6 +658,12 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     }
 
     private void RefreshFavorites() => _favorites.ItemsSource = SqlFavoriteStore.Load();
+
+    private async Task PickFavoritePathAsync(TextBox target, string title, string label, string pattern)
+    {
+        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(label) { Patterns = [pattern] }] });
+        if (files.FirstOrDefault()?.TryGetLocalPath() is { } path) target.Text = path;
+    }
     private async Task LoadSchemasAsync()
     {
         if (_profile is null) return;
@@ -690,6 +706,9 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private static string RowSummary(SqlRowRecord row) { var name = row.Values.FirstOrDefault(pair => pair.Key.Equals("name", StringComparison.OrdinalIgnoreCase) || pair.Key.Equals("LogTitle", StringComparison.OrdinalIgnoreCase)).Value; return $"{row.Display}{(name is null ? string.Empty : $"  ·  {name}")}"; }
     private static string RelationshipCount(SqlRelationshipMatch match) => match.MatchingRows < 0 ? "file DBC · SQL mirror empty" : $"{match.MatchingRows:N0} exact row(s)";
     private bool IsSharedWorldSchema() => _profile is not null && _session.DatabaseProfile is not null && _profile.Host.Equals(_session.DatabaseProfile.Host, StringComparison.OrdinalIgnoreCase) && _profile.Port == _session.DatabaseProfile.Port && _profile.Database.Equals(_session.DatabaseProfile.Database, StringComparison.OrdinalIgnoreCase);
+    private bool CanOpenGuidedEditor(string table) => IsSharedWorldSchema() &&
+        (new[] { "item_template", "creature_template", "gameobject_template", "quest_template" }.Contains(table, StringComparer.OrdinalIgnoreCase) ||
+         BehaviorDomainCatalog.All.Any(domain => domain.TableName.Equals(table, StringComparison.OrdinalIgnoreCase)));
     private string? ResolveDbcMirrorPath(string tableName)
     {
         if (!tableName.EndsWith("_dbc", StringComparison.OrdinalIgnoreCase)) return null; var stem = tableName[..^4];
