@@ -5,8 +5,9 @@ using System.Text.Json;
 namespace WoWCrucible.Core;
 
 public enum AdtTerrainBrushFalloff { Linear, Smooth, Constant }
+public enum AdtTerrainBrushMode { RaiseLower, Flatten, Smooth, Noise }
 public sealed record AdtTerrainBrushVertex(int CellX, int CellY, int VertexIndex, long HeightOffset, float OriginalRelativeHeight, float EditedRelativeHeight, float Weight, float TileX, float TileY);
-public sealed record AdtTerrainBrushPlan(int FormatVersion, DateTimeOffset CreatedUtc, string InputPath, string InputSha256, float CenterX, float CenterY, float Radius, float Strength, AdtTerrainBrushFalloff Falloff, IReadOnlyList<AdtTerrainBrushVertex> Vertices);
+public sealed record AdtTerrainBrushPlan(int FormatVersion, DateTimeOffset CreatedUtc, string InputPath, string InputSha256, float CenterX, float CenterY, float Radius, float Strength, AdtTerrainBrushFalloff Falloff, IReadOnlyList<AdtTerrainBrushVertex> Vertices, AdtTerrainBrushMode Mode = AdtTerrainBrushMode.RaiseLower, float? TargetHeight = null, int Seed = 0);
 public sealed record AdtTerrainBrushResult(string OutputPath, string OutputSha256, string ReceiptPath, MapAssetInspection Inspection, int EditedVertices, int EditedCells);
 
 public static class AdtTerrainBrushService
@@ -15,30 +16,32 @@ public static class AdtTerrainBrushService
     private const int VertexCount = 145;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public static AdtTerrainBrushPlan Plan(string inputPath, float centerX, float centerY, float radius, float strength, AdtTerrainBrushFalloff falloff)
+    public static AdtTerrainBrushPlan Plan(string inputPath, float centerX, float centerY, float radius, float strength, AdtTerrainBrushFalloff falloff, AdtTerrainBrushMode mode = AdtTerrainBrushMode.RaiseLower, float? targetHeight = null, int seed = 0)
     {
         inputPath = Path.GetFullPath(inputPath); if (!File.Exists(inputPath)) throw new FileNotFoundException("The source ADT does not exist.", inputPath);
         if (!Path.GetExtension(inputPath).Equals(".adt", StringComparison.OrdinalIgnoreCase)) throw new NotSupportedException("Terrain brushing requires a WotLK ADT file.");
         if (!float.IsFinite(centerX) || !float.IsFinite(centerY) || centerX is < 0 or > 16 || centerY is < 0 or > 16) throw new ArgumentOutOfRangeException(nameof(centerX), "Brush center must be finite and inside the tile-local 0–16 terrain grid.");
         if (!float.IsFinite(radius) || radius <= 0) throw new ArgumentOutOfRangeException(nameof(radius), "Brush radius must be finite and greater than zero.");
-        if (!float.IsFinite(strength) || strength == 0) throw new ArgumentOutOfRangeException(nameof(strength), "Brush strength must be a finite nonzero height delta.");
-        if (!Enum.IsDefined(falloff)) throw new ArgumentOutOfRangeException(nameof(falloff));
+        if (!float.IsFinite(strength) || strength == 0) throw new ArgumentOutOfRangeException(nameof(strength), "Brush strength must be a finite nonzero amount.");
+        if (!Enum.IsDefined(falloff)) throw new ArgumentOutOfRangeException(nameof(falloff)); if (!Enum.IsDefined(mode)) throw new ArgumentOutOfRangeException(nameof(mode));
+        if (mode == AdtTerrainBrushMode.Flatten && (targetHeight is null || !float.IsFinite(targetHeight.Value))) throw new ArgumentOutOfRangeException(nameof(targetHeight), "Flatten mode requires a finite absolute target height.");
+        if (targetHeight is { } suppliedTarget && !float.IsFinite(suppliedTarget)) throw new ArgumentOutOfRangeException(nameof(targetHeight), "Target height must be finite when supplied.");
         var inspection = MapAssetInspectionService.Inspect(inputPath); if (inspection.Kind != MapAssetKind.Adt || inspection.Version != 18) throw new InvalidDataException("Terrain brushing requires a validated WotLK MVER 18 ADT.");
-        var vertices = new List<AdtTerrainBrushVertex>();
-        foreach (var cell in LocateCells(inputPath).Values.OrderBy(value => value.CellY).ThenBy(value => value.CellX))
+        var vertices = new List<AdtTerrainBrushVertex>(); var cells = LocateCells(inputPath); var heightGrid = HeightGrid(cells.Values);
+        foreach (var cell in cells.Values.OrderBy(value => value.CellY).ThenBy(value => value.CellX))
         {
             for (var index = 0; index < cell.Heights.Length; index++)
             {
                 var (localX, localY) = VertexPosition(index); var tileX = cell.CellX + localX; var tileY = cell.CellY + localY;
                 var distance = MathF.Sqrt(MathF.Pow(tileX - centerX, 2) + MathF.Pow(tileY - centerY, 2)); if (distance > radius) continue;
                 var weight = Weight(distance, radius, falloff);
-                if (weight <= 0) continue; var edited = cell.Heights[index] + strength * weight;
+                if (weight <= 0) continue; var edited = EditedRelativeHeight(cell, index, tileX, tileY, weight, strength, mode, targetHeight, seed, heightGrid); if (BitConverter.SingleToInt32Bits(edited) == BitConverter.SingleToInt32Bits(cell.Heights[index])) continue;
                 if (!float.IsFinite(edited)) throw new InvalidDataException($"Brush produces a non-finite height at ADT cell {cell.CellX},{cell.CellY} vertex {index}.");
                 vertices.Add(new(cell.CellX, cell.CellY, index, cell.HeightDataOffset + index * 4L, cell.Heights[index], edited, weight, tileX, tileY));
             }
         }
-        if (vertices.Count == 0) throw new InvalidOperationException("The brush does not touch a present ADT terrain vertex. Move the center or increase its radius.");
-        return new(FormatVersion, DateTimeOffset.UtcNow, inputPath, Sha256(inputPath), centerX, centerY, radius, strength, falloff, vertices);
+        if (vertices.Count == 0) throw new InvalidOperationException("The brush does not produce a terrain change. Move it onto present vertices, increase its radius/strength, or choose a different target/mode.");
+        return new(FormatVersion, DateTimeOffset.UtcNow, inputPath, Sha256(inputPath), centerX, centerY, radius, strength, falloff, vertices, mode, targetHeight, seed);
     }
 
     public static MapAssetInspection Preview(AdtTerrainBrushPlan plan)
@@ -79,7 +82,7 @@ public static class AdtTerrainBrushService
             var actual = inspection.Cells.Single(cell => cell.X == coordinate.CellX && cell.Y == coordinate.CellY && cell.Present); var planned = expected.Cells.Single(cell => cell.X == coordinate.CellX && cell.Y == coordinate.CellY && cell.Present);
             if (actual.MinimumHeight is not { } minimum || actual.MaximumHeight is not { } maximum || planned.MinimumHeight is not { } expectedMinimum || planned.MaximumHeight is not { } expectedMaximum || Math.Abs(minimum - expectedMinimum) > 0.001f || Math.Abs(maximum - expectedMaximum) > 0.001f) throw new InvalidDataException($"Written ADT cell {coordinate.CellX},{coordinate.CellY} did not re-parse to the brushed height range.");
         }
-        var hash = Sha256(outputPath); var receiptPath = outputPath + ".crucible-map-brush.json"; var receipt = new { FormatVersion, AppliedUtc = DateTimeOffset.UtcNow, plan.InputPath, plan.InputSha256, OutputPath = outputPath, OutputSha256 = hash, plan.CenterX, plan.CenterY, plan.Radius, plan.Strength, plan.Falloff, plan.Vertices };
+        var hash = Sha256(outputPath); var receiptPath = outputPath + ".crucible-map-brush.json"; var receipt = new { FormatVersion, AppliedUtc = DateTimeOffset.UtcNow, plan.InputPath, plan.InputSha256, OutputPath = outputPath, OutputSha256 = hash, plan.CenterX, plan.CenterY, plan.Radius, plan.Strength, plan.Falloff, plan.Mode, plan.TargetHeight, plan.Seed, plan.Vertices };
         AtomicWrite(receiptPath, JsonSerializer.SerializeToUtf8Bytes(receipt, JsonOptions), overwrite: true); return new(outputPath, hash, receiptPath, inspection, plan.Vertices.Count, plan.Vertices.Select(vertex => (vertex.CellX, vertex.CellY)).Distinct().Count());
     }
 
@@ -115,20 +118,47 @@ public static class AdtTerrainBrushService
     private static void ValidatePlan(AdtTerrainBrushPlan plan, bool verifySource)
     {
         ArgumentNullException.ThrowIfNull(plan); if (plan.FormatVersion != FormatVersion) throw new InvalidDataException($"Unsupported ADT terrain-brush plan format {plan.FormatVersion}.");
-        if (plan.Vertices.Count == 0 || !float.IsFinite(plan.CenterX) || !float.IsFinite(plan.CenterY) || plan.CenterX is < 0 or > 16 || plan.CenterY is < 0 or > 16 || !float.IsFinite(plan.Radius) || plan.Radius <= 0 || !float.IsFinite(plan.Strength) || plan.Strength == 0 || !Enum.IsDefined(plan.Falloff)) throw new InvalidDataException("ADT terrain-brush plan has no valid brush or vertex edits.");
+        if (plan.Vertices.Count == 0 || !float.IsFinite(plan.CenterX) || !float.IsFinite(plan.CenterY) || plan.CenterX is < 0 or > 16 || plan.CenterY is < 0 or > 16 || !float.IsFinite(plan.Radius) || plan.Radius <= 0 || !float.IsFinite(plan.Strength) || plan.Strength == 0 || !Enum.IsDefined(plan.Falloff) || !Enum.IsDefined(plan.Mode) || (plan.TargetHeight is { } target && !float.IsFinite(target)) || (plan.Mode == AdtTerrainBrushMode.Flatten && plan.TargetHeight is null)) throw new InvalidDataException("ADT terrain-brush plan has no valid brush, mode, or vertex edits.");
         if (plan.Vertices.Select(vertex => vertex.HeightOffset).Distinct().Count() != plan.Vertices.Count) throw new InvalidDataException("ADT terrain-brush plan contains duplicate byte offsets.");
-        if (!verifySource) return; if (!Sha256(plan.InputPath).Equals(plan.InputSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Source ADT hash no longer matches the terrain-brush plan; rebuild the plan before applying it."); var cells = LocateCells(plan.InputPath);
+        if (!verifySource) return; if (!Sha256(plan.InputPath).Equals(plan.InputSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Source ADT hash no longer matches the terrain-brush plan; rebuild the plan before applying it."); var cells = LocateCells(plan.InputPath); var heightGrid = HeightGrid(cells.Values);
         foreach (var vertex in plan.Vertices)
         {
             if (vertex.VertexIndex is < 0 or >= VertexCount || !cells.TryGetValue((vertex.CellX, vertex.CellY), out var cell)) throw new InvalidDataException($"Terrain-brush vertex {vertex.CellX},{vertex.CellY}:{vertex.VertexIndex} does not identify a source MCVT vertex."); var expectedOffset = cell.HeightDataOffset + vertex.VertexIndex * 4L;
             if (vertex.HeightOffset != expectedOffset || BitConverter.SingleToInt32Bits(vertex.OriginalRelativeHeight) != BitConverter.SingleToInt32Bits(cell.Heights[vertex.VertexIndex])) throw new InvalidDataException($"Terrain-brush vertex {vertex.CellX},{vertex.CellY}:{vertex.VertexIndex} does not match its source offset/preimage.");
-            var (localX, localY) = VertexPosition(vertex.VertexIndex); var tileX = vertex.CellX + localX; var tileY = vertex.CellY + localY; var distance = MathF.Sqrt(MathF.Pow(tileX - plan.CenterX, 2) + MathF.Pow(tileY - plan.CenterY, 2)); var weight = Weight(distance, plan.Radius, plan.Falloff); var edited = vertex.OriginalRelativeHeight + plan.Strength * weight;
-            if (weight <= 0 || !float.IsFinite(vertex.Weight) || !float.IsFinite(vertex.EditedRelativeHeight) || Math.Abs(vertex.TileX - tileX) > 0.000001f || Math.Abs(vertex.TileY - tileY) > 0.000001f || Math.Abs(vertex.Weight - weight) > 0.000001f || Math.Abs(vertex.EditedRelativeHeight - edited) > 0.00001f) throw new InvalidDataException($"Terrain-brush vertex {vertex.CellX},{vertex.CellY}:{vertex.VertexIndex} has a changed coordinate, weight, or postimage.");
+            var (localX, localY) = VertexPosition(vertex.VertexIndex); var tileX = vertex.CellX + localX; var tileY = vertex.CellY + localY; var distance = MathF.Sqrt(MathF.Pow(tileX - plan.CenterX, 2) + MathF.Pow(tileY - plan.CenterY, 2)); var weight = Weight(distance, plan.Radius, plan.Falloff); var edited = EditedRelativeHeight(cell, vertex.VertexIndex, tileX, tileY, weight, plan.Strength, plan.Mode, plan.TargetHeight, plan.Seed, heightGrid);
+            if (weight <= 0 || !float.IsFinite(vertex.Weight) || !float.IsFinite(vertex.EditedRelativeHeight) || BitConverter.SingleToInt32Bits(vertex.EditedRelativeHeight) == BitConverter.SingleToInt32Bits(vertex.OriginalRelativeHeight) || Math.Abs(vertex.TileX - tileX) > 0.000001f || Math.Abs(vertex.TileY - tileY) > 0.000001f || Math.Abs(vertex.Weight - weight) > 0.000001f || Math.Abs(vertex.EditedRelativeHeight - edited) > 0.00001f) throw new InvalidDataException($"Terrain-brush vertex {vertex.CellX},{vertex.CellY}:{vertex.VertexIndex} has a changed coordinate, weight, or postimage.");
         }
     }
     private static float Weight(float distance, float radius, AdtTerrainBrushFalloff falloff)
     {
         if (distance > radius) return 0; var normalized = Math.Clamp(distance / radius, 0, 1); return falloff switch { AdtTerrainBrushFalloff.Constant => 1f, AdtTerrainBrushFalloff.Smooth => 1f - normalized * normalized * (3f - 2f * normalized), _ => 1f - normalized };
+    }
+    private static Dictionary<(int X, int Y), float> HeightGrid(IEnumerable<CellVertices> cells)
+    {
+        var samples = new Dictionary<(int, int), (double Sum, int Count)>(); foreach (var cell in cells) for (var index = 0; index < cell.Heights.Length; index++) { var (localX, localY) = VertexPosition(index); var key = GridKey(cell.CellX + localX, cell.CellY + localY); samples.TryGetValue(key, out var value); samples[key] = (value.Sum + cell.BaseHeight + cell.Heights[index], value.Count + 1); }
+        return samples.ToDictionary(pair => pair.Key, pair => (float)(pair.Value.Sum / pair.Value.Count));
+    }
+    private static float EditedRelativeHeight(CellVertices cell, int index, float tileX, float tileY, float weight, float strength, AdtTerrainBrushMode mode, float? targetHeight, int seed, IReadOnlyDictionary<(int X, int Y), float> heightGrid)
+    {
+        var originalRelative = cell.Heights[index]; var originalAbsolute = cell.BaseHeight + originalRelative; var amount = Math.Abs(strength) * weight; float editedAbsolute;
+        switch (mode)
+        {
+            case AdtTerrainBrushMode.Flatten:
+                var flattenTarget = targetHeight ?? throw new InvalidDataException("Flatten brush has no target height."); editedAbsolute = originalAbsolute + Math.Clamp(flattenTarget - originalAbsolute, -amount, amount); break;
+            case AdtTerrainBrushMode.Smooth:
+                var key = GridKey(tileX, tileY); double sum = 0; var count = 0; for (var y = -2; y <= 2; y++) for (var x = -2; x <= 2; x++) if ((x != 0 || y != 0) && x * x + y * y <= 4 && heightGrid.TryGetValue((key.X + x, key.Y + y), out var neighbor)) { sum += neighbor; count++; }
+                var smoothTarget = count == 0 ? originalAbsolute : (float)(sum / count); editedAbsolute = originalAbsolute + Math.Clamp(smoothTarget - originalAbsolute, -amount, amount); break;
+            case AdtTerrainBrushMode.Noise:
+                var noiseKey = GridKey(tileX, tileY); editedAbsolute = originalAbsolute + Noise(noiseKey.X, noiseKey.Y, seed) * amount; break;
+            default:
+                editedAbsolute = originalAbsolute + strength * weight; break;
+        }
+        var result = editedAbsolute - cell.BaseHeight; if (!float.IsFinite(result)) throw new InvalidDataException($"Brush produces a non-finite height at ADT cell {cell.CellX},{cell.CellY} vertex {index}."); return result;
+    }
+    private static (int X, int Y) GridKey(float tileX, float tileY) => ((int)MathF.Round(tileX * 16f), (int)MathF.Round(tileY * 16f));
+    private static float Noise(int x, int y, int seed)
+    {
+        var value = unchecked((uint)seed * 0x9E3779B9u ^ (uint)x * 0x85EBCA6Bu ^ (uint)y * 0xC2B2AE35u); value ^= value >> 16; value *= 0x7FEB352Du; value ^= value >> 15; value *= 0x846CA68Bu; value ^= value >> 16; return value / (float)uint.MaxValue * 2f - 1f;
     }
     private static string Decode(ReadOnlySpan<byte> raw) => new string(Encoding.ASCII.GetString(raw).Reverse().ToArray());
     private static string Sha256(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }

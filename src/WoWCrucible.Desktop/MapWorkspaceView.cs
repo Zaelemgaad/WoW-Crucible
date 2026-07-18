@@ -10,6 +10,7 @@ namespace WoWCrucible.Desktop;
 
 internal sealed class MapWorkspaceView : UserControl, IDisposable
 {
+    private static readonly MapBrushModeChoice[] BrushModes = [new("Raise / lower", AdtTerrainBrushMode.RaiseLower), new("Flatten toward height", AdtTerrainBrushMode.Flatten), new("Smooth terrain", AdtTerrainBrushMode.Smooth), new("Seeded noise", AdtTerrainBrushMode.Noise)];
     private readonly TextBox _path = new() { PlaceholderText = "Open or drop a WotLK ADT, WDT, or WDL file…" };
     private readonly TextBlock _summary = Info("No map file loaded.");
     private readonly TextBlock _selected = Info("Select a present grid cell for exact terrain metadata.");
@@ -22,7 +23,10 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly TextBox _brushCenterY = new() { Text = "8", PlaceholderText = "Center Y (0–16)" };
     private readonly TextBox _brushRadius = new() { Text = "1", PlaceholderText = "Radius" };
     private readonly TextBox _brushStrength = new() { Text = "5", PlaceholderText = "Signed strength" };
+    private readonly ComboBox _brushMode = new() { ItemsSource = BrushModes, SelectedIndex = 0 };
     private readonly ComboBox _brushFalloff = new() { ItemsSource = Enum.GetValues<AdtTerrainBrushFalloff>(), SelectedItem = AdtTerrainBrushFalloff.Smooth };
+    private readonly TextBox _brushTarget = new() { Text = "0", PlaceholderText = "Flatten target height" };
+    private readonly TextBox _brushSeed = new() { Text = "0", PlaceholderText = "Noise seed" };
     private CancellationTokenSource? _operation;
     private MapAssetInspection? _inspection;
     private AdtHeightEditPlan? _heightPlan;
@@ -43,7 +47,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var previewBrush = new Button { Content = "Preview vertex brush" }; previewBrush.Click += async (_, _) => await PreviewBrushAsync();
         var saveBrush = new Button { Content = "Write brushed ADT…" }; saveBrush.Click += async (_, _) => await SaveBrushAsync();
         _grid.TerrainPointSelected += (_, point) => { _brushCenterX.Text = point.X.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _brushCenterY.Text = point.Y.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); UpdateBrushOverlay(); };
-        _brushCenterX.TextChanged += (_, _) => BrushInputChanged(); _brushCenterY.TextChanged += (_, _) => BrushInputChanged(); _brushRadius.TextChanged += (_, _) => BrushInputChanged(); _brushStrength.TextChanged += (_, _) => _brushPlan = null; _brushFalloff.SelectionChanged += (_, _) => _brushPlan = null;
+        _brushCenterX.TextChanged += (_, _) => BrushInputChanged(); _brushCenterY.TextChanged += (_, _) => BrushInputChanged(); _brushRadius.TextChanged += (_, _) => BrushInputChanged(); _brushStrength.TextChanged += (_, _) => _brushPlan = null; _brushMode.SelectionChanged += (_, _) => _brushPlan = null; _brushFalloff.SelectionChanged += (_, _) => _brushPlan = null; _brushTarget.TextChanged += (_, _) => _brushPlan = null; _brushSeed.TextChanged += (_, _) => _brushPlan = null;
         _heightDelta.TextChanged += (_, _) => _heightPlan = null;
 
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 10, Margin = new Thickness(12, 8) };
@@ -65,7 +69,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             Content = new StackPanel
             {
                 Margin = new Thickness(10), Spacing = 8,
-                Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Strength may be positive or negative; the circle is the exact tile-local radius."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
+                Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
             }
         };
         var body = new Grid { ColumnDefinitions = new("3*,Auto,2*") };
@@ -117,10 +121,11 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         {
             if (_inspection?.Kind != MapAssetKind.Adt) throw new InvalidOperationException("Terrain brushing requires an ADT file.");
             var centerX = Number(_brushCenterX, "brush center X"); var centerY = Number(_brushCenterY, "brush center Y"); var radius = Number(_brushRadius, "brush radius"); var strength = Number(_brushStrength, "brush strength");
-            var falloff = _brushFalloff.SelectedItem is AdtTerrainBrushFalloff selected ? selected : AdtTerrainBrushFalloff.Smooth; _status.Text = "Planning exact MCVT vertex edits…";
-            var plan = await Task.Run(() => AdtTerrainBrushService.Plan(_inspection.Path, centerX, centerY, radius, strength, falloff)); var preview = await Task.Run(() => AdtTerrainBrushService.Preview(plan));
+            var mode = _brushMode.SelectedItem is MapBrushModeChoice selectedMode ? selectedMode.Value : AdtTerrainBrushMode.RaiseLower; var falloff = _brushFalloff.SelectedItem is AdtTerrainBrushFalloff selectedFalloff ? selectedFalloff : AdtTerrainBrushFalloff.Smooth;
+            float? target = mode == AdtTerrainBrushMode.Flatten ? Number(_brushTarget, "flatten target height") : null; var seed = 0; if (mode == AdtTerrainBrushMode.Noise && !int.TryParse(_brushSeed.Text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out seed)) throw new InvalidOperationException("Enter a signed 32-bit integer noise seed."); _status.Text = $"Planning exact {mode} MCVT vertex edits…";
+            var plan = await Task.Run(() => AdtTerrainBrushService.Plan(_inspection.Path, centerX, centerY, radius, strength, falloff, mode, target, seed)); var preview = await Task.Run(() => AdtTerrainBrushService.Preview(plan));
             _brushPlan = plan; _heightPlan = null; _grid.SetInspection(preview, plan.Vertices.Select(vertex => (vertex.CellX, vertex.CellY)).Distinct()); _grid.SetBrush(plan.CenterX, plan.CenterY, plan.Radius); _summary.Text = Summary(preview);
-            _status.Text = $"Preview only · {plan.Vertices.Count:N0} vertex edits across {plan.Vertices.Select(vertex => (vertex.CellX, vertex.CellY)).Distinct().Count():N0} cell(s) · {plan.Falloff} falloff · source bytes unchanged";
+            _status.Text = $"Preview only · {plan.Mode} · {plan.Vertices.Count:N0} vertex edits across {plan.Vertices.Select(vertex => (vertex.CellX, vertex.CellY)).Distinct().Count():N0} cell(s) · {plan.Falloff} falloff · source bytes unchanged";
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT terrain brush preview failed", exception); }
     }
@@ -141,10 +146,11 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
 
     private Control BrushFields()
     {
-        var fields = new Grid { ColumnDefinitions = new("*,*,*,*"), ColumnSpacing = 6 };
-        var values = new[] { Field("CENTER X", _brushCenterX), Field("CENTER Y", _brushCenterY), Field("RADIUS", _brushRadius), Field("STRENGTH", _brushStrength) };
-        for (var index = 0; index < values.Length; index++) { fields.Children.Add(values[index]); Grid.SetColumn(values[index], index); }
-        return new StackPanel { Spacing = 6, Children = { fields, Field("FALLOFF", _brushFalloff) } };
+        var position = new Grid { ColumnDefinitions = new("*,*,*,*"), ColumnSpacing = 6 }; var positionValues = new[] { Field("CENTER X", _brushCenterX), Field("CENTER Y", _brushCenterY), Field("RADIUS", _brushRadius), Field("STRENGTH", _brushStrength) };
+        for (var index = 0; index < positionValues.Length; index++) { position.Children.Add(positionValues[index]); Grid.SetColumn(positionValues[index], index); }
+        var behavior = new Grid { ColumnDefinitions = new("*,*,*,*"), ColumnSpacing = 6 }; var behaviorValues = new[] { Field("MODE", _brushMode), Field("FALLOFF", _brushFalloff), Field("FLATTEN TARGET", _brushTarget), Field("NOISE SEED", _brushSeed) };
+        for (var index = 0; index < behaviorValues.Length; index++) { behavior.Children.Add(behaviorValues[index]); Grid.SetColumn(behaviorValues[index], index); }
+        return new StackPanel { Spacing = 6, Children = { position, behavior } };
     }
 
     private void UpdateBrushOverlay()
@@ -244,3 +250,4 @@ internal sealed class MapGridControl : Control
 }
 
 internal sealed record MapTerrainPoint(double X, double Y);
+internal sealed record MapBrushModeChoice(string Label, AdtTerrainBrushMode Value) { public override string ToString() => Label; }
