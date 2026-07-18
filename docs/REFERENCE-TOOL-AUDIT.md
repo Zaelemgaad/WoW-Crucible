@@ -95,12 +95,12 @@ The July 2026 workspace review covered the added Amaroth Toolpack directories pl
 - **BLP preview and conversion queue — native foundation landed.** The included BLPConverter 8.1 source established palette/DXT/alpha/mipmap requirements but remains GPL reference material rather than copied implementation. Crucible now owns a clean-room managed BLP1/BLP2 parser, palette/JPEG/raw-BGRA/DXT decode, mip validation/salvage reporting, BLP2 encode, path-preserving bulk conversion, CLI, and single-window preview. Remaining work is material-layer composition and texture painting/channel authoring, not an external-converter runtime dependency.
 - **CASC source provider.** CascView/CASCExplorer and the large listfiles are useful research inputs for post-WotLK assets. Crucible should eventually index CASC through a maintained library/provider abstraction, using listfiles only as path hints. Old bundled explorer binaries should not become runtime dependencies.
 - **Light/map visualization.** LightMapper's map overlay for `Light`, `LightIntBand`, and related tables is a good future project visualization. ADT copy, offset, ground-effect, alpha-map, WDT, and Noggit workflows belong behind explicit map projects with coordinate previews, backups, and dependency checks.
-- **Model conversion recipes.** MultiConverter, M2ModRedux, old Blender scripts, and WoW Blender Studio establish the need for model version inspection, external converter profiles, rename/repoint assistance, skin/animation dependency validation, and conversion logs. Crucible should orchestrate maintained external authoring tools rather than attempt to absorb obsolete model editors.
+- **Model conversion recipes.** MultiConverter, M2ModRedux, old Blender scripts, and WoW Blender Studio establish the need for model version inspection, rename/repoint assistance, skin/animation dependency validation, conversion logs, and documented interchange. Crucible must implement the worthwhile conversion/validation workflow natively; a legacy or maintained external editor may be used only as a temporary behavioral oracle or optional interchange endpoint while that native coverage is unfinished.
 - **Protected UI/login-screen project.** The Mordred login-screen sample is useful for dependency-aware GlueXML authoring and resolution previews. Crucible already warns about protected GlueXML and executable hashes; a UI project should add changed-file previews and explicitly bind the compatible executable without distributing it.
 
-### Keep external or treat only as reference
+### Reference-only inputs while native coverage is incomplete
 
-- Noggit, WoW Blender Studio, 010 Editor, WMV, Photoshop, PuTTY, HxD, and specialized WMO/model editors remain external authoring applications. Crucible can generate inputs, validate outputs, and offer configured launch shortcuts.
+- Noggit, WoW Blender Studio, 010 Editor, WMV, Photoshop, PuTTY, HxD, and specialized WMO/model editors are workflow/format references during migration. Optional import/export or launch bridges do not satisfy replacement: each worthwhile editing, inspection, validation, preview, and deployment capability remains assigned to a maintainable Crucible-native destination.
 - MPQEditor, MyWarCraftStudio, and the many generic DBC/CSV editors are behavior references; Crucible already owns the safer archive and table workflows.
 - The toolpack `Wow.exe` is build 12340 and claims removed UI checks. Its SHA-256 is `E463C25FA6D49D2D2057FB0252BC8B8E0BDD9DDD30CAD940F91CC7AFA9847855`. Treat it as a user-supplied compatibility candidate: back up the selected executable, record its hash in the patch manifest, and never commit or redistribute it.
 
@@ -116,7 +116,7 @@ Use Coffee as format and workflow archaeology only. Source from a particular sub
 
 The standalone `Noggit 3.2614` directory is an unsigned, binary-only-in-this-workspace RelWithDebInfo build from July 2018 using Qt 5.9. The executable identifies itself as `Noggit Studio - 3.2614`, has SHA-256 `DE5274C20747059AC95D99BEEB65EA9013B1CD6A9273F648F570399D27DEE618`, and exposes project settings for separate game/project paths, imports, a WMV log, and optional MySQL fields; this particular binary says MySQL support was not compiled in.
 
-Noggit remains the right class of external application for interactive terrain, texture, water, object, zone, minimap, horizon, and UID work. Crucible should not recreate its 3D editor. Instead, a map project should prepare an isolated project tree, inventory affected ADT/WDT/WDL and referenced assets before launch, launch a user-selected Noggit executable, then hash/diff and validate outputs before patch staging. Never point an untested old Noggit build directly at the only copy of a client or project.
+Noggit is strong behavioral evidence for interactive terrain, texture, water, object, zone, minimap, horizon, and UID work. Crucible's native map project must absorb those worthwhile workflows incrementally. During that migration an optional isolated launch bridge may prepare a copied project tree, inventory affected ADT/WDT/WDL and referenced assets, then hash/diff and validate outputs before patch staging; that bridge is temporary compatibility, not the completed destination. Never point an untested old Noggit build directly at the only copy of a client or project.
 
 #### MultiConverter 3.6.2
 
@@ -150,7 +150,7 @@ The conversion project format remains backend-neutral so a user can compare anot
 6. Bulk gameobject generation from indexed model paths.
 7. Project-local SQLite staging for spell/table bulk editing.
 8. CASC indexing provider for supported post-WotLK source profiles.
-9. Light/map project visualization and guarded Noggit/external authoring-tool launch profiles.
+9. Native light/map project visualization and editing, with guarded external launch profiles only as temporary migration aids.
 
 ## Product model
 

@@ -23,6 +23,7 @@ try
         "client" => Client(commandArguments[1..]),
         "asset" => Asset(commandArguments[1..]),
         "project" => Project(commandArguments[1..]),
+        "tools" => Tooling(commandArguments[1..]),
         "mpq" => Mpq(commandArguments[1..]),
         "manifest" => Manifest(commandArguments[1..]),
         _ => Fail($"Unknown command: {commandArguments[0]}")
@@ -46,6 +47,23 @@ finally
 
 devbug?.Complete(exitCode);
 return exitCode;
+
+static int Tooling(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ToolingHelp();
+    if (!args[0].Equals("inventory", StringComparison.OrdinalIgnoreCase)) return Fail($"Unknown tools operation: {args[0]}");
+    var options = args[1..]; var rootArgument = options.FirstOrDefault(option => !option.StartsWith("--", StringComparison.Ordinal)); var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase)); var unassignedOnly = options.Any(option => option.Equals("--unassigned-only", StringComparison.OrdinalIgnoreCase)); var includeMissing = !options.Any(option => option.Equals("--no-missing", StringComparison.OrdinalIgnoreCase));
+    var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.Equals("--unassigned-only", StringComparison.OrdinalIgnoreCase) && !option.Equals("--no-missing", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown tools inventory option: {unknown[0]}");
+    if (options.Count(option => !option.StartsWith("--", StringComparison.Ordinal)) > 1) return Fail("tools inventory accepts at most one workspace-root path.");
+    var root = rootArgument is null ? ToolConsolidationInventoryService.FindWorkspaceRoot(CruciblePaths.ApplicationDirectory) : rootArgument; var report = ToolConsolidationInventoryService.Scan(root, includeMissing); var entries = unassignedOnly ? report.Entries.Where(entry => entry.Status == ToolInventoryStatus.Unassigned).ToArray() : report.Entries;
+    if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { report.WorkspaceRoot, report.ScannedUtc, report.Tracked, report.Missing, report.Unassigned, Entries = entries }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+    else
+    {
+        foreach (var entry in entries) Console.WriteLine($"{entry.Status}\t{entry.Scope}\t{entry.RelativePath}\t{entry.Capability}\t{entry.CrucibleDestination}");
+        Console.Error.WriteLine($"Tool inventory: {report.Tracked:N0} tracked · {report.Unassigned:N0} NEW UNASSIGNED · {report.Missing:N0} expected root(s) absent.\nWorkspace: {report.WorkspaceRoot}");
+    }
+    return report.Unassigned == 0 ? 0 : 3;
+}
 
 static int Asset(string[] args)
 {
@@ -1222,6 +1240,7 @@ static int Mpq(string[] args)
 static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--require=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
 static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc rows <file.dbc> <schema.xml> <id>...\n  wowcrucible dbc find <file.dbc> <schema.xml> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc promote additions <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc clone-remap where <base.dbc> <source.dbc> <schema.xml> <column> <value>... --manifest=map.json --output=merged.dbc [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source.dbc> <parent-merged.dbc> <parent-schema.xml> <parent-map.json> <foreign-column> <child-base.dbc> <child-source.dbc> <child-schema.xml> --child-map=map.json --child-output=child.dbc --parent-output=parent.dbc\n  wowcrucible dbc copy-row <base.dbc> <source.dbc> <schema.xml> <source-id> <target-id> <output.dbc> [--set=Column=Value]...\n  wowcrucible dbc set-row <input.dbc> <schema.xml> <id> <output.dbc> --set=Column=Value [...]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]", code);
 static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]", code);
+static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n\nWithout a path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage.", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
 {
     var anonymous = files.Count(file => ClientArchiveIndexService.IsAnonymous(file.ArchivePath));
@@ -1236,7 +1255,7 @@ static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLin
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
+    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  tools     inventory the local legacy-tool corpus and expose unassigned additions\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible tools inventory --unassigned-only\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 

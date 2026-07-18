@@ -17,6 +17,16 @@ if (!ClientPatchDeploymentService.InvalidateCache(deploymentFixture).Existed || 
     throw new InvalidOperationException("Explicit client cache invalidation failed.");
 Directory.Delete(deploymentFixture, true); File.Delete(patchDeploymentSource);
 
+var toolInventoryFixture = Path.Combine(Path.GetTempPath(), $"crucible-tool-inventory-{Guid.NewGuid():N}");
+Directory.CreateDirectory(Path.Combine(toolInventoryFixture, "Keira3")); Directory.CreateDirectory(Path.Combine(toolInventoryFixture, "WDBXEditor")); Directory.CreateDirectory(Path.Combine(toolInventoryFixture, "MysteryTool"));
+Directory.CreateDirectory(Path.Combine(toolInventoryFixture, "Tools", "MPQEditor future")); Directory.CreateDirectory(Path.Combine(toolInventoryFixture, "Tools", "Models", "anim porter")); Directory.CreateDirectory(Path.Combine(toolInventoryFixture, "Tools", "NewNestedTool"));
+var toolInventory = ToolConsolidationInventoryService.Scan(toolInventoryFixture); var discoveredToolRoot = ToolConsolidationInventoryService.FindWorkspaceRoot(Path.Combine(toolInventoryFixture, "Tools", "Models"));
+if (toolInventory.Unassigned != 2 || toolInventory.Missing == 0 || !toolInventory.Entries.Any(entry => entry.RelativePath == "Keira3" && entry.Status == ToolInventoryStatus.Tracked) ||
+    !toolInventory.Entries.Any(entry => entry.RelativePath == "Tools/MPQEditor future" && entry.Status == ToolInventoryStatus.Tracked) || !toolInventory.Entries.Any(entry => entry.RelativePath == "Tools/Models/anim porter" && entry.Status == ToolInventoryStatus.Tracked) ||
+    !toolInventory.Entries.Any(entry => entry.RelativePath == "MysteryTool" && entry.Status == ToolInventoryStatus.Unassigned) || !toolInventory.Entries.Any(entry => entry.RelativePath == "Tools/NewNestedTool" && entry.Status == ToolInventoryStatus.Unassigned) || !discoveredToolRoot.Equals(toolInventoryFixture, StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Tool consolidation inventory did not distinguish assigned, missing, and newly unassigned workspace/tool roots.");
+Directory.Delete(toolInventoryFixture, true);
+
 var browserEntries = new MpqFileEntry[]
 {
     new(@"Character\Human\Male\HumanMale.m2", 100, 60, 0, 0),

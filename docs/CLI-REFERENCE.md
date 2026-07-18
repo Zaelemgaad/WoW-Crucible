@@ -11,6 +11,14 @@ Exit codes are consistent across workflows:
 - `2`: missing/invalid command syntax.
 - `3`: work completed but unresolved conflicts, blocked assets, warnings that require review, or partial failures remain.
 
+## Tool consolidation inventory
+
+```text
+wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]
+```
+
+Without a path, the CLI searches upward from its executable for the shared `wow edits` workspace. It inventories every top-level workspace root, every direct `Tools` package, and the explicitly audited AmarothTools/Models/Map children. Tracked, missing, and newly unassigned paths are distinct states. A new unassigned directory is printed first and returns review exit code `3`; it is never silently folded into a generic category. The desktop exposes the same catalog in the single-window **Tool inventory** workspace with search and state filters.
+
 ## Portable content projects and ID reservations
 
 ```text

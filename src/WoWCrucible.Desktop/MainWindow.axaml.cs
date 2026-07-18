@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     private bool _syncingScrollbars;
     private readonly DesktopWorkspaceSession _workspaceSession = new(DesktopSettings.Load());
     private AssetComparisonView? _assetComparisonView;
+    private ToolInventoryView? _toolInventoryView;
     private ItemWorkbenchView? _itemWorkbenchView;
     private MpqWorkspaceView? _mpqWorkspaceView;
     private ClientWorkspaceView? _clientWorkspaceView;
@@ -624,6 +625,12 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(_behaviorWorkspaceView, "Behaviors & dialogue");
     }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
+    private async void OpenToolInventoryClick(object? sender, RoutedEventArgs e) => await OpenToolInventoryAsync();
+    public async Task OpenToolInventoryAsync()
+    {
+        if (_toolInventoryView is null) { _toolInventoryView = new ToolInventoryView(); _toolInventoryView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+        OpenFeatureWorkspace(_toolInventoryView, "Tool Inventory"); await _toolInventoryView.ActivateAsync();
+    }
     private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e) => CloseFeatureWorkspace();
     private void OpenLayeredDbcsClick(object? sender, RoutedEventArgs e)
     {

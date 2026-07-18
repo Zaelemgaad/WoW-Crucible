@@ -97,3 +97,5 @@ Every top-level Tools directory is assigned below, including redundant editors. 
 | CLI | Broad command groups and shipped guide | Command parity for every UI operation, structured JSON output, generated searchable command palette |
 
 This matrix is updated whenever a capability lands, a new local tool appears, or a previously unknown workflow is discovered.
+
+The matrix is also executable: `wowcrucible tools inventory` and the same-window **Tool inventory** workspace scan the current corpus against Crucible's native assignment catalog. The July 18, 2026 workspace has 94 tracked workspace/tool roots, zero new unassigned roots, and zero expected top-level roots missing. Any later unassigned directory is sorted first and produces CLI review exit code `3` until it receives an explicit capability and destination.
