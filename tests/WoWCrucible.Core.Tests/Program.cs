@@ -341,6 +341,24 @@ if (questObjectPlan.Rows.Count != 3 || questObjectPlan.Rows[1].Table != "gameobj
 try { _ = GameObjectTemplateAdapter.CreatePlan(gameObjectDraft with { Type = 5 }, GameObjectTemplateAdapter.CreatePortableCapabilities()); throw new InvalidOperationException("Gameobject loot was accepted for an incompatible type."); }
 catch (InvalidDataException) { }
 
+var behaviorDomains = BehaviorDomainCatalog.All;
+var portableGossipOption = BehaviorAuthoringAdapter.PortableTable("gossip_menu_option");
+var portableNpcText = BehaviorAuthoringAdapter.PortableTable("npc_text");
+var portableCondition = BehaviorAuthoringAdapter.PortableTable("conditions");
+var portableSmart = BehaviorAuthoringAdapter.PortableTable("smart_scripts");
+if (behaviorDomains.Count != 9 || portableGossipOption.Columns.Count != 14 || portableNpcText.Columns.Count != 90 || portableCondition.Columns.Count != 15 || portableSmart.Columns.Count != 31)
+    throw new InvalidOperationException("Behavior portable schema coverage drifted from the current WotLK world tables.");
+if (BehaviorSemanticCatalog.SmartActions.Single(choice => choice.Value == 242).Name != "Increment data" || BehaviorSemanticCatalog.SmartEvents.Single(choice => choice.Value == 110).Name != "In melee range" || BehaviorSemanticCatalog.SmartTargets.Single(choice => choice.Value == 206).Name != "Formation" || BehaviorSemanticCatalog.ConditionTypes.Single(choice => choice.Value == 48).Name != "Quest objective progress")
+    throw new InvalidOperationException("Behavior enum decoding no longer covers the current AzerothCore constants.");
+var smartValues = new Dictionary<string, object?>(BehaviorAuthoringAdapter.Defaults(portableSmart), StringComparer.OrdinalIgnoreCase) { ["entryorguid"] = 900100, ["source_type"] = 0, ["id"] = 0, ["link"] = 0, ["event_type"] = 4, ["action_type"] = 11, ["action_param1"] = 133, ["target_type"] = 2, ["comment"] = "Crucible's SmartAI test" };
+var smartPlan = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("smartai"), portableSmart, smartValues);
+if (smartPlan.Rows.Count != 1 || smartPlan.Rows[0].Key.Count != 4 || smartPlan.Rows[0].Values["event_chance"]?.ToString() != "100" || !smartPlan.PreviewSql().Contains("Crucible''s SmartAI test", StringComparison.Ordinal))
+    throw new InvalidOperationException("Complete SmartAI planning, composite identity, defaults, or SQL escaping failed.");
+try { var invalid = new Dictionary<string, object?>(smartValues, StringComparer.OrdinalIgnoreCase) { ["event_chance"] = 101 }; _ = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("smartai"), portableSmart, invalid); throw new InvalidOperationException("Invalid SmartAI chance was accepted."); }
+catch (InvalidDataException) { }
+try { var invalid = new Dictionary<string, object?>(BehaviorAuthoringAdapter.Defaults(portableGossipOption), StringComparer.OrdinalIgnoreCase) { ["OptionIcon"] = 21 }; _ = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("gossip-option"), portableGossipOption, invalid); throw new InvalidOperationException("Invalid WotLK gossip icon was accepted."); }
+catch (InvalidDataException) { }
+
 var portableQuestTable = QuestTemplateAdapter.CreatePortableTable(); var portableQuestValues = QuestTemplateAdapter.CreateDefaultValues(portableQuestTable).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
 portableQuestValues["ID"] = 900300u; portableQuestValues["LogTitle"] = "Crucible's Trial"; portableQuestValues["RequiredNpcOrGo1"] = -900200; portableQuestValues["RequiredNpcOrGoCount1"] = 1; portableQuestValues["RewardItem1"] = 6948; portableQuestValues["RewardAmount1"] = 1; portableQuestValues["Flags"] = 0x00001008u;
 static DatabaseTableCapability QuestLinkTable(string name) => new(name, [new("id", "int", "int unsigned", false, "0", "PRI", "", 1), new("quest", "int", "int unsigned", false, "0", "PRI", "", 2)]);

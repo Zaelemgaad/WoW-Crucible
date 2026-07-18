@@ -29,6 +29,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Provides a native guided creature/NPC creator with four display choices, named faction/type/rank/class/service controls, combat and movement fields, embedded WotLK M2/SKIN preview, vendor inventory and creature-loot child rows, exact SQL preview/export, current normalized or legacy embedded model-column adaptation, and strict transactional no-overwrite insertion.
 - Provides a native guided gameobject creator covering all 36 WotLK types. Data0–Data23 are relabeled from the current AzerothCore type union without hiding any raw field; template identity, optional world spawn, chest/fishing-hole loot, quest starter/ender links, portable JSON drafts, SQL export, decoded SQL Studio handoff, and M2/SKIN preview are kept in one transactional workspace.
 - Provides a native guided quest workspace that represents all 105 portable WotLK `quest_template` fields and every column discovered in the connected schema. Quest type and flags are decoded while raw values remain editable; objective, requirement, reward, text, POI, creature-giver, and gameobject-giver data can be planned, exported, inserted, or updated transactionally without hiding custom columns.
+- Provides a native complete-field Behaviors & Dialogue workspace for gossip menus/options, all 90 NPC-dialogue fields, normalized and legacy trainers, conditions, and all 31 SmartAI fields. Current AzerothCore types/events/actions/targets are decoded beside editable raw values, composite identities are protected, portable drafts and exact SQL are exportable, and live rows route directly from SQL Studio without opening another window.
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
 - Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.
@@ -183,6 +184,12 @@ Open the complete decoded quest workspace directly:
 
 ```powershell
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- --quests
+```
+
+Open gossip, trainers, conditions, and SmartAI directly:
+
+```powershell
+dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- --behaviors
 ```
 
 Run the legacy WinForms reference shell (development comparison only):

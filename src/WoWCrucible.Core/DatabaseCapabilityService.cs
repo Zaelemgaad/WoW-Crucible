@@ -100,7 +100,15 @@ public sealed class DatabaseCapabilityService
         new("crucible_gameobject_queststarter", "gameobject_queststarter", "id", "gameobject_template", "entry", false, "AzerothCore gameobject quest starter"),
         new("crucible_gameobject_questender", "gameobject_questender", "id", "gameobject_template", "entry", false, "AzerothCore gameobject quest ender"),
         new("crucible_gameobject_startquest", "gameobject_queststarter", "quest", "quest_template", "ID", false, "Quest started by a gameobject"),
-        new("crucible_gameobject_endquest", "gameobject_questender", "quest", "quest_template", "ID", false, "Quest ended by a gameobject")
+        new("crucible_gameobject_endquest", "gameobject_questender", "quest", "quest_template", "ID", false, "Quest ended by a gameobject"),
+        new("crucible_creature_gossip", "creature_template", "gossip_menu_id", "gossip_menu", "MenuID", false, "Creature default gossip menu"),
+        new("crucible_gossip_text", "gossip_menu", "TextID", "npc_text", "ID", false, "Text displayed by a gossip menu"),
+        new("crucible_gossip_option_menu", "gossip_menu_option", "MenuID", "gossip_menu", "MenuID", false, "Option belonging to a gossip menu"),
+        new("crucible_gossip_option_submenu", "gossip_menu_option", "ActionMenuID", "gossip_menu", "MenuID", false, "Submenu opened by a gossip option"),
+        new("crucible_creature_trainer", "creature_default_trainer", "CreatureId", "creature_template", "entry", false, "Creature assigned to a normalized trainer"),
+        new("crucible_default_trainer", "creature_default_trainer", "TrainerId", "trainer", "Id", false, "Normalized trainer assigned to a creature"),
+        new("crucible_trainer_spell", "trainer_spell", "TrainerId", "trainer", "Id", false, "Spell taught by a normalized trainer"),
+        new("crucible_legacy_trainer", "npc_trainer", "ID", "creature_template", "entry", false, "Legacy trainer spell attached directly to a creature")
     ];
 
     public static string BuildConnectionString(DatabaseConnectionProfile profile)

@@ -33,6 +33,7 @@ public partial class MainWindow : Window
     private CreatureWorkspaceView? _creatureWorkspaceView;
     private GameObjectWorkspaceView? _gameObjectWorkspaceView;
     private QuestWorkspaceView? _questWorkspaceView;
+    private BehaviorWorkspaceView? _behaviorWorkspaceView;
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
     private SqlWorkspaceView? _sqlWorkspaceView;
 
@@ -547,6 +548,16 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_questWorkspaceView, "Quests");
     }
+    private void OpenBehaviorWorkspaceClick(object? sender, RoutedEventArgs e) => OpenBehaviorWorkspace();
+    public void OpenBehaviorWorkspace()
+    {
+        if (_behaviorWorkspaceView is null)
+        {
+            _behaviorWorkspaceView = new BehaviorWorkspaceView(_workspaceSession);
+            _behaviorWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_behaviorWorkspaceView, "Behaviors & dialogue");
+    }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
     private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e) => CloseFeatureWorkspace();
     private void OpenLayeredDbcsClick(object? sender, RoutedEventArgs e)
@@ -646,6 +657,11 @@ public partial class MainWindow : Window
         {
             if (_questWorkspaceView is null) { _questWorkspaceView = new QuestWorkspaceView(_workspaceSession); _questWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
             _questWorkspaceView.OpenQuestRow(request.Row); OpenFeatureWorkspace(_questWorkspaceView, "Quests");
+        }
+        else if (BehaviorDomainCatalog.All.Any(domain => domain.TableName.Equals(request.Table, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (_behaviorWorkspaceView is null) { _behaviorWorkspaceView = new BehaviorWorkspaceView(_workspaceSession); _behaviorWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+            _behaviorWorkspaceView.OpenRow(request.Table, request.Row); OpenFeatureWorkspace(_behaviorWorkspaceView, "Behaviors & dialogue");
         }
     }
 
