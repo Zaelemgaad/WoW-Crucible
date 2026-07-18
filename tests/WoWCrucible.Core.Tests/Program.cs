@@ -426,6 +426,25 @@ if (previewGeometry.Vertices.Count != 3 || previewGeometry.TriangleIndices.Count
     previewGeometry.Bones.Count != 1 || previewGeometry.Bones[0].ParentIndex != -1 || previewGeometry.Bones[0].Pivot.Z != 1.25f ||
     previewGeometry.Attachments.Count != 1 || previewGeometry.Attachments[0].Id != 11 || previewGeometry.Attachments[0].Name != "Helmet" || previewGeometry.Attachments[0].BoneIndex != 0 || previewGeometry.Attachments[0].Position.Y != -0.5f || !previewGeometry.Attachments[0].LookupSlots.SequenceEqual([11]))
     throw new InvalidOperationException("Native M2/SKIN preview geometry parsing failed.");
+var animatedModel = Path.Combine(assetFixture, "geometry-animated.m2"); var animatedBytes = new byte[0x500]; geometryBytes.CopyTo(animatedBytes, 0);
+const int fixtureSequenceOffset = 0x300, fixtureTimeSeriesOffset = 0x340, fixtureValueSeriesOffset = 0x348, fixtureTimesOffset = 0x350, fixtureValuesOffset = 0x358;
+BitConverter.GetBytes((uint)1).CopyTo(animatedBytes, 0x1C); BitConverter.GetBytes((uint)fixtureSequenceOffset).CopyTo(animatedBytes, 0x20);
+BitConverter.GetBytes((ushort)4).CopyTo(animatedBytes, fixtureSequenceOffset); BitConverter.GetBytes((uint)1000).CopyTo(animatedBytes, fixtureSequenceOffset + 4); BitConverter.GetBytes((uint)0x20).CopyTo(animatedBytes, fixtureSequenceOffset + 12);
+BitConverter.GetBytes((ushort)1).CopyTo(animatedBytes, fixtureBoneOffset + 16); BitConverter.GetBytes((short)-1).CopyTo(animatedBytes, fixtureBoneOffset + 18);
+BitConverter.GetBytes((uint)1).CopyTo(animatedBytes, fixtureBoneOffset + 20); BitConverter.GetBytes((uint)fixtureTimeSeriesOffset).CopyTo(animatedBytes, fixtureBoneOffset + 24);
+BitConverter.GetBytes((uint)1).CopyTo(animatedBytes, fixtureBoneOffset + 28); BitConverter.GetBytes((uint)fixtureValueSeriesOffset).CopyTo(animatedBytes, fixtureBoneOffset + 32);
+BitConverter.GetBytes((uint)2).CopyTo(animatedBytes, fixtureTimeSeriesOffset); BitConverter.GetBytes((uint)fixtureTimesOffset).CopyTo(animatedBytes, fixtureTimeSeriesOffset + 4);
+BitConverter.GetBytes((uint)2).CopyTo(animatedBytes, fixtureValueSeriesOffset); BitConverter.GetBytes((uint)fixtureValuesOffset).CopyTo(animatedBytes, fixtureValueSeriesOffset + 4);
+BitConverter.GetBytes((uint)0).CopyTo(animatedBytes, fixtureTimesOffset); BitConverter.GetBytes((uint)1000).CopyTo(animatedBytes, fixtureTimesOffset + 4);
+BitConverter.GetBytes(0f).CopyTo(animatedBytes, fixtureValuesOffset); BitConverter.GetBytes(2f).CopyTo(animatedBytes, fixtureValuesOffset + 12);
+for (var index = 0; index < fixtureVertices.Length; index++) { var vertex = 0x130 + index * 48; animatedBytes[vertex + 12] = 255; animatedBytes[vertex + 16] = 0; }
+File.WriteAllBytes(animatedModel, animatedBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-animated00.skin"));
+var animatedGeometry = M2PreviewGeometryService.Load(animatedModel); var animatedPose = M2AnimationService.CreatePose(animatedGeometry);
+M2AnimationService.SampleInto(animatedGeometry, 0, 500, animatedPose);
+if (animatedGeometry.Sequences.Count != 1 || animatedGeometry.Sequences[0].AnimationId != 4 || animatedGeometry.Sequences[0].DurationMilliseconds != 1000 ||
+    Math.Abs(animatedPose.Vertices[0].X - 0f) > 0.0001f || Math.Abs(animatedPose.Vertices[1].X - 2f) > 0.0001f || Math.Abs(animatedPose.AttachmentPositions[0].X - 1.25f) > 0.0001f ||
+    animatedPose.SequenceIndex != 0 || Math.Abs(animatedPose.TimeMilliseconds - 500) > 0.0001)
+    throw new InvalidOperationException("Wrath M2 linear bone animation sampling, weighted skinning, or attachment transformation failed.");
 var invalidAttachmentModel = Path.Combine(assetFixture, "geometry-invalid.m2"); var invalidAttachmentBytes = geometryBytes.ToArray(); BitConverter.GetBytes((uint)2).CopyTo(invalidAttachmentBytes, fixtureAttachmentOffset + 4); File.WriteAllBytes(invalidAttachmentModel, invalidAttachmentBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-invalid00.skin"));
 try { _ = M2PreviewGeometryService.Load(invalidAttachmentModel); throw new InvalidOperationException("An M2 attachment pointing beyond the bone table was accepted."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("references bone", StringComparison.Ordinal)) { }

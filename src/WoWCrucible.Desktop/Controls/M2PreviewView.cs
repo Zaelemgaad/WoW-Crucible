@@ -2,10 +2,12 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Rendering.SceneGraph;
 using Avalonia.Skia;
+using Avalonia.Threading;
 using SkiaSharp;
 using WoWCrucible.Core;
 
@@ -13,7 +15,120 @@ namespace WoWCrucible.Desktop.Controls;
 
 public sealed record M2PreviewMountedModel(M2PreviewGeometry Geometry, Matrix4x4 Transform, RgbaTexture? Texture, string Label);
 
-public sealed class M2PreviewView : Control, IDisposable
+public sealed class M2PreviewView : UserControl, IDisposable
+{
+    private readonly M2PreviewCanvas _canvas = new();
+    private readonly Grid _playback = new() { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto") };
+    private readonly Button _play = new() { Content = "Play" };
+    private readonly ComboBox _sequences = new() { HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch };
+    private readonly TextBlock _time = new() { VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
+    private readonly Slider _timeline = new() { Minimum = 0, Maximum = 1, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch };
+    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(1000d / 30d) };
+    private readonly System.Diagnostics.Stopwatch _clock = new();
+    private M2PreviewGeometry? _geometry;
+    private M2AnimationPose? _pose;
+    private double _elapsedBeforePlay;
+    private bool _updatingTimeline;
+    private bool _mountedModelsVisible;
+
+    public M2PreviewView()
+    {
+        ClipToBounds = true;
+        _playback.Children.Add(_play); Grid.SetColumn(_play, 0);
+        _playback.Children.Add(_sequences); Grid.SetColumn(_sequences, 1);
+        _playback.Children.Add(_time); Grid.SetColumn(_time, 2);
+        _playback.Children.Add(_timeline); Grid.SetRow(_timeline, 1); Grid.SetColumnSpan(_timeline, 3);
+        var root = new Grid { RowDefinitions = new("*,Auto") };
+        root.Children.Add(_canvas);
+        root.Children.Add(_playback); Grid.SetRow(_playback, 1);
+        Content = root;
+        _play.Click += (_, _) => TogglePlayback();
+        _sequences.SelectionChanged += (_, _) => SelectSequence();
+        _timeline.PropertyChanged += (_, args) => { if (args.Property == RangeBase.ValueProperty && !_updatingTimeline) Scrub(_timeline.Value); };
+        _timer.Tick += (_, _) => Tick();
+        DetachedFromVisualTree += (_, _) => StopPlayback();
+        _playback.IsVisible = false;
+    }
+
+    public void SetGeometry(M2PreviewGeometry geometry)
+    {
+        StopPlayback(); _geometry = geometry; _pose = null; _elapsedBeforePlay = 0; _mountedModelsVisible = false;
+        _canvas.SetGeometry(geometry);
+        _sequences.ItemsSource = geometry.Sequences;
+        _playback.IsVisible = geometry.Sequences.Count > 0;
+        _sequences.SelectedIndex = geometry.Sequences.Count > 0 ? 0 : -1;
+        UpdatePlaybackAvailability();
+    }
+
+    public void ClearGeometry() { StopPlayback(); _geometry = null; _pose = null; _playback.IsVisible = false; _canvas.ClearGeometry(); }
+    public void SetTexture(string? previewPath) => _canvas.SetTexture(previewPath);
+    public void SetDecodedTexture(RgbaTexture? texture) => _canvas.SetDecodedTexture(texture);
+    public void SetDecodedTextures(IReadOnlyDictionary<int, RgbaTexture> textures) => _canvas.SetDecodedTextures(textures);
+    public void SetAttachmentOverlay(bool visible, int? highlightedAttachmentIndex = null) => _canvas.SetAttachmentOverlay(visible, highlightedAttachmentIndex);
+    public void SetMountedModels(IEnumerable<M2PreviewMountedModel> models)
+    {
+        var materialized = models.ToArray(); _mountedModelsVisible = materialized.Length > 0;
+        if (_mountedModelsVisible) StopPlayback();
+        _canvas.SetMountedModels(materialized); UpdatePlaybackAvailability();
+    }
+    public void ClearMountedModels() { _mountedModelsVisible = false; _canvas.ClearMountedModels(); UpdatePlaybackAvailability(); }
+
+    private void SelectSequence()
+    {
+        StopPlayback(); _elapsedBeforePlay = 0;
+        var sequence = SelectedSequence();
+        if (_geometry is null || sequence is null) { _pose = null; _canvas.SetPose(null); return; }
+        _timeline.Maximum = Math.Max(1, sequence.DurationMilliseconds); _timeline.Value = 0;
+        _pose ??= M2AnimationService.CreatePose(_geometry);
+        try { M2AnimationService.SampleInto(_geometry, sequence.Index, 0, _pose); _canvas.SetPose(_pose); _time.Text = $"0 / {sequence.DurationMilliseconds:N0} ms"; }
+        catch (Exception exception) { _pose = null; _canvas.SetPose(null); _time.Text = $"Static fallback: {exception.Message}"; }
+        UpdatePlaybackAvailability();
+    }
+
+    private void TogglePlayback()
+    {
+        if (_timer.IsEnabled) { _elapsedBeforePlay = CurrentElapsed(); StopPlayback(); return; }
+        if (_geometry is null || SelectedSequence() is null || _mountedModelsVisible || _pose is null) return;
+        _clock.Restart(); _timer.Start(); _play.Content = "Pause";
+    }
+
+    private void Tick()
+    {
+        if (!IsEffectivelyVisible) { StopPlayback(); return; }
+        var sequence = SelectedSequence(); if (_geometry is null || sequence is null || _pose is null) { StopPlayback(); return; }
+        var elapsed = CurrentElapsed();
+        if (!sequence.Loops && elapsed >= sequence.DurationMilliseconds) { elapsed = sequence.DurationMilliseconds; _elapsedBeforePlay = elapsed; StopPlayback(); }
+        try
+        {
+            M2AnimationService.SampleInto(_geometry, sequence.Index, elapsed, _pose); _canvas.SetPose(_pose);
+            _updatingTimeline = true; _timeline.Value = _pose.TimeMilliseconds; _updatingTimeline = false;
+            _time.Text = $"{_pose.TimeMilliseconds:N0} / {sequence.DurationMilliseconds:N0} ms";
+        }
+        catch (Exception exception) { StopPlayback(); _canvas.SetPose(null); _time.Text = $"Static fallback: {exception.Message}"; }
+    }
+
+    private void Scrub(double value)
+    {
+        if (_geometry is null || SelectedSequence() is not { } sequence || _pose is null || _mountedModelsVisible) return;
+        _elapsedBeforePlay = value; _clock.Restart();
+        try { M2AnimationService.SampleInto(_geometry, sequence.Index, value, _pose); _canvas.SetPose(_pose); _time.Text = $"{_pose.TimeMilliseconds:N0} / {sequence.DurationMilliseconds:N0} ms"; }
+        catch (Exception exception) { StopPlayback(); _canvas.SetPose(null); _time.Text = $"Static fallback: {exception.Message}"; }
+    }
+
+    private M2PreviewSequence? SelectedSequence() => _sequences.SelectedItem as M2PreviewSequence;
+    private double CurrentElapsed() => _elapsedBeforePlay + _clock.Elapsed.TotalMilliseconds;
+    private void StopPlayback() { _timer.Stop(); _clock.Stop(); _play.Content = "Play"; }
+    private void UpdatePlaybackAvailability()
+    {
+        _play.IsEnabled = _geometry is not null && _pose is not null && !_mountedModelsVisible;
+        _timeline.IsEnabled = _play.IsEnabled;
+        if (_mountedModelsVisible && _geometry?.Sequences.Count > 0) _time.Text = "Animation pauses while mounted item models are visible";
+    }
+
+    public void Dispose() { StopPlayback(); _timer.Stop(); _canvas.Dispose(); _geometry = null; _pose = null; }
+}
+
+internal sealed class M2PreviewCanvas : Control, IDisposable
 {
     private sealed record MountedModel(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? Texture, string Label);
     private M2PreviewGeometry? _geometry;
@@ -26,12 +141,14 @@ public sealed class M2PreviewView : Control, IDisposable
     private Avalonia.Point? _dragStart;
     private bool _showAttachments;
     private int? _highlightedAttachmentIndex;
+    private M2AnimationPose? _pose;
 
-    public M2PreviewView() => ClipToBounds = true;
+    public M2PreviewCanvas() => ClipToBounds = true;
 
     public void SetGeometry(M2PreviewGeometry geometry)
     {
         _geometry = geometry;
+        _pose = null;
         ClearMaterialTextures();
         ClearMountedModels();
         _yaw = -0.65f;
@@ -43,6 +160,7 @@ public sealed class M2PreviewView : Control, IDisposable
     public void ClearGeometry()
     {
         _geometry = null;
+        _pose = null;
         ClearMountedModels();
         InvalidateVisual();
     }
@@ -102,6 +220,8 @@ public sealed class M2PreviewView : Control, IDisposable
         InvalidateVisual();
     }
 
+    public void SetPose(M2AnimationPose? pose) { _pose = pose; InvalidateVisual(); }
+
     private static SKBitmap CreateBitmap(RgbaTexture texture)
     {
         var bitmap = new SKBitmap(new SKImageInfo(texture.Width, texture.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
@@ -135,7 +255,7 @@ public sealed class M2PreviewView : Control, IDisposable
         base.Render(context);
         context.FillRectangle(new SolidColorBrush(Color.Parse("#090D14")), Bounds);
         if (_geometry is null) return;
-        context.Custom(new M2DrawOperation(Bounds, _geometry, _texture, _materialTextures, _mountedModels, _yaw, _pitch, _zoom, _showAttachments, _highlightedAttachmentIndex));
+        context.Custom(new M2DrawOperation(Bounds, _geometry, _pose, _texture, _materialTextures, _mountedModels, _yaw, _pitch, _zoom, _showAttachments, _highlightedAttachmentIndex));
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
@@ -173,9 +293,9 @@ public sealed class M2PreviewView : Control, IDisposable
         e.Handled = true;
     }
 
-    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, IReadOnlyList<MountedModel> mountedModels, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex) : ICustomDrawOperation
+    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, M2AnimationPose? pose, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, IReadOnlyList<MountedModel> mountedModels, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex) : ICustomDrawOperation
     {
-        private sealed record SceneSource(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? ManualTexture, IReadOnlyDictionary<int, SKBitmap>? MaterialTextures, string Label);
+        private sealed record SceneSource(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? ManualTexture, IReadOnlyDictionary<int, SKBitmap>? MaterialTextures, string Label, IReadOnlyList<Vector3>? PosedVertices, Vector3 Minimum, Vector3 Maximum);
         public Rect Bounds => bounds;
         public bool HitTest(Avalonia.Point point) => Bounds.Contains(point);
         public bool Equals(ICustomDrawOperation? other) => false;
@@ -189,12 +309,12 @@ public sealed class M2PreviewView : Control, IDisposable
             var canvas = lease.SkCanvas;
             var width = (float)bounds.Width;
             var height = (float)bounds.Height;
-            var sources = new List<SceneSource>(mountedModels.Count + 1) { new(geometry, Matrix4x4.Identity, texture, materialTextures, Path.GetFileName(geometry.ModelPath)) };
-            sources.AddRange(mountedModels.Select(model => new SceneSource(model.Geometry, model.Transform, model.Texture, null, model.Label)));
+            var sources = new List<SceneSource>(mountedModels.Count + 1) { new(geometry, Matrix4x4.Identity, texture, materialTextures, Path.GetFileName(geometry.ModelPath), pose?.Vertices, pose?.Minimum ?? geometry.Minimum, pose?.Maximum ?? geometry.Maximum) };
+            sources.AddRange(mountedModels.Select(model => new SceneSource(model.Geometry, model.Transform, model.Texture, null, model.Label, null, model.Geometry.Minimum, model.Geometry.Maximum)));
             var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity);
             foreach (var source in sources)
             {
-                var transformedBounds = M2PreviewSceneService.TransformBounds(source.Geometry.Minimum, source.Geometry.Maximum, source.Transform);
+                var transformedBounds = M2PreviewSceneService.TransformBounds(source.Minimum, source.Maximum, source.Transform);
                 minimum = Vector3.Min(minimum, transformedBounds.Minimum); maximum = Vector3.Max(maximum, transformedBounds.Maximum);
             }
             var center = (minimum + maximum) * 0.5f;
@@ -210,9 +330,9 @@ public sealed class M2PreviewView : Control, IDisposable
             var light = Vector3.Normalize(new Vector3(-0.35f, -0.65f, 0.9f));
             for (var sourceIndex = 0; sourceIndex < sources.Count; sourceIndex++)
             {
-                var source = sources[sourceIndex]; var sourceGeometry = source.Geometry; var transformed = new Vector3[sourceGeometry.Vertices.Count];
+                var source = sources[sourceIndex]; var sourceGeometry = source.Geometry; var sourceVertices = source.PosedVertices ?? sourceGeometry.Vertices; var transformed = new Vector3[sourceVertices.Count];
                 for (var index = 0; index < transformed.Length; index++)
-                    transformed[index] = Vector3.Transform(Vector3.Transform(sourceGeometry.Vertices[index], source.Transform) - center, rotation);
+                    transformed[index] = Vector3.Transform(Vector3.Transform(sourceVertices[index], source.Transform) - center, rotation);
                 IReadOnlyList<M2PreviewBatch> batches = sourceGeometry.Batches.Count == 0 ? [new M2PreviewBatch(0, 0, 0, sourceGeometry.TriangleIndices.Count, null, null)] : sourceGeometry.Batches;
                 foreach (var batch in batches)
                 {
@@ -278,7 +398,8 @@ public sealed class M2PreviewView : Control, IDisposable
                 using var labelFont = new SKFont(SKTypeface.Default, 12);
                 foreach (var attachment in geometry.Attachments)
                 {
-                    var point = Vector3.Transform(attachment.Position - center, rotation);
+                    var attachmentPosition = pose is not null && attachment.Index < pose.AttachmentPositions.Length ? pose.AttachmentPositions[attachment.Index] : attachment.Position;
+                    var point = Vector3.Transform(attachmentPosition - center, rotation);
                     var x = width * 0.5f + point.X * scale; var y = height * 0.5f - point.Z * scale;
                     var selected = highlightedAttachmentIndex == attachment.Index;
                     var radius = selected ? 6f : 3.2f;
@@ -299,7 +420,8 @@ public sealed class M2PreviewView : Control, IDisposable
             var textureCount = texture is not null ? "manual texture" : $"{materialTextures.Count:N0} material texture(s)";
             var attachments = showAttachments ? $" · {geometry.Attachments.Count:N0} attachment point(s)" : string.Empty;
             var mounted = mountedModels.Count == 0 ? string.Empty : $" · {mountedModels.Count:N0} mounted model(s)";
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces{attachments}{mounted}", 12, 23, SKTextAlign.Left, titleFont, text);
+            var animation = pose is null ? string.Empty : $" · animation {geometry.Sequences[pose.SequenceIndex].AnimationId:N0}:{geometry.Sequences[pose.SequenceIndex].SubAnimationId:N0}";
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }

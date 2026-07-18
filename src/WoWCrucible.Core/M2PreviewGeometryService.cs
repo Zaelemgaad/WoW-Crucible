@@ -4,6 +4,12 @@ namespace WoWCrucible.Core;
 
 public sealed record M2TextureSlot(int Index, uint Type, uint Flags, string? EmbeddedPath);
 public sealed record M2PreviewBone(int Index, uint Flags, short ParentIndex, ushort SubmeshId, Vector3 Pivot);
+public sealed record M2PreviewSequence(int Index, ushort AnimationId, ushort SubAnimationId, uint DurationMilliseconds, float MoveSpeed, uint Flags, short Probability, uint MinimumRepetitions, uint MaximumRepetitions, uint BlendMilliseconds, short NextSequence, ushort AliasSequence)
+{
+    public bool Loops => (Flags & 0x20) != 0;
+    public bool IsAlias => (Flags & 0x40) != 0;
+    public override string ToString() => $"{AnimationId:N0}:{SubAnimationId:N0} · {DurationMilliseconds:N0} ms";
+}
 public sealed record M2PreviewAttachment(int Index, uint Id, string Name, int BoneIndex, Vector3 Position, IReadOnlyList<int> LookupSlots)
 {
     public override string ToString() => $"{Id:N0} · {Name} · bone {BoneIndex:N0}";
@@ -25,9 +31,11 @@ public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadO
     public IReadOnlyList<M2PreviewBatch> Batches { get; init; } = [];
     public IReadOnlyList<M2PreviewBone> Bones { get; init; } = [];
     public IReadOnlyList<M2PreviewAttachment> Attachments { get; init; } = [];
+    public IReadOnlyList<M2PreviewSequence> Sequences { get; init; } = [];
     public int TotalTriangleIndices { get; init; } = TriangleIndices.Count;
     public M2PreviewVisibilityMode VisibilityMode { get; init; } = M2PreviewVisibilityMode.BaseAppearance;
     public M2GeosetSelection? GeosetSelection { get; init; }
+    internal M2AnimationRig? AnimationRig { get; init; }
 }
 
 public static class M2PreviewGeometryService
@@ -60,6 +68,7 @@ public static class M2PreviewGeometryService
         }
 
         var bones = ReadBones(model);
+        var animationRig = M2AnimationService.ParseRig(modelPath, model, vertexOffset, vertexCount, bones);
         var attachments = ReadAttachments(model, bones.Count);
         var textureSlots = ReadTextureSlots(model);
         var textureLookup = ReadTextureLookup(model, textureSlots.Count);
@@ -94,9 +103,11 @@ public static class M2PreviewGeometryService
             Batches = batches,
             Bones = bones,
             Attachments = attachments,
+            Sequences = animationRig.Sequences,
             TotalTriangleIndices = allTriangles.Length,
             VisibilityMode = visibilityMode,
-            GeosetSelection = geosetSelection
+            GeosetSelection = geosetSelection,
+            AnimationRig = animationRig
         };
     }
 

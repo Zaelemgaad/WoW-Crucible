@@ -38,7 +38,7 @@ wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=
 wowcrucible asset texture-validate <file-or-folder> [--recursive]
 wowcrucible asset inspect <model.m2|building.wmo>...
 wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] ["--target-choice=client-path|archive"]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
-wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--naked|--groups=group:variant,...|--all-geosets]
+wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
 wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>
 wowcrucible asset appearance-render <processed-library> <dbc-folder> <logical-path> <model-file> <body.png> [--skin=N] [--face=N] [--facial-hair=N] [--hair=N] [--source=name] [--hair-output=file.png] [--overwrite]
 wowcrucible asset appearance-compose <base.blp> <output.png> [--torso=BLP] [--pelvis=BLP] [--face-upper=BLP] [--face-lower=BLP] [--facial-upper=BLP] [--facial-lower=BLP] [--scalp-upper=BLP] [--scalp-lower=BLP] [--overwrite]
@@ -60,6 +60,8 @@ wowcrucible asset definitive-stage <library-folder> <output-folder>
 ```
 
 The same native inspection/workspace flow is available under **Modern asset conversion** in the desktop navigation. It accepts recursive drag/drop, keeps source and dependency snapshots immutable and hash-verified, reopens moved `conversion-report.json` workspaces, and previews M2 files that are already compatible with WotLK 3.3.5a. A successful inspection does not claim that a modern MD21 model has been converted; output writing remains intentionally blocked until its translated structures can be validated.
+
+`preview-info` reports every Wrath animation sequence. Add `--animation=N --time=MS` to resolve aliases and external `.anim` files, sample the weighted bone pose at an exact time, and report its resulting bounds. This is the command-line diagnostic for the same animation path used by the in-window model preview.
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
 
