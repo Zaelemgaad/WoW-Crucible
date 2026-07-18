@@ -28,6 +28,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _query = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "SELECT * FROM item_template WHERE entry IN (17, 17802);" };
     private readonly TextBox _queryOutput = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
     private readonly ListBox _favorites = new();
+    private readonly TabControl _tabs;
     private readonly TextBox _favoriteNotes = new() { PlaceholderText = "Optional note: what you changed or why this row matters" };
     private readonly TextBox _favoriteDbc = new() { PlaceholderText = "Optional related DBC path" };
     private readonly TextBox _favoriteMpq = new() { PlaceholderText = "Optional related MPQ path" };
@@ -35,6 +36,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private SqlTablePage? _page;
     private SqlRowRecord? _selectedRow;
     private bool _creatingRow;
+    private bool _suppressTableSelection;
     private int _offset;
     private CancellationTokenSource? _operation;
 
@@ -48,8 +50,8 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _session = session; _session.Changed += SessionChanged;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "SQL STUDIO", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1) } };
-        var tabs = new TabControl { Margin = new Thickness(10), Items = { new TabItem { Header = "Tables & rows", Content = BrowsePage() }, new TabItem { Header = "SQL query", Content = QueryPage() }, new TabItem { Header = "Favorites", Content = FavoritesPage() } } };
-        Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(tabs, 1), WithRow(_confirmation, 2), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 6), Child = _status }, 3) } };
+        _tabs = new TabControl { Margin = new Thickness(10), Items = { new TabItem { Header = "Tables & rows", Content = BrowsePage() }, new TabItem { Header = "SQL query", Content = QueryPage() }, new TabItem { Header = "Favorites", Content = FavoritesPage() } } };
+        Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(_tabs, 1), WithRow(_confirmation, 2), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 6), Child = _status }, 3) } };
         _tableFilter.TextChanged += (_, _) => PopulateTables(); _tables.SelectionChanged += async (_, _) => await SelectTableAsync();
         _rows.SelectionChanged += (_, _) => SelectRow();
         RefreshFavorites(); PopulateTables();
@@ -96,7 +98,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _tables.ItemsSource = values; if (selected is not null) _tables.SelectedItem = values.FirstOrDefault(item => item.Table.Name.Equals(selected, StringComparison.OrdinalIgnoreCase));
     }
 
-    private async Task SelectTableAsync() { _offset = 0; await LoadPageAsync(false); }
+    private async Task SelectTableAsync() { if (_suppressTableSelection) return; _offset = 0; await LoadPageAsync(false); }
     private async Task LoadPageAsync(bool selectFirst)
     {
         if (_session.DatabaseProfile is null || _tables.SelectedItem is not TableChoice selected) { _pageStatus.Text = "Connect Server & SQL and select a table."; return; }
@@ -283,10 +285,23 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private async Task OpenFavoriteAsync()
     {
-        if (_favorites.SelectedItem is not SqlRowFavorite favorite || _session.DatabaseCapabilities is null) return;
+        if (_favorites.SelectedItem is not SqlRowFavorite favorite || _session.DatabaseCapabilities is null || _session.DatabaseProfile is null) return;
         var table = _session.DatabaseCapabilities.FindTable(favorite.Table); if (table is null) { _status.Text = $"The connected database has no {favorite.Table} table."; return; }
-        PopulateTables(); _tables.SelectedItem = (_tables.ItemsSource as IEnumerable<TableChoice>)?.FirstOrDefault(choice => choice.Table.Name.Equals(table.Name, StringComparison.OrdinalIgnoreCase));
-        _rowSearch.Text = string.Join(' ', favorite.Key.Values.Where(value => !string.IsNullOrWhiteSpace(value))); _offset = 0; await LoadPageAsync(true);
+        try
+        {
+            Begin($"Opening exact favorite {favorite.Label}…");
+            var key = favorite.Key.ToDictionary(pair => pair.Key, pair => (object?)pair.Value, StringComparer.OrdinalIgnoreCase);
+            var row = await _service.ReadRowAsync(_session.DatabaseProfile, table, key, _operation!.Token);
+            if (row is null) { _status.Text = $"The exact favorite no longer exists: {favorite.Database}.{favorite.Table} · {string.Join(", ", favorite.Key.Select(pair => $"{pair.Key}={pair.Value}"))}."; return; }
+            _suppressTableSelection = true; try { PopulateTables(); _tables.SelectedItem = (_tables.ItemsSource as IEnumerable<TableChoice>)?.FirstOrDefault(choice => choice.Table.Name.Equals(table.Name, StringComparison.OrdinalIgnoreCase)); } finally { _suppressTableSelection = false; }
+            _rowSearch.Text = string.Empty; _offset = 0; _page = new(table.Name, table.Columns, row.Key.Keys.ToArray(), 1, 0, 1, "exact favorite", [row]);
+            _rows.ItemsSource = _page.Rows; _rows.ItemTemplate = new FuncDataTemplate<SqlRowRecord>((value, _) => new TextBlock { Text = value is null ? string.Empty : RowSummary(value), TextWrapping = TextWrapping.NoWrap, Margin = new Thickness(4) });
+            _pageStatus.Text = "Exact primary-key favorite · 1 row"; _tabs.SelectedIndex = 0; _rows.SelectedItem = row;
+            _status.Text = $"Opened exact favorite {row.Display}. No broad text-search substitution was used.";
+        }
+        catch (OperationCanceledException) { _status.Text = "Favorite lookup cancelled."; }
+        catch (Exception exception) { Fail("Favorite lookup failed", exception); }
+        finally { End(); }
     }
 
     private void RefreshFavorites() => _favorites.ItemsSource = SqlFavoriteStore.Load();

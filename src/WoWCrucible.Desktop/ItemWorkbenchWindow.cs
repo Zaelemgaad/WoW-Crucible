@@ -22,8 +22,11 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly TextBox _search = new() { PlaceholderText = "Filter by ID, name, quality, level, or set ID…" };
+    private readonly TextBox _inspectId = new() { PlaceholderText = "Inspect exact item ID…" };
+    private readonly TextBox _acquisitionDbc = new() { PlaceholderText = "Optional server DBC folder for CharStartOutfit.dbc coverage…" };
     private readonly ListBox _items = new();
     private readonly TextBlock _auditSummary = new() { TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _inspection = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#AEB8C8")) };
     private ItemAcquisitionAudit? _audit;
     private readonly TextBox _cloneSource = new() { PlaceholderText = "Source item ID" };
     private readonly TextBox _cloneDestination = new() { PlaceholderText = "New item ID" };
@@ -77,9 +80,16 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private Control AcquisitionPage()
     {
         var audit = AccentButton("Scan acquisition paths"); audit.Click += async (_, _) => await AuditAsync();
-        var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), Margin = new Thickness(0,0,0,10) }; header.Children.Add(audit); Grid.SetColumn(_search, 1); _search.Margin = new Thickness(10,0); header.Children.Add(_search); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
-        var note = new TextBlock { Text = "“No known path” means no vendor, direct/reachable loot, linked starter→ender quest reward, starting-item, prospecting, milling, disenchanting, fishing, or spell-loot source was found in the live schema. Reference-pool control rows are not mistaken for item drops, and orphaned quest templates are not treated as playable acquisition. Script-created items still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
-        return new Grid { RowDefinitions = new("Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(note, 1), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 2) } };
+        var inspect = AccentButton("Explain exact ID"); inspect.Click += async (_, _) => await InspectExactAsync();
+        var edit = new Button { Content = "Open selected in decoded editor" }; edit.Click += async (_, _) => await OpenSelectedItemAsync(false);
+        var favorite = new Button { Content = "★ Favorite selected row" }; favorite.Click += async (_, _) => await OpenSelectedItemAsync(true);
+        var browseDbc = new Button { Content = "DBC folder…" }; browseDbc.Click += async (_, _) => await PickFolderAsync(_acquisitionDbc, "Select the server DBC folder");
+        var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), Margin = new Thickness(0,0,0,8) }; header.Children.Add(audit); Grid.SetColumn(_search, 1); _search.Margin = new Thickness(10,0); header.Children.Add(_search); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
+        var rowActions = new WrapPanel { Children = { edit, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
+        var exact = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _inspectId, WithColumn(inspect, 1), rowActions } };
+        var dbc = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1) } };
+        var note = new TextBlock { Text = "“No known path” means no vendor, direct/reachable loot, usable linked starter→ender quest reward, starting-item, prospecting, milling, disenchanting, fishing, or spell-loot source was found in the live schema. Reference-pool control rows, disabled quests, and orphaned quest templates are not mistaken for playable acquisition. Script-created items still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(exact, 1), WithRow(dbc, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
     private Control ClonePage()
@@ -109,8 +119,51 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private async Task AuditAsync()
     {
-        SetBusy("Scanning every known acquisition source…"); DesktopCrashLogger.Debug("ITEM", "acquisition-audit-start", ("host", _host.Text), ("database", _database.Text)); try { _audit = await new ItemCatalogService().AuditAsync(Profile()); ApplyAuditFilter(); _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} / {_audit.TotalItems:N0} no known path"; _status.Text = $"Checked {_audit.CheckedSources.Count:N0} source families; {_audit.MissingSources.Count:N0} unavailable in this schema."; DesktopCrashLogger.Debug("ITEM", "acquisition-audit-success", ("total_items", _audit.TotalItems), ("no_known_path", _audit.NoKnownAcquisitionPath.Count), ("checked_sources", _audit.CheckedSources.Count), ("missing_sources", _audit.MissingSources.Count)); }
+        SetBusy("Scanning every known SQL and DBC acquisition source…"); DesktopCrashLogger.Debug("ITEM", "acquisition-audit-start", ("host", _host.Text), ("database", _database.Text), ("dbc", _acquisitionDbc.Text)); try { _audit = await new ItemCatalogService().AuditAsync(Profile(), EmptyNull(_acquisitionDbc.Text)); ApplyAuditFilter(); _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} / {_audit.TotalItems:N0} no known path"; _status.Text = $"Checked {_audit.CheckedSources.Count:N0} source families; {_audit.MissingSources.Count:N0} unavailable or unconfigured."; DesktopCrashLogger.Debug("ITEM", "acquisition-audit-success", ("total_items", _audit.TotalItems), ("no_known_path", _audit.NoKnownAcquisitionPath.Count), ("checked_sources", _audit.CheckedSources.Count), ("missing_sources", _audit.MissingSources.Count)); }
         catch (Exception exception) { await ErrorAsync("Acquisition audit failed", exception); }
+    }
+
+    private async Task InspectExactAsync()
+    {
+        if (!uint.TryParse(_inspectId.Text, out var entry) || entry == 0) { _inspection.Text = "Enter a positive item ID."; return; }
+        SetBusy($"Tracing every acquisition candidate for item {entry:N0}…");
+        try
+        {
+            var result = await new ItemCatalogService().InspectAsync(Profile(), entry, EmptyNull(_acquisitionDbc.Text));
+            if (!result.Found) { _inspection.Text = $"Item {entry:N0} does not exist in item_template."; _status.Text = "Exact item inspection complete."; return; }
+            var item = result.Item!;
+            var evidence = result.HasKnownAcquisitionPath ? result.AcceptedEvidence : result.RejectedEvidence;
+            _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(result.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\n" + string.Join("\n", evidence.Select(value => $"• {value}"));
+            _status.Text = $"Inspected item {entry:N0} across {result.CheckedSources.Count:N0} source families.";
+        }
+        catch (Exception exception) { await ErrorAsync("Exact item inspection failed", exception); }
+    }
+
+    private async Task OpenSelectedItemAsync(bool favorite)
+    {
+        if (_items.SelectedItem is not ItemCatalogEntry selected) { _status.Text = "Select an item row first."; return; }
+        SetBusy($"Opening exact item_template row {selected.Entry:N0}…");
+        try
+        {
+            var profile = Profile();
+            var capabilities = _session.DatabaseCapabilities is { } active && _session.DatabaseProfile is { } connected &&
+                connected.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) && connected.Port == profile.Port && connected.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase)
+                ? active : await new DatabaseCapabilityService().InspectAsync(profile);
+            var table = capabilities.FindTable("item_template") ?? throw new NotSupportedException("The connected schema has no item_template table.");
+            var entryColumn = table.Find("entry")?.Name ?? throw new NotSupportedException("item_template has no entry column.");
+            var row = await new SqlWorkspaceService().ReadRowAsync(profile, table, new Dictionary<string, object?> { [entryColumn] = selected.Entry })
+                ?? throw new InvalidOperationException($"Item {selected.Entry} disappeared before it could be opened.");
+            if (favorite)
+            {
+                SqlFavoriteStore.Save(new(profile.Database, table.Name,
+                    row.Key.ToDictionary(pair => pair.Key, pair => Convert.ToString(pair.Value, System.Globalization.CultureInfo.InvariantCulture), StringComparer.OrdinalIgnoreCase),
+                    $"{selected.Name} · {row.Display}", "Favorited from the unobtainable/cut-item audit.", DateTimeOffset.UtcNow));
+                _status.Text = $"Favorited exact row {row.Display}. It is now available in SQL Studio → Favorites.";
+                return;
+            }
+            _creator.LoadRow(row.Values); _tabs.SelectedIndex = 0; _status.Text = $"Loaded exact row {row.Display} into the decoded item editor. SQL Studio still exposes every raw/custom field.";
+        }
+        catch (Exception exception) { await ErrorAsync(favorite ? "Favorite failed" : "Decoded item open failed", exception); }
     }
 
     private void ApplyAuditFilter()
@@ -172,8 +225,9 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         if (password.Length == 0 && current is not null && current.Host.Equals(_host.Text, StringComparison.OrdinalIgnoreCase) && current.Port == (uint)(_port.Value ?? 3306) && current.User.Equals(_user.Text, StringComparison.OrdinalIgnoreCase) && current.Database.Equals(_database.Text, StringComparison.OrdinalIgnoreCase)) password = current.Password;
         return new(_host.Text ?? "127.0.0.1", (uint)(_port.Value ?? 3306), _user.Text ?? string.Empty, password, _database.Text ?? string.Empty, MySqlSslMode.Preferred);
     }
-    private void LoadDefaults() { try { var path = CruciblePaths.SettingsFileForRead; if (!File.Exists(path)) return; using var json = JsonDocument.Parse(File.ReadAllText(path)); var root = json.RootElement; if (root.TryGetProperty("DatabaseHost", out var host)) _host.Text = host.GetString(); if (root.TryGetProperty("DatabasePort", out var port)) _port.Value = port.GetUInt32(); if (root.TryGetProperty("DatabaseUser", out var user)) _user.Text = user.GetString(); if (root.TryGetProperty("WorldDatabase", out var db)) _database.Text = db.GetString(); if (root.TryGetProperty("SchemaDefinitionPath", out var schema)) _schemaPath.Text = schema.GetString(); if (root.TryGetProperty("CoreDbcPath", out var dbc)) { var directory = dbc.GetString(); if (Directory.Exists(directory)) { _itemSetPath.Text = Path.Combine(directory, "ItemSet.dbc"); _spellPath.Text = Path.Combine(directory, "Spell.dbc"); } } } catch (Exception exception) { DesktopCrashLogger.Debug("SETTINGS", "item-workbench-defaults-load-failed", ("error", exception.Message)); } }
+    private void LoadDefaults() { try { var path = CruciblePaths.SettingsFileForRead; if (!File.Exists(path)) return; using var json = JsonDocument.Parse(File.ReadAllText(path)); var root = json.RootElement; if (root.TryGetProperty("DatabaseHost", out var host)) _host.Text = host.GetString(); if (root.TryGetProperty("DatabasePort", out var port)) _port.Value = port.GetUInt32(); if (root.TryGetProperty("DatabaseUser", out var user)) _user.Text = user.GetString(); if (root.TryGetProperty("WorldDatabase", out var db)) _database.Text = db.GetString(); if (root.TryGetProperty("SchemaDefinitionPath", out var schema)) _schemaPath.Text = schema.GetString(); if (root.TryGetProperty("CoreDbcPath", out var dbc)) { var directory = dbc.GetString(); _acquisitionDbc.Text = directory; if (Directory.Exists(directory)) { _itemSetPath.Text = Path.Combine(directory, "ItemSet.dbc"); _spellPath.Text = Path.Combine(directory, "Spell.dbc"); } } } catch (Exception exception) { DesktopCrashLogger.Debug("SETTINGS", "item-workbench-defaults-load-failed", ("error", exception.Message)); } }
     private async Task PickFileAsync(TextBox target, string title, string pattern) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(title) { Patterns = [pattern] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }
+    private async Task PickFolderAsync(TextBox target, string title) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var folders = await storage.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = title, AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }
     private async Task PickOutputAsync(TextBox target, string name) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var file = await storage.SaveFilePickerAsync(new FilePickerSaveOptions { SuggestedFileName = name, FileTypeChoices = [new FilePickerFileType("DBC") { Patterns = ["*.dbc"] }] }); var path = file?.TryGetLocalPath(); if (path is not null) target.Text = path; }
     private Task ErrorAsync(string title, Exception exception) { DesktopCrashLogger.Log(title, exception); _status.Text = $"{title}: {exception.Message}"; return Task.CompletedTask; }
     private void SetBusy(string text) => _status.Text = text;
@@ -187,6 +241,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private static T WithColumn<T>(T control, int column) where T:Control { Grid.SetColumn(control,column); return control; }
     private static void AddCell(Grid grid, string text, int column, FontWeight? weight = null) { var value = new TextBlock { Text = text, TextTrimming = TextTrimming.CharacterEllipsis, FontWeight = weight ?? FontWeight.Normal, Margin = new Thickness(4) }; Grid.SetColumn(value,column); grid.Children.Add(value); }
     private static string QualityName(int quality) => quality switch { 0=>"Poor",1=>"Common",2=>"Uncommon",3=>"Rare",4=>"Epic",5=>"Legendary",6=>"Artifact",7=>"Heirloom",_=>$"Quality {quality}" };
+    private static string? EmptyNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private void SessionChanged(object? sender, EventArgs e) => PopulateSessionConnection();
     private void PopulateSessionConnection()
     {

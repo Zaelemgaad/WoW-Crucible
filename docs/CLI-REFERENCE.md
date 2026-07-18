@@ -178,7 +178,8 @@ wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snap
 wowcrucible db snapshot-inspect <snapshot-file> [--quick]
 wowcrucible db recovery-audit <legacy-snapshot> <output.crucible-db-audit> [--baseline=stock-snapshot] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
 wowcrucible db recovery-inspect <audit-file> [--quick]
-wowcrucible db item-audit <host> <port> <user> <database> [--password-env=ENV_NAME] [--output=report.json]
+wowcrucible db item-audit <host> <port> <user> <database> [--password-env=ENV_NAME] [--dbc=server-dbc-folder] [--output=report.json]
+wowcrucible db item-inspect <host> <port> <user> <database> <item-id> [--password-env=ENV_NAME] [--dbc=server-dbc-folder]
 wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=" Variant"] [--itemset=ID]
 ```
 
@@ -203,7 +204,9 @@ wowcrucible db content-plan 127.0.0.1 3306 acore acore_world smartai smartai.jso
 
 `db recovery-audit` is the read-only phase-two boundary. With `--baseline`, it emits an atomic, compressed, source-hash-bound audit containing keyed added, modified, and removed rows plus exact before/after field values. Without a baseline, it labels every emitted row an **unattributed candidate** instead of pretending stock rows are custom work. Tables are grouped into content domains for review. A table without a primary key, a collation-dependent/textual key that snapshot format v1 cannot order portably, another incompatible key, a partial schema, or an excluded counterpart is reported but never compared by capture order. Known runtime-state tables remain excluded unless `--include-sensitive` is explicit. `db recovery-inspect` verifies the audit offline; `--quick` still hashes all change streams. The artifact always records `PromotionReady=false`: dependency closure, target translation, ID remapping, selection, SQL generation, and deployment remain later phases.
 
-`item-audit` discovers the current schema instead of assuming one core revision. It checks vendor, creature/gameobject/item/mail/pickpocket/skinning/disenchant/fishing/spell/reference/prospecting/milling loot, character starting items, and every quest reward/choice slot that exists. The report calls an item **no known acquisition path**, not certainly unobtainable, because custom server scripts can grant items without a database relationship.
+`item-audit` discovers the current schema instead of assuming one core revision. It checks vendor, creature/gameobject/item/mail/pickpocket/skinning/disenchant/fishing/spell/reference/prospecting/milling loot, SQL character starting items, and every quest reward/choice slot that exists. `--dbc` additionally reads `CharStartOutfit.dbc`, which is essential on cores that derive normal starting equipment from DBC rather than `playercreateinfo_item`. Quest rewards count only when a quest has a live starter and ender and is not in the core's disabled-quest table. The report calls an item **no known acquisition path**, not certainly unobtainable, because custom server scripts can grant items without a database relationship.
+
+`item-inspect` traces one exact ID through the same audit and prints the accepted or rejected evidence behind its classification. For example, it explains that item 17 occurring in a nonzero-reference control row is not a direct drop, and that a reward on an explicitly disabled quest does not make the item obtainable.
 
 `item-clone` transactionally copies every writable column currently present in `item_template`, including custom columns unknown to Crucible, plus matching locale rows. It refuses an already-used destination ID. `--itemset=ID` assigns the copy to a set; omitting it preserves the source membership.
 

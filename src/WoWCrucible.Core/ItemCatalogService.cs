@@ -8,10 +8,18 @@ public sealed record ItemCatalogEntry(uint Entry, string Name, int Quality, int 
 }
 public sealed record ItemAcquisitionAudit(string Database, DateTimeOffset AuditedUtc, IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources,
     int TotalItems, int ObtainableItems, IReadOnlyList<ItemCatalogEntry> NoKnownAcquisitionPath);
+public sealed record ItemAcquisitionInspection(ItemCatalogEntry? Item, IReadOnlyList<string> AcceptedEvidence, IReadOnlyList<string> RejectedEvidence,
+    IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources)
+{
+    public bool Found => Item is not null;
+    public bool HasKnownAcquisitionPath => Item?.HasKnownAcquisitionPath == true;
+}
 public sealed record ItemCloneResult(uint SourceEntry, uint NewEntry, string SourceName, string NewName, uint ItemSetId, int CopiedColumns, int CopiedLocaleRows);
 
 public sealed class ItemCatalogService
 {
+    private sealed record AcquisitionScan(IReadOnlyList<ItemCatalogEntry> Items, IReadOnlyDictionary<uint, HashSet<string>> Rejected,
+        IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources);
     private sealed record AcquisitionSpec(string Table, params string[] Columns);
     private static readonly AcquisitionSpec[] DirectAcquisitionSpecs =
     [
@@ -28,14 +36,41 @@ public sealed class ItemCatalogService
 
     public static bool IsDirectLootItem(long item, long reference) => item > 0 && item <= uint.MaxValue && reference <= 0;
     public static bool IsLinkedQuestReward(uint questId, IReadOnlySet<uint> starters, IReadOnlySet<uint> enders) => starters.Contains(questId) && enders.Contains(questId);
+    public static bool IsUsableQuestReward(uint questId, IReadOnlySet<uint> starters, IReadOnlySet<uint> enders, IReadOnlySet<uint> disabled)
+        => IsLinkedQuestReward(questId, starters, enders) && !disabled.Contains(questId);
 
-    public async Task<ItemAcquisitionAudit> AuditAsync(DatabaseConnectionProfile profile, CancellationToken cancellationToken = default)
+    public Task<ItemAcquisitionAudit> AuditAsync(DatabaseConnectionProfile profile, CancellationToken cancellationToken = default)
+        => AuditAsync(profile, null, cancellationToken);
+
+    public async Task<ItemAcquisitionAudit> AuditAsync(DatabaseConnectionProfile profile, string? dbcFolder, CancellationToken cancellationToken = default)
+    {
+        var scan = await ScanAsync(profile, dbcFolder, cancellationToken);
+        var unavailable = scan.Items.Where(item => !item.HasKnownAcquisitionPath).ToArray();
+        return new(profile.Database, DateTimeOffset.UtcNow, scan.CheckedSources, scan.MissingSources, scan.Items.Count, scan.Items.Count - unavailable.Length, unavailable);
+    }
+
+    public Task<ItemAcquisitionInspection> InspectAsync(DatabaseConnectionProfile profile, uint entry, CancellationToken cancellationToken = default)
+        => InspectAsync(profile, entry, null, cancellationToken);
+
+    public async Task<ItemAcquisitionInspection> InspectAsync(DatabaseConnectionProfile profile, uint entry, string? dbcFolder, CancellationToken cancellationToken = default)
+    {
+        if (entry == 0) throw new ArgumentOutOfRangeException(nameof(entry), "Item ID must be positive.");
+        var scan = await ScanAsync(profile, dbcFolder, cancellationToken);
+        var item = scan.Items.FirstOrDefault(candidate => candidate.Entry == entry);
+        var accepted = item?.AcquisitionSources.Select(source => $"Accepted · {source}").ToArray() ?? [];
+        var rejected = scan.Rejected.TryGetValue(entry, out var findings)
+            ? findings.Order(StringComparer.OrdinalIgnoreCase).ToArray()
+            : item is null || item.HasKnownAcquisitionPath ? [] : ["No vendor, direct/reachable loot, usable quest reward, SQL/DBC starting-item, prospecting, milling, disenchanting, fishing, or spell-loot row references this item in the checked coverage."];
+        return new(item, accepted, rejected, scan.CheckedSources, scan.MissingSources);
+    }
+
+    private async Task<AcquisitionScan> ScanAsync(DatabaseConnectionProfile profile, string? dbcFolder, CancellationToken cancellationToken)
     {
         await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile));
         await connection.OpenAsync(cancellationToken);
         var schema = await ReadSchemaAsync(connection, profile.Database, cancellationToken);
         var itemTable = ResolveTable(schema, "item_template") ?? throw new NotSupportedException("The selected database has no item_template table.");
-        var acquired = new Dictionary<uint, HashSet<string>>(); var checkedSources = new List<string>(); var missingSources = new List<string>();
+        var acquired = new Dictionary<uint, HashSet<string>>(); var rejected = new Dictionary<uint, HashSet<string>>(); var checkedSources = new List<string>(); var missingSources = new List<string>();
         foreach (var spec in DirectAcquisitionSpecs)
         {
             var table = ResolveTable(schema, spec.Table);
@@ -50,12 +85,13 @@ public sealed class ItemCatalogService
                 while (await reader.ReadAsync(cancellationToken))
                 {
                     var entry = Convert.ToUInt32(reader.GetValue(0));
-                    AddAcquired(acquired, entry, table);
+                    AddAcquired(acquired, entry, $"{table}.{column}");
                 }
             }
         }
-        await CollectReachableLootAsync(connection, schema, acquired, checkedSources, missingSources, cancellationToken);
-        await CollectLinkedQuestRewardsAsync(connection, schema, acquired, checkedSources, missingSources, cancellationToken);
+        await CollectReachableLootAsync(connection, schema, acquired, rejected, checkedSources, missingSources, cancellationToken);
+        await CollectLinkedQuestRewardsAsync(connection, schema, acquired, rejected, checkedSources, missingSources, cancellationToken);
+        CollectCharStartOutfitItems(dbcFolder, acquired, checkedSources, missingSources);
 
         var itemColumns = schema[itemTable];
         var entryColumn = RequireColumn(itemColumns, "entry"); var nameColumn = RequireColumn(itemColumns, "name");
@@ -69,12 +105,37 @@ public sealed class ItemCatalogService
                 var entry = Convert.ToUInt32(reader.GetValue(0)); var sources = acquired.TryGetValue(entry, out var found) ? found.Order(StringComparer.OrdinalIgnoreCase).ToArray() : [];
                 items.Add(new(entry, Convert.ToString(reader.GetValue(1)) ?? string.Empty, Convert.ToInt32(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3)), Convert.ToUInt32(reader.GetValue(4)), sources));
             }
-        var unavailable = items.Where(item => !item.HasKnownAcquisitionPath).ToArray();
-        return new(profile.Database, DateTimeOffset.UtcNow, checkedSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(), missingSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(), items.Count, items.Count - unavailable.Length, unavailable);
+        return new(items, rejected,
+            checkedSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+            missingSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray());
+    }
+
+    public static IReadOnlySet<uint> ReadCharStartOutfitItems(string path)
+    {
+        var file = WdbcFile.Load(path);
+        if (file.FieldCount != 77 || file.RecordSize < 104) throw new InvalidDataException($"CharStartOutfit.dbc must use the WotLK 77-field layout; this file has {file.FieldCount} fields and {file.RecordSize}-byte records.");
+        var result = new HashSet<uint>();
+        for (var row = 0; row < file.RowCount; row++)
+            for (var slot = 0; slot < 24; slot++)
+            {
+                var raw = file.GetRaw(row, new(slot + 5, 8 + slot * 4, 4, $"ItemID[{slot}]", DbcValueType.Int32));
+                var signed = unchecked((int)raw); if (signed > 0) result.Add((uint)signed);
+            }
+        return result;
+    }
+
+    private static void CollectCharStartOutfitItems(string? dbcFolder, Dictionary<uint, HashSet<string>> acquired,
+        ICollection<string> checkedSources, ICollection<string> missingSources)
+    {
+        if (string.IsNullOrWhiteSpace(dbcFolder)) { missingSources.Add("CharStartOutfit.dbc (configure the server DBC folder)"); return; }
+        var path = Directory.Exists(dbcFolder) ? Path.Combine(dbcFolder, "CharStartOutfit.dbc") : dbcFolder;
+        if (!File.Exists(path)) { missingSources.Add($"CharStartOutfit.dbc ({path})"); return; }
+        foreach (var entry in ReadCharStartOutfitItems(path)) AddAcquired(acquired, entry, "CharStartOutfit.dbc (starting equipment)");
+        checkedSources.Add("CharStartOutfit.dbc (starting equipment)");
     }
 
     private static async Task CollectReachableLootAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
-        Dictionary<uint, HashSet<string>> acquired, ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+        Dictionary<uint, HashSet<string>> acquired, Dictionary<uint, HashSet<string>> rejected, ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
     {
         var referencedPools = new HashSet<uint>();
         foreach (var requested in LootTables)
@@ -96,8 +157,12 @@ public sealed class ItemCatalogService
                 // In Trinity/Azeroth loot schemas Item is not an awarded item when
                 // Reference is nonzero. Treating both columns as independent made
                 // reference-count/group values look like real obtainable item IDs.
-                if (rawReferenceId > 0 && rawReferenceId <= uint.MaxValue) referencedPools.Add((uint)rawReferenceId);
-                else if (IsDirectLootItem(rawItemId, rawReferenceId)) AddAcquired(acquired, (uint)rawItemId, table);
+                if (rawReferenceId > 0 && rawReferenceId <= uint.MaxValue)
+                {
+                    referencedPools.Add((uint)rawReferenceId);
+                    if (rawItemId is > 0 and <= uint.MaxValue) AddRejected(rejected, (uint)rawItemId, $"Ignored · {table} has nonzero Reference values; its Item field is a reference-control value, not a direct award.");
+                }
+                else if (IsDirectLootItem(rawItemId, rawReferenceId)) AddAcquired(acquired, (uint)rawItemId, $"{table} (direct loot)");
             }
         }
 
@@ -124,13 +189,13 @@ public sealed class ItemCatalogService
             cancellationToken.ThrowIfCancellationRequested();
             if (!visited.Add(pool) || !rows.TryGetValue(pool, out var values)) continue;
             foreach (var row in values)
-                if (row.Reference != 0) pending.Enqueue(row.Reference);
+                if (row.Reference != 0) { pending.Enqueue(row.Reference); AddRejected(rejected, row.Item, "Ignored · reference_loot_template row links to another pool; its Item field is not directly awarded."); }
                 else AddAcquired(acquired, row.Item, "reference_loot_template (reachable pool)");
         }
     }
 
     private static async Task CollectLinkedQuestRewardsAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
-        Dictionary<uint, HashSet<string>> acquired, ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+        Dictionary<uint, HashSet<string>> acquired, Dictionary<uint, HashSet<string>> rejected, ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
     {
         var questTable = ResolveTable(schema, "quest_template");
         if (questTable is null) { missingSources.Add("quest_template"); return; }
@@ -140,18 +205,47 @@ public sealed class ItemCatalogService
 
         var starters = await ReadQuestLinksAsync(connection, schema, ["creature_queststarter", "gameobject_queststarter"], missingSources, cancellationToken);
         var enders = await ReadQuestLinksAsync(connection, schema, ["creature_questender", "gameobject_questender"], missingSources, cancellationToken);
+        var disabled = await ReadDisabledQuestsAsync(connection, schema, missingSources, cancellationToken);
+        var disabledIds = disabled.Keys.ToHashSet();
         var linked = starters.Intersect(enders).ToHashSet();
-        if (linked.Count == 0) { missingSources.Add("quest rewards with linked starter and ender"); return; }
-        checkedSources.Add("quest_template (linked starter + ender)");
+        checkedSources.Add("quest_template (linked starter + ender + not disabled)");
         var sql = $"SELECT {Quote(questId)},{string.Join(',', rewards.Select(Quote))} FROM {Quote(questTable)}";
         await using var command = new MySqlCommand(sql, connection) { CommandTimeout = 120 };
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             var currentQuest = Convert.ToUInt32(reader.GetValue(0));
-            if (!IsLinkedQuestReward(currentQuest, starters, enders)) continue;
-            for (var index = 1; index < reader.FieldCount; index++) AddAcquired(acquired, Convert.ToUInt32(reader.GetValue(index)), "quest_template (linked reward)");
+            var usable = IsUsableQuestReward(currentQuest, starters, enders, disabledIds);
+            for (var index = 1; index < reader.FieldCount; index++)
+            {
+                var reward = Convert.ToUInt32(reader.GetValue(index)); if (reward == 0) continue;
+                if (usable) AddAcquired(acquired, reward, $"quest_template reward from usable quest {currentQuest}");
+                else
+                {
+                    var reason = disabled.TryGetValue(currentQuest, out var comment)
+                        ? $"Ignored · quest {currentQuest} is disabled{(string.IsNullOrWhiteSpace(comment) ? string.Empty : $" ({comment})")}."
+                        : $"Ignored · quest {currentQuest} does not have both a live starter and ender.";
+                    AddRejected(rejected, reward, reason);
+                }
+            }
         }
+    }
+
+    private static async Task<Dictionary<uint, string>> ReadDisabledQuestsAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
+        ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        var table = ResolveTable(schema, "disables"); if (table is null) { missingSources.Add("disables (quest state)"); return []; }
+        var columns = schema[table]; var type = ResolveColumn(columns, "sourceType"); var entry = ResolveColumn(columns, "entry"); var comment = ResolveColumn(columns, "comment");
+        if (type is null || entry is null) { missingSources.Add("disables (quest state)"); return []; }
+        var result = new Dictionary<uint, string>();
+        await using var command = new MySqlCommand($"SELECT {Quote(entry)},{(comment is null ? "''" : Quote(comment))} FROM {Quote(table)} WHERE {Quote(type)}=1", connection);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var raw = Convert.ToInt64(reader.GetValue(0)); if (raw is <= 0 or > uint.MaxValue) continue;
+            result[(uint)raw] = Convert.ToString(reader.GetValue(1)) ?? string.Empty;
+        }
+        return result;
     }
 
     private static async Task<HashSet<uint>> ReadQuestLinksAsync(MySqlConnection connection, Dictionary<string, List<string>> schema, IEnumerable<string> requestedTables, ICollection<string> missingSources, CancellationToken cancellationToken)
@@ -177,6 +271,13 @@ public sealed class ItemCatalogService
         if (entry == 0) return;
         if (!acquired.TryGetValue(entry, out var sources)) acquired[entry] = sources = new(StringComparer.OrdinalIgnoreCase);
         sources.Add(source);
+    }
+
+    private static void AddRejected(Dictionary<uint, HashSet<string>> rejected, uint entry, string reason)
+    {
+        if (entry == 0) return;
+        if (!rejected.TryGetValue(entry, out var reasons)) rejected[entry] = reasons = new(StringComparer.OrdinalIgnoreCase);
+        reasons.Add(reason);
     }
 
     public async Task<IReadOnlyDictionary<uint, string>> GetItemNamesAsync(DatabaseConnectionProfile profile, IEnumerable<uint> itemIds, CancellationToken cancellationToken = default)

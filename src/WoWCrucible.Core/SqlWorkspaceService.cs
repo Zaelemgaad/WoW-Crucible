@@ -22,6 +22,25 @@ public sealed record SqlRowFavorite(string Database, string Table, IReadOnlyDict
 
 public sealed class SqlWorkspaceService
 {
+    public async Task<SqlRowRecord?> ReadRowAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table,
+        IReadOnlyDictionary<string, object?> key, CancellationToken cancellationToken = default)
+    {
+        if (key.Count == 0) throw new InvalidOperationException("An exact row lookup requires the complete primary key.");
+        var primary = table.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase)).Select(column => column.Name).ToArray();
+        if (primary.Length == 0 || primary.Any(name => !key.ContainsKey(name)) || key.Keys.Any(name => !primary.Contains(name, StringComparer.OrdinalIgnoreCase)))
+            throw new InvalidOperationException($"The supplied key does not exactly match {table.Name}'s primary key ({string.Join(", ", primary)}).");
+        var predicates = primary.Select((name, index) => $"{ItemWritePlan.QuoteIdentifier(name)} <=> @k{index}").ToArray();
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        await using var command = new MySqlCommand($"SELECT {string.Join(',', table.Columns.Select(column => ItemWritePlan.QuoteIdentifier(column.Name)))} FROM {ItemWritePlan.QuoteIdentifier(table.Name)} WHERE {string.Join(" AND ", predicates)} LIMIT 2", connection);
+        for (var index = 0; index < primary.Length; index++) command.Parameters.AddWithValue($"@k{index}", key[primary[index]] ?? DBNull.Value);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken); if (!await reader.ReadAsync(cancellationToken)) return null;
+        var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < reader.FieldCount; index++) values[reader.GetName(index)] = reader.IsDBNull(index) ? null : reader.GetValue(index);
+        var rowKey = primary.ToDictionary(name => name, name => values[name], StringComparer.OrdinalIgnoreCase);
+        if (await reader.ReadAsync(cancellationToken)) throw new InvalidOperationException("A supposedly unique primary key returned more than one row.");
+        return new(values, rowKey);
+    }
+
     public async Task<SqlTablePage> ReadPageAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table, int offset, int limit, string? search = null, CancellationToken cancellationToken = default)
     {
         offset = Math.Max(0, offset); limit = Math.Clamp(limit, 1, 500); search = search?.Trim() ?? string.Empty;
