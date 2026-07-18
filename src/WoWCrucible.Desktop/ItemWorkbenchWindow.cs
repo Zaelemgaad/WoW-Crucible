@@ -22,8 +22,15 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly TextBox _search = new() { PlaceholderText = "Filter by ID, name, quality, level, or set ID…" };
+    private readonly ComboBox _classification = new()
+    {
+        ItemsSource = new[] { "No known acquisition path", "Known acquisition path", "All item_template rows" },
+        SelectedIndex = 0,
+        HorizontalAlignment = HorizontalAlignment.Stretch
+    };
     private readonly TextBox _inspectId = new() { PlaceholderText = "Inspect exact item ID…" };
     private readonly TextBox _acquisitionDbc = new() { PlaceholderText = "Optional server DBC folder for CharStartOutfit.dbc coverage…" };
+    private readonly TextBox _favoriteMpq = new() { PlaceholderText = "Optional related MPQ path saved with favorites…" };
     private readonly ListBox _items = new();
     private readonly TextBlock _auditSummary = new() { TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _inspection = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#AEB8C8")) };
@@ -53,6 +60,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         });
         _items.SelectionChanged += (_, _) => { if (_items.SelectedItem is ItemCatalogEntry item) { _cloneSource.Text = item.Entry.ToString(); _cloneResult.Text = $"Selected {item.Entry:N0} — {item.Name}\nQuality: {QualityName(item.Quality)} · Item level: {item.ItemLevel} · Set: {(item.ItemSetId == 0 ? "none" : item.ItemSetId)}"; } };
         _search.TextChanged += (_, _) => ApplyAuditFilter();
+        _classification.SelectionChanged += (_, _) => ApplyAuditFilter();
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
@@ -86,12 +94,16 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var fullSql = new Button { Content = "Open complete SQL row" }; fullSql.Click += async (_, _) => await OpenSelectedInSqlAsync();
         var favorite = new Button { Content = "★ Favorite selected row" }; favorite.Click += async (_, _) => await OpenSelectedItemAsync(true);
         var browseDbc = new Button { Content = "DBC folder…" }; browseDbc.Click += async (_, _) => await PickFolderAsync(_acquisitionDbc, "Select the server DBC folder");
-        var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), Margin = new Thickness(0,0,0,8) }; header.Children.Add(audit); Grid.SetColumn(_search, 1); _search.Margin = new Thickness(10,0); header.Children.Add(_search); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
+        var browseMpq = new Button { Content = "Related MPQ…" }; browseMpq.Click += async (_, _) => await PickFileAsync(_favoriteMpq, "Select an optional related MPQ", "*.mpq");
+        var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto"), RowSpacing = 7, Margin = new Thickness(0,0,0,8) };
+        header.Children.Add(audit); Grid.SetColumn(_search, 1); _search.Margin = new Thickness(10,0); header.Children.Add(_search); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
+        var classificationLabel = new TextBlock { Text = "Show", VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetRow(classificationLabel, 1); header.Children.Add(classificationLabel); Grid.SetRow(_classification, 1); Grid.SetColumn(_classification, 1); _classification.Margin = new Thickness(10,0); header.Children.Add(_classification);
         var rowActions = new WrapPanel { Children = { edit, fullSql, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
         var exact = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _inspectId, WithColumn(inspect, 1), rowActions } };
-        var dbc = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1) } };
+        var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
         var note = new TextBlock { Text = "“No known path” means no vendor, achievement, direct/reachable loot, usable quest reward/start item, character-start, profession/disenchant/fishing/spell-loot, or causally reachable Spell.dbc create-item source was found. Exact numeric search reports no-path, known-path, or absent instead of leaving an ambiguous empty list. Reference controls, disabled quests, orphaned rewards, and unreachable spells are not mistaken for playable acquisition. Custom scripts still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
-        return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(exact, 1), WithRow(dbc, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
+        return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(exact, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
     private Control ClonePage()
@@ -136,7 +148,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             var item = result.Item!;
             var evidence = result.HasKnownAcquisitionPath ? result.AcceptedEvidence : result.RejectedEvidence;
             _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(result.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\n" + string.Join("\n", evidence.Select(value => $"• {value}"));
-            _status.Text = $"Inspected item {entry:N0} across {result.CheckedSources.Count:N0} source families.";
+            _items.ItemsSource = new[] { item }; _items.SelectedItem = item; _items.ScrollIntoView(item);
+            _status.Text = $"Inspected and selected item {entry:N0} across {result.CheckedSources.Count:N0} source families. It can now be opened, favorited, or edited.";
         }
         catch (Exception exception) { await ErrorAsync("Exact item inspection failed", exception); }
     }
@@ -159,7 +172,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             {
                 SqlFavoriteStore.Save(new(profile.Database, table.Name,
                     row.Key.ToDictionary(pair => pair.Key, pair => Convert.ToString(pair.Value, System.Globalization.CultureInfo.InvariantCulture), StringComparer.OrdinalIgnoreCase),
-                    $"{selected.Name} · {row.Display}", "Favorited from the unobtainable/cut-item audit.", DateTimeOffset.UtcNow));
+                    $"{selected.Name} · {row.Display}", "Favorited from the unobtainable/cut-item audit.", DateTimeOffset.UtcNow,
+                    EmptyNull(_acquisitionDbc.Text), EmptyNull(_favoriteMpq.Text)));
                 _status.Text = $"Favorited exact row {row.Display}. It is now available in SQL Studio → Favorites.";
                 return;
             }
@@ -204,17 +218,25 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             }
             if (exact.HasKnownAcquisitionPath)
             {
-                _items.ItemsSource = Array.Empty<ItemCatalogEntry>();
-                _status.Text = $"Exact item {exactId:N0} exists but has a known acquisition path: {string.Join("; ", exact.AcquisitionSources.Take(3))}. Use Explain exact ID for full evidence.";
+                _items.ItemsSource = new[] { exact }; _items.SelectedItem = exact; _items.ScrollIntoView(exact);
+                _status.Text = $"Exact item {exactId:N0} has a KNOWN acquisition path: {string.Join("; ", exact.AcquisitionSources.Take(3))}. It is shown so its classification is never mistaken for a missing row.";
                 return;
             }
             _items.ItemsSource = new[] { exact }; _items.SelectedItem = exact; _items.ScrollIntoView(exact);
             _status.Text = $"Exact item {exactId:N0} is classified NO KNOWN ACQUISITION PATH.";
             return;
         }
-        IEnumerable<ItemCatalogEntry> rows = _audit.NoKnownAcquisitionPath;
+        var mode = _classification.SelectedIndex;
+        IEnumerable<ItemCatalogEntry> rows = mode switch
+        {
+            1 => _audit.AllItems.Where(item => item.HasKnownAcquisitionPath),
+            2 => _audit.AllItems,
+            _ => _audit.NoKnownAcquisitionPath
+        };
         if (query.Length > 0) rows = rows.Where(item => item.Entry.ToString().Contains(query, StringComparison.OrdinalIgnoreCase) || item.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || QualityName(item.Quality).Contains(query, StringComparison.OrdinalIgnoreCase) || item.ItemLevel.ToString().Contains(query) || item.ItemSetId.ToString().Contains(query));
-        var result = rows.Take(100_000).ToArray(); _items.ItemsSource = result; _status.Text = $"Showing {result.Length:N0} no-known-path item(s).";
+        var result = rows.Take(100_000).ToArray(); _items.ItemsSource = result;
+        var label = mode switch { 1 => "known-path", 2 => "total", _ => "no-known-path" };
+        _status.Text = $"Showing {result.Length:N0} {label} item(s). Numeric searches always show an existing exact row and state its classification.";
     }
 
     private async Task CloneAsync()
