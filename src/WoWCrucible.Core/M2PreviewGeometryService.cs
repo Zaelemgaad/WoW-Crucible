@@ -3,6 +3,13 @@ using System.Numerics;
 namespace WoWCrucible.Core;
 
 public sealed record M2TextureSlot(int Index, uint Type, uint Flags, string? EmbeddedPath);
+public sealed record M2PreviewRenderFlag(int Index, ushort Flags, ushort BlendMode)
+{
+    public bool Unlit => (Flags & 0x1) != 0;
+    public bool Unfogged => (Flags & 0x2) != 0;
+    public bool TwoSided => (Flags & 0x4) != 0;
+    public bool NoDepthTest => (Flags & 0x10) != 0;
+}
 public sealed record M2PreviewBone(int Index, uint Flags, short ParentIndex, ushort SubmeshId, Vector3 Pivot);
 public sealed record M2PreviewSequence(int Index, ushort AnimationId, ushort SubAnimationId, uint DurationMilliseconds, float MoveSpeed, uint Flags, short Probability, uint MinimumRepetitions, uint MaximumRepetitions, uint BlendMilliseconds, short NextSequence, ushort AliasSequence)
 {
@@ -23,11 +30,17 @@ public sealed record M2PreviewSubmesh(int Index, ushort GeosetId, ushort Level, 
     public string GeosetGroupName => M2GeosetCatalog.GroupName(GeosetGroup);
 }
 public sealed record M2PreviewMaterialUnit(int Index, byte Flags, sbyte PriorityPlane, ushort ShaderId, ushort SubmeshIndex, ushort SecondarySubmeshIndex, short ColorIndex, ushort RenderFlagsIndex, ushort TextureUnitLookupIndex, ushort TextureCount, ushort TextureLookupIndex, int TextureDefinitionIndex, ushort SecondaryTextureUnitLookupIndex, ushort TransparencyLookupIndex, ushort TextureAnimationLookupIndex);
-public sealed record M2PreviewBatch(int SubmeshIndex, ushort GeosetId, int TriangleStart, int TriangleIndexCount, int? MaterialUnitIndex, int? TextureDefinitionIndex);
+public sealed record M2PreviewBatch(int SubmeshIndex, ushort GeosetId, int TriangleStart, int TriangleIndexCount, int? MaterialUnitIndex, int? TextureDefinitionIndex)
+{
+    public ushort RenderFlags { get; init; }
+    public ushort BlendMode { get; init; }
+    public sbyte PriorityPlane { get; init; }
+}
 public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadOnlyList<Vector3> Vertices, IReadOnlyList<Vector3> Normals, IReadOnlyList<Vector2> TextureCoordinates, IReadOnlyList<int> TriangleIndices, Vector3 Minimum, Vector3 Maximum, IReadOnlyList<M2TextureSlot> TextureSlots)
 {
     public IReadOnlyList<M2PreviewSubmesh> Submeshes { get; init; } = [];
     public IReadOnlyList<M2PreviewMaterialUnit> MaterialUnits { get; init; } = [];
+    public IReadOnlyList<M2PreviewRenderFlag> RenderFlags { get; init; } = [];
     public IReadOnlyList<M2PreviewBatch> Batches { get; init; } = [];
     public IReadOnlyList<M2PreviewBone> Bones { get; init; } = [];
     public IReadOnlyList<M2PreviewAttachment> Attachments { get; init; } = [];
@@ -71,6 +84,7 @@ public static class M2PreviewGeometryService
         var animationRig = M2AnimationService.ParseRig(modelPath, model, vertexOffset, vertexCount, bones);
         var attachments = ReadAttachments(model, bones.Count);
         var textureSlots = ReadTextureSlots(model);
+        var renderFlags = ReadRenderFlags(model);
         var textureLookup = ReadTextureLookup(model, textureSlots.Count);
         skinPath = ResolveSkin(modelPath, skinPath);
         var skin = File.ReadAllBytes(skinPath);
@@ -89,8 +103,8 @@ public static class M2PreviewGeometryService
             if (vertexIndex >= vertices.Length) throw new InvalidDataException($"SKIN lookup {lookupIndex:N0} references M2 vertex {vertexIndex:N0}, but only {vertices.Length:N0} vertices exist.");
             allTriangles[index] = vertexIndex;
         }
-        var materialUnits = ReadMaterialUnits(skin, textureLookup, textureSlots.Count);
-        var (submeshes, triangles, batches) = ReadVisibleSubmeshes(skin, allTriangles, materialUnits, visibilityMode, geosetSelection);
+        var materialUnits = ReadMaterialUnits(skin, textureLookup, textureSlots.Count, renderFlags.Count);
+        var (submeshes, triangles, batches) = ReadVisibleSubmeshes(skin, allTriangles, materialUnits, renderFlags, visibilityMode, geosetSelection);
         if (triangles.Length > 0)
         {
             minimum = new Vector3(float.PositiveInfinity); maximum = new Vector3(float.NegativeInfinity);
@@ -100,6 +114,7 @@ public static class M2PreviewGeometryService
         {
             Submeshes = submeshes,
             MaterialUnits = materialUnits,
+            RenderFlags = renderFlags,
             Batches = batches,
             Bones = bones,
             Attachments = attachments,
@@ -133,6 +148,21 @@ public static class M2PreviewGeometryService
                 path = System.Text.Encoding.UTF8.GetString(model, start, length).TrimEnd('\0');
             }
             result[index] = new(index, type, flags, path);
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<M2PreviewRenderFlag> ReadRenderFlags(byte[] model)
+    {
+        const int CountOffset = 0x70; const int DataOffset = 0x74; const int RenderFlagStride = 4; const int MaximumRenderFlags = 65_536;
+        if (model.Length < DataOffset + 4) return [];
+        var count = CheckedCount(ReadUInt(model, CountOffset), MaximumRenderFlags, "M2 render flag"); var offset = CheckedOffset(ReadUInt(model, DataOffset), "M2 render flag");
+        RequireRange(model, offset, count, RenderFlagStride, "M2 render flags"); var result = new M2PreviewRenderFlag[count];
+        for (var index = 0; index < count; index++)
+        {
+            var item = offset + index * RenderFlagStride; var blendMode = ReadUShort(model, item + 2);
+            if (blendMode > 7) throw new InvalidDataException($"M2 render flag {index:N0} uses unsupported blend mode {blendMode:N0}.");
+            result[index] = new(index, ReadUShort(model, item), blendMode);
         }
         return result;
     }
@@ -207,7 +237,7 @@ public static class M2PreviewGeometryService
         return result;
     }
 
-    private static IReadOnlyList<M2PreviewMaterialUnit> ReadMaterialUnits(byte[] skin, IReadOnlyList<ushort> textureLookup, int textureCount)
+    private static IReadOnlyList<M2PreviewMaterialUnit> ReadMaterialUnits(byte[] skin, IReadOnlyList<ushort> textureLookup, int textureCount, int renderFlagCount)
     {
         const int CountOffset = 36; const int DataOffset = 40; const int MaterialStride = 24; const int MaximumMaterials = 131_072;
         if (skin.Length < DataOffset + 4) return [];
@@ -219,16 +249,18 @@ public static class M2PreviewGeometryService
         {
             var item = offset + index * MaterialStride;
             var textureLookupIndex = ReadUShort(skin, item + 16);
+            var renderFlagsIndex = ReadUShort(skin, item + 10);
+            if (renderFlagCount > 0 && renderFlagsIndex >= renderFlagCount) throw new InvalidDataException($"SKIN material unit {index:N0} references render flag {renderFlagsIndex:N0}, but only {renderFlagCount:N0} records exist.");
             var textureDefinitionIndex = textureLookupIndex < textureLookup.Count ? textureLookup[textureLookupIndex] : -1;
             if (textureLookup.Count == 0 && textureLookupIndex < textureCount) textureDefinitionIndex = textureLookupIndex;
             result[index] = new(index, skin[item], unchecked((sbyte)skin[item + 1]), ReadUShort(skin, item + 2), ReadUShort(skin, item + 4), ReadUShort(skin, item + 6),
-                ReadShort(skin, item + 8), ReadUShort(skin, item + 10), ReadUShort(skin, item + 12), ReadUShort(skin, item + 14), textureLookupIndex,
+                ReadShort(skin, item + 8), renderFlagsIndex, ReadUShort(skin, item + 12), ReadUShort(skin, item + 14), textureLookupIndex,
                 textureDefinitionIndex, ReadUShort(skin, item + 18), ReadUShort(skin, item + 20), ReadUShort(skin, item + 22));
         }
         return result;
     }
 
-    private static (IReadOnlyList<M2PreviewSubmesh> Submeshes, int[] Triangles, IReadOnlyList<M2PreviewBatch> Batches) ReadVisibleSubmeshes(byte[] skin, int[] allTriangles, IReadOnlyList<M2PreviewMaterialUnit> materialUnits, M2PreviewVisibilityMode visibilityMode, M2GeosetSelection? geosetSelection)
+    private static (IReadOnlyList<M2PreviewSubmesh> Submeshes, int[] Triangles, IReadOnlyList<M2PreviewBatch> Batches) ReadVisibleSubmeshes(byte[] skin, int[] allTriangles, IReadOnlyList<M2PreviewMaterialUnit> materialUnits, IReadOnlyList<M2PreviewRenderFlag> renderFlags, M2PreviewVisibilityMode visibilityMode, M2GeosetSelection? geosetSelection)
     {
         const int CountOffset = 28; const int DataOffset = 32; const int SubmeshStride = 48; const int MaximumSubmeshes = 131_072;
         if (skin.Length < DataOffset + 4) return ([], allTriangles, [new(0, 0, 0, allTriangles.Length, null, null)]);
@@ -290,9 +322,18 @@ public static class M2PreviewGeometryService
             {
                 var compactStart = triangles.Count;
                 triangles.AddRange(allTriangles.AsSpan(section.TriangleStart, section.TriangleCount).ToArray());
-                var material = materialUnits.FirstOrDefault(unit => unit.SubmeshIndex == index && unit.TextureDefinitionIndex >= 0)
-                    ?? materialUnits.FirstOrDefault(unit => unit.SubmeshIndex == index);
-                batches.Add(new(index, section.Id, compactStart, section.TriangleCount, material?.Index, material is { TextureDefinitionIndex: >= 0 } ? material.TextureDefinitionIndex : null));
+                var materials = materialUnits.Where(unit => unit.SubmeshIndex == index).OrderBy(unit => unit.PriorityPlane).ThenBy(unit => unit.Index).ToArray();
+                if (materials.Length == 0) batches.Add(new(index, section.Id, compactStart, section.TriangleCount, null, null));
+                else foreach (var material in materials)
+                {
+                    var flags = material.RenderFlagsIndex < renderFlags.Count ? renderFlags[material.RenderFlagsIndex] : null;
+                    batches.Add(new(index, section.Id, compactStart, section.TriangleCount, material.Index, material.TextureDefinitionIndex >= 0 ? material.TextureDefinitionIndex : null)
+                    {
+                        RenderFlags = flags?.Flags ?? 0,
+                        BlendMode = flags?.BlendMode ?? 0,
+                        PriorityPlane = material.PriorityPlane
+                    });
+                }
             }
         }
         return (submeshes, triangles.ToArray(), batches);

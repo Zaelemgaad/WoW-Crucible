@@ -8,6 +8,16 @@ public sealed record ItemModelMountPlan(IReadOnlyList<ItemModelMountPlacement> P
 
 public static class M2PreviewSceneService
 {
+    public static Matrix4x4 AttachmentTransform(M2PreviewAttachment attachment, IReadOnlyList<Matrix4x4>? boneTransforms = null)
+    {
+        ArgumentNullException.ThrowIfNull(attachment);
+        var transform = Matrix4x4.CreateTranslation(attachment.Position);
+        if (boneTransforms is null) return transform;
+        if ((uint)attachment.BoneIndex >= (uint)boneTransforms.Count) throw new ArgumentException($"Attachment {attachment.Index:N0} references bone {attachment.BoneIndex:N0}, but the pose contains {boneTransforms.Count:N0} transforms.", nameof(boneTransforms));
+        var result = transform * boneTransforms[attachment.BoneIndex];
+        return Finite(result) ? result : throw new InvalidDataException($"Attachment {attachment.Index:N0} produced a non-finite mounted-model transform.");
+    }
+
     public static (Vector3 Minimum, Vector3 Maximum) TransformBounds(Vector3 minimum, Vector3 maximum, Matrix4x4 transform)
     {
         if (!Finite(minimum) || !Finite(maximum) || !Finite(transform)) throw new ArgumentException("Preview scene bounds and transforms must contain only finite values.");

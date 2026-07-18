@@ -305,7 +305,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         {
             var targetId = item.FollowPicker && attachment is not null ? attachment.Id : item.AttachmentId;
             var target = _mountCharacterGeometry.Attachments.FirstOrDefault(candidate => candidate.Id == targetId);
-            if (target is not null) mounted.Add(new(item.Geometry, Matrix4x4.CreateTranslation(target.Position), item.Texture, item.Label));
+            if (target is not null) mounted.Add(new(item.Geometry, M2PreviewSceneService.AttachmentTransform(target), item.Texture, item.Label, target.Index));
         }
         _model.SetMountedModels(mounted);
     }
