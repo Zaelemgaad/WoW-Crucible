@@ -15,6 +15,7 @@ public sealed record SqlTablePage(string Table, IReadOnlyList<DatabaseColumnCapa
     long TotalRows, int Offset, int Limit, string Search, IReadOnlyList<SqlRowRecord> Rows);
 public sealed record SqlQueryResult(IReadOnlyList<string> Columns, IReadOnlyList<IReadOnlyList<object?>> Rows, int AffectedRows, TimeSpan Duration);
 public sealed record SqlInsertResult(int AffectedRows, long InsertedId);
+public sealed record SqlRelationshipMatch(DatabaseRelationCapability Relation, bool Outgoing, string TargetTable, string TargetColumn, object? Value, long MatchingRows);
 public sealed record SqlRowFavorite(string Database, string Table, IReadOnlyDictionary<string, string?> Key, string Label, string Notes, DateTimeOffset AddedUtc, string? DbcPath = null, string? MpqPath = null)
 {
     public string Identity => $"{Database}\u001f{Table}\u001f{string.Join("\u001e", Key.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase).Select(pair => $"{pair.Key}={pair.Value}"))}";
@@ -22,6 +23,46 @@ public sealed record SqlRowFavorite(string Database, string Table, IReadOnlyDict
 
 public sealed class SqlWorkspaceService
 {
+    public async Task<SqlTablePage> ReadColumnMatchesAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table,
+        string columnName, object? value, int limit = 200, CancellationToken cancellationToken = default)
+    {
+        var column = table.Find(columnName) ?? throw new InvalidOperationException($"{table.Name} has no {columnName} column.");
+        limit = Math.Clamp(limit, 1, 500); var quotedColumn = ItemWritePlan.QuoteIdentifier(column.Name);
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        await using var count = new MySqlCommand($"SELECT COUNT(*) FROM {ItemWritePlan.QuoteIdentifier(table.Name)} WHERE {quotedColumn} <=> @value", connection);
+        count.Parameters.AddWithValue("@value", value ?? DBNull.Value); var total = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        var primary = table.Columns.Where(candidate => candidate.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase)).Select(candidate => candidate.Name).ToArray();
+        var order = primary.Length > 0 ? $" ORDER BY {string.Join(',', primary.Select(ItemWritePlan.QuoteIdentifier))}" : string.Empty;
+        await using var command = new MySqlCommand($"SELECT {string.Join(',', table.Columns.Select(candidate => ItemWritePlan.QuoteIdentifier(candidate.Name)))} FROM {ItemWritePlan.QuoteIdentifier(table.Name)} WHERE {quotedColumn} <=> @value{order} LIMIT @limit", connection);
+        command.Parameters.AddWithValue("@value", value ?? DBNull.Value); command.Parameters.AddWithValue("@limit", limit);
+        var rows = new List<SqlRowRecord>(); await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < reader.FieldCount; index++) values[reader.GetName(index)] = reader.IsDBNull(index) ? null : reader.GetValue(index);
+            rows.Add(new(values, primary.ToDictionary(name => name, name => values[name], StringComparer.OrdinalIgnoreCase)));
+        }
+        return new(table.Name, table.Columns, primary, total, 0, limit, $"{column.Name} = {Convert.ToString(value, CultureInfo.InvariantCulture)}", rows);
+    }
+
+    public async Task<IReadOnlyList<SqlRelationshipMatch>> AnalyzeRelationshipsAsync(DatabaseConnectionProfile profile, DatabaseCapabilities capabilities,
+        string tableName, IReadOnlyDictionary<string, object?> row, CancellationToken cancellationToken = default)
+    {
+        var relations = capabilities.Relationships.Where(relation => relation.Touches(tableName)).ToArray(); var results = new List<SqlRelationshipMatch>();
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        foreach (var relation in relations)
+        {
+            var outgoing = relation.FromTable.Equals(tableName, StringComparison.OrdinalIgnoreCase); var sourceColumn = outgoing ? relation.FromColumn : relation.ToColumn;
+            if (!row.TryGetValue(sourceColumn, out var value) || value is null) continue;
+            var targetTableName = outgoing ? relation.ToTable : relation.FromTable; var targetColumnName = outgoing ? relation.ToColumn : relation.FromColumn;
+            var targetTable = capabilities.FindTable(targetTableName); var targetColumn = targetTable?.Find(targetColumnName); if (targetTable is null || targetColumn is null) continue;
+            await using var command = new MySqlCommand($"SELECT COUNT(*) FROM {ItemWritePlan.QuoteIdentifier(targetTable.Name)} WHERE {ItemWritePlan.QuoteIdentifier(targetColumn.Name)} <=> @value", connection);
+            command.Parameters.AddWithValue("@value", value); var count = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+            results.Add(new(relation, outgoing, targetTable.Name, targetColumn.Name, value, count));
+        }
+        return results.OrderByDescending(result => result.MatchingRows).ThenBy(result => result.TargetTable).ThenBy(result => result.TargetColumn).ToArray();
+    }
+
     public async Task<SqlRowRecord?> ReadRowAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table,
         IReadOnlyDictionary<string, object?> key, CancellationToken cancellationToken = default)
     {

@@ -22,6 +22,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _rowSearch = new() { PlaceholderText = "Search this table by ID, name, or any of the first 24 fields…" };
     private readonly ListBox _rows = new();
     private readonly StackPanel _rowEditor = new() { Spacing = 6 };
+    private readonly StackPanel _relationshipResults = new() { Spacing = 5 };
     private readonly TextBlock _pageStatus = Status("Connect Server & SQL to browse the live database.");
     private readonly TextBlock _status = Status("SQL Studio is idle.");
     private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
@@ -228,25 +229,60 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     {
         if (_selectedRow is null || _page is null || _session.DatabaseCapabilities is null) return;
         var relations = _session.DatabaseCapabilities.Relationships.Where(relation => relation.Touches(_page.Table)).ToArray();
-        _rowEditor.Children.Add(new TextBlock { Text = relations.Length == 0 ? "Relationships · none declared or recognized for this table" : $"Relationships · {relations.Length:N0}", FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 8, 0, 0) });
+        _rowEditor.Children.Add(new TextBlock { Text = relations.Length == 0 ? "Dependencies · none declared or recognized for this table" : $"Dependencies · {relations.Length:N0} recognized edge(s)", FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 8, 0, 0) });
         if (relations.Length == 0) return;
+        _relationshipResults.Children.Clear();
+        var analyze = AccentButton("Analyze exact dependency counts"); analyze.Click += async (_, _) => await AnalyzeRelationshipsAsync(analyze);
+        _rowEditor.Children.Add(new TextBlock { Text = "Navigation uses the specific relationship column, never a broad all-field text match. Analyze before deleting, cloning, or moving an identity to see the exact number of matching rows on every recognized edge.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") });
+        _rowEditor.Children.Add(analyze);
         var buttons = new WrapPanel();
         foreach (var relation in relations)
         {
             var outgoing = relation.FromTable.Equals(_page.Table, StringComparison.OrdinalIgnoreCase); var sourceColumn = outgoing ? relation.FromColumn : relation.ToColumn;
             var targetTable = outgoing ? relation.ToTable : relation.FromTable; var targetColumn = outgoing ? relation.ToColumn : relation.FromColumn;
             if (!_selectedRow.Values.TryGetValue(sourceColumn, out var value) || value is null) continue;
-            var button = new Button { Content = $"{targetTable}.{targetColumn} = {CellText(value)}  ·  {(relation.Declared ? "FK" : "inferred")}" };
-            button.Click += async (_, _) => await OpenRelatedAsync(targetTable, value); ToolTip.SetTip(button, relation.Description); buttons.Children.Add(button);
+            var direction = outgoing ? "→" : "←"; var button = new Button { Content = $"{direction} {targetTable}.{targetColumn} = {CellText(value)}  ·  {(relation.Declared ? "FK" : "inferred")}" };
+            button.Click += async (_, _) => await OpenRelatedAsync(targetTable, targetColumn, value); ToolTip.SetTip(button, relation.Description); buttons.Children.Add(button);
         }
-        _rowEditor.Children.Add(buttons);
+        _rowEditor.Children.Add(buttons); _rowEditor.Children.Add(_relationshipResults);
     }
 
-    private async Task OpenRelatedAsync(string tableName, object value)
+    private async Task AnalyzeRelationshipsAsync(Button button)
+    {
+        if (_selectedRow is null || _page is null || _session.DatabaseCapabilities is null || _session.DatabaseProfile is null) return;
+        try
+        {
+            button.IsEnabled = false; Begin($"Analyzing dependencies for {_selectedRow.Display}…");
+            var matches = await _service.AnalyzeRelationshipsAsync(_session.DatabaseProfile, _session.DatabaseCapabilities, _page.Table, _selectedRow.Values, _operation!.Token);
+            _relationshipResults.Children.Clear();
+            if (matches.Count == 0) _relationshipResults.Children.Add(Status("No relationship values are populated on this row."));
+            foreach (var match in matches)
+            {
+                var direction = match.Outgoing ? "depends on" : "referenced by"; var open = new Button { HorizontalContentAlignment = HorizontalAlignment.Left, Content = $"{match.MatchingRows:N0} row(s) · {direction} {match.TargetTable}.{match.TargetColumn} = {CellText(match.Value)}" };
+                open.Click += async (_, _) => await OpenRelatedAsync(match.TargetTable, match.TargetColumn, match.Value); ToolTip.SetTip(open, match.Relation.Description); _relationshipResults.Children.Add(open);
+            }
+            _status.Text = $"Analyzed {matches.Count:N0} populated dependency edge(s); {matches.Sum(match => match.MatchingRows):N0} exact matching row reference(s).";
+        }
+        catch (OperationCanceledException) { _status.Text = "Dependency analysis cancelled."; }
+        catch (Exception exception) { Fail("Dependency analysis failed", exception); }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private async Task OpenRelatedAsync(string tableName, string columnName, object? value)
     {
         PopulateTables(); var choice = (_tables.ItemsSource as IEnumerable<TableChoice>)?.FirstOrDefault(item => item.Table.Name.Equals(tableName, StringComparison.OrdinalIgnoreCase));
         if (choice is null) { _status.Text = $"Related table {tableName} is not available in the connected schema."; return; }
-        _tables.SelectedItem = choice; _rowSearch.Text = CellText(value); _offset = 0; await LoadPageAsync(true);
+        try
+        {
+            _suppressTableSelection = true; _tables.SelectedItem = choice; _rowSearch.Text = string.Empty; _offset = 0;
+            Begin($"Opening exact relationship {tableName}.{columnName}…"); _page = await _service.ReadColumnMatchesAsync(_session.DatabaseProfile!, choice.Table, columnName, value, 200, _operation!.Token);
+            _rows.ItemsSource = _page.Rows; _rows.ItemTemplate = new FuncDataTemplate<SqlRowRecord>((row, _) => new TextBlock { Text = row is null ? string.Empty : RowSummary(row), TextWrapping = TextWrapping.NoWrap, Margin = new Thickness(4) });
+            _pageStatus.Text = _page.TotalRows == 0 ? $"No rows where {columnName} exactly equals {CellText(value)}." : $"Exact {columnName} match · showing {_page.Rows.Count:N0} of {_page.TotalRows:N0}";
+            if (_page.Rows.Count > 0) _rows.SelectedIndex = 0; _status.Text = $"Opened exact dependency edge {tableName}.{columnName} = {CellText(value)}.";
+        }
+        catch (OperationCanceledException) { _status.Text = "Relationship navigation cancelled."; }
+        catch (Exception exception) { Fail("Relationship navigation failed", exception); }
+        finally { _suppressTableSelection = false; End(); }
     }
 
     private async Task ExportTableAsync(SqlExportFormat format)
