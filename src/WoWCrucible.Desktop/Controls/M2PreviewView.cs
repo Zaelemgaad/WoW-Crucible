@@ -11,11 +11,15 @@ using WoWCrucible.Core;
 
 namespace WoWCrucible.Desktop.Controls;
 
+public sealed record M2PreviewMountedModel(M2PreviewGeometry Geometry, Matrix4x4 Transform, RgbaTexture? Texture, string Label);
+
 public sealed class M2PreviewView : Control, IDisposable
 {
+    private sealed record MountedModel(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? Texture, string Label);
     private M2PreviewGeometry? _geometry;
     private SKBitmap? _texture;
     private readonly Dictionary<int, SKBitmap> _materialTextures = [];
+    private readonly List<MountedModel> _mountedModels = [];
     private float _yaw = -0.65f;
     private float _pitch = 0.35f;
     private float _zoom = 1;
@@ -29,6 +33,7 @@ public sealed class M2PreviewView : Control, IDisposable
     {
         _geometry = geometry;
         ClearMaterialTextures();
+        ClearMountedModels();
         _yaw = -0.65f;
         _pitch = 0.35f;
         _zoom = 1;
@@ -38,6 +43,7 @@ public sealed class M2PreviewView : Control, IDisposable
     public void ClearGeometry()
     {
         _geometry = null;
+        ClearMountedModels();
         InvalidateVisual();
     }
 
@@ -77,6 +83,25 @@ public sealed class M2PreviewView : Control, IDisposable
         InvalidateVisual();
     }
 
+    public void SetMountedModels(IEnumerable<M2PreviewMountedModel> models)
+    {
+        ClearMountedModels();
+        foreach (var model in models)
+        {
+            ArgumentNullException.ThrowIfNull(model.Geometry);
+            if (!Finite(model.Transform)) throw new ArgumentException($"Mounted model '{model.Label}' has a non-finite transform.", nameof(models));
+            _mountedModels.Add(new(model.Geometry, model.Transform, model.Texture is null ? null : CreateBitmap(model.Texture), model.Label));
+        }
+        InvalidateVisual();
+    }
+
+    public void ClearMountedModels()
+    {
+        foreach (var model in _mountedModels) model.Texture?.Dispose();
+        _mountedModels.Clear();
+        InvalidateVisual();
+    }
+
     private static SKBitmap CreateBitmap(RgbaTexture texture)
     {
         var bitmap = new SKBitmap(new SKImageInfo(texture.Width, texture.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
@@ -91,10 +116,17 @@ public sealed class M2PreviewView : Control, IDisposable
         _materialTextures.Clear();
     }
 
+    private static bool Finite(Matrix4x4 value) =>
+        float.IsFinite(value.M11) && float.IsFinite(value.M12) && float.IsFinite(value.M13) && float.IsFinite(value.M14) &&
+        float.IsFinite(value.M21) && float.IsFinite(value.M22) && float.IsFinite(value.M23) && float.IsFinite(value.M24) &&
+        float.IsFinite(value.M31) && float.IsFinite(value.M32) && float.IsFinite(value.M33) && float.IsFinite(value.M34) &&
+        float.IsFinite(value.M41) && float.IsFinite(value.M42) && float.IsFinite(value.M43) && float.IsFinite(value.M44);
+
     public void Dispose()
     {
         _texture?.Dispose(); _texture = null;
         ClearMaterialTextures();
+        ClearMountedModels();
         _geometry = null;
     }
 
@@ -103,7 +135,7 @@ public sealed class M2PreviewView : Control, IDisposable
         base.Render(context);
         context.FillRectangle(new SolidColorBrush(Color.Parse("#090D14")), Bounds);
         if (_geometry is null) return;
-        context.Custom(new M2DrawOperation(Bounds, _geometry, _texture, _materialTextures, _yaw, _pitch, _zoom, _showAttachments, _highlightedAttachmentIndex));
+        context.Custom(new M2DrawOperation(Bounds, _geometry, _texture, _materialTextures, _mountedModels, _yaw, _pitch, _zoom, _showAttachments, _highlightedAttachmentIndex));
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
@@ -141,8 +173,9 @@ public sealed class M2PreviewView : Control, IDisposable
         e.Handled = true;
     }
 
-    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex) : ICustomDrawOperation
+    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, IReadOnlyList<MountedModel> mountedModels, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex) : ICustomDrawOperation
     {
+        private sealed record SceneSource(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? ManualTexture, IReadOnlyDictionary<int, SKBitmap>? MaterialTextures, string Label);
         public Rect Bounds => bounds;
         public bool HitTest(Avalonia.Point point) => Bounds.Contains(point);
         public bool Equals(ICustomDrawOperation? other) => false;
@@ -156,39 +189,49 @@ public sealed class M2PreviewView : Control, IDisposable
             var canvas = lease.SkCanvas;
             var width = (float)bounds.Width;
             var height = (float)bounds.Height;
-            var center = (geometry.Minimum + geometry.Maximum) * 0.5f;
-            var extent = geometry.Maximum - geometry.Minimum;
+            var sources = new List<SceneSource>(mountedModels.Count + 1) { new(geometry, Matrix4x4.Identity, texture, materialTextures, Path.GetFileName(geometry.ModelPath)) };
+            sources.AddRange(mountedModels.Select(model => new SceneSource(model.Geometry, model.Transform, model.Texture, null, model.Label)));
+            var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity);
+            foreach (var source in sources)
+            {
+                var transformedBounds = M2PreviewSceneService.TransformBounds(source.Geometry.Minimum, source.Geometry.Maximum, source.Transform);
+                minimum = Vector3.Min(minimum, transformedBounds.Minimum); maximum = Vector3.Max(maximum, transformedBounds.Maximum);
+            }
+            var center = (minimum + maximum) * 0.5f;
+            var extent = maximum - minimum;
             var largest = Math.Max(extent.X, Math.Max(extent.Y, extent.Z));
             if (!float.IsFinite(largest) || largest <= 0.00001f) return;
 
             var scale = Math.Min(width, height) * 0.42f / largest * zoom;
             var rotation = Matrix4x4.CreateRotationZ(yaw) * Matrix4x4.CreateRotationX(pitch);
-            var transformed = new Vector3[geometry.Vertices.Count];
-            for (var index = 0; index < transformed.Length; index++)
-                transformed[index] = Vector3.Transform(geometry.Vertices[index] - center, rotation);
-
-            var triangleCount = geometry.TriangleIndices.Count / 3;
+            var triangleCount = sources.Sum(source => source.Geometry.TriangleIndices.Count / 3);
             var sampling = Math.Max(1, (int)Math.Ceiling(triangleCount / 30_000d));
             var faces = new List<Face>(Math.Min(triangleCount, 30_000));
             var light = Vector3.Normalize(new Vector3(-0.35f, -0.65f, 0.9f));
-            IReadOnlyList<M2PreviewBatch> batches = geometry.Batches.Count == 0 ? [new M2PreviewBatch(0, 0, 0, geometry.TriangleIndices.Count, null, null)] : geometry.Batches;
-            foreach (var batch in batches)
+            for (var sourceIndex = 0; sourceIndex < sources.Count; sourceIndex++)
             {
-                var end = Math.Min(geometry.TriangleIndices.Count, batch.TriangleStart + batch.TriangleIndexCount);
-                for (var offset = batch.TriangleStart; offset + 2 < end; offset += 3 * sampling)
+                var source = sources[sourceIndex]; var sourceGeometry = source.Geometry; var transformed = new Vector3[sourceGeometry.Vertices.Count];
+                for (var index = 0; index < transformed.Length; index++)
+                    transformed[index] = Vector3.Transform(Vector3.Transform(sourceGeometry.Vertices[index], source.Transform) - center, rotation);
+                IReadOnlyList<M2PreviewBatch> batches = sourceGeometry.Batches.Count == 0 ? [new M2PreviewBatch(0, 0, 0, sourceGeometry.TriangleIndices.Count, null, null)] : sourceGeometry.Batches;
+                foreach (var batch in batches)
                 {
-                var a = transformed[geometry.TriangleIndices[offset]];
-                var b = transformed[geometry.TriangleIndices[offset + 1]];
-                var c = transformed[geometry.TriangleIndices[offset + 2]];
-                var ax = width * 0.5f + a.X * scale; var ay = height * 0.5f - a.Z * scale;
-                var bx = width * 0.5f + b.X * scale; var by = height * 0.5f - b.Z * scale;
-                var cx = width * 0.5f + c.X * scale; var cy = height * 0.5f - c.Z * scale;
-                var area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-                if (Math.Abs(area) < 0.02f) continue;
-                var normal = Vector3.Cross(b - a, c - a);
-                if (normal.LengthSquared() > 0.000001f) normal = Vector3.Normalize(normal);
-                var brightness = Math.Clamp(0.25f + 0.75f * Math.Abs(Vector3.Dot(normal, light)), 0.2f, 1f);
-                faces.Add(new((a.Y + b.Y + c.Y) / 3f, geometry.TriangleIndices[offset], geometry.TriangleIndices[offset + 1], geometry.TriangleIndices[offset + 2], ax, ay, bx, by, cx, cy, (byte)Math.Round(brightness * 15), batch.TextureDefinitionIndex));
+                    var end = Math.Min(sourceGeometry.TriangleIndices.Count, batch.TriangleStart + batch.TriangleIndexCount);
+                    var activeTexture = ResolveTexture(source, batch.TextureDefinitionIndex);
+                    for (var offset = batch.TriangleStart; offset + 2 < end; offset += 3 * sampling)
+                    {
+                        var ia = sourceGeometry.TriangleIndices[offset]; var ib = sourceGeometry.TriangleIndices[offset + 1]; var ic = sourceGeometry.TriangleIndices[offset + 2];
+                        var a = transformed[ia]; var b = transformed[ib]; var c = transformed[ic];
+                        var ax = width * 0.5f + a.X * scale; var ay = height * 0.5f - a.Z * scale;
+                        var bx = width * 0.5f + b.X * scale; var by = height * 0.5f - b.Z * scale;
+                        var cx = width * 0.5f + c.X * scale; var cy = height * 0.5f - c.Z * scale;
+                        var area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+                        if (Math.Abs(area) < 0.02f) continue;
+                        var normal = Vector3.Cross(b - a, c - a);
+                        if (normal.LengthSquared() > 0.000001f) normal = Vector3.Normalize(normal);
+                        var brightness = Math.Clamp(0.25f + 0.75f * Math.Abs(Vector3.Dot(normal, light)), 0.2f, 1f);
+                        faces.Add(new((a.Y + b.Y + c.Y) / 3f, sourceIndex, ia, ib, ic, ax, ay, bx, by, cx, cy, (byte)Math.Round(brightness * 15), activeTexture));
+                    }
                 }
             }
             faces.Sort(static (left, right) => right.Depth.CompareTo(left.Depth));
@@ -196,7 +239,7 @@ public sealed class M2PreviewView : Control, IDisposable
             using var fill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
             using var edge = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 0.65f, Color = new SKColor(5, 9, 15, 58) };
             using var path = new SKPath();
-            foreach (var face in faces.Where(face => texture is null && (face.TextureDefinitionIndex is not { } index || !materialTextures.ContainsKey(index))))
+            foreach (var face in faces.Where(face => face.Texture is null))
             {
                 var value = 48 + face.Shade * 11;
                 fill.Color = new SKColor((byte)Math.Min(220, value / 2 + 45), (byte)Math.Min(230, value), (byte)Math.Min(255, value + 24));
@@ -204,11 +247,10 @@ public sealed class M2PreviewView : Control, IDisposable
                 canvas.DrawPath(path, fill); canvas.DrawPath(path, edge);
             }
 
-            var texturedFaces = faces.Where(face => texture is not null || face.TextureDefinitionIndex is { } index && materialTextures.ContainsKey(index))
-                .GroupBy(face => texture is not null ? -1 : face.TextureDefinitionIndex!.Value);
+            var texturedFaces = faces.Where(face => face.Texture is not null).GroupBy(face => new TextureGroup(face.SourceIndex, face.Texture!));
             foreach (var group in texturedFaces)
             {
-                var activeTexture = texture ?? materialTextures[group.Key]; var groupFaces = group.ToArray();
+                var activeTexture = group.Key.Texture; var sourceGeometry = sources[group.Key.SourceIndex].Geometry; var groupFaces = group.ToArray();
                 var positions = new SKPoint[groupFaces.Length * 3]; var coordinates = new SKPoint[groupFaces.Length * 3]; var colors = new SKColor[groupFaces.Length * 3];
                 for (var index = 0; index < groupFaces.Length; index++)
                 {
@@ -223,7 +265,7 @@ public sealed class M2PreviewView : Control, IDisposable
                 canvas.DrawVertices(mesh, SKBlendMode.Modulate, paint);
                 void AddUv(int destination, int vertex)
                 {
-                    var uv = geometry.TextureCoordinates[vertex]; coordinates[destination] = new(uv.X * activeTexture.Width, uv.Y * activeTexture.Height);
+                    var uv = sourceGeometry.TextureCoordinates[vertex]; coordinates[destination] = new(uv.X * activeTexture.Width, uv.Y * activeTexture.Height);
                 }
             }
 
@@ -256,11 +298,19 @@ public sealed class M2PreviewView : Control, IDisposable
             var geosets = geometry.Submeshes.Count == 0 ? "complete mesh" : $"{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} geosets";
             var textureCount = texture is not null ? "manual texture" : $"{materialTextures.Count:N0} material texture(s)";
             var attachments = showAttachments ? $" · {geometry.Attachments.Count:N0} attachment point(s)" : string.Empty;
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces{attachments}", 12, 23, SKTextAlign.Left, titleFont, text);
+            var mounted = mountedModels.Count == 0 ? string.Empty : $" · {mountedModels.Count:N0} mounted model(s)";
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces{attachments}{mounted}", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }
 
-        private readonly record struct Face(float Depth, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy, byte Shade, int? TextureDefinitionIndex);
+        private static SKBitmap? ResolveTexture(SceneSource source, int? textureDefinitionIndex)
+        {
+            if (source.ManualTexture is not null) return source.ManualTexture;
+            return textureDefinitionIndex is { } index && source.MaterialTextures?.TryGetValue(index, out var texture) == true ? texture : null;
+        }
+
+        private readonly record struct TextureGroup(int SourceIndex, SKBitmap Texture);
+        private readonly record struct Face(float Depth, int SourceIndex, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy, byte Shade, SKBitmap? Texture);
     }
 }

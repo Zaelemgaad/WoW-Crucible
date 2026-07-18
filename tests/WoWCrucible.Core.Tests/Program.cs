@@ -1,6 +1,7 @@
 using WoWCrucible.Core;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Numerics;
 using System.Text.Json;
 
 if (args.Length != 2)
@@ -171,6 +172,33 @@ if (thunderfuryDisplay.ModelNames.FirstOrDefault() != "Sword_2H_Ashbringer02.mdx
     !thunderfuryDisplay.Assets.Any(asset => asset.Kind == "model" && asset.ClientPaths.First().Equals(@"Item\ObjectComponents\Weapon\Sword_2H_Ashbringer02.m2", StringComparison.OrdinalIgnoreCase)) ||
     !thunderfuryDisplay.Assets.Any(asset => asset.Kind == "model-texture" && asset.ClientPaths.First().EndsWith(@"Sword_2H_Ashbringer_A_01Blue.blp", StringComparison.OrdinalIgnoreCase)))
     throw new InvalidOperationException("Built-in ItemDisplayInfo resolution did not map a real WotLK weapon display to canonical M2 and texture paths.");
+var translatedBounds = M2PreviewSceneService.TransformBounds(new Vector3(-1, -2, -3), new Vector3(1, 2, 3), Matrix4x4.CreateTranslation(10, 20, 30));
+if (translatedBounds.Minimum != new Vector3(9, 18, 27) || translatedBounds.Maximum != new Vector3(11, 22, 33))
+    throw new InvalidOperationException("Multi-model preview framing did not include transformed child-model bounds.");
+try { _ = M2PreviewSceneService.TransformBounds(Vector3.Zero, Vector3.One, new Matrix4x4(float.NaN,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)); throw new InvalidOperationException("A non-finite preview-scene transform was accepted."); }
+catch (ArgumentException exception) when (exception.Message.Contains("finite", StringComparison.OrdinalIgnoreCase)) { }
+if (M2PreviewSceneService.RecommendedAttachmentId(1) != 11 || M2PreviewSceneService.RecommendedAttachmentId(17) != 1 ||
+    M2PreviewSceneService.RecommendedAttachmentId(22) != 2 || M2PreviewSceneService.RecommendedAttachmentId(27) != 30 ||
+    M2PreviewSceneService.RecommendedAttachmentId(3) is not null)
+    throw new InvalidOperationException("WotLK item inventory slots did not preserve the explicit character-attachment policy.");
+var mountSourceFixture = Path.Combine(Path.GetTempPath(), $"crucible-mount-source-{Guid.NewGuid():N}");
+try
+{
+    var sourceA = Path.Combine(mountSourceFixture, "patch-A"); var sourceB = Path.Combine(mountSourceFixture, "patch-B"); Directory.CreateDirectory(sourceA); Directory.CreateDirectory(sourceB);
+    var modelA = Path.Combine(sourceA, "weapon.m2"); var modelB = Path.Combine(sourceB, "weapon.m2"); var textureA = Path.Combine(sourceA, "weapon.blp"); var textureB = Path.Combine(sourceB, "weapon.png");
+    foreach (var path in new[] { modelA, modelB, textureA, textureB }) File.WriteAllBytes(path, [1]);
+    var mountDisplay = thunderfuryDisplay with { Assets =
+    [
+        new ItemDisplayAsset("model", 0, "weapon.mdx", [], [modelA, modelB]),
+        new ItemDisplayAsset("model-texture", 0, "weapon.blp", [], [textureB, textureA]),
+        new ItemDisplayAsset("model-texture", 1, "wrong-slot.blp", [], [textureA])
+    ] };
+    var mountSources = M2PreviewSceneService.FindItemModelSources(mountDisplay);
+    if (mountSources.Count != 2 || mountSources.Single(source => source.Provenance == "patch-A").TexturePath != textureA ||
+        mountSources.Single(source => source.Provenance == "patch-B").TexturePath != textureB)
+        throw new InvalidOperationException("Item-model mounting crossed provenance boundaries or mismatched ItemDisplayInfo model/texture slots.");
+}
+finally { if (Directory.Exists(mountSourceFixture)) Directory.Delete(mountSourceFixture, true); }
 var chestGeosets = ItemEquipmentPreviewService.ResolveGeosets(5, [2, 3, 4]);
 var legGeosets = ItemEquipmentPreviewService.ResolveGeosets(7, [1, 2, 3]);
 var bootGeosets = ItemEquipmentPreviewService.ResolveGeosets(8, [4, 5, 0]);

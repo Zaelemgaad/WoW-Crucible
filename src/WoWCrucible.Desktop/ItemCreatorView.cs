@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
+using System.Numerics;
 using WoWCrucible.Core;
 using WoWCrucible.Desktop.Controls;
 
@@ -45,6 +46,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private AssetComparisonIndex? _appearanceIndex; private CharacterAppearancePreviewPlan? _appearancePlan; private bool _suppressAppearance;
     private readonly TextBlock _displayDetails = Status("Resolve the current display ID to see every ItemDisplayInfo model, texture, icon, geoset, and visual field.");
     private ItemDisplayInfoRecord? _resolvedDisplay;
+    private M2PreviewGeometry? _mountedItemGeometry; private RgbaTexture? _mountedItemTexture; private string? _mountedItemLabel; private string? _mountCharacterPath;
     private readonly TextBlock _status = Status("Offline portable schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _commit = AccentButton("Insert into connected database");
     private ItemWritePlan? _pendingInsert;
@@ -72,8 +74,9 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
 
         var resolveDisplay = AccentButton("Resolve current display ID"); resolveDisplay.Click += async (_, _) => await ResolveDisplayAsync(true);
         var loadResolved = new Button { Content = "Load selected resolved model" }; loadResolved.Click += async (_, _) => await LoadResolvedModelAsync();
+        var mountResolved = AccentButton("Mount selected model on character"); mountResolved.Click += async (_, _) => await PreviewMountedModelAsync();
         var loadModel = new Button { Content = "Load other extracted M2…" }; loadModel.Click += async (_, _) => await LoadModelAsync();
-        var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _attachmentPicker.ItemsSource = null; _attachmentPicker.IsEnabled = false; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
+        var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { ClearMountedPreviewState(); _model.ClearGeometry(); _attachmentPicker.ItemsSource = null; _attachmentPicker.IsEnabled = false; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
         _showAttachments.Click += (_, _) => ApplyAttachmentOverlay(); _attachmentPicker.SelectionChanged += (_, _) => ApplyAttachmentOverlay();
         var browseCharacter = new Button { Content = "Character M2…" }; browseCharacter.Click += async (_, _) => await PickFileAsync(_characterModelPath, "Choose a playable character M2", "*.m2");
         var browseCharacterSkin = new Button { Content = "Base skin…" }; browseCharacterSkin.Click += async (_, _) => await PickTextureAsync(_characterSkinPath, "Choose that character's base skin atlas");
@@ -87,8 +90,8 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         var characterPaths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _characterModelPath, WithColumn(browseCharacter,1), WithRow(_characterSkinPath,1), WithRow(WithColumn(browseCharacterSkin,1),1) } };
         var appearanceChoices = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _appearanceSkins, WithColumn(_appearanceFaces,1), WithRow(_appearanceFacialHair,1), WithRow(WithColumn(_appearanceHair,1),1), WithRow(_appearanceSources,2) } }; Grid.SetColumnSpan(_appearanceSources,2);
         foreach(var combo in new[]{_appearanceSkins,_appearanceFaces,_appearanceFacialHair,_appearanceHair,_appearanceSources})combo.SelectionChanged+=async(_,_)=>{if(!_suppressAppearance)await LoadAppearanceChoicesAsync();};
-        var attachmentControls = new Expander { Header = "Native equipment/effect attachment points", Content = new StackPanel { Spacing = 6, Children = { new TextBlock { Text = "Highlights the exact WotLK attachment record where helmets, shoulders, weapons, sheaths, and effects bind. This is also the mounting data used by the next equipment-model stage.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, _showAttachments, _attachmentPicker } } };
-        var modelHeader = new StackPanel { Spacing = 7, Children = { new TextBlock { Text="Live item display resolution", FontWeight=FontWeight.SemiBold }, resolverPaths, new WrapPanel { Children = { resolveDisplay, loadResolved, loadModel, clearModel } }, _resolvedModels, _displayDetails, attachmentControls, new Separator(), new TextBlock { Text="Equipped armor preview", FontWeight=FontWeight.SemiBold }, new TextBlock { Text="Choose a playable character M2. Load decoded choices to build its real CharSections skin, face, underwear, facial features, hair texture, and hair geosets; the base-atlas field remains a manual fallback.",TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#9AA5B7") }, characterPaths, appearanceChoices, _appearanceStatus, _wearSources, new WrapPanel { Children = { fillCharacter, loadAppearance, previewEquipped } } } };
+        var attachmentControls = new Expander { Header = "Native equipment/effect attachment points", Content = new StackPanel { Spacing = 6, Children = { new TextBlock { Text = "Highlights the exact WotLK attachment record where helmets, shoulders, weapons, sheaths, and effects bind. Changing this selector immediately remounts the currently previewed item model. Ambiguous slots such as shoulders deliberately require an explicit choice.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, _showAttachments, _attachmentPicker } } };
+        var modelHeader = new StackPanel { Spacing = 7, Children = { new TextBlock { Text="Live item display resolution", FontWeight=FontWeight.SemiBold }, resolverPaths, new WrapPanel { Children = { resolveDisplay, loadResolved, mountResolved, loadModel, clearModel } }, _resolvedModels, _displayDetails, attachmentControls, new Separator(), new TextBlock { Text="Equipped character preview", FontWeight=FontWeight.SemiBold }, new TextBlock { Text="Choose a playable character M2. Load decoded choices to build its real CharSections skin, face, underwear, facial features, hair texture, and hair geosets. Wearable armor composes atlas/geoset changes; helmets, weapons, shields, bows, cloaks, and quivers can mount their real child M2 on a native attachment point.",TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#9AA5B7") }, characterPaths, appearanceChoices, _appearanceStatus, _wearSources, new WrapPanel { Children = { fillCharacter, loadAppearance, previewEquipped } } } };
         var modelPage = new Grid { RowDefinitions = new("2*,Auto,3*,Auto"), Children = { new ScrollViewer { Content=modelHeader }, WithRow(new GridSplitter { ResizeDirection=GridResizeDirection.Rows, Background=Brush.Parse("#2B3445") },1), WithRow(new Border { Background=Brush.Parse("#090D14"), Child=_model },2), WithRow(_modelStatus,3) } };
         var previewTabs = new TabControl { Items = { new TabItem { Header="Tooltip", Content=new ScrollViewer { Content=new Border { Background=Brush.Parse("#080911"), BorderBrush=Brush.Parse("#7C6639"), BorderThickness=new Thickness(1), Margin=new Thickness(8), Child=_tooltip } } }, new TabItem { Header="3D model", Content=modelPage }, new TabItem { Header="SQL preview", Content=_sql } } };
 
@@ -156,7 +159,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private async Task ExportAsync(){ try{RefreshSql();var file=await Storage().SaveFilePickerAsync(new FilePickerSaveOptions{Title="Export item SQL",SuggestedFileName=$"item-{(uint)(_entry.Value??0)}.sql",FileTypeChoices=[new FilePickerFileType("SQL"){Patterns=["*.sql"]}]});var path=file?.TryGetLocalPath();if(path is not null)await File.WriteAllTextAsync(path,(_sql.Text??string.Empty)+Environment.NewLine);}catch(Exception exception){_status.Text=$"Export failed: {exception.Message}";} }
     private void PrepareInsert(){ try{ if(!_session.DatabaseTested||_session.DatabaseProfile is null){_status.Text="Connect and verify Server & SQL before writing.";return;} _pendingInsert=Plan();if(_loadedEntry is{ } loaded&&(uint)(_entry.Value??0)!=loaded)throw new InvalidOperationException("The decoded editor will not silently change a primary item ID. Use Full item copy for a variant or SQL Studio for an explicit key migration.");var editing=_loadedEntry is not null;var cancel=new Button{Content="Cancel"};var confirm=AccentButton(editing?$"Confirm update item {_loadedEntry}":$"Confirm insert item {(uint)(_entry.Value??0)}");cancel.Click+=(_,_)=>{_confirmation.IsVisible=false;_pendingInsert=null;};confirm.Click+=async(_,_)=>await CommitAsync(confirm);_confirmation.Child=new Grid{ColumnDefinitions=new("*,Auto,Auto"),ColumnSpacing=8,Children={new TextBlock{Text=editing?$"Update Crucible's decoded fields for '{_name.Text}' in {_session.DatabaseProfile.Database}.item_template? Custom/unmapped columns remain unchanged.":$"Insert '{_name.Text}' into {_session.DatabaseProfile.Database}.item_template? Existing IDs are refused, never replaced.",TextWrapping=TextWrapping.Wrap,VerticalAlignment=VerticalAlignment.Center},WithColumn(cancel,1),WithColumn(confirm,2)}};_confirmation.IsVisible=true;}catch(Exception exception){_status.Text=exception.Message;} }
     private async Task CommitAsync(Button button){ if(_pendingInsert is null||_session.DatabaseProfile is null)return;try{button.IsEnabled=false;if(_loadedEntry is{ } loaded)await new SqlWorkspaceService().UpdateRowAsync(_session.DatabaseProfile,Table(),new Dictionary<string,object?>{{"entry",loaded}},_pendingInsert.Values.ToDictionary(pair=>pair.Key,pair=>(object?)pair.Value,StringComparer.OrdinalIgnoreCase));else await new ItemTemplateService().InsertAsync(_session.DatabaseProfile,_pendingInsert);_status.Text=_loadedEntry is null?"Item inserted transactionally. Restart or reload the world server as required by the detected core.":"Decoded item fields updated transactionally; custom/unmapped columns were preserved.";_confirmation.IsVisible=false;_pendingInsert=null;}catch(Exception exception){_status.Text=$"Item write failed: {exception.Message}";DesktopCrashLogger.Log("Item write failed",exception);}finally{button.IsEnabled=true;} }
-    private async Task LoadModelAsync(){try{var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title="Choose an extracted WotLK M2",AllowMultiple=false,FileTypeFilter=[new FilePickerFileType("WotLK M2"){Patterns=["*.m2"]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is null)return;_modelStatus.Text="Loading model…";var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(path));_model.SetGeometry(geometry);RefreshAttachmentPoints(geometry);_modelStatus.Text=$"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section=>section.Visible):N0}/{geometry.Submeshes.Count:N0} base geosets · {geometry.TriangleIndices.Count/3:N0} triangles · {geometry.Attachments.Count:N0} attachment points";}catch(Exception exception){_modelStatus.Text=$"Model load failed: {exception.Message}";} }
+    private async Task LoadModelAsync(){try{var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title="Choose an extracted WotLK M2",AllowMultiple=false,FileTypeFilter=[new FilePickerFileType("WotLK M2"){Patterns=["*.m2"]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is null)return;_modelStatus.Text="Loading model…";var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(path));ClearMountedPreviewState();_model.SetGeometry(geometry);RefreshAttachmentPoints(geometry);_modelStatus.Text=$"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section=>section.Visible):N0}/{geometry.Submeshes.Count:N0} base geosets · {geometry.TriangleIndices.Count/3:N0} triangles · {geometry.Attachments.Count:N0} attachment points";}catch(Exception exception){_modelStatus.Text=$"Model load failed: {exception.Message}";} }
 
     private async Task ResolveDisplayAsync(bool loadFirstModel)
     {
@@ -166,7 +169,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             var dbc=_displayDbcPath.Text?.Trim()??string.Empty; if(!File.Exists(dbc))throw new FileNotFoundException("Configure the server's ItemDisplayInfo.dbc path.",dbc);
             _modelStatus.Text=$"Resolving display {displayId:N0}…";
             var resolved=await Task.Run(()=>ItemDisplayInfoService.Resolve(dbc,EmptyNull(_displaySchemaPath.Text),displayId,Selected(_class),Selected(_subclass),Selected(_inventory),EmptyNull(_assetLibraryPath.Text)));
-            _resolvedDisplay=resolved; var models=resolved.ExistingModels.ToArray(); _resolvedModels.ItemsSource=models; _resolvedModels.SelectedIndex=models.Length>0?0:-1;
+            ClearMountedPreviewState(); _resolvedDisplay=resolved; var models=resolved.ExistingModels.ToArray(); _resolvedModels.ItemsSource=models; _resolvedModels.SelectedIndex=models.Length>0?0:-1;
             var wearSources=ItemEquipmentPreviewService.FindWearSources(resolved); _wearSources.ItemsSource=wearSources; _wearSources.SelectedIndex=wearSources.Count>0?0:-1;
             var assets=resolved.Assets.Select(asset=>$"{asset.Kind} {asset.Slot}: {asset.Name} · {(asset.ExistingPaths.Count==0?"not found in processed library":$"{asset.ExistingPaths.Count:N0} source file(s)")}");
             _displayDetails.Text=$"Display {resolved.Id:N0} · geosets {string.Join(", ",resolved.GeosetGroups)} · helmet visibility {string.Join(", ",resolved.HelmetGeosetVisibility)} · flags 0x{resolved.Flags:X8}\nSpell visual {resolved.SpellVisualId:N0} · item visual {resolved.ItemVisualId:N0} · particle color {resolved.ParticleColorId:N0} · sound group {resolved.GroupSoundIndex:N0}\n{string.Join("\n",assets)}";
@@ -182,11 +185,56 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         if(_resolvedModels.SelectedItem is not string path||!File.Exists(path)){_modelStatus.Text="Resolve a display and select an extracted model source first.";return;}
         try
         {
-            _modelStatus.Text=$"Loading {Path.GetFileName(path)}…"; var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(path, visibilityMode:M2PreviewVisibilityMode.AllGeosets)); _model.SetGeometry(geometry); RefreshAttachmentPoints(geometry);
+            _modelStatus.Text=$"Loading {Path.GetFileName(path)}…"; var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(path, visibilityMode:M2PreviewVisibilityMode.AllGeosets)); ClearMountedPreviewState(); _model.SetGeometry(geometry); RefreshAttachmentPoints(geometry);
             var provenance=Path.GetDirectoryName(path); var texture=_resolvedDisplay?.Assets.Where(asset=>asset.Kind=="model-texture").SelectMany(asset=>asset.ExistingPaths).Where(candidate=>Path.GetExtension(candidate).Equals(".png",StringComparison.OrdinalIgnoreCase)).OrderByDescending(candidate=>Path.GetDirectoryName(candidate)?.Equals(provenance,StringComparison.OrdinalIgnoreCase)==true).FirstOrDefault();
             _model.SetTexture(texture); _modelStatus.Text=$"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section=>section.Visible):N0}/{geometry.Submeshes.Count:N0} geosets · {geometry.TriangleIndices.Count/3:N0} triangles{(texture is null?" · no resolved PNG texture":$" · {Path.GetFileName(texture)}")}";
         }
         catch(Exception exception){_modelStatus.Text=$"Resolved model could not be rendered: {exception.Message}";DesktopCrashLogger.Log("Resolved item model preview failed",exception);}
+    }
+
+    private async Task PreviewMountedModelAsync()
+    {
+        try
+        {
+            if(_resolvedDisplay is null)await ResolveDisplayAsync(false);
+            if(_resolvedDisplay is null)throw new InvalidOperationException("Resolve a valid ItemDisplayInfo display ID first.");
+            if(_resolvedModels.SelectedItem is not string selectedModel||!File.Exists(selectedModel))throw new InvalidOperationException("Select one resolved item-model provenance first.");
+            var source=M2PreviewSceneService.FindItemModelSources(_resolvedDisplay).FirstOrDefault(candidate=>candidate.ModelPath.Equals(selectedModel,StringComparison.OrdinalIgnoreCase))
+                ??throw new InvalidOperationException("The selected model is no longer part of the resolved ItemDisplayInfo sources.");
+            var characterPath=_characterModelPath.Text?.Trim()??string.Empty;if(!File.Exists(characterPath))throw new FileNotFoundException("Choose an extracted playable character M2 first.",characterPath);
+            var previousAttachment=_mountCharacterPath?.Equals(characterPath,StringComparison.OrdinalIgnoreCase)==true?(_attachmentPicker.SelectedItem as M2PreviewAttachment)?.Id:null;
+            var requestedAttachment=M2PreviewSceneService.RecommendedAttachmentId(Selected(_inventory))??previousAttachment;
+            _mountedItemGeometry=null;_mountedItemTexture=null;_mountedItemLabel=null;_model.ClearMountedModels();_modelStatus.Text=$"Loading character and {Path.GetFileName(source.ModelPath)} from {source.Provenance}…";
+
+            ComposedCharacterAppearance? appearance=null;M2GeosetSelection? geosetSelection=null;
+            if(_appearanceIndex is not null&&_appearancePlan?.SelectedSource is not null)
+            {
+                appearance=await Task.Run(()=>CharacterAppearancePreviewService.Compose(_appearanceIndex,_appearancePlan));geosetSelection=new(_appearancePlan.Geosets.GroupVariants,"decoded CharSections appearance");
+            }
+            else geosetSelection=new(M2GeosetCatalog.NakedCharacterSelection,"naked character fallback");
+            var characterGeometry=await Task.Run(()=>M2PreviewGeometryService.Load(characterPath,visibilityMode:M2PreviewVisibilityMode.BaseAppearance,geosetSelection:geosetSelection));
+            _model.SetGeometry(characterGeometry);
+            if(appearance is not null)
+            {
+                var textures=new Dictionary<int,RgbaTexture>();foreach(var slot in characterGeometry.TextureSlots){if(slot.Type==1)textures[slot.Index]=appearance.Body;else if(slot.Type==6&&appearance.Hair is not null)textures[slot.Index]=appearance.Hair;}if(textures.Count>0)_model.SetDecodedTextures(textures);else _model.SetDecodedTexture(appearance.Body);
+            }
+            else
+            {
+                var baseSkin=_characterSkinPath.Text?.Trim();if(!string.IsNullOrWhiteSpace(baseSkin)&&File.Exists(baseSkin))_model.SetDecodedTexture(await Task.Run(()=>DecodePreviewTexture(baseSkin)));else _model.SetTexture(null);
+            }
+            _mountCharacterPath=characterPath;RefreshAttachmentPoints(characterGeometry,requestedAttachment,requestedAttachment is not null);
+            if(requestedAttachment is null)
+            {
+                _showAttachments.IsChecked=true;ApplyAttachmentOverlay();_modelStatus.Text="The character is loaded, but this item slot has no unambiguous automatic bind point. Choose the exact native attachment above, then press Mount selected model on character again.";return;
+            }
+            var attachment=_attachmentPicker.SelectedItem as M2PreviewAttachment??throw new InvalidDataException($"The character model has no attachment ID {requestedAttachment:N0} required by this inventory slot.");
+            var itemGeometry=await Task.Run(()=>M2PreviewGeometryService.Load(source.ModelPath,visibilityMode:M2PreviewVisibilityMode.AllGeosets));
+            var itemTexture=source.TexturePath is null?null:await Task.Run(()=>DecodePreviewTexture(source.TexturePath));
+            _mountedItemGeometry=itemGeometry;_mountedItemTexture=itemTexture;_mountedItemLabel=$"{Path.GetFileName(source.ModelPath)} · {source.Provenance}";_showAttachments.IsChecked=true;ApplyAttachmentOverlay();
+            _session.Settings.ItemPreviewCharacterModelPath=characterPath;_session.Settings.ItemPreviewCharacterSkinPath=_characterSkinPath.Text??string.Empty;_session.Settings.Save();
+            _modelStatus.Text=$"Mounted {Path.GetFileName(source.ModelPath)} from {source.Provenance} on {attachment.Id:N0} · {attachment.Name}. Character and item faces share one depth-sorted scene.{(source.TexturePath is null?" No same-provenance model texture was found; the item remains untextured.":$" Texture: {Path.GetFileName(source.TexturePath)}.")}";
+        }
+        catch(Exception exception){_modelStatus.Text=$"Mounted item preview failed: {exception.Message}";DesktopCrashLogger.Log("Mounted item preview failed",exception);}
     }
 
     private async Task PreviewEquippedAsync()
@@ -210,7 +258,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             foreach(var pair in preview.Geosets.GroupVariants)groupVariants[pair.Key]=pair.Value;
             var selection=new M2GeosetSelection(groupVariants,appearance is null?preview.Geosets.Source:$"Decoded CharSections + {preview.Geosets.Source}");
             var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(modelPath,visibilityMode:M2PreviewVisibilityMode.BaseAppearance,geosetSelection:selection));
-            _model.SetGeometry(geometry); RefreshAttachmentPoints(geometry);
+            ClearMountedPreviewState(); _model.SetGeometry(geometry); RefreshAttachmentPoints(geometry);
             if(appearance?.Hair is not null){var textures=new Dictionary<int,RgbaTexture>();foreach(var slot in geometry.TextureSlots){if(slot.Type==1)textures[slot.Index]=preview.Atlas;else if(slot.Type==6)textures[slot.Index]=appearance.Hair;}if(textures.Count>0)_model.SetDecodedTextures(textures);else _model.SetDecodedTexture(preview.Atlas);}else _model.SetDecodedTexture(preview.Atlas);
             _session.Settings.ItemPreviewCharacterModelPath=modelPath; _session.Settings.ItemPreviewCharacterSkinPath=skinPath; _session.Settings.Save();
             var geosets=preview.Geosets.GroupVariants.Count==0?"no equipment geoset override":string.Join(", ",preview.Geosets.GroupVariants.Select(pair=>$"{pair.Key}:{pair.Value}"));
@@ -219,20 +267,35 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         catch(Exception exception){_modelStatus.Text=$"Equipped preview failed: {exception.Message}";DesktopCrashLogger.Log("Equipped item preview failed",exception);}
     }
 
-    private void RefreshAttachmentPoints(M2PreviewGeometry geometry)
+    private void RefreshAttachmentPoints(M2PreviewGeometry geometry, uint? preferredId = null, bool selectFallback = true)
     {
         var previous = (_attachmentPicker.SelectedItem as M2PreviewAttachment)?.Id;
         _attachmentPicker.ItemsSource = geometry.Attachments; _attachmentPicker.IsEnabled = geometry.Attachments.Count > 0;
-        _attachmentPicker.SelectedItem = geometry.Attachments.FirstOrDefault(attachment => attachment.Id == previous)
-            ?? geometry.Attachments.FirstOrDefault(attachment => attachment.Id == 11)
-            ?? geometry.Attachments.FirstOrDefault();
+        var selected = preferredId is { } requested ? geometry.Attachments.FirstOrDefault(attachment => attachment.Id == requested) : null;
+        if (selected is null && preferredId is null && previous is { } prior) selected = geometry.Attachments.FirstOrDefault(attachment => attachment.Id == prior);
+        if (selected is null && selectFallback) selected = geometry.Attachments.FirstOrDefault(attachment => attachment.Id == 11) ?? geometry.Attachments.FirstOrDefault();
+        _attachmentPicker.SelectedItem = selected;
         ApplyAttachmentOverlay();
     }
 
     private void ApplyAttachmentOverlay()
     {
-        _model.SetAttachmentOverlay(_showAttachments.IsChecked == true, (_attachmentPicker.SelectedItem as M2PreviewAttachment)?.Index);
+        var attachment = _attachmentPicker.SelectedItem as M2PreviewAttachment;
+        _model.SetAttachmentOverlay(_showAttachments.IsChecked == true, attachment?.Index);
+        if (_mountedItemGeometry is not null && attachment is not null)
+            _model.SetMountedModels([new M2PreviewMountedModel(_mountedItemGeometry, Matrix4x4.CreateTranslation(attachment.Position), _mountedItemTexture, _mountedItemLabel ?? Path.GetFileName(_mountedItemGeometry.ModelPath))]);
+        else _model.ClearMountedModels();
     }
+
+    private void ClearMountedPreviewState()
+    {
+        _mountedItemGeometry = null; _mountedItemTexture = null; _mountedItemLabel = null; _mountCharacterPath = null;
+        _model.ClearMountedModels();
+    }
+
+    private static RgbaTexture DecodePreviewTexture(string path) => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase)
+        ? BlpTextureService.Decode(path)
+        : BlpTextureService.DecodeImage(path);
 
     private async Task LoadAppearanceChoicesAsync()
     {
