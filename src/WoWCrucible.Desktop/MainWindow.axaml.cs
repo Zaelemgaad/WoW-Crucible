@@ -28,6 +28,9 @@ public partial class MainWindow : Window
     private AssetComparisonView? _assetComparisonView;
     private ItemWorkbenchView? _itemWorkbenchView;
     private MpqWorkspaceView? _mpqWorkspaceView;
+    private ClientWorkspaceView? _clientWorkspaceView;
+    private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
+    private CreatureWorkspaceView? _creatureWorkspaceView;
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
 
     private DbcDocumentSession? Current => _activeDocument >= 0 && _activeDocument < _documents.Count ? _documents[_activeDocument] : null;
@@ -53,7 +56,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { _assetComparisonView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); };
+        Closed += (_, _) => { _assetComparisonView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -512,8 +515,28 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
     }
+    private void OpenCreatureWorkspaceClick(object? sender, RoutedEventArgs e)
+    {
+        if (_creatureWorkspaceView is null)
+        {
+            _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession);
+            _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
+    }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
     private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e) => CloseFeatureWorkspace();
+    private void OpenLayeredDbcsClick(object? sender, RoutedEventArgs e)
+    {
+        if (_layeredDbcWorkspaceView is null)
+        {
+            _layeredDbcWorkspaceView = new LayeredDbcWorkspaceView(_workspaceSession);
+            _layeredDbcWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _layeredDbcWorkspaceView.OpenDbcRequested += async (_, path) => { CloseFeatureWorkspace(); await LoadDbcAsync(path); };
+            _layeredDbcWorkspaceView.StageOverridesRequested += (_, paths) => OpenPatchBuilderWithPaths(paths);
+        }
+        OpenFeatureWorkspace(_layeredDbcWorkspaceView, "DBC Layers & Promotion");
+    }
     private void OpenMpqWorkspaceClick(object? sender, RoutedEventArgs e)
     {
         if (_mpqWorkspaceView is null)
@@ -521,6 +544,38 @@ public partial class MainWindow : Window
             _mpqWorkspaceView = new MpqWorkspaceView(_workspaceSession);
             _mpqWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
         }
+        OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
+    }
+    private void OpenClientWorkspaceClick(object? sender, RoutedEventArgs e)
+    {
+        if (_clientWorkspaceView is null)
+        {
+            _clientWorkspaceView = new ClientWorkspaceView(_workspaceSession);
+            _clientWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _clientWorkspaceView.OpenArchiveRequested += async (_, path) => await OpenIndexedArchiveAsync(path);
+        }
+        OpenFeatureWorkspace(_clientWorkspaceView, "Client Workshop");
+    }
+
+    private async Task OpenIndexedArchiveAsync(string path)
+    {
+        if (_mpqWorkspaceView is null)
+        {
+            _mpqWorkspaceView = new MpqWorkspaceView(_workspaceSession);
+            _mpqWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
+        await _mpqWorkspaceView.OpenArchiveAsync(path);
+    }
+
+    private void OpenPatchBuilderWithPaths(IReadOnlyList<string> paths)
+    {
+        if (_mpqWorkspaceView is null)
+        {
+            _mpqWorkspaceView = new MpqWorkspaceView(_workspaceSession);
+            _mpqWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        _mpqWorkspaceView.StagePaths(paths);
         OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
     }
     private void OpenServerSqlClick(object? sender, RoutedEventArgs e)

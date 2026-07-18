@@ -26,6 +26,9 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _legacyStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly Button _detect = AccentButton("Detect server and connect");
     private readonly Button _test = AccentButton("Test and use connection");
+    private readonly ServerLifecycleService _lifecycle = new();
+    private readonly TextBlock _runtimeStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
+    private readonly List<Button> _lifecycleButtons = [];
     private CancellationTokenSource? _operation;
     private bool _activated;
 
@@ -57,6 +60,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             {
                 new TabItem { Header = "Automatic server detection", Content = automatic },
                 new TabItem { Header = "Manual SQL", Content = manual },
+                new TabItem { Header = "Server controls", Content = LifecyclePage() },
                 new TabItem { Header = "Session overview", Content = SummaryCard() },
                 new TabItem { Header = "Recover legacy SQL edits", Content = LegacyRecoveryPage() }
             }
@@ -70,11 +74,58 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     public void Activate()
     {
         PopulateFromSession();
+        if (_session.Server is not null) _ = RefreshLifecycleAsync();
         if (_activated || _session.DatabaseTested || string.IsNullOrWhiteSpace(_serverRoot.Text) || !Directory.Exists(_serverRoot.Text)) return;
         _activated = true; _ = DetectAsync();
     }
 
     private Border SummaryCard() => new() { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = new ScrollViewer { Content = _summary } };
+
+    private Control LifecyclePage()
+    {
+        Button Action(string label, Func<ServerWorkspace, CancellationToken, Task<ServerLifecycleResult>> operation, bool accent = false)
+        {
+            var button = accent ? AccentButton(label) : new Button { Content = label };
+            button.Click += async (_, _) => await RunLifecycleAsync(operation);
+            _lifecycleButtons.Add(button);
+            return button;
+        }
+        var refresh = new Button { Content = "Refresh status" };
+        refresh.Click += async (_, _) => await RefreshLifecycleAsync();
+        _lifecycleButtons.Add(refresh);
+        var controls = new WrapPanel
+        {
+            Children =
+            {
+                refresh,
+                Action("Start auth + world", _lifecycle.StartAllAsync, true),
+                Action("Start worldserver only", _lifecycle.StartWorldAsync),
+                Action("Gracefully stop worldserver", _lifecycle.StopWorldAsync),
+                Action("Gracefully restart worldserver", _lifecycle.RestartWorldAsync, true),
+                Action("Gracefully stop auth + world", _lifecycle.StopAllAsync)
+            }
+        };
+        return new ScrollViewer
+        {
+            Content = new StackPanel
+            {
+                Margin = new Thickness(16),
+                Spacing = 13,
+                Children =
+                {
+                    new TextBlock { Text = "Server lifecycle", FontSize = 22, FontWeight = FontWeight.SemiBold },
+                    new TextBlock
+                    {
+                        Text = "Worldserver stop and restart always use the core's graceful shutdown path and wait for its save to finish. The database stays online for HeidiSQL and Crucible. A local worldserver not launched by this Crucible session is never force-killed.",
+                        TextWrapping = TextWrapping.Wrap,
+                        Foreground = new SolidColorBrush(Color.Parse("#9AA5B7"))
+                    },
+                    controls,
+                    new Border { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _runtimeStatus }
+                }
+            }
+        };
+    }
 
     private Control LegacyRecoveryPage()
     {
@@ -136,14 +187,17 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private async Task DetectAsync()
     {
         BeginOperation("Detecting the live server configuration and testing its world database…");
+        var detected = false;
         try
         {
             await _session.DetectServerAndConnectAsync(_serverRoot.Text ?? string.Empty, _operation!.Token);
             _status.Text = "Server workspace detected and SQL connection verified. This session is now shared by Crucible features.";
+            detected = true;
         }
         catch (OperationCanceledException) { _status.Text = "Server detection cancelled."; }
         catch (Exception exception) { _status.Text = $"Detection failed: {exception.Message}"; }
         finally { EndOperation(); }
+        if (detected) await RefreshLifecycleAsync();
     }
 
     private async Task TestManualAsync()
@@ -158,6 +212,47 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         catch (OperationCanceledException) { _status.Text = "Connection test cancelled."; }
         catch (Exception exception) { _status.Text = $"Connection failed: {exception.Message}"; }
         finally { EndOperation(); }
+    }
+
+    private async Task RefreshLifecycleAsync()
+    {
+        if (_session.Server is not { } server) { _runtimeStatus.Text = "Detect an installed server workspace first."; return; }
+        BeginOperation("Checking authserver, worldserver, and database status…");
+        try
+        {
+            var status = await _lifecycle.GetStatusAsync(server, _operation!.Token);
+            ShowRuntimeStatus(status, "Status refreshed.");
+            _status.Text = status.Detail;
+        }
+        catch (OperationCanceledException) { _runtimeStatus.Text = "Status check cancelled."; }
+        catch (Exception exception) { _runtimeStatus.Text = $"Status check failed: {exception.Message}"; DesktopCrashLogger.Log("Server status check failed", exception); }
+        finally { EndOperation(); }
+    }
+
+    private async Task RunLifecycleAsync(Func<ServerWorkspace, CancellationToken, Task<ServerLifecycleResult>> operation)
+    {
+        if (_session.Server is not { } server) { _runtimeStatus.Text = "Detect an installed server workspace first."; return; }
+        BeginOperation("Running the requested server operation…");
+        try
+        {
+            var result = await operation(server, _operation!.Token);
+            ShowRuntimeStatus(result.Status, result.Detail);
+            _status.Text = $"{result.Action} completed and was verified.";
+            DesktopCrashLogger.Debug("SERVER", "lifecycle-success", ("action", result.Action), ("world", result.Status.WorldServerRunning), ("auth", result.Status.AuthServerRunning), ("database", result.Status.DatabaseRunning));
+        }
+        catch (OperationCanceledException) { _runtimeStatus.Text = "Server operation cancelled. No force-kill fallback was used."; }
+        catch (Exception exception)
+        {
+            _runtimeStatus.Text = $"Server operation failed safely: {exception.Message}";
+            _status.Text = "Server operation failed; inspect the status before retrying.";
+            DesktopCrashLogger.Log("Server lifecycle operation failed", exception);
+        }
+        finally { EndOperation(); }
+    }
+
+    private void ShowRuntimeStatus(ServerRuntimeStatus status, string detail)
+    {
+        _runtimeStatus.Text = $"worldserver\t{(status.WorldServerRunning ? "RUNNING" : "STOPPED")}\nauthserver\t{(status.AuthServerRunning ? "RUNNING" : "STOPPED")}\ndatabase\t{(status.DatabaseRunning ? "RUNNING" : "STOPPED / UNKNOWN")}\n\n{detail}\n\n{status.Detail}";
     }
 
     private async Task CaptureLegacySnapshotAsync()
@@ -275,10 +370,10 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
 
     private void BeginOperation(string text)
     {
-        _operation?.Cancel(); _operation?.Dispose(); _operation = new(); _detect.IsEnabled = _test.IsEnabled = false; _status.Text = text;
+        _operation?.Cancel(); _operation?.Dispose(); _operation = new(); _detect.IsEnabled = _test.IsEnabled = false; foreach (var button in _lifecycleButtons) button.IsEnabled = false; _status.Text = text;
     }
 
-    private void EndOperation() => _detect.IsEnabled = _test.IsEnabled = true;
+    private void EndOperation() { _detect.IsEnabled = _test.IsEnabled = true; foreach (var button in _lifecycleButtons) button.IsEnabled = true; }
 
     private void SessionChanged(object? sender, EventArgs e) => PopulateFromSession();
 
@@ -296,7 +391,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         _summary.Text = $"Core family\t{server.CoreFamily}\nServer root\t{server.RootPath}\nConfiguration\t{server.ConfigLocation}\nLayout\t{(server.UsesWsl ? $"Windows + WSL ({server.WslDistribution})" : "Native/local")}\nServer DBCs\t{(string.IsNullOrWhiteSpace(server.DbcPath) ? "Not found" : server.DbcPath)}\nWorld database\t{server.WorldDatabase.Database} on {server.WorldDatabase.Host}:{server.WorldDatabase.Port}\nDatabase user\t{server.WorldDatabase.User}\nConnection\t{(capabilities is null ? "Not tested" : $"Verified · MySQL {capabilities.ServerVersion}")}\nRecognized tables\t{capabilities?.Tables.Count ?? 0:N0}\nDBC overlay tables\t{capabilities?.DbcOverlayTables.Count ?? 0:N0}";
     }
 
-    public void Dispose() { _session.Changed -= SessionChanged; _operation?.Cancel(); _operation?.Dispose(); }
+    public void Dispose() { _session.Changed -= SessionChanged; _operation?.Cancel(); _operation?.Dispose(); _lifecycle.Dispose(); }
 
     private static Grid Form(params (string Label, Control Input)[] rows)
     {

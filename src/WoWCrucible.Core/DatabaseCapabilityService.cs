@@ -16,7 +16,7 @@ public sealed record DatabaseCapabilities(string ServerVersion, string Database,
 
 public sealed class DatabaseCapabilityService
 {
-    private static readonly string[] RelevantTables = ["item_template", "creature_template", "quest_template", "npc_vendor", "creature_loot_template", "gameobject_template", "spell_proc"];
+    private static readonly string[] RelevantTables = ["item_template", "creature_template", "creature_template_model", "creature", "quest_template", "creature_queststarter", "creature_questender", "gameobject_queststarter", "gameobject_questender", "npc_vendor", "creature_loot_template", "gameobject_template", "gameobject", "spell_proc"];
 
     public async Task<DatabaseCapabilities> InspectAsync(DatabaseConnectionProfile profile, CancellationToken cancellationToken = default)
     {
@@ -31,7 +31,7 @@ public sealed class DatabaseCapabilityService
                    COLUMN_DEFAULT, COLUMN_KEY, EXTRA, ORDINAL_POSITION
             FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = @database
-              AND (TABLE_NAME IN ('item_template','creature_template','quest_template','npc_vendor','creature_loot_template','gameobject_template','spell_proc')
+              AND (TABLE_NAME IN ('item_template','creature_template','creature_template_model','creature','quest_template','creature_queststarter','creature_questender','gameobject_queststarter','gameobject_questender','npc_vendor','creature_loot_template','gameobject_template','gameobject','spell_proc')
                    OR TABLE_NAME LIKE '%\\_dbc')
             ORDER BY TABLE_NAME, ORDINAL_POSITION
             """;

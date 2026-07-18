@@ -14,7 +14,10 @@ public sealed record ServerWorkspace(
     DatabaseConnectionProfile WorldDatabase,
     bool UsesWsl = false,
     string? WslDistribution = null,
-    string? WslConfigPath = null);
+    string? WslConfigPath = null,
+    string? WslWorldExecutable = null,
+    string? WslAuthExecutable = null,
+    string? WslAuthConfigPath = null);
 
 public static partial class ServerWorkspaceDetector
 {
@@ -25,7 +28,12 @@ public static partial class ServerWorkspaceDetector
         {
             var wsl = DetectWslLauncher(rootPath) ?? throw new FileNotFoundException("No live worldserver.conf or supported WSL launcher was found in this folder.");
             var text = await ReadWslFileAsync(wsl.Distribution, wsl.ConfigPath, cancellationToken);
-            return Parse(rootPath, $"WSL {wsl.Distribution}:{wsl.ConfigPath}", text, true, wsl.Distribution, wsl.ConfigPath);
+            return Parse(rootPath, $"WSL {wsl.Distribution}:{wsl.ConfigPath}", text, true, wsl.Distribution, wsl.ConfigPath) with
+            {
+                WslWorldExecutable = wsl.WorldExecutable,
+                WslAuthExecutable = wsl.AuthExecutable,
+                WslAuthConfigPath = wsl.AuthConfigPath
+            };
         }
     }
 
@@ -52,14 +60,24 @@ public static partial class ServerWorkspaceDetector
         return new(root, configLocation, dbcPath, DetectFamily(root, configText), database, usesWsl, wslDistribution, wslConfigPath);
     }
 
-    public static (string Distribution, string ConfigPath)? DetectWslLauncher(string rootPath)
+    public static (string Distribution, string ConfigPath, string WorldExecutable, string AuthExecutable, string AuthConfigPath)? DetectWslLauncher(string rootPath)
     {
         var script = Path.Combine(NormalizeRoot(rootPath), "Start-Server.ps1");
         if (!File.Exists(script)) return null;
         var text = File.ReadAllText(script);
         var distribution = WslDistributionRegex().Match(text);
         var config = WslWorldConfigRegex().Match(text);
-        return distribution.Success && config.Success ? (distribution.Groups[1].Value, config.Groups[1].Value) : null;
+        if (!distribution.Success || !config.Success) return null;
+        var world = WslWorldExecutableRegex().Match(text);
+        var auth = WslAuthExecutableRegex().Match(text);
+        var authConfig = WslAuthConfigRegex().Match(text);
+        var installRoot = Path.GetDirectoryName(Path.GetDirectoryName(config.Groups[1].Value.Replace('\\', '/')))?.Replace('\\', '/') ?? string.Empty;
+        return (
+            distribution.Groups[1].Value,
+            config.Groups[1].Value,
+            world.Success ? world.Groups[1].Value : $"{installRoot}/bin/worldserver",
+            auth.Success ? auth.Groups[1].Value : $"{installRoot}/bin/authserver",
+            authConfig.Success ? authConfig.Groups[1].Value : $"{installRoot}/etc/authserver.conf");
     }
 
     private static Dictionary<string, string> ParseSettings(string text)
@@ -144,4 +162,10 @@ public static partial class ServerWorkspaceDetector
     private static partial Regex WslDistributionRegex();
     [GeneratedRegex("""(?mi)['"]--config['"]\s*,\s*['"]([^'"]*worldserver\.conf)['"]""")]
     private static partial Regex WslWorldConfigRegex();
+    [GeneratedRegex("""(?mi)['"](/[^'"]*/worldserver)['"]\s*,?\s*$""")]
+    private static partial Regex WslWorldExecutableRegex();
+    [GeneratedRegex("""(?mi)['"](/[^'"]*/authserver)['"]\s*,?\s*$""")]
+    private static partial Regex WslAuthExecutableRegex();
+    [GeneratedRegex("""(?mi)['"]--config['"]\s*,\s*['"]([^'"]*authserver\.conf)['"]""")]
+    private static partial Regex WslAuthConfigRegex();
 }

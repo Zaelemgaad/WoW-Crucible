@@ -256,6 +256,15 @@ if (!explicitlyConfiguredServer.DbcPath.EndsWith(Path.Combine("configured-data",
 File.Delete(Path.Combine(serverFixture, "etc", "worldserver.conf")); File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf.dist"), "WorldDatabaseInfo = \"bad;3306;bad;bad;bad\"");
 try { _ = ServerWorkspaceDetector.DetectLocal(serverFixture); throw new InvalidOperationException("A .conf.dist template was accepted as a live server configuration."); }
 catch (FileNotFoundException) { }
+File.WriteAllText(Path.Combine(serverFixture, "Start-Server.ps1"), """
+    $distro = 'Fixture-Linux'
+    Start-Process -FilePath 'wsl.exe' -ArgumentList @('-d', $distro, '--', '/srv/acore/bin/authserver', '--config', '/srv/acore/etc/authserver.conf')
+    Start-Process -FilePath 'wsl.exe' -ArgumentList @('-d', $distro, '--', '/srv/acore/bin/worldserver', '--config', '/srv/acore/etc/worldserver.conf')
+    """);
+var wslLauncher = ServerWorkspaceDetector.DetectWslLauncher(serverFixture);
+if (wslLauncher is null || wslLauncher.Value.Distribution != "Fixture-Linux" || wslLauncher.Value.WorldExecutable != "/srv/acore/bin/worldserver" ||
+    wslLauncher.Value.AuthExecutable != "/srv/acore/bin/authserver" || wslLauncher.Value.ConfigPath != "/srv/acore/etc/worldserver.conf" || wslLauncher.Value.AuthConfigPath != "/srv/acore/etc/authserver.conf")
+    throw new InvalidOperationException("Native WSL lifecycle path detection failed.");
 Directory.Delete(serverFixture, true);
 
 var azerothItemTable = new DatabaseTableCapability("item_template", ItemColumns("entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "delay", "MaxDurability", "description", "stat_type1", "stat_value1", "spellid_1", "spelltrigger_1", "spellcooldown_1"));
@@ -270,6 +279,25 @@ if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Value
     throw new InvalidOperationException("Capability-aware item mapping or SQL escaping failed.");
 if (gapStatsPlan.Values["StatsCount"] is not 1 || gapStatsPlan.Values["stat_type1"] is not 7 || gapStatsPlan.Values["stat_value1"] is not 75 || gapStatsPlan.Values["stat_type2"] is not 0)
     throw new InvalidOperationException("Trinity item stat slots were not compacted before StatsCount was calculated.");
+
+var modernCreatureTable = new DatabaseTableCapability("creature_template", ItemColumns("entry", "name", "subname", "minlevel", "maxlevel", "faction", "npcflag", "rank", "type", "family", "unit_class", "speed_walk", "speed_run", "HealthModifier", "ManaModifier", "ArmorModifier", "DamageModifier", "BaseAttackTime", "RangeAttackTime", "unit_flags", "unit_flags2", "dynamicflags", "type_flags", "lootid", "pickpocketloot", "skinloot", "mingold", "maxgold", "AIName", "ScriptName", "RegenHealth", "VerifiedBuild"));
+var modernCreatureModelTable = new DatabaseTableCapability("creature_template_model", ItemColumns("CreatureID", "Idx", "CreatureDisplayID", "DisplayScale", "Probability", "VerifiedBuild"));
+var modernVendorTable = new DatabaseTableCapability("npc_vendor", ItemColumns("entry", "slot", "item", "maxcount", "incrtime", "ExtendedCost", "VerifiedBuild"));
+var modernLootTable = new DatabaseTableCapability("creature_loot_template", ItemColumns("Entry", "Item", "Reference", "Chance", "QuestRequired", "LootMode", "GroupId", "MinCount", "MaxCount", "Comment"));
+var modernCreatureCapabilities = new DatabaseCapabilities("fixture", "world", new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [modernCreatureTable.Name] = modernCreatureTable, [modernCreatureModelTable.Name] = modernCreatureModelTable, [modernVendorTable.Name] = modernVendorTable, [modernLootTable.Name] = modernLootTable });
+var creatureDraft = new CreatureTemplateDraft(900100, "Crucible's Guardian", "Layer test", [1234, 5678], 80, 83, 35, 1, 1, 7, 0, 1, 1.1f, 1f, 1.14286f, 2f, 1f, 1.5f, 3f, 2000, 2000, 0, 0, 0, 0, 900100, 0, 0, 10, 50, "SmartAI", "", true,
+    [new(-1, 6948, 0, 0, 0)], [new(900100, 6948, 0, 25, false, 1, 0, 1, 2, "Crucible loot")]);
+var modernCreaturePlan = CreatureTemplateAdapter.CreatePlan(creatureDraft, modernCreatureCapabilities);
+if (modernCreaturePlan.Rows.Count != 5 || modernCreaturePlan.Rows[1].Values["CreatureDisplayID"] is not 1234u || modernCreaturePlan.Rows[2].Values["CreatureDisplayID"] is not 5678u ||
+    modernCreaturePlan.Rows[3].Table != "npc_vendor" || modernCreaturePlan.Rows[4].Table != "creature_loot_template" || !modernCreaturePlan.PreviewSql().Contains("Crucible''s Guardian") || !modernCreaturePlan.PreviewSql().Contains("Crucible loot"))
+    throw new InvalidOperationException("Modern schema-aware creature/model/vendor/loot planning failed.");
+var legacyCreatureTable = new DatabaseTableCapability("creature_template", ItemColumns("entry", "name", "subname", "minlevel", "maxlevel", "faction", "modelid1", "modelid2", "modelid3", "modelid4"));
+var legacyVendorTable = new DatabaseTableCapability("npc_vendor", ItemColumns("entry", "item", "maxcount", "incrtime"));
+var legacyLootTable = new DatabaseTableCapability("creature_loot_template", ItemColumns("Entry", "Item", "Chance", "MinCount", "MaxCount"));
+var legacyCreatureCapabilities = new DatabaseCapabilities("fixture", "world", new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [legacyCreatureTable.Name] = legacyCreatureTable, [legacyVendorTable.Name] = legacyVendorTable, [legacyLootTable.Name] = legacyLootTable });
+var legacyCreaturePlan = CreatureTemplateAdapter.CreatePlan(creatureDraft, legacyCreatureCapabilities);
+if (legacyCreaturePlan.Rows.Count != 3 || legacyCreaturePlan.Rows[0].Values["modelid1"] is not 1234u || legacyCreaturePlan.Rows[0].Values["modelid2"] is not 5678u || legacyCreaturePlan.Rows[1].Key.Count != 2 || legacyCreaturePlan.Rows[2].Key.Count != 2)
+    throw new InvalidOperationException("Legacy creature/template/vendor/loot adaptation failed.");
 
 static IReadOnlyList<DatabaseColumnCapability> ItemColumns(params string[] names) => names.Select((name, index) => new DatabaseColumnCapability(name, "int", "int", false, "0", name == "entry" ? "PRI" : "", "", index + 1)).ToArray();
 

@@ -130,7 +130,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         if (!uint.TryParse(_setId.Text, out var id)) { _status.Text = "Enter a numeric set ID."; return; } SetBusy("Resolving item-set members and spell names…"); DesktopCrashLogger.Debug("ITEMSET", "inspect-start", ("set_id", id), ("dbc", _itemSetPath.Text));
         try
         {
-            var set = await Task.Run(() => ItemSetDbcService.Inspect(_itemSetPath.Text!, _schemaPath.Text!, id, File.Exists(_spellPath.Text) ? _spellPath.Text : null));
+            var itemSetPath = _itemSetPath.Text!; var schemaPath = _schemaPath.Text!; var spellPath = File.Exists(_spellPath.Text) ? _spellPath.Text : null;
+            var set = await Task.Run(() => ItemSetDbcService.Inspect(itemSetPath, schemaPath, id, spellPath));
             IReadOnlyDictionary<uint, string> names = new Dictionary<uint, string>(); var namesUnavailable = false;
             if (!string.IsNullOrWhiteSpace(_user.Text) && !string.IsNullOrWhiteSpace(_password.Text))
             {
@@ -148,14 +149,16 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private async Task CloneSetAsync()
     {
         if (!uint.TryParse(_setId.Text, out var source) || !uint.TryParse(_newSetId.Text, out var target)) { _status.Text = "Enter numeric source and new set IDs."; return; }
-        DesktopCrashLogger.Debug("ITEMSET", "clone-start", ("source_set", source), ("target_set", target), ("output", _setCloneOutput.Text)); try { var map = ParsePairs(_setMap.Text); var result = await Task.Run(() => ItemSetDbcService.Clone(_itemSetPath.Text!, _schemaPath.Text!, _setCloneOutput.Text!, source, target, map, _setSuffix.Text ?? string.Empty)); _status.Text = $"Cloned '{result.Name}' with {result.ItemIdMap.Count:N0} remapped member(s)."; DesktopCrashLogger.Debug("ITEMSET", "clone-success", ("target_set", target), ("name", result.Name), ("remapped_members", result.ItemIdMap.Count), ("output", _setCloneOutput.Text)); }
+        var itemSetPath = _itemSetPath.Text!; var schemaPath = _schemaPath.Text!; var output = _setCloneOutput.Text!; var suffix = _setSuffix.Text ?? string.Empty;
+        DesktopCrashLogger.Debug("ITEMSET", "clone-start", ("source_set", source), ("target_set", target), ("output", output)); try { var map = ParsePairs(_setMap.Text); var result = await Task.Run(() => ItemSetDbcService.Clone(itemSetPath, schemaPath, output, source, target, map, suffix)); _status.Text = $"Cloned '{result.Name}' with {result.ItemIdMap.Count:N0} remapped member(s)."; DesktopCrashLogger.Debug("ITEMSET", "clone-success", ("target_set", target), ("name", result.Name), ("remapped_members", result.ItemIdMap.Count), ("output", output)); }
         catch (Exception exception) { await ErrorAsync("Item-set clone failed", exception); }
     }
 
     private async Task ApplyEffectsAsync()
     {
         if (!uint.TryParse(_setId.Text, out var set)) { _status.Text = "Enter a numeric set ID."; return; }
-        DesktopCrashLogger.Debug("ITEMSET", "effects-write-start", ("set_id", set), ("output", _effectsOutput.Text)); try { var pairs = ParsePairs(_effects.Text).Select((pair, index) => new ItemSetEffect(index + 1, pair.Key, pair.Value, null)).ToArray(); await Task.Run(() => ItemSetDbcService.SetEffects(_itemSetPath.Text!, _schemaPath.Text!, _effectsOutput.Text!, set, pairs)); _status.Text = $"Wrote {pairs.Length:N0} set bonus slot(s) without modifying the source DBC."; DesktopCrashLogger.Debug("ITEMSET", "effects-write-success", ("set_id", set), ("slots", pairs.Length), ("output", _effectsOutput.Text)); }
+        var itemSetPath = _itemSetPath.Text!; var schemaPath = _schemaPath.Text!; var output = _effectsOutput.Text!;
+        DesktopCrashLogger.Debug("ITEMSET", "effects-write-start", ("set_id", set), ("output", output)); try { var pairs = ParsePairs(_effects.Text).Select((pair, index) => new ItemSetEffect(index + 1, pair.Key, pair.Value, null)).ToArray(); await Task.Run(() => ItemSetDbcService.SetEffects(itemSetPath, schemaPath, output, set, pairs)); _status.Text = $"Wrote {pairs.Length:N0} set bonus slot(s) without modifying the source DBC."; DesktopCrashLogger.Debug("ITEMSET", "effects-write-success", ("set_id", set), ("slots", pairs.Length), ("output", output)); }
         catch (Exception exception) { await ErrorAsync("Item-set effect edit failed", exception); }
     }
 

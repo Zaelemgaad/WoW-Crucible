@@ -21,6 +21,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     }
 
     private readonly DesktopWorkspaceSession _session;
+    private readonly TabControl _tabs = new() { Margin = new Thickness(10) };
     private readonly List<PatchRow> _entries = [];
     private readonly ListBox _builderItems = new() { SelectionMode = SelectionMode.Multiple };
     private readonly TextBox _allowed = new() { AcceptsReturn = true, PlaceholderText = "Optional allowed globs, one per line" };
@@ -60,8 +61,23 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
 
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12,8), Children = { back, WithColumn(new TextBlock { Text = "MPQ PATCHES & ARCHIVES", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, 1) } };
-        var tabs = new TabControl { Margin = new Thickness(10), Items = { new TabItem { Header = "Patch builder", Content = BuildBuilderPage() }, new TabItem { Header = "Archive browser", Content = BuildBrowserPage() }, new TabItem { Header = "Client deployment", Content = BuildDeploymentPage() } } };
-        Content = new Grid { RowDefinitions = new("Auto,*"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,0,1), Child = heading }, WithRow(tabs, 1) } };
+        _tabs.Items.Add(new TabItem { Header = "Patch builder", Content = BuildBuilderPage() });
+        _tabs.Items.Add(new TabItem { Header = "Archive browser", Content = BuildBrowserPage() });
+        _tabs.Items.Add(new TabItem { Header = "Client deployment", Content = BuildDeploymentPage() });
+        Content = new Grid { RowDefinitions = new("Auto,*"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,0,1), Child = heading }, WithRow(_tabs, 1) } };
+    }
+
+    public async Task OpenArchiveAsync(string path)
+    {
+        _archivePath.Text = Path.GetFullPath(path);
+        _tabs.SelectedIndex = 1;
+        await LoadArchiveAsync();
+    }
+
+    public void StagePaths(IEnumerable<string> paths)
+    {
+        _tabs.SelectedIndex = 0;
+        AddPaths(paths);
     }
 
     private Control BuildBuilderPage()
@@ -134,12 +150,12 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         var browsePatch = new Button { Content = "Patch…" }; browsePatch.Click += async (_, _) => { var path = await PickFileAsync("Select the patch MPQ", ["*.mpq"]); if (path is not null) { patch.Text = path; targetName.Text = Path.GetFileName(path); } };
         var install = AccentButton("Install patch and clear Cache"); install.Click += async (_, _) =>
         {
-            try { status.Text = "Installing and verifying patch…"; var result = await Task.Run(() => ClientPatchDeploymentService.Install(patch.Text ?? string.Empty, clientRoot.Text ?? string.Empty, targetName.Text)); status.Text = $"Installed {result.InstalledPath}\nSHA-256 {result.Sha256}\nCache: {(result.Cache.Existed ? $"deleted {result.Cache.DeletedFiles:N0} files / {FormatBytes(result.Cache.DeletedBytes)}" : "already absent")}"; }
+            try { status.Text = "Installing and verifying patch…"; var patchPath = patch.Text ?? string.Empty; var root = clientRoot.Text ?? string.Empty; var name = targetName.Text; var result = await Task.Run(() => ClientPatchDeploymentService.Install(patchPath, root, name)); status.Text = $"Installed {result.InstalledPath}\nSHA-256 {result.Sha256}\nCache: {(result.Cache.Existed ? $"deleted {result.Cache.DeletedFiles:N0} files / {FormatBytes(result.Cache.DeletedBytes)}" : "already absent")}"; }
             catch (Exception exception) { status.Text = $"Install failed: {exception.Message}"; DesktopCrashLogger.Log("Client patch install failed", exception); }
         };
         var clearCache = new Button { Content = "Clear Cache now" }; clearCache.Click += async (_, _) =>
         {
-            try { var result = await Task.Run(() => ClientPatchDeploymentService.InvalidateCache(clientRoot.Text ?? string.Empty)); status.Text = result.Existed ? $"Deleted the entire Cache folder: {result.DeletedFiles:N0} files / {FormatBytes(result.DeletedBytes)}." : "Cache was already absent."; }
+            try { var root = clientRoot.Text ?? string.Empty; var result = await Task.Run(() => ClientPatchDeploymentService.InvalidateCache(root)); status.Text = result.Existed ? $"Deleted the entire Cache folder: {result.DeletedFiles:N0} files / {FormatBytes(result.DeletedBytes)}." : "Cache was already absent."; }
             catch (Exception exception) { status.Text = $"Cache clear failed: {exception.Message}"; DesktopCrashLogger.Log("Client cache clear failed", exception); }
         };
         var form = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), RowSpacing = 8, ColumnSpacing = 8 };
@@ -229,7 +245,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private async Task ExtractAsync(IReadOnlyList<MpqFileEntry> entries)
     {
         if (entries.Count == 0) { _browserStatus.Text = "Select at least one archive entry."; return; } var destination = await PickFolderAsync("Select extraction destination"); if (destination is null) return; BeginOperation();
-        try { var progress = new Progress<(int Done, int Total, string Path)>(value => _browserStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}"); await Task.Run(() => new PatchArchiveService().Extract(_archivePath.Text ?? string.Empty, destination, entries, progress, _operation!.Token)); _browserStatus.Text = $"Extracted {entries.Count:N0} entries to {destination}."; }
+        try { var archivePath = _archivePath.Text ?? string.Empty; var progress = new Progress<(int Done, int Total, string Path)>(value => _browserStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}"); await Task.Run(() => new PatchArchiveService().Extract(archivePath, destination, entries, progress, _operation!.Token)); _browserStatus.Text = $"Extracted {entries.Count:N0} entries to {destination}."; }
         catch (OperationCanceledException) { _browserStatus.Text = "Extraction cancelled."; }
         catch (Exception exception) { _browserStatus.Text = $"Extraction failed: {exception.Message}"; DesktopCrashLogger.Log("MPQ extraction failed", exception); }
     }

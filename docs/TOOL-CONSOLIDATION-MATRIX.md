@@ -85,11 +85,11 @@ Every top-level Tools directory is assigned below, including redundant editors. 
 | DBC WDBC editing | Native multi-document virtual editor, decoded fields, undo/redo, bulk clone, layer/promotion services | DBD/DB2 formats, structured import/export, domain workspaces, effective DBC+SQL view |
 | M2/SKIN preview | Native mesh, UV, bounded discovery; base geosets now filtered | Materials, texture units, CharSections composition, equipment, animation, particles, export |
 | MPQ | Native create/update/list/extract/manifest/validation/deployment; single-window workspace; files/folder-tree drag-and-drop | Tree mode, locale/listfile recovery, streaming performance, complete MPQEditor parity |
-| Server & SQL | Shared automatic WSL/local detection and read-only schema verification | Full SQL explorer, snapshots/diff/import, adapter bindings, transactional deployment/rollback |
+| Server & SQL | Shared automatic WSL/local detection, schema verification, and native graceful auth/world lifecycle controls without PowerShell wrapper execution | Full SQL explorer, snapshots/diff/import, broader adapter bindings, transactional deployment/rollback |
 | Items & sets | Acquisition audit, full schema copy, ItemSet clone/effects | Complete guided item creator, ten stats, five spells, accurate tooltip/model preview, all target adapters |
 | Spells | Core DBC editor and legacy WinForms spell form exist | Native Avalonia effect-centric spell workspace with SQL overlay diagnosis |
-| Creatures/NPCs/gameobjects | Core schema services and old guided references only | Creators, appearance/model preview, spawn/loot/vendor/SmartAI child editors |
-| Quests/loot/vendors/conditions | Reference behavior inventoried | Guided graph/multi-row editors and portable change plans |
+| Creatures/NPCs/gameobjects | Native creature/NPC creator, current/legacy model schema adaptation, embedded M2/SKIN preview, SQL plan/export, strict transactional insertion | Spawn, gameobject, trainer, quest, gossip, and SmartAI child editors |
+| Quests/loot/vendors/conditions | Native multi-row vendor inventory and creature-loot plans within creature creation | Standalone reusable editors, quest graphs, conditions, selectors, and dependency-aware portable change plans |
 | BLP/textures | PNG catalog and external conversion pipeline | Native BLP codec, layer comparison, batch conversion, alpha/mipmap correctness |
 | WMO/ADT/WDT/WDL/maps | Inspection/conversion beginnings only | Native map/world project with 2D/3D previews and validated patch closure |
 | CASC | Local libraries/listfiles inventoried | Native provider integrated beside MPQ in the same archive UI |

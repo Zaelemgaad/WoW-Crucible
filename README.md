@@ -14,6 +14,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
+- Starts, stops, and restarts auth/world servers natively from the shared Server & SQL workspace. WSL shutdown sends `SIGINT` and waits for graceful completion; a locally launched worldserver receives `saveall` before shutdown. Crucible does not execute the workspace's PowerShell wrapper scripts or force-kill an unowned server process.
 - Keeps DBC editing, Items & Sets, MPQ work, Assets & Compare, Server & SQL, dialogs, and the CLI guide inside one splitter-driven Avalonia window; feature navigation no longer creates a pile of child windows or depends on fixed panel widths.
 - Reads the selected installed server's `worldserver.conf` (including the split Windows/WSL test layout), verifies the detected database, and shares that in-memory session with item and recovery workflows.
 - Captures a legacy world database through a SELECT-only streaming snapshot, then performs an entirely offline baseline-to-legacy audit with field-level additions, edits, removals, domain grouping, source hashes, and explicit unattributed mode when no stock baseline is available. Target translation and selective promotion remain pending.
@@ -24,6 +25,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Models core-specific DBC consumers, including AzerothCore SQL overlays and unused tables; an optional core-source path derives current mappings directly from `DBCStores.cpp` instead of relying on the built-in profile.
 - Audits a server DBC against its live SQL overlay, decodes known GT class/level rows, identifies the effective server value, and exports an idempotent DBC-to-SQL migration preview without modifying the database.
 - Provides an offline-capable guided item/weapon/armor creator with all ten stat slots and all five item-spell slots, named class/subclass/quality/slot/binding choices, a live WotLK-style tooltip, SQL preview/export, and schema-aware transactional insertion when a server is connected.
+- Provides a native guided creature/NPC creator with four display choices, named faction/type/rank/class/service controls, combat and movement fields, embedded WotLK M2/SKIN preview, vendor inventory and creature-loot child rows, exact SQL preview/export, current normalized or legacy embedded model-column adaptation, and strict transactional no-overwrite insertion.
 - Opens and saves 3.3.5a `WDBC`/`.dbc` files directly.
 - Uses a virtual, double-buffered grid suitable for large files such as `Spell.dbc`.
 - Includes its own complete 234-column `Spell.dbc` schema and accepts external build-12340 definitions for generic tables.
