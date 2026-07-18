@@ -27,6 +27,14 @@ public sealed record SqlRowFavorite(string Database, string Table, IReadOnlyDict
 
 public sealed class SqlWorkspaceService
 {
+    public async Task<IReadOnlyList<string>> ListDatabasesAsync(DatabaseConnectionProfile profile, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        await using var command = new MySqlCommand("SHOW DATABASES", connection); await using var reader = await command.ExecuteReaderAsync(cancellationToken); var databases = new List<string>();
+        while (await reader.ReadAsync(cancellationToken)) databases.Add(reader.GetString(0));
+        return databases.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
     public async Task<SqlTablePage> ReadColumnMatchesAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table,
         string columnName, object? value, int limit = 200, CancellationToken cancellationToken = default)
     {
