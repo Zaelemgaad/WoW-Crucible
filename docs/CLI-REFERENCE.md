@@ -175,6 +175,7 @@ wowcrucible db inspect <host> <port> <user> <database> --password-env=ENV_NAME [
 wowcrucible db query <host> <port> <user> <database> <statement.sql> [--write] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db export <host> <port> <user> <database> <table> <output> [--format=csv|jsonl] [--overwrite] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db import <host> <port> <user> <database> <table> <input.csv> [--apply] --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db dependency-snapshot <host> <port> <user> <database> <table> <output.json> --key=column=value [--key=column=value]... [--limit=N] [--overwrite]
 wowcrucible db draft-template <domain> <output.json> [--overwrite]
 wowcrucible db content-plan <host> <port> <user> <database> <domain> <draft.json> [--output=plan.sql] [--overwrite] [--apply] [--update] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=ENV_NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
@@ -194,6 +195,12 @@ Server detection reads the live `worldserver.conf`; it does not accept `.dist` t
 `db export` discovers the live table shape and streams the complete table to an atomically published UTF-8 CSV or newline-delimited JSON file. CSV uses `\\N` for SQL `NULL`, quotes commas/newlines correctly, and represents binary values as hexadecimal. Existing outputs require `--overwrite`.
 
 `db import` is a structural dry-run by default: it validates the header against the live schema, rejects unknown/generated/duplicate columns, checks required fields and every row width, and reports the planned row count. `--apply` is required to write. Apply is INSERT-only in one transaction; an existing key or any row error rolls back the complete import instead of replacing data.
+
+`db dependency-snapshot` reads one row by its complete primary key, discovers current-schema declared relationships plus validated AzerothCore item/quest/loot/creature/gameobject/spell/trainer/appearance mappings, and captures complete matching rows for each exact edge. Repeat `--key` for a composite identity. The per-edge limit defaults to 200 and is capped at 500; every truncation is explicit. An empty SQL `_dbc` mirror is recorded as a file-DBC edge instead of falsely reporting a broken reference. The artifact is review data and never executable SQL.
+
+```powershell
+wowcrucible db dependency-snapshot 127.0.0.1 3306 acore acore_world item_template item-17802.crucible-dependencies.json --key=entry=17802
+```
 
 `db draft-template` creates a portable, editable JSON starting point without connecting to MySQL. Supported domains are `creature`, `gameobject`, `quest`, `gossip-menu`, `gossip-option`, `npc-text`, `trainer`, `trainer-spell`, `trainer-creature`, `legacy-trainer-spell`, `condition`, and `smartai`. `db content-plan` adapts the draft to the actual live schema and prints exact SQL without writing by default. The quest adapter covers the complete 105-field stock 3.3.5a template; behavior adapters cover all current gossip, trainer, condition, NPC-text, and SmartAI columns while preserving composite keys. `--apply` inserts the primary and child rows in one transaction. `--apply --update` requires the primary identity to match exactly one existing row, updates mapped primary fields while preserving custom columns, and inserts only collision-free newly staged child rows; it never silently replaces existing children.
 

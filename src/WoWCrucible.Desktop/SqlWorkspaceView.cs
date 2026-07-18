@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
@@ -7,6 +8,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using WoWCrucible.Core;
+using WoWCrucible.Desktop.Controls;
 
 namespace WoWCrucible.Desktop;
 
@@ -23,6 +25,10 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly ListBox _rows = new();
     private readonly StackPanel _rowEditor = new() { Spacing = 6 };
     private readonly StackPanel _relationshipResults = new() { Spacing = 5 };
+    private readonly SqlDependencyGraphView _dependencyGraph = new();
+    private readonly StackPanel _dependencyList = new() { Spacing = 5 };
+    private readonly TextBlock _dependencyStatus = Status("Select a SQL row, then analyze its recognized dependencies.");
+    private readonly TextBox _dependencyLimit = new() { Text = "200", PlaceholderText = "Rows captured per dependency edge" };
     private readonly TextBlock _pageStatus = Status("Connect Server & SQL to browse the live database.");
     private readonly TextBlock _status = Status("SQL Studio is idle.");
     private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
@@ -51,7 +57,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _session = session; _session.Changed += SessionChanged;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "SQL STUDIO", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1) } };
-        _tabs = new TabControl { Margin = new Thickness(10), Items = { new TabItem { Header = "Tables & rows", Content = BrowsePage() }, new TabItem { Header = "SQL query", Content = QueryPage() }, new TabItem { Header = "Favorites", Content = FavoritesPage() } } };
+        _tabs = new TabControl { Margin = new Thickness(10), Items = { new TabItem { Header = "Tables & rows", Content = BrowsePage() }, new TabItem { Header = "SQL query", Content = QueryPage() }, new TabItem { Header = "Favorites", Content = FavoritesPage() }, new TabItem { Header = "Dependency graph", Content = DependencyPage() } } };
         Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(_tabs, 1), WithRow(_confirmation, 2), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 6), Child = _status }, 3) } };
         _tableFilter.TextChanged += (_, _) => PopulateTables(); _tables.SelectionChanged += async (_, _) => await SelectTableAsync();
         _rows.SelectionChanged += (_, _) => SelectRow();
@@ -109,6 +115,15 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         return new Grid { RowDefinitions = new("Auto,*"), Children = { new WrapPanel { Children = { open, remove, openDbc, openMpq } }, WithRow(_favorites, 1) } };
     }
 
+    private Control DependencyPage()
+    {
+        var analyze = AccentButton("Analyze selected row"); analyze.Click += async (_, _) => await AnalyzeRelationshipsAsync(analyze);
+        var export = new Button { Content = "Capture complete dependency snapshot…" }; export.Click += async (_, _) => await ExportDependencySnapshotAsync(export);
+        var controls = new Grid { ColumnDefinitions = new("Auto,Auto,*,*"), ColumnSpacing = 8, Children = { analyze, WithColumn(export, 1), WithColumn(new TextBlock { Text = "Per-edge capture limit", VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right }, 2), WithColumn(_dependencyLimit, 3) } };
+        var details = new ScrollViewer { Content = _dependencyList };
+        return new Grid { RowDefinitions = new("Auto,2*,Auto,*,Auto"), RowSpacing = 7, Children = { controls, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _dependencyGraph }, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(details, 3), WithRow(_dependencyStatus, 4) } };
+    }
+
     private void PopulateTables()
     {
         var selected = (_tables.SelectedItem as TableChoice)?.Table.Name; var query = _tableFilter.Text?.Trim() ?? string.Empty;
@@ -137,6 +152,8 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private void SelectRow()
     {
         _creatingRow = false; _selectedRow = _rows.SelectedItem as SqlRowRecord; _editors.Clear(); _rowEditor.Children.Clear(); _confirmation.IsVisible = false;
+        _dependencyList.Children.Clear(); _dependencyGraph.SetGraph(_selectedRow is null || _page is null ? "Select a primary-keyed SQL row" : $"{_page.Table} · {_selectedRow.Display}", []);
+        _dependencyStatus.Text = _selectedRow is null ? "Select a SQL row, then analyze its recognized dependencies." : "Ready to analyze exact incoming and outgoing dependency edges.";
         if (_selectedRow is null || _page is null) return;
         var heading = new StackPanel { Spacing = 6 };
         heading.Children.Add(new TextBlock { Text = $"Complete row editor · {_page.Table} · {_selectedRow.Display}", FontSize = 16, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap });
@@ -255,16 +272,47 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             button.IsEnabled = false; Begin($"Analyzing dependencies for {_selectedRow.Display}…");
             var matches = await _service.AnalyzeRelationshipsAsync(_session.DatabaseProfile, _session.DatabaseCapabilities, _page.Table, _selectedRow.Values, _operation!.Token);
             _relationshipResults.Children.Clear();
+            _dependencyList.Children.Clear(); _dependencyGraph.SetGraph($"{_page.Table} · {_selectedRow.Display}", matches);
             if (matches.Count == 0) _relationshipResults.Children.Add(Status("No relationship values are populated on this row."));
             foreach (var match in matches)
             {
-                var direction = match.Outgoing ? "depends on" : "referenced by"; var open = new Button { HorizontalContentAlignment = HorizontalAlignment.Left, Content = $"{match.MatchingRows:N0} row(s) · {direction} {match.TargetTable}.{match.TargetColumn} = {CellText(match.Value)}" };
-                open.Click += async (_, _) => await OpenRelatedAsync(match.TargetTable, match.TargetColumn, match.Value); ToolTip.SetTip(open, match.Relation.Description); _relationshipResults.Children.Add(open);
+                var direction = match.Outgoing ? "depends on" : "referenced by"; var open = new Button { HorizontalContentAlignment = HorizontalAlignment.Left, Content = $"{RelationshipCount(match)} · {direction} {match.TargetTable}.{match.TargetColumn} = {CellText(match.Value)}" };
+                var graphOpen = new Button { HorizontalContentAlignment = HorizontalAlignment.Left, Content = open.Content };
+                if (match.MatchingRows < 0)
+                {
+                    var dbcPath = ResolveDbcMirrorPath(match.TargetTable); open.IsEnabled = graphOpen.IsEnabled = dbcPath is not null;
+                    if (dbcPath is not null) { open.Click += (_, _) => OpenDbcRequested?.Invoke(this, dbcPath); graphOpen.Click += (_, _) => OpenDbcRequested?.Invoke(this, dbcPath); }
+                    ToolTip.SetTip(open, dbcPath is null ? $"{match.Relation.Description}. Configure the server DBC folder to open this file." : $"{match.Relation.Description}. Open {dbcPath}."); ToolTip.SetTip(graphOpen, ToolTip.GetTip(open));
+                }
+                else
+                {
+                    open.Click += async (_, _) => await OpenRelatedAsync(match.TargetTable, match.TargetColumn, match.Value); graphOpen.Click += async (_, _) => await OpenRelatedAsync(match.TargetTable, match.TargetColumn, match.Value); ToolTip.SetTip(open, match.Relation.Description); ToolTip.SetTip(graphOpen, match.Relation.Description);
+                }
+                _relationshipResults.Children.Add(open); _dependencyList.Children.Add(graphOpen);
             }
-            _status.Text = $"Analyzed {matches.Count:N0} populated dependency edge(s); {matches.Sum(match => match.MatchingRows):N0} exact matching row reference(s).";
+            if (matches.Count == 0) _dependencyList.Children.Add(Status("No populated recognized dependency edges exist for this row."));
+            var summary = $"Analyzed {matches.Count:N0} populated dependency edge(s); {matches.Where(match => match.MatchingRows >= 0).Sum(match => match.MatchingRows):N0} exact SQL row reference(s); {matches.Count(match => match.MatchingRows < 0):N0} edge(s) require file-DBC resolution."; _status.Text = summary; _dependencyStatus.Text = summary; _tabs.SelectedIndex = 3;
         }
         catch (OperationCanceledException) { _status.Text = "Dependency analysis cancelled."; }
         catch (Exception exception) { Fail("Dependency analysis failed", exception); }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private async Task ExportDependencySnapshotAsync(Button button)
+    {
+        if (_selectedRow is null || _page is null || _session.DatabaseCapabilities is null || _session.DatabaseProfile is null) { _dependencyStatus.Text = "Select a primary-keyed SQL row first."; return; }
+        if (!int.TryParse(_dependencyLimit.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var limit) || limit is < 1 or > 500) { _dependencyStatus.Text = "Per-edge capture limit must be a whole number from 1 through 500."; return; }
+        try
+        {
+            var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Export read-only SQL dependency snapshot", SuggestedFileName = $"{_page.Table}-{SafeName(_selectedRow.Display)}.crucible-dependencies.json", FileTypeChoices = [new FilePickerFileType("Crucible dependency snapshot") { Patterns = ["*.crucible-dependencies.json", "*.json"] }] });
+            var path = file?.TryGetLocalPath(); if (path is null) return;
+            button.IsEnabled = false; Begin($"Capturing complete dependency rows for {_selectedRow.Display}…");
+            var snapshot = await _service.CaptureDependencySnapshotAsync(_session.DatabaseProfile, _session.DatabaseCapabilities, _page.Table, _selectedRow, limit, _operation!.Token);
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine, _operation.Token);
+            var summary = $"Captured the complete root row plus {snapshot.Edges.Sum(edge => edge.Rows.Count):N0} related row(s) across {snapshot.Edges.Count:N0} edge(s). {snapshot.Edges.Count(edge => edge.Truncated):N0} edge(s) were explicitly marked truncated."; _dependencyStatus.Text = summary; _status.Text = $"{summary} Snapshot: {path}";
+        }
+        catch (OperationCanceledException) { _dependencyStatus.Text = "Dependency snapshot capture cancelled."; }
+        catch (Exception exception) { Fail("Dependency snapshot failed", exception); _dependencyStatus.Text = $"Dependency snapshot failed: {exception.Message}"; }
         finally { button.IsEnabled = true; End(); }
     }
 
@@ -365,6 +413,16 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _session.Changed -= SessionChanged; }
 
     private static string RowSummary(SqlRowRecord row) { var name = row.Values.FirstOrDefault(pair => pair.Key.Equals("name", StringComparison.OrdinalIgnoreCase) || pair.Key.Equals("LogTitle", StringComparison.OrdinalIgnoreCase)).Value; return $"{row.Display}{(name is null ? string.Empty : $"  ·  {name}")}"; }
+    private static string RelationshipCount(SqlRelationshipMatch match) => match.MatchingRows < 0 ? "file DBC · SQL mirror empty" : $"{match.MatchingRows:N0} exact row(s)";
+    private string? ResolveDbcMirrorPath(string tableName)
+    {
+        if (!tableName.EndsWith("_dbc", StringComparison.OrdinalIgnoreCase)) return null; var stem = tableName[..^4];
+        foreach (var root in new[] { _session.Settings.OverrideDbcPath, _session.Settings.CoreDbcPath, _session.Settings.BaseDbcPath }.Where(Directory.Exists))
+        {
+            var match = Directory.EnumerateFiles(root, "*.dbc", SearchOption.TopDirectoryOnly).FirstOrDefault(path => Path.GetFileNameWithoutExtension(path).Equals(stem, StringComparison.OrdinalIgnoreCase)); if (match is not null) return match;
+        }
+        return null;
+    }
     private static string CellText(object? value) => value switch { null => string.Empty, byte[] bytes => "0x" + Convert.ToHexString(bytes), DateTime date => date.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture), IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture), _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty };
     private static object? ParseCell(DatabaseColumnCapability column, string? text)
     {
@@ -376,6 +434,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private static bool IsReadOnly(string sql) => SqlWorkspaceService.IsReadOnlyStatement(sql);
     private static string FormatResult(SqlQueryResult result) { var builder = new StringBuilder(); builder.AppendLine(string.Join('\t', result.Columns)); foreach (var row in result.Rows) builder.AppendLine(string.Join('\t', row.Select(CellText))); return builder.ToString(); }
     private static string? EmptyNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private static string SafeName(string value) { var invalid = Path.GetInvalidFileNameChars(); var safe = new string(value.Select(character => invalid.Contains(character) || char.IsWhiteSpace(character) ? '-' : character).ToArray()).Trim('-'); return string.IsNullOrWhiteSpace(safe) ? "row" : safe.Length <= 80 ? safe : safe[..80]; }
     private IStorageProvider Storage() => TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("SQL Studio is not attached to the main window.");
     private static Button Button(string text, Func<Task> action) { var button = new Button { Content = text }; button.Click += async (_, _) => await action(); return button; }
     private static Button AccentButton(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }

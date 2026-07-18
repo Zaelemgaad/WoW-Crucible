@@ -16,6 +16,10 @@ public sealed record SqlTablePage(string Table, IReadOnlyList<DatabaseColumnCapa
 public sealed record SqlQueryResult(IReadOnlyList<string> Columns, IReadOnlyList<IReadOnlyList<object?>> Rows, int AffectedRows, TimeSpan Duration);
 public sealed record SqlInsertResult(int AffectedRows, long InsertedId);
 public sealed record SqlRelationshipMatch(DatabaseRelationCapability Relation, bool Outgoing, string TargetTable, string TargetColumn, object? Value, long MatchingRows);
+public sealed record SqlDependencySnapshotEdge(string Relation, string Direction, string SourceTable, string SourceColumn, string TargetTable, string TargetColumn,
+    object? Value, long TotalRows, bool Truncated, IReadOnlyList<SqlRowRecord> Rows, bool Declared, string Description);
+public sealed record SqlDependencySnapshot(string Format, DateTimeOffset CapturedUtc, string Database, string RootTable, SqlRowRecord Root,
+    int PerEdgeLimit, IReadOnlyList<SqlDependencySnapshotEdge> Edges, IReadOnlyList<string> Warnings);
 public sealed record SqlRowFavorite(string Database, string Table, IReadOnlyDictionary<string, string?> Key, string Label, string Notes, DateTimeOffset AddedUtc, string? DbcPath = null, string? MpqPath = null)
 {
     public string Identity => $"{Database}\u001f{Table}\u001f{string.Join("\u001e", Key.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase).Select(pair => $"{pair.Key}={pair.Value}"))}";
@@ -50,17 +54,71 @@ public sealed class SqlWorkspaceService
     {
         var relations = capabilities.Relationships.Where(relation => relation.Touches(tableName)).ToArray(); var results = new List<SqlRelationshipMatch>();
         await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        var populatedTables = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        async Task<long> CountMatchesAsync(DatabaseTableCapability targetTable, DatabaseColumnCapability targetColumn, object value)
+        {
+            await using var command = new MySqlCommand($"SELECT COUNT(*) FROM {ItemWritePlan.QuoteIdentifier(targetTable.Name)} WHERE {ItemWritePlan.QuoteIdentifier(targetColumn.Name)} <=> @value", connection);
+            command.Parameters.AddWithValue("@value", value); var count = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture); if (count > 0 || !targetTable.Name.EndsWith("_dbc", StringComparison.OrdinalIgnoreCase)) return count;
+            if (!populatedTables.TryGetValue(targetTable.Name, out var populated))
+            {
+                await using var any = new MySqlCommand($"SELECT EXISTS(SELECT 1 FROM {ItemWritePlan.QuoteIdentifier(targetTable.Name)} LIMIT 1)", connection); populated = Convert.ToInt32(await any.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) != 0; populatedTables[targetTable.Name] = populated;
+            }
+            return populated ? 0 : -1;
+        }
         foreach (var relation in relations)
         {
-            var outgoing = relation.FromTable.Equals(tableName, StringComparison.OrdinalIgnoreCase); var sourceColumn = outgoing ? relation.FromColumn : relation.ToColumn;
-            if (!row.TryGetValue(sourceColumn, out var value) || value is null) continue;
-            var targetTableName = outgoing ? relation.ToTable : relation.FromTable; var targetColumnName = outgoing ? relation.ToColumn : relation.FromColumn;
-            var targetTable = capabilities.FindTable(targetTableName); var targetColumn = targetTable?.Find(targetColumnName); if (targetTable is null || targetColumn is null) continue;
-            await using var command = new MySqlCommand($"SELECT COUNT(*) FROM {ItemWritePlan.QuoteIdentifier(targetTable.Name)} WHERE {ItemWritePlan.QuoteIdentifier(targetColumn.Name)} <=> @value", connection);
-            command.Parameters.AddWithValue("@value", value); var count = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
-            results.Add(new(relation, outgoing, targetTable.Name, targetColumn.Name, value, count));
+            if (relation.FromTable.Equals(tableName, StringComparison.OrdinalIgnoreCase) && row.TryGetValue(relation.FromColumn, out var outgoingValue) && outgoingValue is not null && (relation.Declared || !IsEmptyReference(outgoingValue)))
+            {
+                var targetTable = capabilities.FindTable(relation.ToTable); var targetColumn = targetTable?.Find(relation.ToColumn);
+                if (targetTable is not null && targetColumn is not null)
+                {
+                    var count = await CountMatchesAsync(targetTable, targetColumn, outgoingValue);
+                    results.Add(new(relation, true, targetTable.Name, targetColumn.Name, outgoingValue, count));
+                }
+            }
+            if (relation.ToTable.Equals(tableName, StringComparison.OrdinalIgnoreCase) && row.TryGetValue(relation.ToColumn, out var incomingValue) && incomingValue is not null && (relation.Declared || !IsEmptyReference(incomingValue)))
+            {
+                var sourceTable = capabilities.FindTable(relation.FromTable); var sourceColumn = sourceTable?.Find(relation.FromColumn);
+                if (sourceTable is not null && sourceColumn is not null)
+                {
+                    var count = await CountMatchesAsync(sourceTable, sourceColumn, incomingValue);
+                    if (count > 0) results.Add(new(relation, false, sourceTable.Name, sourceColumn.Name, incomingValue, count));
+                }
+            }
         }
         return results.OrderByDescending(result => result.MatchingRows).ThenBy(result => result.TargetTable).ThenBy(result => result.TargetColumn).ToArray();
+    }
+
+    public async Task<SqlDependencySnapshot> CaptureDependencySnapshotAsync(DatabaseConnectionProfile profile, DatabaseCapabilities capabilities,
+        string tableName, SqlRowRecord root, int perEdgeLimit = 500, CancellationToken cancellationToken = default)
+    {
+        perEdgeLimit = Math.Clamp(perEdgeLimit, 1, 500); var matches = await AnalyzeRelationshipsAsync(profile, capabilities, tableName, root.Values, cancellationToken);
+        var edges = new List<SqlDependencySnapshotEdge>(); var warnings = new List<string>();
+        foreach (var match in matches)
+        {
+            var table = capabilities.FindTable(match.TargetTable); if (table is null) continue;
+            if (match.MatchingRows < 0)
+            {
+                warnings.Add($"{match.TargetTable} is an empty SQL DBC mirror; resolve {match.TargetColumn}={Convert.ToString(match.Value, CultureInfo.InvariantCulture)} against the configured client/server DBC file.");
+                edges.Add(new(match.Relation.Name, match.Outgoing ? "outgoing" : "incoming", match.Relation.FromTable, match.Relation.FromColumn, match.Relation.ToTable, match.Relation.ToColumn, match.Value, -1, false, [], match.Relation.Declared, match.Relation.Description));
+                continue;
+            }
+            var page = await ReadColumnMatchesAsync(profile, table, match.TargetColumn, match.Value, perEdgeLimit, cancellationToken);
+            var truncated = page.TotalRows > page.Rows.Count;
+            if (truncated) warnings.Add($"{match.TargetTable}.{match.TargetColumn} has {page.TotalRows:N0} matching rows; only the first {page.Rows.Count:N0} are captured.");
+            edges.Add(new(match.Relation.Name, match.Outgoing ? "outgoing" : "incoming", match.Relation.FromTable,
+                match.Relation.FromColumn, match.Relation.ToTable, match.Relation.ToColumn,
+                match.Value, page.TotalRows, truncated, page.Rows, match.Relation.Declared, match.Relation.Description));
+        }
+        warnings.Insert(0, "This is a read-only dependency snapshot, not executable SQL. Review identity allocation and target-core schema before converting any row into a deployment plan.");
+        return new("wow-crucible-sql-dependency-snapshot-v1", DateTimeOffset.UtcNow, capabilities.Database, tableName, root, perEdgeLimit, edges, warnings);
+    }
+
+    private static bool IsEmptyReference(object value)
+    {
+        if (value is string text) return string.IsNullOrWhiteSpace(text) || text.Trim() == "0";
+        if (value is byte[] bytes) return bytes.Length == 0;
+        try { return Convert.ToDecimal(value, CultureInfo.InvariantCulture) == 0; } catch { return false; }
     }
 
     public async Task<SqlRowRecord?> ReadRowAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table,
