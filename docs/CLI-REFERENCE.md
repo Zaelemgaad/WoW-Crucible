@@ -124,7 +124,9 @@ Promotion and clone/remap commands save semantic, reviewable operations. Strings
 
 ```text
 wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]
+wowcrucible mpq tree <archive.mpq> [internal-folder] [--format=text|json] [--listfile=paths.txt]
 wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]
+wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]
 wowcrucible mpq create <archive.mpq> <files/folders...>
 wowcrucible mpq update <small-patch.mpq> <files/folders...>
 wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]
@@ -133,6 +135,10 @@ wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--confli
 Filters accept text or `*`, `?`, and `**` globs. `--content-only` excludes `(listfile)`, `(attributes)`, and `(signature)` metadata. JSON output separates entry properties for scripts.
 
 If an archive opens but only exposes StormLib `File000...` placeholders, Crucible reports those entries as unresolved names rather than calling the MPQ incompatible. Supply a compatible external path corpus with `--listfile=paths.txt` to recover known client paths before filtering or extraction.
+
+`tree` lists only the direct files and subfolders at the requested internal folder while reporting recursive counts and bytes. `extract-folder` resolves that exact folder to its recursive files before extraction. The desktop provides the same lazy breadcrumb browser beside the global flat search and displays non-default locale variants explicitly.
+
+Standalone list/tree/extract commands and the desktop archive browser share compressed indexes under `Cache\MPQ` beside the executable when portable. A cache is reused only when the archive and optional external listfile path, size, and write timestamp still match. Writes are atomic, corrupt entries are rebuilt, and pruning retains at most roughly 64 recent indexes within a 512 MiB budget.
 
 `update` is transaction-safe but copies the archive first and refuses archives larger than 2 GiB. Treat large client/mod layers as immutable inputs and build a small manifest-driven patch instead.
 

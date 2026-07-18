@@ -17,6 +17,35 @@ if (!ClientPatchDeploymentService.InvalidateCache(deploymentFixture).Existed || 
     throw new InvalidOperationException("Explicit client cache invalidation failed.");
 Directory.Delete(deploymentFixture, true); File.Delete(patchDeploymentSource);
 
+var browserEntries = new MpqFileEntry[]
+{
+    new(@"Character\Human\Male\HumanMale.m2", 100, 60, 0, 0),
+    new(@"Character\Human\Male\HumanMale00.skin", 50, 25, 0, 0),
+    new(@"Character\Human\Female\HumanFemale.m2", 110, 70, 0, 0),
+    new(@"DBFilesClient\Spell.dbc", 200, 100, 0, 0),
+    new("File00000123.xxx", 25, 25, 0, 0),
+    new("(listfile)", 10, 10, 0, 0)
+};
+var browserRoot = MpqArchiveBrowser.Browse(browserEntries, null); var humanFolder = MpqArchiveBrowser.Browse(browserEntries, @"Character\Human");
+if (browserRoot.Nodes.Count != 4 || browserRoot.Nodes.Count(node => node.IsFolder) != 2 || browserRoot.RecursiveFiles != 6 || browserRoot.AnonymousFiles != 1 ||
+    humanFolder.Nodes.Count != 2 || humanFolder.Nodes.Any(node => !node.IsFolder) || !humanFolder.Breadcrumbs.SequenceEqual(["Character", @"Character\Human"]) || MpqArchiveBrowser.Parent(@"Character\Human") != "Character")
+    throw new InvalidOperationException("Lazy MPQ folder browsing did not preserve hierarchy, breadcrumbs, metadata, or anonymous entries.");
+var maleNode = humanFolder.Nodes.Single(node => node.Name == "Male"); var selectedMale = MpqArchiveBrowser.Select(browserEntries, [maleNode]);
+if (selectedMale.Count != 2 || selectedMale.Any(entry => !entry.ArchivePath.StartsWith(@"Character\Human\Male\", StringComparison.Ordinal)) || MpqArchiveBrowser.SelectFolder(browserEntries, "").Count != browserEntries.Length)
+    throw new InvalidOperationException("MPQ folder selection did not resolve exactly the recursive extraction closure.");
+try { _ = MpqArchiveBrowser.Browse(browserEntries, @"Character\..\DBFilesClient"); throw new InvalidOperationException("MPQ folder navigation accepted a parent traversal segment."); }
+catch (ArgumentException) { }
+var mpqCacheFixture = Path.Combine(Path.GetTempPath(), $"crucible-mpq-cache-{Guid.NewGuid():N}"); var fakeArchive = Path.Combine(mpqCacheFixture, "fixture.mpq"); var fakeCache = Path.Combine(mpqCacheFixture, "cache"); Directory.CreateDirectory(mpqCacheFixture); File.WriteAllText(fakeArchive, "fixture-v1"); var cacheLoads = 0;
+var firstIndex = MpqArchiveIndexCache.LoadOrCreate(fakeArchive, null, fakeCache, () => { cacheLoads++; return browserEntries; });
+var secondIndex = MpqArchiveIndexCache.LoadOrCreate(fakeArchive, null, fakeCache, () => { cacheLoads++; return []; });
+if (firstIndex.Cached || !secondIndex.Cached || cacheLoads != 1 || secondIndex.Entries.Count != browserEntries.Length || !firstIndex.CachePath.StartsWith(fakeCache, StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("App-local MPQ indexing did not reuse an identity-matched compressed cache.");
+File.AppendAllText(fakeArchive, "-changed"); var changedIndex = MpqArchiveIndexCache.LoadOrCreate(fakeArchive, null, fakeCache, () => { cacheLoads++; return browserEntries[..2]; });
+if (changedIndex.Cached || cacheLoads != 2 || changedIndex.Entries.Count != 2) throw new InvalidOperationException("MPQ index cache did not invalidate after the archive identity changed.");
+File.WriteAllText(changedIndex.CachePath, "corrupt"); var repairedIndex = MpqArchiveIndexCache.LoadOrCreate(fakeArchive, null, fakeCache, () => { cacheLoads++; return browserEntries[..3]; });
+if (repairedIndex.Cached || cacheLoads != 3 || repairedIndex.Entries.Count != 3) throw new InvalidOperationException("A corrupt MPQ index cache was not discarded and rebuilt safely.");
+Directory.Delete(mpqCacheFixture, true);
+
 var textureFixture = Path.Combine(Path.GetTempPath(), $"crucible-native-textures-{Guid.NewGuid():N}"); Directory.CreateDirectory(textureFixture);
 var atomicExtractTarget = Path.Combine(textureFixture, "atomic-extract.bin"); File.WriteAllText(atomicExtractTarget, "known-good");
 try

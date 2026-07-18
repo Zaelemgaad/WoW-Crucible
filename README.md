@@ -54,7 +54,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
 - Keeps normal use silent: no startup, success, or activity logs, with only unhandled fatal diagnostics retained when possible. Opt-in **Devbug Mode** adds a live structured terminal and detailed asynchronous session log, retains only the newest three sessions, and never records database passwords. See [docs/DEVBUG-MODE.md](docs/DEVBUG-MODE.md).
 - Houses Crucible-owned settings, profiles, and logs in organized folders beside the executable. Read-only installations fall back to `%LOCALAPPDATA%\\WoWCrucible`, and every Devbug session identifies the effective data root.
-- Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
+- Browses large MPQs without loading file contents through a lazy folder/breadcrumb view plus a separate global flat-path search, preserves visible locale variants, extracts selected files/folders or the current folder recursively in the background, and reports unresolved hash-only names honestly. Compressed app-local indexes beside the executable are identity-bound to archive/listfile path, size, and timestamp, atomically rebuilt after changes/corruption, and capped so giant archives reopen without repeated file-table scans or unbounded cache growth.
 - Builds content-first asset libraries where provenance is inserted immediately before each file, keeping every archive and imported-folder version of the same Character/UI/World directory adjacent instead of splitting sources into separate trees. New loose-file scans and extracted-folder imports write directly into that layout.
 - Consolidates older `Loose\Content` libraries into the same content-first tree with a read-only dry run, strict all-or-nothing blocking for non-identical destination conflicts, byte-for-byte duplicate verification, and a durable apply journal.
 - Visually compares PNG assets by content directory rather than filename: a versioned compact sidecar opened the current 162.5 MB test catalog in roughly 0.15 seconds, includes model-only M2/SKIN paths, falls back safely when stale/corrupt/unwritable, and never replaces the CSV as the durable source. Path/source/name filters, selectable filename/source/file-size sorting, cancellable SHA-256 plus byte-for-byte exact-copy grouping, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions, provenance, and direct Explorer reveal remain non-destructive.
@@ -135,7 +135,9 @@ wowcrucible asset library-import extracted-archive asset-library provenance-name
 wowcrucible asset library-consolidate asset-library [--apply]
 wowcrucible asset library-catalog asset-library
 wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json] [--listfile=paths.txt]
+wowcrucible mpq tree patch.MPQ [internal-folder] [--format=text|json] [--listfile=paths.txt]
 wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N] [--listfile=paths.txt]
+wowcrucible mpq extract-folder patch.MPQ internal-folder output-folder [--quiet|--progress=N] [--listfile=paths.txt]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
 wowcrucible mpq update patch-W.MPQ file-or-folder [...]
 wowcrucible mpq merge patch-merged.MPQ patch-A.MPQ patch-B.MPQ [...] --conflicts=block

@@ -35,10 +35,13 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
 
     private readonly TextBox _archivePath = new() { PlaceholderText = "MPQ archive" };
     private readonly TextBox _externalListfile = new() { PlaceholderText = "Optional external listfile" };
-    private readonly TextBox _browserSearch = new() { PlaceholderText = "Filter paths or use * and ? wildcards…" };
+    private readonly TextBox _browserSearch = new() { PlaceholderText = "Global flat-path search (* and ? supported)…" };
     private readonly ListBox _browserItems = new() { SelectionMode = SelectionMode.Multiple };
+    private readonly ListBox _treeItems = new() { SelectionMode = SelectionMode.Multiple };
+    private readonly WrapPanel _treeBreadcrumb = new() { VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _browserStatus = StatusText("Open an MPQ to browse it.");
     private IReadOnlyList<MpqFileEntry> _allArchiveEntries = [];
+    private string _treeFolder = string.Empty;
     private readonly ListBox _mergeInputs = new() { SelectionMode = SelectionMode.Multiple };
     private readonly List<string> _mergePaths = [];
     private readonly ComboBox _mergePolicy = new() { ItemsSource = Enum.GetValues<MpqMergeConflictPolicy>(), SelectedItem = MpqMergeConflictPolicy.BlockDifferentEntries };
@@ -62,6 +65,18 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
             }
         });
         _browserSearch.TextChanged += (_, _) => FilterArchive();
+        _treeItems.ItemTemplate = new FuncDataTemplate<MpqBrowserNode>((node, _) => node is null ? new Grid() : new Grid
+        {
+            ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(3, 2), Children =
+            {
+                new TextBlock { Text = node.IsFolder ? "▸" : node.Kind == "anonymous" ? "?" : "·", Foreground = Brush.Parse(node.IsFolder ? "#D2A95F" : node.Kind == "anonymous" ? "#D47B67" : "#8290A6") },
+                WithColumn(new TextBlock { Text = node.Name, TextTrimming = TextTrimming.CharacterEllipsis }, 1),
+                WithColumn(new TextBlock { Text = node.IsFolder ? $"{node.FileCount:N0} files" : node.Entry?.Locale is > 0 ? $"{node.Kind} · locale 0x{node.Entry.Locale:X}" : node.Kind }, 2),
+                WithColumn(new TextBlock { Text = FormatBytes(node.Size) }, 3),
+                WithColumn(new TextBlock { Text = node.IsFolder || node.Size == 0 ? FormatBytes(node.CompressedSize) : $"{100d * node.CompressedSize / node.Size:0.#}%" }, 4)
+            }
+        });
+        _treeItems.DoubleTapped += (_, _) => OpenSelectedTreeFolder();
 
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12,8), Children = { back, WithColumn(new TextBlock { Text = "MPQ PATCHES & ARCHIVES", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, 1) } };
@@ -137,12 +152,27 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     {
         var open = new Button { Content = "Open MPQ" }; open.Click += async (_, _) => await ChooseArchiveAsync();
         var listfile = new Button { Content = "External listfile…" }; listfile.Click += async (_, _) => await ChooseListfileAsync();
+        var cancel = new Button { Content = "Cancel operation" }; cancel.Click += (_, _) => _operation?.Cancel();
+        var toolbar = new WrapPanel { Children = { open, listfile, cancel } };
+        var paths = new Grid { ColumnDefinitions = new("2*,*,2*"), ColumnSpacing = 8, Children = { _archivePath, WithColumn(_externalListfile, 1), WithColumn(_browserSearch, 2) } };
+        var modes = new TabControl { Items = { new TabItem { Header = "Folders", Content = BuildFolderBrowser() }, new TabItem { Header = "Flat search", Content = BuildFlatBrowser() } } };
+        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), Margin = new Thickness(8), RowSpacing = 8, Children = { toolbar, WithRow(paths, 1), WithRow(modes, 2), WithRow(_browserStatus, 3) } };
+    }
+
+    private Control BuildFolderBrowser()
+    {
+        var root = new Button { Content = "Root" }; root.Click += (_, _) => NavigateTree(string.Empty); var up = new Button { Content = "↑ Up" }; up.Click += (_, _) => NavigateTree(MpqArchiveBrowser.Parent(_treeFolder)); var open = new Button { Content = "Open selected folder" }; open.Click += (_, _) => OpenSelectedTreeFolder();
+        var extractSelected = new Button { Content = "Extract selected files/folders" }; extractSelected.Click += async (_, _) => await ExtractAsync(MpqArchiveBrowser.Select(_allArchiveEntries, _treeItems.SelectedItems?.OfType<MpqBrowserNode>() ?? []));
+        var extractFolder = AccentButton("Extract current folder recursively"); extractFolder.Click += async (_, _) => await ExtractAsync(MpqArchiveBrowser.SelectFolder(_allArchiveEntries, _treeFolder));
+        var controls = new WrapPanel { Children = { root, up, open, extractSelected, extractFolder, _treeBreadcrumb } };
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 6, Children = { controls, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _treeItems }, 1) } };
+    }
+
+    private Control BuildFlatBrowser()
+    {
         var extractSelected = new Button { Content = "Extract selected" }; extractSelected.Click += async (_, _) => await ExtractAsync(_browserItems.SelectedItems?.OfType<MpqFileEntry>().ToArray() ?? []);
         var extractAll = AccentButton("Extract all visible"); extractAll.Click += async (_, _) => await ExtractAsync((_browserItems.ItemsSource as IEnumerable<MpqFileEntry>)?.ToArray() ?? []);
-        var cancel = new Button { Content = "Cancel operation" }; cancel.Click += (_, _) => _operation?.Cancel();
-        var toolbar = new WrapPanel { Children = { open, listfile, extractSelected, extractAll, cancel } };
-        var paths = new Grid { ColumnDefinitions = new("2*,*,2*"), ColumnSpacing = 8, Children = { _archivePath, WithColumn(_externalListfile, 1), WithColumn(_browserSearch, 2) } };
-        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), Margin = new Thickness(8), RowSpacing = 8, Children = { toolbar, WithRow(paths, 1), WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _browserItems }, 2), WithRow(_browserStatus, 3) } };
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 6, Children = { new WrapPanel { Children = { extractSelected, extractAll, new TextBlock { Text = "The search box above filters this global path list. Folder mode stays at its current location.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _browserItems }, 1) } };
     }
 
     private Control BuildMergePage()
@@ -274,11 +304,22 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private async Task LoadArchiveAsync()
     {
         BeginOperation();
-        try { _browserStatus.Text = "Reading archive index…"; var archive = _archivePath.Text ?? string.Empty; var listfile = string.IsNullOrWhiteSpace(_externalListfile.Text) ? null : _externalListfile.Text; _allArchiveEntries = await Task.Run(() => new PatchArchiveService().ListFiles(archive, "*", listfile), _operation!.Token); FilterArchive(); _browserStatus.Text = $"Loaded {_allArchiveEntries.Count:N0} entries from {archive}."; }
+        try { _browserStatus.Text = "Reading archive index or app-local cache…"; var archive = _archivePath.Text ?? string.Empty; var listfile = string.IsNullOrWhiteSpace(_externalListfile.Text) ? null : _externalListfile.Text; var indexed = await Task.Run(() => MpqArchiveIndexCache.LoadOrCreate(archive, listfile, () => new PatchArchiveService().ListFiles(archive, "*", listfile), _operation!.Token), _operation!.Token); _allArchiveEntries = indexed.Entries; FilterArchive(); NavigateTree(string.Empty); var anonymous = _allArchiveEntries.Count(entry => !entry.IsMetadata && ClientArchiveIndexService.IsAnonymous(entry.ArchivePath)); _browserStatus.Text = $"Loaded {_allArchiveEntries.Count:N0} entries from {(indexed.Cached ? "app-local index cache" : "the MPQ")} · {archive}.{(anonymous == 0 ? string.Empty : $" {anonymous:N0} anonymous hash-table name(s) remain; load an external listfile to attempt name recovery.")}"; }
         catch (Exception exception) { _browserStatus.Text = $"Open failed: {exception.Message}"; DesktopCrashLogger.Log("MPQ open failed", exception); }
     }
 
     private void FilterArchive() { var filtered = _allArchiveEntries.Where(entry => MpqPathFilter.Matches(entry.ArchivePath, _browserSearch.Text)).ToArray(); _browserItems.ItemsSource = filtered; if (_allArchiveEntries.Count > 0) _browserStatus.Text = $"Showing {filtered.Length:N0} of {_allArchiveEntries.Count:N0} archive entries."; }
+    private void NavigateTree(string folder)
+    {
+        try { var page = MpqArchiveBrowser.Browse(_allArchiveEntries, folder); _treeFolder = page.CurrentFolder; _treeItems.ItemsSource = page.Nodes; BuildBreadcrumb(page); _browserStatus.Text = $"{(page.CurrentFolder.Length == 0 ? "MPQ root" : page.CurrentFolder)} · {page.Nodes.Count:N0} direct node(s) · {page.RecursiveFiles:N0} recursive file(s) · {FormatBytes(page.RecursiveBytes)}{(page.AnonymousFiles == 0 ? string.Empty : $" · {page.AnonymousFiles:N0} anonymous name(s)")}."; }
+        catch (Exception exception) { _browserStatus.Text = $"Folder navigation failed: {exception.Message}"; }
+    }
+    private void OpenSelectedTreeFolder() { if (_treeItems.SelectedItem is MpqBrowserNode { IsFolder: true } folder) NavigateTree(folder.ArchivePath); }
+    private void BuildBreadcrumb(MpqFolderPage page)
+    {
+        _treeBreadcrumb.Children.Clear(); var root = new Button { Content = "MPQ" }; root.Click += (_, _) => NavigateTree(string.Empty); _treeBreadcrumb.Children.Add(root);
+        foreach (var path in page.Breadcrumbs) { _treeBreadcrumb.Children.Add(new TextBlock { Text = "›", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(3, 0) }); var button = new Button { Content = path.Split('\\')[^1] }; button.Click += (_, _) => NavigateTree(path); _treeBreadcrumb.Children.Add(button); }
+    }
     private async Task ExtractAsync(IReadOnlyList<MpqFileEntry> entries)
     {
         if (entries.Count == 0) { _browserStatus.Text = "Select at least one archive entry."; return; } var destination = await PickFolderAsync("Select extraction destination"); if (destination is null) return; BeginOperation();

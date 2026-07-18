@@ -1135,12 +1135,26 @@ static int Mpq(string[] args)
                 var listFile = Option(options, "--listfile=");
                 var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--content-only", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
                 if (unknown.Length > 0) return Fail($"Unknown list option: {unknown[0]}");
-                var allFiles = service.ListFiles(args[1], "*", listFile);
+                var allFiles = LoadMpqIndex(service, args[1], listFile);
                 var files = allFiles.Where(file => (!contentOnly || !file.IsMetadata) && MpqPathFilter.Matches(file.ArchivePath, query)).ToArray();
                 if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(files, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
                 else foreach (var file in files) Console.WriteLine($"{file.Size}\t{file.CompressedSize}\t{file.ArchivePath}");
                 PrintAnonymousMpqWarning(allFiles, listFile);
                 return 0;
+            }
+        case "tree" when args.Length >= 2:
+            {
+                var options = args[2..]; var folder = options.FirstOrDefault(option => !option.StartsWith("--", StringComparison.Ordinal)) ?? string.Empty; var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase)); var listFile = Option(options, "--listfile=");
+                var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown tree option: {unknown[0]}");
+                var allFiles = LoadMpqIndex(service, args[1], listFile); var page = MpqArchiveBrowser.Browse(allFiles, folder);
+                if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(page, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })); else foreach (var node in page.Nodes) Console.WriteLine($"{(node.IsFolder ? "DIR" : "FILE")}\t{node.Kind}\t{node.FileCount}\t{node.Size}\t{node.CompressedSize}\t{node.ArchivePath}");
+                Console.Error.WriteLine($"{(page.CurrentFolder.Length == 0 ? "MPQ root" : page.CurrentFolder)}: {page.Nodes.Count:N0} direct node(s), {page.RecursiveFiles:N0} recursive file(s), {page.AnonymousFiles:N0} anonymous name(s)."); PrintAnonymousMpqWarning(allFiles, listFile); return 0;
+            }
+        case "extract-folder" when args.Length >= 4:
+            {
+                var options = args[4..]; var quiet = options.Any(option => option.Equals("--quiet", StringComparison.OrdinalIgnoreCase)); var listFile = Option(options, "--listfile="); var progressOption = options.FirstOrDefault(option => option.StartsWith("--progress=", StringComparison.OrdinalIgnoreCase)); var progressStep = progressOption is null ? 5 : int.Parse(progressOption[11..]);
+                if (progressStep is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(progressStep), "Progress percentage must be from 1 to 100."); var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--quiet", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--progress=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown extract-folder option: {unknown[0]}");
+                var allFiles = LoadMpqIndex(service, args[1], listFile); var files = MpqArchiveBrowser.SelectFolder(allFiles, args[2]); if (files.Count == 0) return Fail($"MPQ folder not found or empty: {args[2]}"); PrintAnonymousMpqWarning(allFiles, listFile); var timer = Stopwatch.StartNew(); service.Extract(args[1], args[3], files, quiet ? null : new ConsoleProgress(progressStep)); Console.Error.WriteLine($"Extracted {files.Count:N0} recursive file(s) from {args[2]} to {Path.GetFullPath(args[3])} in {timer.Elapsed.TotalSeconds:0.##}s."); return 0;
             }
         case "extract" when args.Length >= 3:
             {
@@ -1153,7 +1167,7 @@ static int Mpq(string[] args)
                 if (progressStep is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(progressStep), "Progress percentage must be from 1 to 100.");
                 var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--quiet", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--progress=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
                 if (unknown.Length > 0) return Fail($"Unknown extract option: {unknown[0]}");
-                var allFiles = service.ListFiles(args[1], "*", listFile);
+                var allFiles = LoadMpqIndex(service, args[1], listFile);
                 var files = allFiles.Where(file => MpqPathFilter.Matches(file.ArchivePath, query)).ToArray();
                 PrintAnonymousMpqWarning(allFiles, listFile);
                 var timer = System.Diagnostics.Stopwatch.StartNew();
@@ -1184,12 +1198,16 @@ static int Mpq(string[] args)
 
 static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--require=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
 static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc>\n  wowcrucible dbc rows <file.dbc> <schema.xml> <id>...\n  wowcrucible dbc find <file.dbc> <schema.xml> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base.dbc> <override.dbc> <schema.xml> [--summary]\n  wowcrucible dbc promote apply <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc promote additions <base.dbc> <override.dbc> <schema.xml> <manifest.json> <output.dbc>\n  wowcrucible dbc clone-remap where <base.dbc> <source.dbc> <schema.xml> <column> <value>... --manifest=map.json --output=merged.dbc [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source.dbc> <parent-merged.dbc> <parent-schema.xml> <parent-map.json> <foreign-column> <child-base.dbc> <child-source.dbc> <child-schema.xml> --child-map=map.json --child-output=child.dbc --parent-output=parent.dbc\n  wowcrucible dbc copy-row <base.dbc> <source.dbc> <schema.xml> <source-id> <target-id> <output.dbc> [--set=Column=Value]...\n  wowcrucible dbc set-row <input.dbc> <schema.xml> <id> <output.dbc> --set=Column=Value [...]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]", code);
-static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]", code);
+static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
 {
     var anonymous = files.Count(file => ClientArchiveIndexService.IsAnonymous(file.ArchivePath));
     if (anonymous == 0) return;
     Console.Error.WriteLine($"WARNING: Archive opened successfully, but {anonymous:N0} file name(s) are unresolved StormLib placeholders.{(string.IsNullOrWhiteSpace(listFile) ? " Supply --listfile=paths.txt to recover known paths." : " The supplied listfile did not resolve every path.")}");
+}
+static IReadOnlyList<MpqFileEntry> LoadMpqIndex(PatchArchiveService service, string archive, string? listFile)
+{
+    var result = MpqArchiveIndexCache.LoadOrCreate(archive, listFile, () => service.ListFiles(archive, "*", listFile)); Console.Error.WriteLine($"MPQ index: {(result.Cached ? "cache hit" : "read archive and cached")} · {result.Entries.Count:N0} entries."); return result.Entries;
 }
 static int GroupHelp(string message, int code) { if (code == 0) Console.WriteLine(message); else Console.Error.WriteLine(message); return code; }
 
