@@ -619,6 +619,32 @@ if (spellPath is not null)
         throw new InvalidOperationException("Unmodified WDBC round trip changed bytes.");
     File.Delete(output);
     var spellColumns = builtInSchema.GetColumns("Spell", spell.FieldCount);
+    if (SpellSqlAuditService.AzerothCoreSpellEntryFormat.Length != 234 || SpellSqlAuditService.AzerothCoreSpellEntryFormat[13] != 'x' || SpellSqlAuditService.AzerothCoreSpellEntryFormat[136] != 's')
+        throw new InvalidOperationException("The exact AzerothCore SpellEntryfmt mapping is incomplete or misaligned.");
+    var spellSqlColumns = Enumerable.Range(0, 234).Select(index => new DatabaseColumnCapability($"Sql_{index}",
+        SpellSqlAuditService.AzerothCoreSpellEntryFormat[index] == 's' ? "varchar" : SpellSqlAuditService.AzerothCoreSpellEntryFormat[index] == 'f' ? "float" : "int",
+        "fixture", true, null, index == 0 ? "PRI" : string.Empty, string.Empty, index + 1)).ToArray();
+    var spellSqlTable = new DatabaseTableCapability("spell_dbc", spellSqlColumns);
+    var spellSqlValues = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+    for (var index = 0; index < 234; index++)
+    {
+        var format = SpellSqlAuditService.AzerothCoreSpellEntryFormat[index];
+        spellSqlValues[spellSqlColumns[index].Name] = format switch
+        {
+            's' => spell.GetDisplayValue(0, spellColumns[index]),
+            'f' => BitConverter.UInt32BitsToSingle(spell.GetRaw(0, spellColumns[index])),
+            _ => unchecked((int)spell.GetRaw(0, spellColumns[index]))
+        };
+    }
+    if (SpellSqlAuditService.CompareOverride(spell, 0, spellColumns, spellSqlTable, spellSqlValues).Count != 0)
+        throw new InvalidOperationException("An identical spell_dbc record was reported as different from Spell.dbc.");
+    spellSqlValues[spellSqlColumns[13].Name] = 123456789;
+    if (SpellSqlAuditService.CompareOverride(spell, 0, spellColumns, spellSqlTable, spellSqlValues).Count != 0)
+        throw new InvalidOperationException("A SpellEntryfmt-ignored SQL field created a false effective difference.");
+    spellSqlValues[spellSqlColumns[42].Name] = unchecked((int)(spell.GetRaw(0, spellColumns[42]) + 1));
+    var spellOverrideDifferences = SpellSqlAuditService.CompareOverride(spell, 0, spellColumns, spellSqlTable, spellSqlValues);
+    if (spellOverrideDifferences.Count != 1 || spellOverrideDifferences[0].FieldIndex != 42 || SpellSqlAuditService.FindDbcRow(spell, spellColumns, spell.GetRaw(0, spellColumns[0])) != 0)
+        throw new InvalidOperationException("Effective spell_dbc differences or exact Spell.dbc ID lookup were incorrect.");
     var spellRowsBefore = spell.RowCount;
     var timer = Stopwatch.StartNew();
     spell.CloneRows(0, 100, spellColumns[0]);

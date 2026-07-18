@@ -22,19 +22,26 @@ internal sealed class SpellWorkspaceView : UserControl
     private readonly WdbcFile _file;
     private readonly int _row;
     private readonly IReadOnlyList<DbcColumn> _columns;
+    private readonly DesktopWorkspaceSession _session;
     private readonly Action<IReadOnlyList<SpellFieldChange>> _apply;
     private readonly List<FieldBinding> _bindings = [];
     private readonly TextBlock _heading = new() { FontSize = 20, FontWeight = FontWeight.SemiBold };
     private readonly TextBlock _status = new() { TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8") };
+    private readonly TextBlock _sqlSummary = new() { TextWrapping = TextWrapping.Wrap };
+    private readonly StackPanel _sqlResults = new() { Spacing = 8 };
+    private readonly Button _refreshSql = AccentButton("Inspect live SQL precedence");
 
     public event EventHandler? BackRequested;
+    public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
 
-    public SpellWorkspaceView(WdbcFile file, int row, IReadOnlyList<DbcColumn> columns, Action<IReadOnlyList<SpellFieldChange>> apply)
+    public SpellWorkspaceView(WdbcFile file, int row, IReadOnlyList<DbcColumn> columns, DesktopWorkspaceSession session, Action<IReadOnlyList<SpellFieldChange>> apply)
     {
         _file = file;
         _row = row;
         _columns = columns;
+        _session = session;
         _apply = apply;
+        _refreshSql.Click += async (_, _) => await RefreshSqlAuditAsync();
 
         var back = new Button { Content = "← DBC table" };
         back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
@@ -77,7 +84,8 @@ internal sealed class SpellWorkspaceView : UserControl
                 Tab("Effect 2", EffectFields(1)),
                 Tab("Effect 3", EffectFields(2)),
                 Tab("Text", TextFields()),
-                Tab("Visuals & links", VisualFields())
+                Tab("Visuals & links", VisualFields()),
+                new TabItem { Header = "Server SQL", Content = SqlAuditPage() }
             }
         };
         var footer = new Border
@@ -94,7 +102,131 @@ internal sealed class SpellWorkspaceView : UserControl
         };
         RefreshHeading();
         _status.Text = $"Editing row {_row + 1:N0}. Fields show their exact stored values; decoded meanings appear beside supported enums and flags.";
+        _sqlSummary.Text = _session.DatabaseTested
+            ? "Ready to inspect the connected world database. This is read-only until you explicitly open a complete row in SQL Studio."
+            : "Connect Server & SQL first, then return here to inspect spell_dbc replacement and related spell rows.";
     }
+
+    private Control SqlAuditPage()
+    {
+        var explanation = new TextBlock
+        {
+            Text = "AzerothCore loads Spell.dbc, then a matching spell_dbc row replaces the complete server-side record. Other spell SQL tables add proc, script, trainer, item, quest, creature, SmartAI, condition, and relationship behavior. This audit compares only fields consumed by AzerothCore's exact SpellEntryfmt; ignored SQL/DBC cells do not create false differences.",
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = Brush.Parse("#8E99AD")
+        };
+        var heading = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 10, Children = { _sqlSummary, WithColumn(_refreshSql, 1) } };
+        return new ScrollViewer
+        {
+            Content = new StackPanel
+            {
+                Spacing = 12,
+                Margin = new Thickness(14),
+                Children = { explanation, heading, _sqlResults }
+            }
+        };
+    }
+
+    private async Task RefreshSqlAuditAsync()
+    {
+        if (_session.DatabaseProfile is null || _session.DatabaseCapabilities is null)
+        {
+            _sqlSummary.Text = "No verified world database is connected. Open Server & SQL, detect the server folder or test a manual connection, then retry.";
+            return;
+        }
+        var spellId = _file.GetRaw(_row, _columns[0]);
+        _refreshSql.IsEnabled = false; _sqlSummary.Text = $"Inspecting every recognized SQL relationship for spell {spellId:N0}…"; _sqlResults.Children.Clear();
+        DesktopCrashLogger.Debug("SPELL", "sql-audit-start", ("spell_id", spellId), ("database", _session.DatabaseProfile.Database));
+        try
+        {
+            var audit = await new SpellSqlAuditService().AuditAsync(_session.DatabaseProfile, _session.DatabaseCapabilities, spellId, _file, _columns, _row);
+            RenderSqlAudit(audit);
+            DesktopCrashLogger.Debug("SPELL", "sql-audit-success", ("spell_id", spellId), ("override", audit.HasFullOverride), ("differences", audit.OverrideDifferences.Count), ("related_rows", audit.RelatedRows.Count), ("checked_tables", audit.CheckedTables.Count));
+        }
+        catch (Exception exception)
+        {
+            _sqlSummary.Text = $"SQL precedence audit failed safely: {exception.Message}";
+            DesktopCrashLogger.Log("Spell SQL precedence audit failed", exception);
+        }
+        finally { _refreshSql.IsEnabled = true; }
+    }
+
+    private void RenderSqlAudit(SpellSqlAuditResult audit)
+    {
+        _sqlResults.Children.Clear();
+        _sqlSummary.Text = audit.HasFullOverride
+            ? $"SERVER EFFECTIVE SOURCE: spell_dbc fully replaces Spell.dbc for ID {audit.SpellId:N0}. {audit.OverrideDifferences.Count:N0} consumed field difference(s); {audit.RelatedRows.Count:N0} related SQL row(s)."
+            : $"SERVER EFFECTIVE SOURCE: file Spell.dbc for ID {audit.SpellId:N0}. No spell_dbc replacement exists; {audit.RelatedRows.Count:N0} related SQL row(s) still add or reference behavior.";
+        _sqlSummary.Foreground = Brush.Parse(audit.HasFullOverride ? "#FFB454" : "#72D6A0");
+
+        if (audit.FullOverride is { } full)
+        {
+            _sqlResults.Children.Add(SectionHeading("Full spell_dbc replacement"));
+            _sqlResults.Children.Add(SqlRowCard(full));
+            if (!string.IsNullOrWhiteSpace(audit.OverrideComparisonWarning))
+                _sqlResults.Children.Add(Notice($"Comparison warning: {audit.OverrideComparisonWarning}", "#E9A65A"));
+            else if (audit.OverrideDifferences.Count == 0)
+                _sqlResults.Children.Add(Notice("The SQL row still replaces the file record, but every server-consumed field currently matches.", "#8FA0B8"));
+            else
+            {
+                var differencePanel = new StackPanel { Spacing = 4 };
+                foreach (var difference in audit.OverrideDifferences)
+                    differencePanel.Children.Add(new Grid
+                    {
+                        ColumnDefinitions = new("Auto,2*,2*,2*"), ColumnSpacing = 8,
+                        Children =
+                        {
+                            new TextBlock { Text = $"#{difference.FieldIndex}", Foreground = Brush.Parse("#78869C") },
+                            WithColumn(new TextBlock { Text = $"{difference.DbcField} / {difference.SqlColumn}", TextWrapping = TextWrapping.Wrap }, 1),
+                            WithColumn(new TextBlock { Text = $"DBC: {DisplayValue(difference.DbcValue)}", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8FC7FF") }, 2),
+                            WithColumn(new TextBlock { Text = $"SQL: {DisplayValue(difference.SqlValue)}", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#FFB454") }, 3)
+                        }
+                    });
+                _sqlResults.Children.Add(new Expander { Header = $"{audit.OverrideDifferences.Count:N0} effective field difference(s)", IsExpanded = true, Content = differencePanel });
+            }
+        }
+
+        _sqlResults.Children.Add(SectionHeading($"Related SQL rows ({audit.RelatedRows.Count:N0})"));
+        if (audit.RelatedRows.Count == 0) _sqlResults.Children.Add(Notice("No recognized SQL behavior or reference row points at this spell.", "#8FA0B8"));
+        else
+            foreach (var group in audit.RelatedRows.GroupBy(row => row.Table, StringComparer.OrdinalIgnoreCase).OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                var rows = new StackPanel { Spacing = 6 };
+                foreach (var row in group) rows.Children.Add(SqlRowCard(row));
+                _sqlResults.Children.Add(new Expander { Header = $"{group.Key} · {group.Count():N0} row(s)", IsExpanded = true, Content = rows });
+            }
+
+        _sqlResults.Children.Add(Notice($"Coverage: {audit.CheckedTables.Count:N0} available table(s) checked. Unavailable/shape-mismatched: {audit.MissingTables.Count:N0}." +
+            (audit.MissingTables.Count == 0 ? string.Empty : $"\n{string.Join(", ", audit.MissingTables)}"), "#77859A"));
+    }
+
+    private Control SqlRowCard(SpellSqlRelatedRow row)
+    {
+        var open = new Button { Content = row.Key.Count == 0 ? "No primary key — view only" : "Open complete SQL row", IsEnabled = row.Key.Count > 0 };
+        open.Click += (_, _) => FullSqlEditRequested?.Invoke(this, new SqlGuidedEditRequest(row.Table, row.Values));
+        var summary = new TextBlock
+        {
+            Text = $"{row.Relationship} · {row.Display}" + (row.MatchedColumns.Count == 0 ? string.Empty : $" · matched {string.Join(", ", row.MatchedColumns)}"),
+            TextWrapping = TextWrapping.Wrap,
+            FontWeight = FontWeight.SemiBold
+        };
+        var values = new TextBlock
+        {
+            Text = string.Join(Environment.NewLine, row.Values.Select(pair => $"{pair.Key} = {DisplayValue(pair.Value)}")),
+            TextWrapping = TextWrapping.NoWrap,
+            FontFamily = new FontFamily("Cascadia Mono,Consolas"),
+            Foreground = Brush.Parse("#AAB5C7")
+        };
+        return new Border
+        {
+            BorderBrush = Brush.Parse("#2B3548"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(10),
+            Child = new StackPanel { Spacing = 7, Children = { new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Children = { summary, WithColumn(open, 1) } }, new Expander { Header = $"All {row.Values.Count:N0} column values", Content = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Content = values } } } }
+        };
+    }
+
+    private static TextBlock SectionHeading(string text) => new() { Text = text, FontSize = 17, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 5, 0, 0) };
+    private static TextBlock Notice(string text, string color) => new() { Text = text, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse(color) };
+    private static string DisplayValue(object? value) => value switch { null => "NULL", byte[] bytes => $"0x{Convert.ToHexString(bytes)}", _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty };
 
     private static FieldDefinition[] GeneralFields() =>
     [

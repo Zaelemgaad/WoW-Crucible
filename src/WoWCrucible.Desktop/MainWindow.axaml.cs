@@ -389,8 +389,9 @@ public partial class MainWindow : Window
             _ = ShowErrorAsync("Spell schema mismatch", "The guided WotLK spell workspace requires the 3.3.5a Spell.dbc layout. Select the matching build-12340 schema first.");
             return;
         }
-        var view = new SpellWorkspaceView(document.File, row, document.Schema.Columns, changes => ApplySpellChanges(document, row, changes));
+        var view = new SpellWorkspaceView(document.File, row, document.Schema.Columns, _workspaceSession, changes => ApplySpellChanges(document, row, changes));
         view.BackRequested += (_, _) => CloseFeatureWorkspace();
+        view.FullSqlEditRequested += async (_, request) => await OpenCompleteSqlRowAsync(request);
         OpenFeatureWorkspace(view, $"Spell {document.File.GetDisplayValue(row, document.Schema.Columns[0])}");
     }
 

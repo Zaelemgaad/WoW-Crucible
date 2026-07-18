@@ -184,6 +184,7 @@ wowcrucible db recovery-inspect <audit-file> [--quick]
 wowcrucible db item-audit <host> <port> <user> <database> [--password-env=ENV_NAME] [--dbc=server-dbc-folder] [--output=report.json]
 wowcrucible db item-inspect <host> <port> <user> <database> <item-id> [--password-env=ENV_NAME] [--dbc=server-dbc-folder]
 wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=" Variant"] [--itemset=ID]
+wowcrucible db spell-inspect <host> <port> <user> <database> <spell-id> [--password-env=ENV_NAME] [--dbc=Spell.dbc|folder] [--format=text|json]
 ```
 
 Server detection reads the live `worldserver.conf`; it does not accept `.dist` templates. Database passwords should be passed through an environment variable so they do not enter command history. DBC audits report the effective runtime value when the core applies an SQL overlay and can export an idempotent migration without applying it.
@@ -212,6 +213,8 @@ wowcrucible db content-plan 127.0.0.1 3306 acore acore_world smartai smartai.jso
 `item-inspect` traces one exact ID through the same audit and prints the accepted or rejected evidence behind its classification. For example, it explains that item 17 occurring in a nonzero-reference control row is not a direct drop, and that a reward on an explicitly disabled quest does not make the item obtainable.
 
 `item-clone` transactionally copies every writable column currently present in `item_template`, including custom columns unknown to Crucible, plus matching locale rows. It refuses an already-used destination ID. `--itemset=ID` assigns the copy to a set; omitting it preserves the source membership.
+
+`spell-inspect` explains the effective server record for one spell. AzerothCore loads the file `Spell.dbc` first, then a matching `spell_dbc` row replaces that complete server-side record. When `--dbc` is supplied, Crucible compares the two using AzerothCore's exact 234-character `SpellEntryfmt`: ignored `x` cells do not create false differences, integer cells compare by their loaded 32-bit representation, floats compare as floats, and server-consumed strings compare as decoded text. The audit also searches schema-adaptively across recognized proc, script, rank, prerequisite, trainer, item, quest, creature-spell, spell-click, character-start, faction-change, SmartAI, condition, and disable tables. Text output is concise; `--format=json` includes every value and complete primary key from every matched row.
 
 ## Common examples
 

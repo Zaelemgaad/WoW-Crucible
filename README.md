@@ -42,7 +42,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Uses geometric record capacity and single-allocation bulk cloning for large creation batches.
 - Supports cell-level undo/redo with `Ctrl+Z` and `Ctrl+Y` (structural operations begin a new history).
 - Provides a grouped Spell Workspace for general properties, costs, three effects, localized text, visuals, and links.
-- Provides that Spell Workspace natively inside the Avalonia DBC editor, with decoded field meanings and the same staged undo/atomic-save path as direct cell edits.
+- Provides that Spell Workspace natively inside the Avalonia DBC editor, with decoded field meanings and the same staged undo/atomic-save path as direct cell edits. Its live SQL-precedence tab reports whether AzerothCore uses the file record or a complete `spell_dbc` replacement, compares exactly the fields consumed by `SpellEntryfmt`, discovers related spell/proc/script/trainer/item/quest/creature/SmartAI/condition rows across the connected schema, and opens complete primary-keyed rows in same-window SQL Studio.
 - Saves atomically and creates `.bak` files before overwriting data.
 - Accepts DBC and patch-builder drag-and-drop.
 - Builds WotLK patch MPQs from edited DBCs or existing folder trees.
