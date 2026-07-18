@@ -38,6 +38,9 @@ var autoBlp = Path.Combine(textureFixture, "fixture-auto.blp");
 BlpTextureService.EncodeFromImage(nativePng, autoBlp);
 if (BlpTextureService.Inspect(autoBlp).Encoding != "DXT5" || BlpTextureService.Validate(textureFixture).Any(result => !result.Valid))
     throw new InvalidOperationException("Native PNG input, automatic alpha format selection, or BLP validation failed.");
+var emptyBlp = Path.Combine(textureFixture, "fixture-empty.blp"); File.WriteAllBytes(emptyBlp, []); var emptyResult = BlpTextureService.Validate(emptyBlp).Single();
+if (emptyResult.Valid || emptyResult.Error is null || !emptyResult.Error.Contains("zero-byte", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Zero-byte BLP validation did not report a precise extraction-artifact diagnosis.");
+File.Delete(emptyBlp);
 var rawBlp = Path.Combine(textureFixture, "fixture-raw3.blp"); var rawBytes = new byte[148 + texturePixels.Length];
 System.Text.Encoding.ASCII.GetBytes("BLP2").CopyTo(rawBytes, 0); BitConverter.GetBytes((uint)1).CopyTo(rawBytes, 4); rawBytes[8] = 3; rawBytes[9] = 8; rawBytes[10] = 8;
 BitConverter.GetBytes((uint)8).CopyTo(rawBytes, 12); BitConverter.GetBytes((uint)8).CopyTo(rawBytes, 16); BitConverter.GetBytes((uint)148).CopyTo(rawBytes, 20); BitConverter.GetBytes((uint)texturePixels.Length).CopyTo(rawBytes, 84);

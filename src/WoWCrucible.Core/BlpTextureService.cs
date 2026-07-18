@@ -64,6 +64,9 @@ public static class BlpTextureService
         ArgumentNullException.ThrowIfNull(stream);
         if (!stream.CanRead || !stream.CanSeek) throw new ArgumentException("BLP inspection requires a readable, seekable stream.", nameof(stream));
         var start = stream.Position;
+        var remaining = stream.Length - start;
+        if (remaining == 0) throw new InvalidDataException($"{sourceName} is an empty zero-byte file, not a BLP texture.");
+        if (remaining < 4) throw new InvalidDataException($"{sourceName} is truncated to {remaining:N0} byte(s); a BLP signature requires four bytes.");
         var magic = ReadExactly(stream, 4);
         stream.Position = start;
         return magic.AsSpan().SequenceEqual("BLP2"u8) ? InspectBlp2(stream, sourceName, start)
