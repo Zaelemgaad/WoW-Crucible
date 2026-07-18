@@ -38,6 +38,8 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private ItemWritePlan? _pendingInsert;
     private uint? _loadedEntry;
 
+    public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
+
     public ItemCreatorView(DesktopWorkspaceSession session)
     {
         _session = session; _session.Changed += SessionChanged;
@@ -88,7 +90,11 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     {
         var stack=new StackPanel { Spacing=8,Margin=new Thickness(10) };
         stack.Children.Add(new TextBlock { Text="Spell IDs must exist in the effective client/server spell data. Trigger controls tooltip wording; cooldown -1 uses the spell default.",TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#9AA5B7") });
-        for(var index=0;index<5;index++) stack.Children.Add(new Expander { Header=$"Spell effect {index+1}", IsExpanded=index==0, Content=Form(("Spell ID",_spellIds[index]),("Trigger",_spellTriggers[index]),("Charges",_spellCharges[index]),("Proc per minute",_spellPpm[index]),("Cooldown (ms)",_spellCooldowns[index]),("Category ID",_spellCategories[index]),("Category cooldown",_spellCategoryCooldowns[index])) });
+        for(var index=0;index<5;index++)
+        {
+            var slot=index; var find=new Button{Content="Find…"}; find.Click+=(_,_)=>ReferenceLookupRequested?.Invoke(this,new(ReferenceDomain.Spell,$"Item spell effect {slot+1}",(uint)(_spellIds[slot].Value??0),selected=>_spellIds[slot].Value=selected));
+            stack.Children.Add(new Expander { Header=$"Spell effect {index+1}", IsExpanded=index==0, Content=Form(("Spell ID",Row(_spellIds[index],find)),("Trigger",_spellTriggers[index]),("Charges",_spellCharges[index]),("Proc per minute",_spellPpm[index]),("Cooldown (ms)",_spellCooldowns[index]),("Category ID",_spellCategories[index]),("Category cooldown",_spellCategoryCooldowns[index])) });
+        }
         return new ScrollViewer { Content=stack };
     }
 
@@ -125,6 +131,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private void AddTooltip(string text,IBrush brush,double fontSize=13,FontWeight? weight=null)=>_tooltip.Children.Add(new TextBlock{Text=text,TextWrapping=TextWrapping.Wrap,Foreground=brush,FontSize=fontSize,FontWeight=weight??FontWeight.Normal});
     private void AddPair(string left,string right)=>_tooltip.Children.Add(new Grid{ColumnDefinitions=new("*,Auto"),Children={new TextBlock{Text=left,Foreground=Brushes.White},WithColumn(new TextBlock{Text=right,Foreground=Brushes.White},1)}});
     private static Grid Form(params(string Label,Control Input)[] rows){var grid=new Grid{ColumnDefinitions=new("Auto,*"),RowDefinitions=new(string.Join(',',Enumerable.Repeat("Auto",rows.Length))),RowSpacing=7,ColumnSpacing=10,Margin=new Thickness(12)};for(var index=0;index<rows.Length;index++){AddText(grid,rows[index].Label,index,0);AddControl(grid,rows[index].Input,index,1);}return grid;}
+    private static Grid Row(Control field,Control button)=>new(){ColumnDefinitions=new("*,Auto"),ColumnSpacing=7,Children={field,WithColumn(button,1)}};
     private static void AddText(Grid grid,string text,int row,int column,bool bold=false){var value=new TextBlock{Text=text,VerticalAlignment=VerticalAlignment.Center,FontWeight=bold?FontWeight.Bold:FontWeight.Normal};Grid.SetRow(value,row);Grid.SetColumn(value,column);grid.Children.Add(value);}private static void AddControl(Grid grid,Control control,int row,int column){Grid.SetRow(control,row);Grid.SetColumn(control,column);grid.Children.Add(control);}
     private static NumericUpDown Number(decimal min,decimal max,decimal value=0)=>new(){Minimum=min,Maximum=max,Value=value,Increment=1};private static ComboBox Choice(params(int Value,string Name)[] values)=>new(){ItemsSource=Values(values),SelectedIndex=0};private static ComboBox StatChoice()=>Choice((0,"None"),(1,"Health"),(3,"Agility"),(4,"Strength"),(5,"Intellect"),(6,"Spirit"),(7,"Stamina"),(12,"Defense rating"),(13,"Dodge rating"),(14,"Parry rating"),(15,"Block rating"),(31,"Hit rating"),(32,"Critical strike rating"),(35,"Resilience rating"),(36,"Haste rating"),(37,"Expertise rating"),(38,"Attack power"),(39,"Ranged attack power"),(43,"Mana regeneration"),(44,"Armor penetration rating"),(45,"Spell power"),(46,"Health regeneration"),(47,"Spell penetration"),(48,"Block value"));private static ComboBox SpellTriggerChoice()=>Choice((0,"Use"),(1,"Equip"),(2,"Chance on hit"),(4,"Soulstone"),(5,"Use (no delay)"),(6,"Learn spell"));
     private static NamedValue[] Values(params(int Value,string Name)[] values)=>values.Select(value=>new NamedValue(value.Value,value.Name)).ToArray();private static int Selected(ComboBox combo)=>combo.SelectedItem is NamedValue value?value.Value:0;private static string SelectedName(ComboBox combo)=>combo.SelectedItem is NamedValue value?value.Name:string.Empty;

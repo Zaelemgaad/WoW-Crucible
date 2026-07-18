@@ -210,6 +210,15 @@ wowcrucible db content-plan 127.0.0.1 3306 acore acore_world smartai smartai.jso
 
 `item-audit` discovers the current schema instead of assuming one core revision. It checks vendors, achievement rewards, creature/gameobject/item/mail/pickpocket/skinning/disenchant/fishing/spell/reference/prospecting/milling loot, SQL character starting items, usable quest rewards/start items, and every reward/choice slot that exists. `--dbc` reads both `CharStartOutfit.dbc` and `Spell.dbc`: normal starting equipment is not always represented in `playercreateinfo_item`, while crafted/conjured outputs live in create-item spell effects. Spell outputs count only when the spell is reachable through a trainer, character-start action, usable quest reward, an already acquired item's use/learn spell, or a nested learn/trigger-spell edge; simply existing as an unused Spell row is insufficient. Quest rewards require a live starter and ender and must not be disabled; quest starting items require a live starter and must not be disabled. The report calls an item **no known acquisition path**, not certainly unobtainable, because custom server scripts can grant items without a database relationship.
 
+Search the same readable live references used by the guided editors:
+
+```powershell
+wowcrucible db reference-search 127.0.0.1 3306 acore acore_world item Thunderfury
+wowcrucible db reference-search 127.0.0.1 3306 acore acore_world spell Frostbolt --dbc="C:\Server\data\dbc" --format=json
+```
+
+`reference-search` accepts `spell`, `item`, `creature`, `quest`, or `gameobject`, searches an exact numeric ID or partial name, and reports the source of every match. Supplying `--dbc` for spells merges `Spell.dbc` with `spell_dbc` instead of showing duplicate identities. Passwords use `WOW_CRUCIBLE_DB_PASSWORD` or `--password-env`; they are never command arguments.
+
 `item-inspect` traces one exact ID through the same audit and prints the accepted or rejected evidence behind its classification. For example, it explains that item 17 occurring in a nonzero-reference control row is not a direct drop, and that a reward on an explicitly disabled quest does not make the item obtainable.
 
 `item-clone` transactionally copies every writable column currently present in `item_template`, including custom columns unknown to Crucible, plus matching locale rows. It refuses an already-used destination ID. `--itemset=ID` assigns the copy to a set; omitting it preserves the source membership.

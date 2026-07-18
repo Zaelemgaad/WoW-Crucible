@@ -64,6 +64,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     private uint? _loadedEntry;
 
     public event EventHandler? BackRequested;
+    public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public CreatureWorkspaceView(DesktopWorkspaceSession session)
     {
@@ -188,14 +189,14 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
 
     private void AddVendorRow()
     {
-        var row = new VendorRowEditor(RefreshPreview); row.RemoveRequested += (_, _) => { _vendorRows.Children.Remove(row); RefreshPreview(); };
+        var row = new VendorRowEditor(RefreshPreview, request => ReferenceLookupRequested?.Invoke(this, request)); row.RemoveRequested += (_, _) => { _vendorRows.Children.Remove(row); RefreshPreview(); };
         _vendorRows.Children.Add(row); _npcFlags.Single(flag => flag.Flag == 128).Box.IsChecked = true; RefreshPreview();
     }
 
     private void AddLootRow()
     {
         var entry = (uint)(_loot.Value ?? 0); if (entry == 0) { entry = (uint)(_entry.Value ?? 0); _loot.Value = entry; }
-        var row = new LootRowEditor(entry, RefreshPreview); row.RemoveRequested += (_, _) => { _lootRows.Children.Remove(row); RefreshPreview(); };
+        var row = new LootRowEditor(entry, RefreshPreview, request => ReferenceLookupRequested?.Invoke(this, request)); row.RemoveRequested += (_, _) => { _lootRows.Children.Remove(row); RefreshPreview(); };
         _lootRows.Children.Add(row); RefreshPreview();
     }
 
@@ -307,13 +308,15 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
 
         public event EventHandler? RemoveRequested;
 
-        public VendorRowEditor(Action changed)
+        public VendorRowEditor(Action changed, Action<ReferencePickerRequest> lookup)
         {
             foreach (var number in new[] { _slot, _item, _maximumCount, _restockSeconds, _extendedCost })
                 number.ValueChanged += (_, _) => changed();
 
             var remove = new Button { Content = "Remove" };
             remove.Click += (_, _) => RemoveRequested?.Invoke(this, EventArgs.Empty);
+            var findItem = new Button { Content = "Find…" };
+            findItem.Click += (_, _) => lookup(new(ReferenceDomain.Item, "Vendor item", (uint)(_item.Value ?? 0), selected => _item.Value = selected));
             Content = new Border
             {
                 BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Padding = new Thickness(8),
@@ -321,7 +324,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
                 {
                     Children =
                     {
-                        Labeled("Slot (-1 = automatic)", _slot), Labeled("Item ID", _item), Labeled("Maximum stock (0 = unlimited)", _maximumCount),
+                        Labeled("Slot (-1 = automatic)", _slot), Labeled("Item ID", FieldWithButton(_item, findItem)), Labeled("Maximum stock (0 = unlimited)", _maximumCount),
                         Labeled("Restock seconds", _restockSeconds), Labeled("Extended cost ID", _extendedCost),
                         new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Children = { remove } }
                     }
@@ -349,7 +352,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
 
         public event EventHandler? RemoveRequested;
 
-        public LootRowEditor(uint entry, Action changed)
+        public LootRowEditor(uint entry, Action changed, Action<ReferencePickerRequest> lookup)
         {
             _entry = Number(1, uint.MaxValue, entry == 0 ? 1 : entry);
             foreach (var number in new[] { _entry, _item, _reference, _chance, _lootMode, _groupId, _minimumCount, _maximumCount })
@@ -359,6 +362,8 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
 
             var remove = new Button { Content = "Remove" };
             remove.Click += (_, _) => RemoveRequested?.Invoke(this, EventArgs.Empty);
+            var findItem = new Button { Content = "Find…" };
+            findItem.Click += (_, _) => lookup(new(ReferenceDomain.Item, "Creature loot item", (uint)(_item.Value ?? 0), selected => _item.Value = selected));
             Content = new Border
             {
                 BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Padding = new Thickness(8),
@@ -371,7 +376,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
                         {
                             Children =
                             {
-                                Labeled("Loot entry", _entry), Labeled("Item ID", _item), Labeled("Reference ID", _reference), Labeled("Chance %", _chance),
+                                Labeled("Loot entry", _entry), Labeled("Item ID", FieldWithButton(_item, findItem)), Labeled("Reference ID", _reference), Labeled("Chance %", _chance),
                                 Labeled("Loot mode", _lootMode), Labeled("Group", _groupId), Labeled("Minimum count", _minimumCount), Labeled("Maximum count", _maximumCount)
                             }
                         },
@@ -396,4 +401,5 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         Margin = new Thickness(0, 0, 10, 6),
         Children = { new TextBlock { Text = label, Foreground = Brush.Parse("#9AA5B7") }, control }
     };
+    private static Grid FieldWithButton(Control field, Control button) => new() { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { field, WithColumn(button, 1) } };
 }

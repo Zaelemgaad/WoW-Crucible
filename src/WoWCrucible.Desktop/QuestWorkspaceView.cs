@@ -20,6 +20,7 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _status = Status("Offline portable quest schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _commit = AccentButton("Insert into connected world database"); private WorldContentWritePlan? _pendingPlan; private uint? _loadedId; private IReadOnlyDictionary<string, object?>? _loadedValues; private bool _syncingSemantics;
     public event EventHandler? BackRequested;
+    public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public QuestWorkspaceView(DesktopWorkspaceSession session)
     {
@@ -58,14 +59,41 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
                 var text = new TextBox { Text = CellText(value), AcceptsReturn = textField, TextWrapping = textField ? TextWrapping.Wrap : TextWrapping.NoWrap, IsReadOnly = column.Extra.Contains("GENERATED", StringComparison.OrdinalIgnoreCase) || column.Extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase) };
                 var nullValue = new CheckBox { Content = "NULL", IsChecked = value is null, IsEnabled = column.Nullable && !text.IsReadOnly }; nullValue.IsCheckedChanged += (_, _) => { text.IsEnabled = nullValue.IsChecked != true; RefreshPreview(); }; text.IsEnabled = value is not null; text.TextChanged += (_, _) => { RawSemanticChanged(column.Name); RefreshPreview(); };
                 var description = QuestSemanticCatalog.DescribeField(column.Name); var label = new TextBlock { Text = $"{column.Name} · {column.ColumnType}{(column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase) ? " · PRIMARY KEY" : string.Empty)}{(description.Length == 0 ? string.Empty : $"\n{description}")}", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center, Foreground = description.Length == 0 ? null : Brush.Parse("#B7C2D5") };
-                panel.Children.Add(new Grid { ColumnDefinitions = new("2*,3*,Auto"), ColumnSpacing = 9, Children = { label, WithColumn(text, 1), WithColumn(nullValue, 2) } }); _editors[column.Name] = (column, text, nullValue);
+                var row = new Grid { ColumnDefinitions = new("2*,3*,Auto,Auto"), ColumnSpacing = 9, Children = { label, WithColumn(text, 1), WithColumn(nullValue, 2) } };
+                if (ReferenceForField(column.Name) is { } reference)
+                {
+                    var find = new Button { Content = "Find…", IsEnabled = !text.IsReadOnly }; find.Click += (_, _) =>
+                    {
+                        var current = uint.TryParse(text.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+                        ReferenceLookupRequested?.Invoke(this, new(reference, column.Name, current, selected => text.Text = selected.ToString(CultureInfo.InvariantCulture)));
+                    };
+                    Grid.SetColumn(find, 3); row.Children.Add(find);
+                }
+                panel.Children.Add(row); _editors[column.Name] = (column, text, nullValue);
             }
             tabs.Add(new TabItem { Header = group.Key, Content = new ScrollViewer { Content = panel } });
         }
         _fieldTabs.ItemsSource = tabs; SyncSemanticControls(); RefreshPreview();
     }
 
-    private Control LinksPage() => new ScrollViewer { Content = new StackPanel { Spacing = 9, Margin = new Thickness(12), Children = { new TextBlock { Text = "Quest-giver relationships", FontSize = 17, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = "Enter template IDs separated by commas, spaces, or new lines. These become creature_queststarter/ender and gameobject_queststarter/ender rows in the same transaction. Existing link identities are refused rather than replaced.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, Labeled("Creature starters", _creatureStarters), Labeled("Creature enders", _creatureEnders), Labeled("Gameobject starters", _gameObjectStarters), Labeled("Gameobject enders", _gameObjectEnders) } } };
+    private Control LinksPage() => new ScrollViewer { Content = new StackPanel { Spacing = 9, Margin = new Thickness(12), Children = { new TextBlock { Text = "Quest-giver relationships", FontSize = 17, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = "Enter template IDs separated by commas, spaces, or new lines, or use the searchable pickers. These become creature_queststarter/ender and gameobject_queststarter/ender rows in the same transaction. Existing link identities are refused rather than replaced.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, LinkPicker("Creature starters", _creatureStarters, ReferenceDomain.Creature), LinkPicker("Creature enders", _creatureEnders, ReferenceDomain.Creature), LinkPicker("Gameobject starters", _gameObjectStarters, ReferenceDomain.GameObject), LinkPicker("Gameobject enders", _gameObjectEnders, ReferenceDomain.GameObject) } } };
+
+    private Control LinkPicker(string label, TextBox input, ReferenceDomain domain)
+    {
+        var find = new Button { Content = "Find and add…" }; find.Click += (_, _) => ReferenceLookupRequested?.Invoke(this, new(domain, label, 0, selected =>
+        {
+            var ids = ParseIds(input.Text).Append(selected).Distinct(); input.Text = string.Join(", ", ids);
+        }));
+        return new StackPanel { Spacing = 4, Children = { new TextBlock { Text = label, FontWeight = FontWeight.SemiBold }, new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { input, WithColumn(find, 1) } } } };
+    }
+
+    private static ReferenceDomain? ReferenceForField(string name)
+    {
+        if (name.StartsWith("RewardItem", StringComparison.OrdinalIgnoreCase) || name.StartsWith("RewardChoiceItemID", StringComparison.OrdinalIgnoreCase) || name.StartsWith("RequiredItemId", StringComparison.OrdinalIgnoreCase) || name.StartsWith("ItemDrop", StringComparison.OrdinalIgnoreCase) || name.Equals("StartItem", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Item;
+        if (name.Equals("RewardSpell", StringComparison.OrdinalIgnoreCase) || name.Equals("RewardDisplaySpell", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Spell;
+        if (name.Equals("RewardNextQuest", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Quest;
+        return null;
+    }
 
     private void RawSemanticChanged(string name) { if (_syncingSemantics) return; if (name.Equals("QuestType", StringComparison.OrdinalIgnoreCase) || name.Equals("Flags", StringComparison.OrdinalIgnoreCase)) SyncSemanticControls(); }
     private void SyncSemanticControls()

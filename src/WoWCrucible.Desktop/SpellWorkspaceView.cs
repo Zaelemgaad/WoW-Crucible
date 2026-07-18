@@ -11,7 +11,7 @@ internal sealed record SpellFieldChange(DbcColumn Column, string Value);
 
 internal sealed class SpellWorkspaceView : UserControl
 {
-    private sealed record FieldDefinition(string Label, int Column, bool Multiline = false);
+    private sealed record FieldDefinition(string Label, int Column, bool Multiline = false, ReferenceDomain? Reference = null);
     private sealed class FieldBinding(DbcColumn column, TextBox input, string originalText)
     {
         public DbcColumn Column { get; } = column;
@@ -33,6 +33,7 @@ internal sealed class SpellWorkspaceView : UserControl
 
     public event EventHandler? BackRequested;
     public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
+    public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public SpellWorkspaceView(WdbcFile file, int row, IReadOnlyList<DbcColumn> columns, DesktopWorkspaceSession session, Action<IReadOnlyList<SpellFieldChange>> apply)
     {
@@ -231,8 +232,8 @@ internal sealed class SpellWorkspaceView : UserControl
     private static FieldDefinition[] GeneralFields() =>
     [
         new("Spell ID", 0), new("Name (enUS)", 136), new("Category", 1), new("Dispel type", 2), new("Mechanic", 3),
-        new("Spell level", 39), new("Base level", 38), new("Maximum level", 37), new("Casting time index", 28),
-        new("Duration index", 40), new("Range index", 46), new("Recovery time (ms)", 29), new("Category recovery (ms)", 30),
+        new("Spell level", 39), new("Base level", 38), new("Maximum level", 37), new("Casting time index", 28, Reference: ReferenceDomain.SpellCastTime),
+        new("Duration index", 40, Reference: ReferenceDomain.SpellDuration), new("Range index", 46, Reference: ReferenceDomain.SpellRange), new("Recovery time (ms)", 29), new("Category recovery (ms)", 30),
         new("School mask", 225), new("Power type", 41), new("Maximum targets", 212), new("Proc flags", 34),
         new("Proc chance", 35), new("Proc charges", 36), new("Attributes", 4), new("AttributesEx", 5),
         new("AttributesEx2", 6), new("AttributesEx3", 7), new("AttributesEx4", 8), new("AttributesEx5", 9),
@@ -244,12 +245,12 @@ internal sealed class SpellWorkspaceView : UserControl
         var fields = new List<FieldDefinition>
         {
             new("Mana cost", 42), new("Mana cost per level", 43), new("Mana per second", 44), new("Mana cost percent", 204),
-            new("Rune cost ID", 226), new("Required spell focus", 18), new("Required areas ID", 224),
+            new("Rune cost ID", 226, Reference: ReferenceDomain.SpellRuneCost), new("Required spell focus", 18), new("Required areas ID", 224),
             new("Equipped item class", 68), new("Equipped item subclass mask", 69), new("Equipped inventory mask", 70)
         };
         for (var index = 0; index < 8; index++)
         {
-            fields.Add(new FieldDefinition($"Reagent {index + 1} ID", 52 + index));
+            fields.Add(new FieldDefinition($"Reagent {index + 1} ID", 52 + index, Reference: ReferenceDomain.Item));
             fields.Add(new FieldDefinition($"Reagent {index + 1} count", 60 + index));
         }
         return fields.ToArray();
@@ -261,8 +262,8 @@ internal sealed class SpellWorkspaceView : UserControl
         new("Die sides", 74 + effect), new("Points per level", 77 + effect), new("Points per combo point", 119 + effect),
         new("Implicit target A", 86 + effect), new("Implicit target B", 89 + effect), new("Radius index", 92 + effect),
         new("Aura period", 98 + effect), new("Multiple value", 101 + effect), new("Chain targets", 104 + effect),
-        new("Item type", 107 + effect), new("Misc value A", 110 + effect), new("Misc value B", 113 + effect),
-        new("Trigger spell", 116 + effect), new("Mechanic", 83 + effect), new("Class mask A", 122 + effect),
+        new("Item type", 107 + effect, Reference: ReferenceDomain.Item), new("Misc value A", 110 + effect), new("Misc value B", 113 + effect),
+        new("Trigger spell", 116 + effect, Reference: ReferenceDomain.Spell), new("Mechanic", 83 + effect), new("Class mask A", 122 + effect),
         new("Class mask B", 125 + effect), new("Class mask C", 128 + effect)
     ];
 
@@ -274,16 +275,16 @@ internal sealed class SpellWorkspaceView : UserControl
 
     private static FieldDefinition[] VisualFields() =>
     [
-        new("Primary spell visual ID", 131), new("Secondary spell visual ID", 132), new("Spell icon ID", 133),
-        new("Active icon ID", 134), new("Spell priority", 135), new("Missile ID", 227), new("Missile speed", 47),
-        new("Difficulty ID", 233), new("Modal next spell", 48), new("Spell class set", 208)
+        new("Primary spell visual ID", 131, Reference: ReferenceDomain.SpellVisual), new("Secondary spell visual ID", 132, Reference: ReferenceDomain.SpellVisual), new("Spell icon ID", 133, Reference: ReferenceDomain.SpellIcon),
+        new("Active icon ID", 134, Reference: ReferenceDomain.SpellIcon), new("Spell priority", 135), new("Missile ID", 227), new("Missile speed", 47),
+        new("Difficulty ID", 233, Reference: ReferenceDomain.SpellDifficulty), new("Modal next spell", 48, Reference: ReferenceDomain.Spell), new("Spell class set", 208)
     ];
 
     private TabItem Tab(string title, IEnumerable<FieldDefinition> fields)
     {
         var grid = new Grid
         {
-            ColumnDefinitions = new("Auto,2*,*"),
+            ColumnDefinitions = new("Auto,2*,*,Auto"),
             ColumnSpacing = 10,
             RowSpacing = 7,
             Margin = new Thickness(12)
@@ -307,6 +308,20 @@ internal sealed class SpellWorkspaceView : UserControl
             Grid.SetRow(input, row); Grid.SetColumn(input, 1);
             Grid.SetRow(meaning, row); Grid.SetColumn(meaning, 2);
             grid.Children.Add(label); grid.Children.Add(input); grid.Children.Add(meaning);
+            if (field.Reference is { } reference)
+            {
+                var find = new Button { Content = "Find…" };
+                find.Click += (_, _) =>
+                {
+                    var currentId = uint.TryParse(input.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+                    ReferenceLookupRequested?.Invoke(this, new(reference, field.Label, currentId, selected =>
+                    {
+                        input.Text = selected.ToString(CultureInfo.InvariantCulture);
+                        _status.Text = $"Selected {reference} ID {selected:N0} for {field.Label}. Apply changes when the spell is ready.";
+                    }, reference == ReferenceDomain.Spell ? new ReferenceDbcSource(_file, _columns, 0, 136, [39, 3]) : null));
+                };
+                Grid.SetRow(find, row); Grid.SetColumn(find, 3); grid.Children.Add(find);
+            }
             if (!input.IsReadOnly) _bindings.Add(new FieldBinding(column, input, current));
             row++;
         }

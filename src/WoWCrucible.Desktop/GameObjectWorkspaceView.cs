@@ -35,6 +35,7 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
     private readonly Button _commit = AccentButton("Insert into connected world database"); private WorldContentWritePlan? _pendingPlan; private uint? _loadedEntry;
 
     public event EventHandler? BackRequested;
+    public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public GameObjectWorkspaceView(DesktopWorkspaceSession session)
     {
@@ -72,13 +73,26 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
     private Control LootQuestPage()
     {
         var add = AccentButton("Add loot row"); add.Click += (_, _) => AddLootRow();
-        return new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(10), Children = { new StackPanel { Spacing = 7, Children = { add, new TextBlock { Text = "Loot is valid for chest [3] and fishing-hole [25] types. Quest links require quest-giver [2]. The editor blocks mismatched combinations instead of producing dead records.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, new TextBlock { Text = "Starts quests", FontWeight = FontWeight.SemiBold }, _startsQuests, new TextBlock { Text = "Ends quests", FontWeight = FontWeight.SemiBold }, _endsQuests } }, WithRow(new ScrollViewer { Content = _lootRows }, 1) } };
+        var findStart = new Button { Content = "Find and add starting quest…" };
+        findStart.Click += (_, _) => RequestReference(ReferenceDomain.Quest, "Starting quest", _startsQuests);
+        var findEnd = new Button { Content = "Find and add ending quest…" };
+        findEnd.Click += (_, _) => RequestReference(ReferenceDomain.Quest, "Ending quest", _endsQuests);
+        return new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(10), Children = { new StackPanel { Spacing = 7, Children = { add, new TextBlock { Text = "Loot is valid for chest [3] and fishing-hole [25] types. Quest links require quest-giver [2]. The editor blocks mismatched combinations instead of producing dead records.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, new TextBlock { Text = "Starts quests", FontWeight = FontWeight.SemiBold }, _startsQuests, findStart, new TextBlock { Text = "Ends quests", FontWeight = FontWeight.SemiBold }, _endsQuests, findEnd } }, WithRow(new ScrollViewer { Content = _lootRows }, 1) } };
     }
 
     private void AddLootRow()
     {
         var definition = SelectedType(); var suggested = definition.Id is 3 or 25 ? (uint)(_data[1].Value ?? 0) : 0; if (suggested == 0) suggested = (uint)(_entry.Value ?? 0);
-        var row = new LootRowEditor(suggested, RefreshPreview); row.RemoveRequested += (_, _) => { _lootRows.Children.Remove(row); RefreshPreview(); }; _lootRows.Children.Add(row); RefreshPreview();
+        var row = new LootRowEditor(suggested, RefreshPreview, (field, currentId, selected) => ReferenceLookupRequested?.Invoke(this, new ReferencePickerRequest(ReferenceDomain.Item, field, currentId, selected))); row.RemoveRequested += (_, _) => { _lootRows.Children.Remove(row); RefreshPreview(); }; _lootRows.Children.Add(row); RefreshPreview();
+    }
+
+    private void RequestReference(ReferenceDomain domain, string field, TextBox destination)
+    {
+        ReferenceLookupRequested?.Invoke(this, new ReferencePickerRequest(domain, field, 0, id =>
+        {
+            var ids = ParseIds(destination.Text).Append(id).Distinct();
+            destination.Text = string.Join(", ", ids);
+        }));
     }
 
     private void HookEvents()
@@ -170,8 +184,9 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
     {
         private readonly NumericUpDown _entry; private readonly NumericUpDown _item = Number(0, uint.MaxValue); private readonly NumericUpDown _reference = Number(0, int.MaxValue); private readonly NumericUpDown _chance = Number(0, 100, 100); private readonly CheckBox _quest = new() { Content = "Quest required" }; private readonly NumericUpDown _mode = Number(1, ushort.MaxValue, 1); private readonly NumericUpDown _group = Number(0, byte.MaxValue); private readonly NumericUpDown _minimum = Number(1, byte.MaxValue, 1); private readonly NumericUpDown _maximum = Number(1, byte.MaxValue, 1); private readonly TextBox _comment = new();
         public event EventHandler? RemoveRequested;
-        public LootRowEditor(uint entry, Action changed) { _entry = Number(1, uint.MaxValue, entry); foreach (var number in new[] { _entry, _item, _reference, _chance, _mode, _group, _minimum, _maximum }) number.ValueChanged += (_, _) => changed(); _quest.IsCheckedChanged += (_, _) => changed(); _comment.TextChanged += (_, _) => changed(); var remove = new Button { Content = "Remove" }; remove.Click += (_, _) => RemoveRequested?.Invoke(this, EventArgs.Empty); Content = new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Padding = new Thickness(8), Child = new WrapPanel { Children = { Labeled("Loot entry", _entry), Labeled("Item ID", _item), Labeled("Reference", _reference), Labeled("Chance %", _chance), Labeled("Loot mode", _mode), Labeled("Group", _group), Labeled("Minimum", _minimum), Labeled("Maximum", _maximum), Labeled("Comment", _comment), new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Children = { _quest, remove } } } } }; }
+        public LootRowEditor(uint entry, Action changed, Action<string, uint, Action<uint>> lookup) { _entry = Number(1, uint.MaxValue, entry); foreach (var number in new[] { _entry, _item, _reference, _chance, _mode, _group, _minimum, _maximum }) number.ValueChanged += (_, _) => changed(); _quest.IsCheckedChanged += (_, _) => changed(); _comment.TextChanged += (_, _) => changed(); var findItem = new Button { Content = "Find…" }; findItem.Click += (_, _) => lookup("Loot item", (uint)(_item.Value ?? 0), selected => _item.Value = selected); var remove = new Button { Content = "Remove" }; remove.Click += (_, _) => RemoveRequested?.Invoke(this, EventArgs.Empty); Content = new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Padding = new Thickness(8), Child = new WrapPanel { Children = { Labeled("Loot entry", _entry), FieldWithButton("Item ID", _item, findItem), Labeled("Reference", _reference), Labeled("Chance %", _chance), Labeled("Loot mode", _mode), Labeled("Group", _group), Labeled("Minimum", _minimum), Labeled("Maximum", _maximum), Labeled("Comment", _comment), new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Children = { _quest, remove } } } } }; }
         public GameObjectLootDraft Draft() => new((uint)(_entry.Value ?? 0), (uint)(_item.Value ?? 0), (int)(_reference.Value ?? 0), (float)(_chance.Value ?? 0), _quest.IsChecked == true, (ushort)(_mode.Value ?? 1), (byte)(_group.Value ?? 0), (byte)(_minimum.Value ?? 1), (byte)(_maximum.Value ?? 1), _comment.Text ?? string.Empty);
         private static Control Labeled(string label, Control control) => new StackPanel { Children = { new TextBlock { Text = label, Foreground = Brush.Parse("#9AA5B7") }, control } };
+        private static Control FieldWithButton(string label, Control control, Button button) => new StackPanel { Children = { new TextBlock { Text = label, Foreground = Brush.Parse("#9AA5B7") }, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5, Children = { control, button } } } };
     }
 }

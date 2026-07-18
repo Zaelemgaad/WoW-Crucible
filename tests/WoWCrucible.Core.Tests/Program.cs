@@ -645,6 +645,34 @@ if (spellPath is not null)
     var spellOverrideDifferences = SpellSqlAuditService.CompareOverride(spell, 0, spellColumns, spellSqlTable, spellSqlValues);
     if (spellOverrideDifferences.Count != 1 || spellOverrideDifferences[0].FieldIndex != 42 || SpellSqlAuditService.FindDbcRow(spell, spellColumns, spell.GetRaw(0, spellColumns[0])) != 0)
         throw new InvalidOperationException("Effective spell_dbc differences or exact Spell.dbc ID lookup were incorrect.");
+    var namedSpellRow = Enumerable.Range(0, spell.RowCount).First(row => !string.IsNullOrWhiteSpace(Convert.ToString(spell.GetDisplayValue(row, spellColumns[136]))));
+    var namedSpellId = spell.GetRaw(namedSpellRow, spellColumns[0]); var namedSpell = Convert.ToString(spell.GetDisplayValue(namedSpellRow, spellColumns[136]))!;
+    var exactSpellReference = ReferenceLookupService.SearchDbc(ReferenceDomain.Spell, spell, spellColumns, 0, 136, namedSpellId.ToString(), 25, 39, 3);
+    var nameSpellReference = ReferenceLookupService.SearchDbc(ReferenceDomain.Spell, spell, spellColumns, 0, 136, namedSpell[..Math.Min(5, namedSpell.Length)], 25, 39, 3);
+    var mergedSpellReference = ReferenceLookupService.Merge(ReferenceDomain.Spell, namedSpellId.ToString(), 25, exactSpellReference,
+        new ReferenceLookupPage(ReferenceDomain.Spell, namedSpellId.ToString(), [new(namedSpellId, namedSpell, "spell_dbc", "SQL override")], false, ["spell_dbc"]));
+    if (exactSpellReference.Entries.Count != 1 || exactSpellReference.Entries[0].Id != namedSpellId || !nameSpellReference.Entries.Any(entry => entry.Id == namedSpellId) ||
+        mergedSpellReference.Entries.Count != 1 || !mergedSpellReference.Entries[0].Source.Contains("Spell.dbc", StringComparison.OrdinalIgnoreCase) || !mergedSpellReference.Entries[0].Source.Contains("spell_dbc", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Shared DBC/SQL reference searching did not resolve names, exact IDs, or merge duplicate source identities.");
+    var numericReferenceLayouts = new (string Table, int NameColumn, int[] Details)[]
+    {
+        ("SpellCastTimes", -1, [1, 2, 3]),
+        ("SpellDuration", -1, [1, 2, 3]),
+        ("SpellRange", 6, [1, 2, 3, 4, 5]),
+        ("SpellRuneCost", -1, [1, 2, 3, 4]),
+        ("SpellVisual", -1, [1, 2, 3, 4, 5, 6, 7, 8]),
+        ("SpellIcon", 1, []),
+        ("SpellDifficulty", -1, [1, 2, 3, 4])
+    };
+    foreach (var layout in numericReferenceLayouts)
+    {
+        var path = files.First(candidate => Path.GetFileName(candidate).Equals(layout.Table + ".dbc", StringComparison.OrdinalIgnoreCase));
+        var dbc = WdbcFile.Load(path); var resolution = schema.ResolveColumns(layout.Table, dbc.FieldCount);
+        if (resolution.MatchKind != DbcSchemaMatchKind.NamedMatch) throw new InvalidOperationException($"Reference picker test could not resolve {layout.Table}.dbc.");
+        var referenceId = dbc.GetRaw(0, resolution.Columns[0]);
+        var lookup = ReferenceLookupService.SearchDbc(ReferenceDomain.Spell, dbc, resolution.Columns, 0, layout.NameColumn, referenceId.ToString(), 5, layout.Details);
+        if (!lookup.Entries.Any(entry => entry.Id == referenceId)) throw new InvalidOperationException($"Shared reference searching did not resolve numeric {layout.Table}.dbc ID {referenceId}.");
+    }
     var spellRowsBefore = spell.RowCount;
     var timer = Stopwatch.StartNew();
     spell.CloneRows(0, 100, spellColumns[0]);

@@ -37,6 +37,9 @@ public partial class MainWindow : Window
     private BehaviorWorkspaceView? _behaviorWorkspaceView;
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
     private SqlWorkspaceView? _sqlWorkspaceView;
+    private readonly Stack<(Control Workspace, string Title)> _featureHistory = new();
+    private string _featureTitle = string.Empty;
+    private readonly Dictionary<string, (WdbcFile File, IReadOnlyList<DbcColumn> Columns)> _referenceDbcCache = new(StringComparer.OrdinalIgnoreCase);
 
     private DbcDocumentSession? Current => _activeDocument >= 0 && _activeDocument < _documents.Count ? _documents[_activeDocument] : null;
     private WdbcFile? CurrentFile => Current?.File;
@@ -392,8 +395,61 @@ public partial class MainWindow : Window
         var view = new SpellWorkspaceView(document.File, row, document.Schema.Columns, _workspaceSession, changes => ApplySpellChanges(document, row, changes));
         view.BackRequested += (_, _) => CloseFeatureWorkspace();
         view.FullSqlEditRequested += async (_, request) => await OpenCompleteSqlRowAsync(request);
+        view.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         OpenFeatureWorkspace(view, $"Spell {document.File.GetDisplayValue(row, document.Schema.Columns[0])}");
     }
+
+    private async Task OpenReferencePickerAsync(ReferencePickerRequest request)
+    {
+        if (request.DbcSource is null)
+        {
+            var definition = ReferenceDbcDefinition(request.Domain);
+            if (request.Domain == ReferenceDomain.Spell)
+            {
+                var openSpell = _documents.FirstOrDefault(document => Path.GetFileNameWithoutExtension(document.File.SourcePath).Equals("Spell", StringComparison.OrdinalIgnoreCase));
+                if (openSpell is not null) request = request with { DbcSource = new(openSpell.File, openSpell.Schema.Columns, 0, 136, [39, 3]) };
+            }
+            if (request.DbcSource is null && definition is { } dbcDefinition)
+            {
+                var currentDirectory = Current is { } current ? Path.GetDirectoryName(current.File.SourcePath) : null;
+                var path = currentDirectory is not null && File.Exists(Path.Combine(currentDirectory, dbcDefinition.FileName))
+                    ? Path.Combine(currentDirectory, dbcDefinition.FileName)
+                    : Path.Combine(_workspaceSession.Settings.CoreDbcPath, dbcDefinition.FileName);
+                if (File.Exists(path))
+                {
+                    try
+                    {
+                        path = Path.GetFullPath(path);
+                        if (!_referenceDbcCache.TryGetValue(path, out var cached))
+                        {
+                            var catalog = ResolveSchemaCatalog(); var loaded = await Task.Run(() => WdbcFile.Load(path)); var resolution = catalog.ResolveColumns(dbcDefinition.TableName, loaded.FieldCount);
+                            if (resolution.MatchKind == DbcSchemaMatchKind.NamedMatch) _referenceDbcCache[path] = cached = (loaded, resolution.Columns);
+                        }
+                        if (cached.File is not null) request = request with { DbcSource = new(cached.File, cached.Columns, 0, dbcDefinition.NameColumn, dbcDefinition.DetailColumns) };
+                    }
+                    catch (Exception exception) { DesktopCrashLogger.Log($"Reference {dbcDefinition.FileName} load failed", exception); }
+                }
+            }
+        }
+        var view = new ReferencePickerView(_workspaceSession, request);
+        view.BackRequested += (_, _) => { view.Dispose(); CloseFeatureWorkspace(); };
+        view.SelectionApplied += (_, _) => { view.Dispose(); CloseFeatureWorkspace(); };
+        OpenFeatureWorkspace(view, $"Select {request.Domain} for {request.FieldLabel}");
+    }
+
+    private sealed record ReferenceDbcDefinitionRow(string FileName, string TableName, int NameColumn, int[] DetailColumns);
+    private static ReferenceDbcDefinitionRow? ReferenceDbcDefinition(ReferenceDomain domain) => domain switch
+    {
+        ReferenceDomain.Spell => new("Spell.dbc", "Spell", 136, [39, 3]),
+        ReferenceDomain.SpellCastTime => new("SpellCastTimes.dbc", "SpellCastTimes", -1, [1, 2, 3]),
+        ReferenceDomain.SpellDuration => new("SpellDuration.dbc", "SpellDuration", -1, [1, 2, 3]),
+        ReferenceDomain.SpellRange => new("SpellRange.dbc", "SpellRange", 6, [1, 2, 3, 4, 5]),
+        ReferenceDomain.SpellRuneCost => new("SpellRuneCost.dbc", "SpellRuneCost", -1, [1, 2, 3, 4]),
+        ReferenceDomain.SpellVisual => new("SpellVisual.dbc", "SpellVisual", -1, [1, 2, 3, 4, 5, 6, 7, 8]),
+        ReferenceDomain.SpellIcon => new("SpellIcon.dbc", "SpellIcon", 1, []),
+        ReferenceDomain.SpellDifficulty => new("SpellDifficulty.dbc", "SpellDifficulty", -1, [1, 2, 3, 4]),
+        _ => null
+    };
 
     private void ApplySpellChanges(DbcDocumentSession document, int row, IReadOnlyList<SpellFieldChange> changes)
     {
@@ -521,6 +577,7 @@ public partial class MainWindow : Window
             _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession);
             _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace();
             _itemWorkbenchView.FullSqlEditRequested += async (_, request) => await OpenCompleteSqlRowAsync(request);
+            _itemWorkbenchView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         }
         OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
     }
@@ -530,6 +587,7 @@ public partial class MainWindow : Window
         {
             _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession);
             _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _creatureWorkspaceView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         }
         OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
     }
@@ -540,6 +598,7 @@ public partial class MainWindow : Window
         {
             _gameObjectWorkspaceView = new GameObjectWorkspaceView(_workspaceSession);
             _gameObjectWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _gameObjectWorkspaceView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         }
         OpenFeatureWorkspace(_gameObjectWorkspaceView, "Gameobjects");
     }
@@ -550,6 +609,7 @@ public partial class MainWindow : Window
         {
             _questWorkspaceView = new QuestWorkspaceView(_workspaceSession);
             _questWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _questWorkspaceView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         }
         OpenFeatureWorkspace(_questWorkspaceView, "Quests");
     }
@@ -571,7 +631,7 @@ public partial class MainWindow : Window
         {
             _layeredDbcWorkspaceView = new LayeredDbcWorkspaceView(_workspaceSession);
             _layeredDbcWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
-            _layeredDbcWorkspaceView.OpenDbcRequested += async (_, path) => { CloseFeatureWorkspace(); await LoadDbcAsync(path); };
+            _layeredDbcWorkspaceView.OpenDbcRequested += async (_, path) => { CloseAllFeatureWorkspaces(); await LoadDbcAsync(path); };
             _layeredDbcWorkspaceView.StageOverridesRequested += (_, paths) => OpenPatchBuilderWithPaths(paths);
         }
         OpenFeatureWorkspace(_layeredDbcWorkspaceView, "DBC Layers & Promotion");
@@ -653,7 +713,7 @@ public partial class MainWindow : Window
             _sqlWorkspaceView = new SqlWorkspaceView(_workspaceSession);
             _sqlWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
             _sqlWorkspaceView.GuidedEditRequested += (_, request) => OpenGuidedSqlRow(request);
-            _sqlWorkspaceView.OpenDbcRequested += async (_, path) => { CloseFeatureWorkspace(); await LoadDbcAsync(path); };
+            _sqlWorkspaceView.OpenDbcRequested += async (_, path) => { CloseAllFeatureWorkspaces(); await LoadDbcAsync(path); };
             _sqlWorkspaceView.OpenMpqRequested += async (_, path) => await OpenIndexedArchiveAsync(path);
         }
         OpenFeatureWorkspace(_sqlWorkspaceView, "SQL Studio"); _sqlWorkspaceView.Activate();
@@ -677,22 +737,22 @@ public partial class MainWindow : Window
     {
         if (request.Table.Equals("item_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); }
+            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); _itemWorkbenchView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
             _itemWorkbenchView.OpenItemRow(request.Row); OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
         }
         else if (request.Table.Equals("creature_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_creatureWorkspaceView is null) { _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession); _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+            if (_creatureWorkspaceView is null) { _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession); _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _creatureWorkspaceView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
             _creatureWorkspaceView.OpenCreatureRow(request.Row); OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
         }
         else if (request.Table.Equals("gameobject_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_gameObjectWorkspaceView is null) { _gameObjectWorkspaceView = new GameObjectWorkspaceView(_workspaceSession); _gameObjectWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+            if (_gameObjectWorkspaceView is null) { _gameObjectWorkspaceView = new GameObjectWorkspaceView(_workspaceSession); _gameObjectWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _gameObjectWorkspaceView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
             _gameObjectWorkspaceView.OpenGameObjectRow(request.Row); OpenFeatureWorkspace(_gameObjectWorkspaceView, "Gameobjects");
         }
         else if (request.Table.Equals("quest_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_questWorkspaceView is null) { _questWorkspaceView = new QuestWorkspaceView(_workspaceSession); _questWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+            if (_questWorkspaceView is null) { _questWorkspaceView = new QuestWorkspaceView(_workspaceSession); _questWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _questWorkspaceView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
             _questWorkspaceView.OpenQuestRow(request.Row); OpenFeatureWorkspace(_questWorkspaceView, "Quests");
         }
         else if (BehaviorDomainCatalog.All.Any(domain => domain.TableName.Equals(request.Table, StringComparison.OrdinalIgnoreCase)))
@@ -732,15 +792,33 @@ public partial class MainWindow : Window
 
     private void OpenFeatureWorkspace(Control workspace, string title)
     {
+        if (FeatureWorkspaceHost.IsVisible && FeatureWorkspaceHost.Child is Control current && !ReferenceEquals(current, workspace))
+            _featureHistory.Push((current, _featureTitle));
         FeatureWorkspaceHost.Child = workspace;
         FeatureWorkspaceHost.IsVisible = true;
         MainHeader.IsVisible = NavigationPane.IsVisible = NavigationSplitter.IsVisible = EditorWorkspace.IsVisible = InspectorSplitter.IsVisible = InspectorPane.IsVisible = MainStatusBar.IsVisible = false;
+        _featureTitle = title;
         Title = $"WoW Crucible — {title}";
-        DesktopCrashLogger.Debug("UI", "feature-workspace-opened", ("title", title), ("view", workspace.GetType().Name));
+        DesktopCrashLogger.Debug("UI", "feature-workspace-opened", ("title", title), ("view", workspace.GetType().Name), ("history_depth", _featureHistory.Count));
     }
 
     private void CloseFeatureWorkspace()
     {
+        if (_featureHistory.TryPop(out var previous))
+        {
+            FeatureWorkspaceHost.Child = previous.Workspace;
+            _featureTitle = previous.Title;
+            Title = $"WoW Crucible — {previous.Title}";
+            DesktopCrashLogger.Debug("UI", "feature-workspace-back", ("title", previous.Title), ("view", previous.Workspace.GetType().Name), ("history_depth", _featureHistory.Count));
+            return;
+        }
+        CloseAllFeatureWorkspaces();
+    }
+
+    private void CloseAllFeatureWorkspaces()
+    {
+        _featureHistory.Clear();
+        _featureTitle = string.Empty;
         _assetComparisonView?.Suspend();
         FeatureWorkspaceHost.IsVisible = false;
         FeatureWorkspaceHost.Child = null;

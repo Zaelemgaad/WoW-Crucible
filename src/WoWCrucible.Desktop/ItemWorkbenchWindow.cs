@@ -48,10 +48,11 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     public event EventHandler? BackRequested;
     public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
+    public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public ItemWorkbenchView(DesktopWorkspaceSession session)
     {
-        _session = session; _creator = new ItemCreatorView(session); _session.Changed += SessionChanged; LoadDefaults(); PopulateSessionConnection();
+        _session = session; _creator = new ItemCreatorView(session); _creator.ReferenceLookupRequested += (_, request) => ReferenceLookupRequested?.Invoke(this, request); _session.Changed += SessionChanged; LoadDefaults(); PopulateSessionConnection();
         _items.ItemTemplate = new FuncDataTemplate<ItemCatalogEntry>((item, _) =>
         {
             var panel = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), Margin = new Thickness(3, 2) };
