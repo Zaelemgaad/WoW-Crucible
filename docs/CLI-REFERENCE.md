@@ -38,6 +38,9 @@ wowcrucible asset adt-height-plan <input.adt> <delta> <x:y,x:y|all> <plan.json> 
 wowcrucible asset adt-height-apply <plan.json> <output.adt> [--overwrite]
 wowcrucible asset adt-brush-plan <input.adt> <center-x:center-y> <radius> <strength> <plan.json> [--mode=raise-lower|flatten|smooth|noise] [--target-height=N] [--seed=N] [--falloff=linear|smooth|constant] [--overwrite]
 wowcrucible asset adt-brush-apply <plan.json> <output.adt> [--overwrite]
+wowcrucible asset adt-texture-info <input.adt> [--cells] [--format=text|json]
+wowcrucible asset adt-texture-plan <input.adt> <layer-slot> <texture-id> <x:y,x:y|all> <plan.json> [--overwrite]
+wowcrucible asset adt-texture-apply <plan.json> <output.adt> [--overwrite]
 wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]
 wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
 wowcrucible asset texture-validate <file-or-folder> [--recursive]
@@ -73,6 +76,8 @@ The same native inspection/workspace flow is available under **Modern asset conv
 ADT height editing is intentionally two-stage. `adt-height-plan` binds a finite signed delta and explicit `x:y` cells (or all present cells) to the exact source SHA-256 and original MCNK base heights. `adt-height-apply` refuses a changed source or in-place source overwrite, writes a separate ADT atomically, re-parses every edited height range, and emits a companion `.crucible-map-edit.json` receipt. The Maps & World workspace provides the same selection, preview, and write path visually.
 
 `adt-brush-plan` edits the real 145-float MCVT vertex grids with a tile-local radial brush rather than shifting whole cells. The center uses the ADT's `0..16` terrain grid and radius uses that same coordinate space. Raise/lower applies signed strength; flatten moves toward the required absolute `--target-height` by at most the strength magnitude; smooth moves toward the immutable neighboring source-height average by at most that magnitude; noise uses the magnitude as amplitude and a deterministic signed `--seed`. Linear/smooth/constant radial falloff remains independent of the operation. The plan records the mode plus every exact float offset, preimage, weight, and postimage. `adt-brush-apply` recomputes those values from the bound source, retains the source, writes atomically, re-parses every affected cell, and emits `.crucible-map-brush.json`. The visual grid places the center by click and draws the exact radius before preview/write.
+
+`adt-texture-info` decodes the ordered MTEX catalog and every MCNK→MCLY layer record, including slot, flags, alpha offset, ground-effect ID, resolved path, and exact texture-ID byte offset. `adt-texture-plan` reassigns an existing layer slot across explicit cells (or every cell that has the slot) to an existing MTEX ID. It deliberately does not resize MTEX, add layers, or rewrite alpha maps. Apply remains source-hash/preimage bound, writes a separate ADT atomically, re-parses every changed layer, and emits `.crucible-map-texture.json`. The same-window map workspace shows these decoded layers on cell selection and provides the identical preview/write workflow.
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
 
