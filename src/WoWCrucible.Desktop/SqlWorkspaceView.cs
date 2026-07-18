@@ -17,8 +17,10 @@ internal sealed record SqlGuidedEditRequest(string Table, IReadOnlyDictionary<st
 internal sealed class SqlWorkspaceView : UserControl, IDisposable
 {
     private sealed record TableChoice(DatabaseTableCapability Table) { public override string ToString() => $"{Table.Name}  ·  {Table.Columns.Count} columns"; }
+    private sealed record RelationChoice(DatabaseRelationCapability Relation) { public override string ToString() => $"{Relation.FromTable}.{Relation.FromColumn} → {Relation.ToTable}.{Relation.ToColumn} · {(Relation.Declared ? "FK" : "inferred")}"; }
     private readonly DesktopWorkspaceSession _session;
     private readonly SqlWorkspaceService _service = new();
+    private readonly SqlAdministrationService _administration = new();
     private readonly TextBox _tableFilter = new() { PlaceholderText = "Filter tables…" };
     private readonly ComboBox _schemas = new() { PlaceholderText = "Database schema" };
     private readonly ListBox _tables = new();
@@ -30,6 +32,20 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly StackPanel _dependencyList = new() { Spacing = 5 };
     private readonly TextBlock _dependencyStatus = Status("Select a SQL row, then analyze its recognized dependencies.");
     private readonly TextBox _dependencyLimit = new() { Text = "200", PlaceholderText = "Rows captured per dependency edge" };
+    private readonly ListBox _indexes = new();
+    private readonly TextBox _tableDdl = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
+    private readonly TextBox _indexName = new() { PlaceholderText = "Index name" };
+    private readonly TextBox _indexColumns = new() { PlaceholderText = "column1, column2" };
+    private readonly CheckBox _indexUnique = new() { Content = "UNIQUE" };
+    private readonly TextBlock _administrationStatus = Status("Select a table or refresh a server-administration view.");
+    private readonly ListBox _processes = new();
+    private readonly TextBox _processDetail = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
+    private readonly ListBox _databaseUsers = new();
+    private readonly ComboBox _joinRelation = new() { PlaceholderText = "Recognized relationship" };
+    private readonly ComboBox _joinType = new() { ItemsSource = new[] { "INNER", "LEFT", "RIGHT" }, SelectedIndex = 1 };
+    private readonly TextBox _joinLimit = new() { Text = "200", PlaceholderText = "Row limit" };
+    private readonly TextBox _joinSql = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
+    private readonly TextBox _joinOutput = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
     private readonly TextBlock _pageStatus = Status("Connect Server & SQL to browse the live database.");
     private readonly TextBlock _status = Status("SQL Studio is idle.");
     private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
@@ -62,12 +78,13 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var refreshSchemas = new Button { Content = "↻ Schemas" }; refreshSchemas.Click += async (_, _) => await LoadSchemasAsync();
         var heading = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto"), ColumnSpacing = 8, Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "SQL STUDIO", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1), WithColumn(_schemas, 2), WithColumn(refreshSchemas, 3) } };
-        _tabs = new TabControl { Margin = new Thickness(10), Items = { new TabItem { Header = "Tables & rows", Content = BrowsePage() }, new TabItem { Header = "SQL query", Content = QueryPage() }, new TabItem { Header = "Favorites", Content = FavoritesPage() }, new TabItem { Header = "Dependency graph", Content = DependencyPage() } } };
+        _tabs = new TabControl { Margin = new Thickness(10), Items = { new TabItem { Header = "Tables & rows", Content = BrowsePage() }, new TabItem { Header = "SQL query", Content = QueryPage() }, new TabItem { Header = "Favorites", Content = FavoritesPage() }, new TabItem { Header = "Dependency graph", Content = DependencyPage() }, new TabItem { Header = "Schema & server", Content = AdministrationPage() } } };
         Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(_tabs, 1), WithRow(_confirmation, 2), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 6), Child = _status }, 3) } };
         _tableFilter.TextChanged += (_, _) => PopulateTables(); _tables.SelectionChanged += async (_, _) => await SelectTableAsync();
         _schemas.SelectionChanged += async (_, _) => { if (!_suppressSchemaSelection && _schemas.SelectedItem is string database) await SwitchSchemaAsync(database); };
         _rows.SelectionChanged += (_, _) => SelectRow();
-        RefreshFavorites(); PopulateTables();
+        _processes.SelectionChanged += (_, _) => ShowSelectedProcess();
+        RefreshFavorites(); PopulateTables(); PopulateRelations();
     }
 
     public void Activate() { PopulateTables(); if (_tables.SelectedItem is null && _tables.ItemCount > 0) _tables.SelectedIndex = 0; _ = LoadSchemasAsync(); }
@@ -128,6 +145,46 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var controls = new Grid { ColumnDefinitions = new("Auto,Auto,*,*"), ColumnSpacing = 8, Children = { analyze, WithColumn(export, 1), WithColumn(new TextBlock { Text = "Per-edge capture limit", VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right }, 2), WithColumn(_dependencyLimit, 3) } };
         var details = new ScrollViewer { Content = _dependencyList };
         return new Grid { RowDefinitions = new("Auto,2*,Auto,*,Auto"), RowSpacing = 7, Children = { controls, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _dependencyGraph }, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(details, 3), WithRow(_dependencyStatus, 4) } };
+    }
+
+    private Control AdministrationPage()
+    {
+        _indexes.ItemTemplate = new FuncDataTemplate<SqlIndexInfo>((index, _) => new TextBlock { Text = index?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
+        _processes.ItemTemplate = new FuncDataTemplate<SqlProcessInfo>((process, _) => new TextBlock { Text = process?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
+        _databaseUsers.ItemTemplate = new FuncDataTemplate<SqlUserAccountInfo>((account, _) => new TextBlock { Text = account?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
+        var pages = new TabControl { Items = { new TabItem { Header = "Table DDL & indexes", Content = TableAdministrationPage() }, new TabItem { Header = "Processes", Content = ProcessAdministrationPage() }, new TabItem { Header = "Database users", Content = UserAdministrationPage() }, new TabItem { Header = "Visual joins", Content = JoinDesignerPage() } } };
+        return new Grid { RowDefinitions = new("*,Auto"), RowSpacing = 7, Children = { pages, WithRow(_administrationStatus, 1) } };
+    }
+
+    private Control TableAdministrationPage()
+    {
+        var refresh = AccentButton("Load selected table definition & indexes"); refresh.Click += async (_, _) => await LoadTableAdministrationAsync(refresh);
+        var create = new Button { Content = "Review CREATE INDEX" }; create.Click += (_, _) => PrepareCreateIndex();
+        var drop = new Button { Content = "Review DROP selected index" }; drop.Click += (_, _) => PrepareDropIndex();
+        var controls = new WrapPanel { Children = { refresh, new StackPanel { Children = { new TextBlock { Text = "Index name", Foreground = Brush.Parse("#9AA5B7") }, _indexName } }, new StackPanel { Children = { new TextBlock { Text = "Columns, in index order", Foreground = Brush.Parse("#9AA5B7") }, _indexColumns } }, new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Children = { _indexUnique } }, create, drop } };
+        var ddl = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Exact SHOW CREATE TABLE", FontWeight = FontWeight.SemiBold }, WithRow(_tableDdl, 1) } };
+        var indexes = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Live indexes", FontWeight = FontWeight.SemiBold }, WithRow(_indexes, 1) } };
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { controls, WithRow(new Grid { ColumnDefinitions = new("2*,Auto,*"), ColumnSpacing = 7, Children = { ddl, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(indexes, 2) } }, 1) } };
+    }
+
+    private Control ProcessAdministrationPage()
+    {
+        var refresh = AccentButton("Refresh process list"); refresh.Click += async (_, _) => await LoadProcessesAsync(refresh);
+        var kill = new Button { Content = "Review KILL selected connection" }; kill.Click += (_, _) => PrepareKillProcess();
+        return new Grid { RowDefinitions = new("Auto,2*,Auto,*"), RowSpacing = 7, Children = { new WrapPanel { Children = { refresh, kill, new TextBlock { Text = "KILL is never immediate: Crucible shows the exact connection and requires a second confirmation.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(_processes, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(_processDetail, 3) } };
+    }
+
+    private Control UserAdministrationPage()
+    {
+        var refresh = AccentButton("Read database accounts"); refresh.Click += async (_, _) => await LoadUsersAsync(refresh);
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { new WrapPanel { Children = { refresh, new TextBlock { Text = "This view reads account names, hosts, lock/expiry state, and authentication plugins. It never reads or displays password hashes and does not create/drop users.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(_databaseUsers, 1) } };
+    }
+
+    private Control JoinDesignerPage()
+    {
+        var build = new Button { Content = "Build exact join SQL" }; build.Click += (_, _) => BuildJoinSql(); var run = AccentButton("Run read-only join"); run.Click += async (_, _) => await RunJoinAsync(run);
+        var controls = new Grid { ColumnDefinitions = new("3*,*,*,Auto,Auto"), ColumnSpacing = 7, Children = { _joinRelation, WithColumn(_joinType, 1), WithColumn(_joinLimit, 2), WithColumn(build, 3), WithColumn(run, 4) } };
+        return new Grid { RowDefinitions = new("Auto,*,Auto,*"), RowSpacing = 7, Children = { controls, WithRow(_joinSql, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(_joinOutput, 3) } };
     }
 
     private void PopulateTables()
@@ -322,6 +379,85 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         finally { button.IsEnabled = true; End(); }
     }
 
+    private async Task LoadTableAdministrationAsync(Button button)
+    {
+        if (_profile is null || _tables.SelectedItem is not TableChoice selected) { _administrationStatus.Text = "Select a table in Tables & rows first."; return; }
+        try
+        {
+            button.IsEnabled = false; Begin($"Reading DDL and indexes for {selected.Table.Name}…"); _tableDdl.Text = await _administration.ShowCreateTableAsync(_profile, selected.Table, _operation!.Token); var indexes = await _administration.ReadIndexesAsync(_profile, selected.Table, _operation.Token); _indexes.ItemsSource = indexes; _indexColumns.PlaceholderText = $"Available: {string.Join(", ", selected.Table.Columns.Select(column => column.Name))}"; _administrationStatus.Text = $"{_profile.Database}.{selected.Table.Name} · {selected.Table.Columns.Count:N0} column(s) · {indexes.Count:N0} index(es).";
+        }
+        catch (OperationCanceledException) { _administrationStatus.Text = "Table administration load cancelled."; }
+        catch (Exception exception) { Fail("Table administration load failed", exception); _administrationStatus.Text = exception.Message; }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private void PrepareCreateIndex()
+    {
+        if (_profile is null || _tables.SelectedItem is not TableChoice selected) { _administrationStatus.Text = "Select a table first."; return; }
+        try
+        {
+            var columns = ParseColumnList(_indexColumns.Text); var sql = SqlAdministrationService.BuildCreateIndexSql(selected.Table, _indexName.Text ?? string.Empty, columns, _indexUnique.IsChecked == true);
+            var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false; var confirm = AccentButton("Execute CREATE INDEX");
+            confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; await _administration.CreateIndexAsync(_profile, selected.Table, _indexName.Text ?? string.Empty, columns, _indexUnique.IsChecked == true); _confirmation.IsVisible = false; _administrationStatus.Text = $"Created index {_indexName.Text} on {_profile.Database}.{selected.Table.Name}."; await LoadTableAdministrationAsync(confirm); } catch (Exception exception) { Fail("CREATE INDEX failed", exception); _administrationStatus.Text = exception.Message; } finally { confirm.IsEnabled = true; } };
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Execute this schema-changing DDL? MySQL may implicitly commit it; transaction rollback is not promised.\n{sql}", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+        }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot create index: {exception.Message}"; }
+    }
+
+    private void PrepareDropIndex()
+    {
+        if (_profile is null || _tables.SelectedItem is not TableChoice selected || _indexes.SelectedItem is not SqlIndexInfo index) { _administrationStatus.Text = "Select a table and a live index first."; return; }
+        try
+        {
+            var sql = SqlAdministrationService.BuildDropIndexSql(selected.Table, index.Name); var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false; var confirm = new Button { Content = $"Drop {index.Name}" };
+            confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; await _administration.DropIndexAsync(_profile, selected.Table, index.Name); _confirmation.IsVisible = false; _administrationStatus.Text = $"Dropped index {index.Name} from {_profile.Database}.{selected.Table.Name}."; await LoadTableAdministrationAsync(confirm); } catch (Exception exception) { Fail("DROP INDEX failed", exception); _administrationStatus.Text = exception.Message; } finally { confirm.IsEnabled = true; } };
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Permanently remove this index? Query performance and uniqueness enforcement may change immediately. MySQL may implicitly commit DDL.\n{sql}", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+        }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot drop index: {exception.Message}"; }
+    }
+
+    private async Task LoadProcessesAsync(Button button)
+    {
+        if (_profile is null) return; try { button.IsEnabled = false; Begin("Reading MySQL process list…"); var processes = await _administration.ReadProcessesAsync(_profile, _operation!.Token); _processes.ItemsSource = processes; _administrationStatus.Text = $"{processes.Count:N0} visible MySQL connection/process(es)."; }
+        catch (Exception exception) { Fail("Process-list refresh failed", exception); _administrationStatus.Text = exception.Message; } finally { button.IsEnabled = true; End(); }
+    }
+
+    private void ShowSelectedProcess()
+    {
+        _processDetail.Text = _processes.SelectedItem is not SqlProcessInfo process ? string.Empty : $"Connection ID: {process.Id}\nUser: {process.User}\nHost: {process.Host}\nDatabase: {process.Database ?? "(none)"}\nCommand: {process.Command}\nElapsed: {process.Seconds:N0} seconds\nState: {process.State ?? "(none)"}\n\n{process.Statement ?? "(no active statement)"}";
+    }
+
+    private void PrepareKillProcess()
+    {
+        if (_profile is null || _processes.SelectedItem is not SqlProcessInfo process) { _administrationStatus.Text = "Select a process first."; return; }
+        var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false; var confirm = new Button { Content = $"Kill connection {process.Id}" };
+        confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; await _administration.KillProcessAsync(_profile, process.Id); _confirmation.IsVisible = false; _administrationStatus.Text = $"Sent KILL CONNECTION {process.Id}."; await LoadProcessesAsync(confirm); } catch (Exception exception) { Fail("KILL CONNECTION failed", exception); _administrationStatus.Text = exception.Message; } finally { confirm.IsEnabled = true; } };
+        _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Terminate MySQL connection {process.Id} owned by {process.User}@{process.Host}? Active work can roll back and a server component may reconnect.\n\n{process.Statement ?? "No active statement reported."}", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+    }
+
+    private async Task LoadUsersAsync(Button button)
+    {
+        if (_profile is null) return; try { button.IsEnabled = false; Begin("Reading MySQL account metadata…"); var users = await _administration.ReadUsersAsync(_profile, _operation!.Token); _databaseUsers.ItemsSource = users; _administrationStatus.Text = $"{users.Count:N0} database account(s) visible. Password hashes were not queried."; }
+        catch (Exception exception) { Fail("Database-account read failed", exception); _administrationStatus.Text = $"Account metadata is unavailable to this login: {exception.Message}"; } finally { button.IsEnabled = true; End(); }
+    }
+
+    private void PopulateRelations()
+    {
+        var selected = (_joinRelation.SelectedItem as RelationChoice)?.Relation.Name; var choices = (_capabilities?.Relationships ?? []).Where(relation => _capabilities?.FindTable(relation.FromTable) is not null && _capabilities.FindTable(relation.ToTable) is not null).OrderBy(relation => relation.FromTable).ThenBy(relation => relation.ToTable).ThenBy(relation => relation.Name).Select(relation => new RelationChoice(relation)).ToArray(); _joinRelation.ItemsSource = choices; _joinRelation.SelectedItem = choices.FirstOrDefault(choice => choice.Relation.Name.Equals(selected, StringComparison.OrdinalIgnoreCase)); if (_joinRelation.SelectedItem is null && choices.Length > 0) _joinRelation.SelectedIndex = 0;
+    }
+
+    private bool BuildJoinSql()
+    {
+        try { if (_joinRelation.SelectedItem is not RelationChoice choice || _capabilities is null) throw new InvalidOperationException("Select a recognized relationship."); if (!int.TryParse(_joinLimit.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var limit)) throw new FormatException("Join limit must be numeric."); var source = _capabilities.FindTable(choice.Relation.FromTable) ?? throw new InvalidOperationException("Source table is unavailable."); var target = _capabilities.FindTable(choice.Relation.ToTable) ?? throw new InvalidOperationException("Target table is unavailable."); _joinSql.Text = SqlAdministrationService.BuildJoinSql(choice.Relation, source, target, _joinType.SelectedItem as string ?? "LEFT", limit); _administrationStatus.Text = "Built read-only exact-column join SQL with source__/target__ aliases. Review it before running."; return true; }
+        catch (Exception exception) { _joinSql.Text = string.Empty; _administrationStatus.Text = $"Cannot build join: {exception.Message}"; return false; }
+    }
+
+    private async Task RunJoinAsync(Button button)
+    {
+        if (_profile is null) return; try { if (!BuildJoinSql()) return; button.IsEnabled = false; Begin("Running read-only visual join…"); var result = await _service.QueryAsync(_profile, _joinSql.Text ?? string.Empty, 2000, _operation!.Token); _joinOutput.Text = FormatResult(result); _administrationStatus.Text = $"Visual join returned {result.Rows.Count:N0} row(s) in {result.Duration.TotalMilliseconds:N0} ms."; }
+        catch (Exception exception) { Fail("Visual join failed", exception); _administrationStatus.Text = exception.Message; } finally { button.IsEnabled = true; End(); }
+    }
+
     private async Task OpenRelatedAsync(string tableName, string columnName, object? value)
     {
         PopulateTables(); var choice = (_tables.ItemsSource as IEnumerable<TableChoice>)?.FirstOrDefault(item => item.Table.Name.Equals(tableName, StringComparison.OrdinalIgnoreCase));
@@ -435,7 +571,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             Begin($"Inspecting database schema {database}…"); var profile = _profile with { Database = database }; var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, _operation!.Token);
             _profile = profile; _capabilities = capabilities; _page = null; _selectedRow = null; _offset = 0; _rows.ItemsSource = null; _rowEditor.Children.Clear(); _relationshipResults.Children.Clear(); _dependencyList.Children.Clear(); _dependencyGraph.SetGraph($"{database} · select a primary-keyed row", []); _confirmation.IsVisible = false;
             _suppressSchemaSelection = true; try { _schemas.SelectedItem = (_schemas.ItemsSource as IEnumerable<string>)?.FirstOrDefault(value => value.Equals(database, StringComparison.OrdinalIgnoreCase)) ?? database; } finally { _suppressSchemaSelection = false; }
-            _suppressTableSelection = true; try { PopulateTables(); _tables.SelectedItem = null; } finally { _suppressTableSelection = false; }
+            _suppressTableSelection = true; try { PopulateTables(); _tables.SelectedItem = null; } finally { _suppressTableSelection = false; } PopulateRelations();
             _pageStatus.Text = $"{capabilities.Tables.Count:N0} table(s) in {database} · select a table."; _dependencyStatus.Text = $"Active schema: {database}. Select a row to analyze dependencies."; _status.Text = $"SQL Studio switched locally to {database}; the saved world-server profile remains {_session.DatabaseProfile?.Database ?? "unchanged"}.";
         }
         catch (OperationCanceledException) { _status.Text = "Schema switch cancelled."; }
@@ -445,7 +581,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private void SessionChanged(object? sender, EventArgs e)
     {
-        _profile = _session.DatabaseProfile; _capabilities = _session.DatabaseCapabilities; PopulateTables(); _ = LoadSchemasAsync();
+        _profile = _session.DatabaseProfile; _capabilities = _session.DatabaseCapabilities; PopulateTables(); PopulateRelations(); _ = LoadSchemasAsync();
     }
     private void Begin(string text) { _operation?.Cancel(); _operation?.Dispose(); _operation = new(); _status.Text = text; }
     private void End() { _operation?.Dispose(); _operation = null; }
@@ -476,6 +612,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private static bool IsReadOnly(string sql) => SqlWorkspaceService.IsReadOnlyStatement(sql);
     private static string FormatResult(SqlQueryResult result) { var builder = new StringBuilder(); builder.AppendLine(string.Join('\t', result.Columns)); foreach (var row in result.Rows) builder.AppendLine(string.Join('\t', row.Select(CellText))); return builder.ToString(); }
     private static string? EmptyNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private static IReadOnlyList<string> ParseColumnList(string? value) => (value ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     private static string SafeName(string value) { var invalid = Path.GetInvalidFileNameChars(); var safe = new string(value.Select(character => invalid.Contains(character) || char.IsWhiteSpace(character) ? '-' : character).ToArray()).Trim('-'); return string.IsNullOrWhiteSpace(safe) ? "row" : safe.Length <= 80 ? safe : safe[..80]; }
     private IStorageProvider Storage() => TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("SQL Studio is not attached to the main window.");
     private static Button Button(string text, Func<Task> action) { var button = new Button { Content = text }; button.Click += async (_, _) => await action(); return button; }

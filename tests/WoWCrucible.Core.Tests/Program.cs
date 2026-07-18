@@ -428,6 +428,24 @@ if (!spellCreation.TryGetValue(597, out var conjureFood) || !conjureFood.Created
     throw new InvalidOperationException("Spell.dbc acquisition coverage did not map reachable create-item effects such as Conjured Bread.");
 if (!SqlWorkspaceService.IsReadOnlyStatement("-- reviewed\nSELECT * FROM item_template") || SqlWorkspaceService.IsReadOnlyStatement("/* not read-only */ UPDATE item_template SET name='bad'"))
     throw new InvalidOperationException("SQL Studio read-only routing could execute a write through the immediate query path.");
+var joinSource = new DatabaseTableCapability("item_template", ItemColumns("entry", "name"));
+var joinTarget = new DatabaseTableCapability("npc_vendor", ItemColumns("entry", "item"));
+var joinRelation = new DatabaseRelationCapability("fixture_item_vendor", "item_template", "entry", "npc_vendor", "item", false, "Fixture relation");
+var joinSql = SqlAdministrationService.BuildJoinSql(joinRelation, joinSource, joinTarget, "left", 25);
+if (!joinSql.Contains("source.`entry` AS `source__entry`", StringComparison.Ordinal) ||
+    !joinSql.Contains("target.`entry` AS `target__entry`", StringComparison.Ordinal) ||
+    !joinSql.Contains("LEFT JOIN `npc_vendor`", StringComparison.Ordinal) ||
+    !joinSql.EndsWith("LIMIT 25;", StringComparison.Ordinal))
+    throw new InvalidOperationException("Visual SQL joins no longer produce exact, uniquely aliased read-only output.");
+try { _ = SqlAdministrationService.BuildJoinSql(joinRelation, joinSource, joinTarget, "CROSS", 25); throw new InvalidOperationException("An unsupported visual join type was accepted."); }
+catch (ArgumentException) { }
+var createIndexSql = SqlAdministrationService.BuildCreateIndexSql(joinSource, "crucible_name", ["name"], true);
+if (createIndexSql != "CREATE UNIQUE INDEX `crucible_name` ON `item_template` (`name`);")
+    throw new InvalidOperationException("Reviewed index SQL generation changed unexpectedly.");
+try { _ = SqlAdministrationService.BuildCreateIndexSql(joinSource, "crucible_bad", ["missing"], false); throw new InvalidOperationException("Index SQL accepted an unknown table column."); }
+catch (ArgumentException) { }
+try { _ = SqlAdministrationService.BuildDropIndexSql(joinSource, "PRIMARY"); throw new InvalidOperationException("Ordinary index administration could drop a primary key."); }
+catch (InvalidOperationException exception) when (exception.Message.Contains("primary", StringComparison.OrdinalIgnoreCase)) { }
 
 var modernCreatureTable = new DatabaseTableCapability("creature_template", ItemColumns("entry", "name", "subname", "minlevel", "maxlevel", "faction", "npcflag", "rank", "type", "family", "unit_class", "speed_walk", "speed_run", "HealthModifier", "ManaModifier", "ArmorModifier", "DamageModifier", "BaseAttackTime", "RangeAttackTime", "unit_flags", "unit_flags2", "dynamicflags", "type_flags", "lootid", "pickpocketloot", "skinloot", "mingold", "maxgold", "AIName", "ScriptName", "RegenHealth", "VerifiedBuild"));
 var modernCreatureModelTable = new DatabaseTableCapability("creature_template_model", ItemColumns("CreatureID", "Idx", "CreatureDisplayID", "DisplayScale", "Probability", "VerifiedBuild"));
