@@ -176,6 +176,9 @@ wowcrucible db schemas <host> <port> <user> <database> --password-env=ENV_NAME [
 wowcrucible db table-admin <host> <port> <user> <database> <table> [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db process-list <host> <port> <user> <database> [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db user-list <host> <port> <user> <database> [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db account <host> <port> <login> <database> grants <account-user> <account-host> [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db account <host> <port> <login> <database> <create|password|lock|unlock|drop> <account-user> <account-host> [--locked] [--apply] [--new-password-env=NAME] --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db account <host> <port> <login> <database> <grant|revoke> <account-user> <account-host> <privilege[,privilege]> [--global|--table=NAME] [--grant-option] [--apply] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db join <host> <port> <user> <database> <relationship-name> [--type=INNER|LEFT|RIGHT] [--limit=N] [--run] [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db index <host> <port> <user> <database> <table> create <name> <column[,column]> [--unique] [--apply] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db index <host> <port> <user> <database> <table> drop <name> [--apply] --password-env=ENV_NAME [--ssl=Preferred]
@@ -200,6 +203,8 @@ Server detection reads the live `worldserver.conf`; it does not accept `.dist` t
 `db schemas` lists every database visible to the login. The desktop SQL Studio uses the same discovery to switch locally among world, characters, auth, or other accessible schemas; it does not rewrite the shared server workspace's saved world-database target. A favorite records its database and complete primary key and switches back to that schema when reopened.
 
 `db table-admin` reports the complete live column shape, `SHOW CREATE TABLE` DDL, and every index. `db process-list` reports every connection visible to the supplied login. `db user-list` deliberately reads account metadata without password hashes and reports the server permission error when the login cannot inspect `mysql.user`; it never converts that denial into an empty result.
+
+`db account ... grants` reports the exact `SHOW GRANTS` output for one user/host identity and can inspect the connected login even when it cannot enumerate `mysql.user`. The other account actions are dry-run plans unless `--apply` is explicit. Privilege names are checked against the connected server's `SHOW PRIVILEGES` output, scope defaults to the active database, `--table` narrows it, and `--global` deliberately selects `*.*`. New passwords are read only from `WOW_CRUCIBLE_NEW_DB_PASSWORD` or `--new-password-env`; they are parameterized for execution, shown as `<password supplied in memory>`, and never accepted in command arguments. Account changes can affect server access immediately, so verify them with `account ... grants` after apply.
 
 `db join` accepts a relationship name printed by `db inspect`, generates exact uniquely aliased `source__...` and `target__...` columns, and prints SQL without executing it by default. `--run` executes only that generated SELECT. `db index` likewise prints reviewed DDL by default; `--apply` is required to create or drop an index, ordinary primary-key removal is blocked, and MySQL may implicitly commit DDL.
 

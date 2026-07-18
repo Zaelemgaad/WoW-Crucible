@@ -41,6 +41,16 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly ListBox _processes = new();
     private readonly TextBox _processDetail = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
     private readonly ListBox _databaseUsers = new();
+    private readonly TextBox _accountUser = new() { PlaceholderText = "Database account user" };
+    private readonly TextBox _accountHost = new() { Text = "localhost", PlaceholderText = "Account host" };
+    private readonly TextBox _accountPassword = new() { PasswordChar = '●', PlaceholderText = "New password (memory only)" };
+    private readonly TextBox _accountTable = new() { PlaceholderText = "Optional table in active database" };
+    private readonly CheckBox _accountGlobal = new() { Content = "Global *.* scope" };
+    private readonly CheckBox _accountGrantOption = new() { Content = "WITH GRANT OPTION" };
+    private readonly CheckBox _accountCreateLocked = new() { Content = "Create locked" };
+    private readonly ListBox _accountPrivileges = new() { SelectionMode = SelectionMode.Multiple };
+    private readonly TextBox _accountGrants = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
+    private IReadOnlyList<SqlPrivilegeInfo> _supportedPrivileges = [];
     private readonly ComboBox _joinRelation = new() { PlaceholderText = "Recognized relationship" };
     private readonly ComboBox _joinType = new() { ItemsSource = new[] { "INNER", "LEFT", "RIGHT" }, SelectedIndex = 1 };
     private readonly TextBox _joinLimit = new() { Text = "200", PlaceholderText = "Row limit" };
@@ -84,6 +94,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _schemas.SelectionChanged += async (_, _) => { if (!_suppressSchemaSelection && _schemas.SelectedItem is string database) await SwitchSchemaAsync(database); };
         _rows.SelectionChanged += (_, _) => SelectRow();
         _processes.SelectionChanged += (_, _) => ShowSelectedProcess();
+        _databaseUsers.SelectionChanged += (_, _) => SelectDatabaseUser();
         RefreshFavorites(); PopulateTables(); PopulateRelations();
     }
 
@@ -176,8 +187,18 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private Control UserAdministrationPage()
     {
-        var refresh = AccentButton("Read database accounts"); refresh.Click += async (_, _) => await LoadUsersAsync(refresh);
-        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { new WrapPanel { Children = { refresh, new TextBlock { Text = "This view reads account names, hosts, lock/expiry state, and authentication plugins. It never reads or displays password hashes and does not create/drop users.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(_databaseUsers, 1) } };
+        _accountPrivileges.ItemTemplate = new FuncDataTemplate<SqlPrivilegeInfo>((privilege, _) => new TextBlock { Text = privilege?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
+        var refresh = AccentButton("Read accounts & supported privileges"); refresh.Click += async (_, _) => await LoadUsersAsync(refresh); var grants = new Button { Content = "Read exact grants" }; grants.Click += async (_, _) => await LoadAccountGrantsAsync(grants);
+        var create = new Button { Content = "Review CREATE USER" }; create.Click += (_, _) => PrepareCreateUser(); var password = new Button { Content = "Review password change" }; password.Click += (_, _) => PrepareAccountPassword();
+        var lockAccount = new Button { Content = "Review lock" }; lockAccount.Click += (_, _) => PrepareAccountLock(true); var unlock = new Button { Content = "Review unlock" }; unlock.Click += (_, _) => PrepareAccountLock(false); var drop = new Button { Content = "Review DROP USER" }; drop.Click += (_, _) => PrepareDropUser();
+        var grant = new Button { Content = "Review GRANT" }; grant.Click += (_, _) => PreparePrivilegeChange(false); var revoke = new Button { Content = "Review REVOKE" }; revoke.Click += (_, _) => PreparePrivilegeChange(true);
+        var readOnly = new Button { Content = "Select read-only preset" }; readOnly.Click += (_, _) => SelectPrivilegePreset("SELECT", "SHOW VIEW"); var content = new Button { Content = "Select content-editor preset" }; content.Click += (_, _) => SelectPrivilegePreset("SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE", "SHOW VIEW"); var clear = new Button { Content = "Clear privilege selection" }; clear.Click += (_, _) => _accountPrivileges.SelectedItems?.Clear();
+        var accountFields = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 7, Children = { new StackPanel { Children = { new TextBlock { Text = "Account user", Foreground = Brush.Parse("#9AA5B7") }, _accountUser } }, WithColumn(new StackPanel { Children = { new TextBlock { Text = "Account host", Foreground = Brush.Parse("#9AA5B7") }, _accountHost } }, 1) } };
+        var scopeFields = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 7, Children = { _accountTable, WithColumn(_accountGlobal, 1), WithColumn(_accountGrantOption, 2) } };
+        var editor = new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*,Auto,Auto"), RowSpacing = 7, Children = { accountFields, WithRow(_accountPassword, 1), WithRow(new WrapPanel { Children = { _accountCreateLocked, create, password, lockAccount, unlock, drop } }, 2), WithRow(new TextBlock { Text = "New passwords stay in memory, are parameterized at execution, and appear only as <password supplied in memory> in review SQL. Every mutation requires the inline second confirmation below SQL Studio.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, 3), WithRow(scopeFields, 4), WithRow(_accountPrivileges, 5), WithRow(new WrapPanel { Children = { readOnly, content, clear, grant, revoke } }, 6), WithRow(_accountGrants, 7) } };
+        var top = new WrapPanel { Children = { refresh, grants, new TextBlock { Text = "Account metadata and SHOW GRANTS are permission-aware. Password hashes are never queried.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } };
+        var body = new Grid { ColumnDefinitions = new("*,Auto,2*"), ColumnSpacing = 7, Children = { _databaseUsers, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(new ScrollViewer { Content = editor }, 2) } };
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { top, WithRow(body, 1) } };
     }
 
     private Control JoinDesignerPage()
@@ -437,9 +458,87 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private async Task LoadUsersAsync(Button button)
     {
-        if (_profile is null) return; try { button.IsEnabled = false; Begin("Reading MySQL account metadata…"); var users = await _administration.ReadUsersAsync(_profile, _operation!.Token); _databaseUsers.ItemsSource = users; _administrationStatus.Text = $"{users.Count:N0} database account(s) visible. Password hashes were not queried."; }
-        catch (Exception exception) { Fail("Database-account read failed", exception); _administrationStatus.Text = $"Account metadata is unavailable to this login: {exception.Message}"; } finally { button.IsEnabled = true; End(); }
+        if (_profile is null) return; button.IsEnabled = false; Begin("Reading account metadata and server-supported privileges…"); var findings = new List<string>();
+        try { _supportedPrivileges = await _administration.ReadPrivilegesAsync(_profile, _operation!.Token); _accountPrivileges.ItemsSource = _supportedPrivileges; findings.Add($"{_supportedPrivileges.Count:N0} supported privilege(s)"); }
+        catch (Exception exception) { Fail("Supported-privilege read failed", exception); findings.Add($"privilege list unavailable: {exception.Message}"); }
+        try { var users = await _administration.ReadUsersAsync(_profile, _operation!.Token); _databaseUsers.ItemsSource = users; findings.Add($"{users.Count:N0} visible account(s)"); }
+        catch (Exception exception) { Fail("Database-account read failed", exception); findings.Add($"account list unavailable to this login: {exception.Message}"); }
+        finally { button.IsEnabled = true; End(); _administrationStatus.Text = $"{string.Join(" · ", findings)}. Password hashes were not queried."; }
     }
+
+    private void SelectDatabaseUser()
+    {
+        if (_databaseUsers.SelectedItem is not SqlUserAccountInfo account) return; _accountUser.Text = account.User; _accountHost.Text = account.Host; _accountPassword.Text = string.Empty; _accountGrants.Text = string.Empty;
+    }
+
+    private async Task LoadAccountGrantsAsync(Button button)
+    {
+        if (_profile is null) return; try { button.IsEnabled = false; Begin("Reading exact SHOW GRANTS output…"); var grants = await _administration.ReadGrantsAsync(_profile, _accountUser.Text ?? string.Empty, _accountHost.Text ?? string.Empty, _operation!.Token); _accountGrants.Text = string.Join(Environment.NewLine, grants); _administrationStatus.Text = $"{grants.Count:N0} exact grant statement(s) visible for {AccountLabel()}."; }
+        catch (Exception exception) { Fail("SHOW GRANTS failed", exception); _administrationStatus.Text = $"Grants are unavailable to this login: {exception.Message}"; } finally { button.IsEnabled = true; End(); }
+    }
+
+    private void PrepareCreateUser()
+    {
+        if (_profile is not { } profile) return; var user = _accountUser.Text ?? string.Empty; var host = _accountHost.Text ?? string.Empty; var password = _accountPassword.Text ?? string.Empty; var locked = _accountCreateLocked.IsChecked == true;
+        try { if (password.Length == 0) throw new ArgumentException("Enter a non-empty new password."); var sql = SqlAdministrationService.BuildCreateUserSql(user, host, locked); PrepareAccountConfirmation("CREATE USER", SqlAdministrationService.RedactPasswordSql(sql), AccountLabel(user, host), async token => await _administration.CreateUserAsync(profile, user, host, password, locked, token), passwordBearing: true); }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot prepare CREATE USER: {exception.Message}"; }
+    }
+
+    private void PrepareAccountPassword()
+    {
+        if (_profile is not { } profile) return; var user = _accountUser.Text ?? string.Empty; var host = _accountHost.Text ?? string.Empty; var password = _accountPassword.Text ?? string.Empty;
+        try { if (password.Length == 0) throw new ArgumentException("Enter a non-empty replacement password."); var sql = SqlAdministrationService.BuildChangePasswordSql(user, host); PrepareAccountConfirmation("ALTER USER password", SqlAdministrationService.RedactPasswordSql(sql), AccountLabel(user, host), async token => await _administration.ChangePasswordAsync(profile, user, host, password, token), passwordBearing: true); }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot prepare password change: {exception.Message}"; }
+    }
+
+    private void PrepareAccountLock(bool locked)
+    {
+        if (_profile is not { } profile) return; var user = _accountUser.Text ?? string.Empty; var host = _accountHost.Text ?? string.Empty;
+        try { var sql = SqlAdministrationService.BuildAccountLockSql(user, host, locked); PrepareAccountConfirmation(locked ? "ACCOUNT LOCK" : "ACCOUNT UNLOCK", sql, AccountLabel(user, host), async token => await _administration.SetAccountLockAsync(profile, user, host, locked, token)); }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot prepare account {(locked ? "lock" : "unlock")}: {exception.Message}"; }
+    }
+
+    private void PrepareDropUser()
+    {
+        if (_profile is not { } profile) return; var user = _accountUser.Text ?? string.Empty; var host = _accountHost.Text ?? string.Empty;
+        try { var sql = SqlAdministrationService.BuildDropUserSql(user, host); PrepareAccountConfirmation("DROP USER", sql, AccountLabel(user, host), async token => await _administration.DropUserAsync(profile, user, host, token), destructive: true); }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot prepare DROP USER: {exception.Message}"; }
+    }
+
+    private void PreparePrivilegeChange(bool revoke)
+    {
+        if (_profile is not { } profile) return; var user = _accountUser.Text ?? string.Empty; var host = _accountHost.Text ?? string.Empty; var table = EmptyNull(_accountTable.Text); var global = _accountGlobal.IsChecked == true; var withGrantOption = _accountGrantOption.IsChecked == true; var supported = _supportedPrivileges;
+        var privileges = _accountPrivileges.SelectedItems?.OfType<SqlPrivilegeInfo>().Select(privilege => privilege.Name).ToArray() ?? [];
+        try
+        {
+            var sql = revoke ? SqlAdministrationService.BuildRevokeSql(user, host, profile.Database, table, global, privileges, supported) : SqlAdministrationService.BuildGrantSql(user, host, profile.Database, table, global, privileges, supported, withGrantOption);
+            PrepareAccountConfirmation(revoke ? "REVOKE" : "GRANT", sql, AccountLabel(user, host), revoke ? async token => await _administration.RevokeAsync(profile, user, host, profile.Database, table, global, privileges, supported, token) : async token => await _administration.GrantAsync(profile, user, host, profile.Database, table, global, privileges, supported, withGrantOption, token));
+        }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot prepare {(revoke ? "REVOKE" : "GRANT")}: {exception.Message}"; }
+    }
+
+    private void PrepareAccountConfirmation(string action, string previewSql, string targetAccount, Func<CancellationToken, Task> apply, bool passwordBearing = false, bool destructive = false)
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        var cancel = new Button { Content = "Cancel" }; var confirm = new Button { Content = $"Execute {action}" }; cancel.Click += (_, _) => { _confirmation.IsVisible = false; _confirmation.Child = null; if (passwordBearing) _accountPassword.Text = string.Empty; };
+        confirm.Click += async (_, _) =>
+        {
+            try { confirm.IsEnabled = false; Begin($"Executing reviewed {action} for {targetAccount}…"); await apply(_operation!.Token); _confirmation.IsVisible = false; _confirmation.Child = null; _accountPassword.Text = string.Empty; _administrationStatus.Text = $"Applied {action} for {targetAccount}. Read exact grants/account metadata to verify the resulting state."; }
+            catch (Exception exception) { Fail($"Account {action} failed", exception); _administrationStatus.Text = exception.Message; }
+            finally { confirm.IsEnabled = true; End(); }
+        };
+        _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"{(destructive ? "DESTRUCTIVE ACCOUNT CHANGE. " : string.Empty)}Review the exact account, host, privilege scope, and statement. MySQL account changes can affect active or future server access immediately.\n{previewSql}", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+    }
+
+    private void SelectPrivilegePreset(params string[] names)
+    {
+        if (_accountPrivileges.SelectedItems is null) return; _accountPrivileges.SelectedItems.Clear(); var requested = names.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var privilege in _supportedPrivileges.Where(privilege => requested.Contains(privilege.Name.Replace('_', ' ')))) _accountPrivileges.SelectedItems.Add(privilege);
+        _administrationStatus.Text = $"Selected {_accountPrivileges.SelectedItems.Count:N0} privilege(s). Review the exact scope before GRANT or REVOKE.";
+    }
+
+    private string AccountLabel() => AccountLabel(_accountUser.Text ?? string.Empty, _accountHost.Text ?? string.Empty);
+    private static string AccountLabel(string user, string host) => $"'{user}'@'{host}'";
 
     private void PopulateRelations()
     {

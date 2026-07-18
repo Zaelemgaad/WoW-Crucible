@@ -446,6 +446,26 @@ try { _ = SqlAdministrationService.BuildCreateIndexSql(joinSource, "crucible_bad
 catch (ArgumentException) { }
 try { _ = SqlAdministrationService.BuildDropIndexSql(joinSource, "PRIMARY"); throw new InvalidOperationException("Ordinary index administration could drop a primary key."); }
 catch (InvalidOperationException exception) when (exception.Message.Contains("primary", StringComparison.OrdinalIgnoreCase)) { }
+var supportedPrivileges = new[] { new SqlPrivilegeInfo("Select", "Tables", "read rows"), new SqlPrivilegeInfo("Insert", "Tables", "insert rows"), new SqlPrivilegeInfo("Show View", "Tables", "show views"), new SqlPrivilegeInfo("Grant Option", "Databases,Tables", "grant privileges") };
+var createUserSql = SqlAdministrationService.BuildCreateUserSql("crucible'editor", "localhost", true);
+if (!createUserSql.Contains("'crucible''editor'@'localhost'", StringComparison.Ordinal) || !createUserSql.Contains("@crucible_new_password", StringComparison.Ordinal) || createUserSql.Contains("<password", StringComparison.Ordinal))
+    throw new InvalidOperationException("Account creation SQL stopped quoting account identities or parameterizing the new password.");
+var redactedUserSql = SqlAdministrationService.RedactPasswordSql(createUserSql);
+if (redactedUserSql.Contains("@crucible_new_password", StringComparison.Ordinal) || !redactedUserSql.Contains("<password supplied in memory>", StringComparison.Ordinal))
+    throw new InvalidOperationException("Account-plan display did not redact the password parameter clearly.");
+var grantSql = SqlAdministrationService.BuildGrantSql("editor", "localhost", "acore_world", "item_template", false, ["select", "insert"], supportedPrivileges, true);
+if (grantSql != "GRANT SELECT, INSERT ON `acore_world`.`item_template` TO 'editor'@'localhost' WITH GRANT OPTION;")
+    throw new InvalidOperationException("Exact table-scoped privilege planning changed unexpectedly.");
+var globalRevokeSql = SqlAdministrationService.BuildRevokeSql("editor", "%", "ignored", null, true, ["SHOW_VIEW"], supportedPrivileges);
+if (globalRevokeSql != "REVOKE SHOW VIEW ON *.* FROM 'editor'@'%';") throw new InvalidOperationException("Global privilege revocation planning failed.");
+try { _ = SqlAdministrationService.BuildGrantSql("editor", "localhost", "acore_world", null, false, ["FILE"], supportedPrivileges, false); throw new InvalidOperationException("Privilege planning accepted a capability the server did not report."); }
+catch (ArgumentException exception) when (exception.Message.Contains("Unsupported", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = SqlAdministrationService.BuildGrantSql("editor", "localhost", "acore_world", "item_template", true, ["SELECT"], supportedPrivileges, false); throw new InvalidOperationException("Privilege planning combined a table with global scope."); }
+catch (ArgumentException) { }
+try { _ = SqlAdministrationService.BuildDropUserSql("editor; DROP DATABASE acore_world", "localhost"); throw new InvalidOperationException("Account planning accepted a statement delimiter."); }
+catch (ArgumentException) { }
+try { _ = SqlAdministrationService.BuildDropUserSql("editor\\", "localhost"); throw new InvalidOperationException("Account planning accepted a backslash that could alter MySQL string parsing."); }
+catch (ArgumentException) { }
 
 var modernCreatureTable = new DatabaseTableCapability("creature_template", ItemColumns("entry", "name", "subname", "minlevel", "maxlevel", "faction", "npcflag", "rank", "type", "family", "unit_class", "speed_walk", "speed_run", "HealthModifier", "ManaModifier", "ArmorModifier", "DamageModifier", "BaseAttackTime", "RangeAttackTime", "unit_flags", "unit_flags2", "dynamicflags", "type_flags", "lootid", "pickpocketloot", "skinloot", "mingold", "maxgold", "AIName", "ScriptName", "RegenHealth", "VerifiedBuild"));
 var modernCreatureModelTable = new DatabaseTableCapability("creature_template_model", ItemColumns("CreatureID", "Idx", "CreatureDisplayID", "DisplayScale", "Probability", "VerifiedBuild"));
