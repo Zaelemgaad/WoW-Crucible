@@ -68,6 +68,25 @@ static int Tooling(string[] args)
 static int Asset(string[] args)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["adt-height-plan", var adtPath, var deltaText, var cellText, var heightPlanPath, .. var heightPlanOptions])
+    {
+        var overwrite = heightPlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var unknown = heightPlanOptions.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown asset adt-height-plan option: {unknown[0]}");
+        if (!float.TryParse(deltaText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var delta) || !float.IsFinite(delta)) return Fail("Height delta must be finite.");
+        IReadOnlyList<(int X, int Y)> cells;
+        if (cellText.Equals("all", StringComparison.OrdinalIgnoreCase)) cells = MapAssetInspectionService.Inspect(adtPath).Cells.Where(cell => cell.Present).Select(cell => (cell.X, cell.Y)).ToArray();
+        else
+        {
+            var parsed = new List<(int, int)>(); foreach (var token in cellText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) { var parts = token.Split(':'); if (parts.Length != 2 || !int.TryParse(parts[0], out var x) || !int.TryParse(parts[1], out var y)) return Fail($"Invalid ADT cell '{token}'; use x:y,x:y or all."); parsed.Add((x, y)); } cells = parsed;
+        }
+        var plan = AdtHeightEditService.Plan(adtPath, cells, delta); AdtHeightEditService.SavePlan(plan, heightPlanPath, overwrite);
+        Console.Error.WriteLine($"Planned {plan.Cells.Count:N0} ADT terrain-cell edit(s) at delta {plan.Delta:R}: {Path.GetFullPath(heightPlanPath)}"); return 0;
+    }
+    if (args is ["adt-height-apply", var applyHeightPlanPath, var heightOutputPath, .. var heightApplyOptions])
+    {
+        var overwrite = heightApplyOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var unknown = heightApplyOptions.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown asset adt-height-apply option: {unknown[0]}");
+        var result = AdtHeightEditService.Apply(AdtHeightEditService.LoadPlan(applyHeightPlanPath), heightOutputPath, overwrite);
+        Console.WriteLine($"Output\t{result.OutputPath}\nSHA256\t{result.OutputSha256}\nReceipt\t{result.ReceiptPath}\nEditedCells\t{result.EditedCells:N0}\nDelta\t{result.Delta:R}"); return 0;
+    }
     if (args is ["map-info", var mapPath, .. var mapOptions])
     {
         var json = mapOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var includeCells = mapOptions.Contains("--cells", StringComparer.OrdinalIgnoreCase);
@@ -1563,7 +1582,7 @@ static IReadOnlyList<MpqFileEntry> LoadMpqIndex(PatchArchiveService service, str
 static int GroupHelp(string message, int code)
 {
     if (message.Contains("wowcrucible asset texture-info", StringComparison.Ordinal))
-        message = message.Replace("Usage:\n", "Usage:\n  wowcrucible asset map-info <file.adt|wdt|wdl> [--cells] [--format=text|json]\n", StringComparison.Ordinal);
+        message = message.Replace("Usage:\n", "Usage:\n  wowcrucible asset map-info <file.adt|wdt|wdl> [--cells] [--format=text|json]\n  wowcrucible asset adt-height-plan <input.adt> <delta> <x:y,x:y|all> <plan.json> [--overwrite]\n  wowcrucible asset adt-height-apply <plan.json> <output.adt> [--overwrite]\n", StringComparison.Ordinal);
     if (message.Contains("wowcrucible db query", StringComparison.Ordinal))
         message += "\n\nDatabase objects:\n  wowcrucible db objects <host> <port> <user> <database> [--type=view|trigger|procedure|function|event] [--format=text|json]\n  wowcrucible db object-show <host> <port> <user> <database> <type> <name> [--format=text|json]\n  wowcrucible db object-export <host> <port> <user> <database> <output.sql> [--overwrite]\n  wowcrucible db object-drop <host> <port> <user> <database> <type> <name> [--apply]\n  wowcrucible db view-set <host> <port> <user> <database> <name> <select.sql> [--apply]\n  wowcrucible db event-state <host> <port> <user> <database> <name> <enable|disable> [--apply]\n\nTarget-bound synchronization:\n  wowcrucible db sync-plan <host> <port> <user> <database> <verified-audit> <plan.json> [--include=glob]... [--include-removals] [--auto-remap] [--remap-start=ID] [--maximum=N] [--overwrite]\n  wowcrucible db sync-inspect <plan.json> [--sql=preview.sql] [--overwrite]\n  wowcrucible db sync-apply <host> <port> <user> <database> <plan.json> <receipt.json> [--apply] [--overwrite]\n  wowcrucible db sync-rollback <host> <port> <user> <database> <receipt.json> [--apply]\n\nObject mutations and synchronization apply/rollback are dry-run unless --apply is explicit. Guided views accept exactly one independently validated SELECT; synchronization requires a verified baseline comparison, exact primary keys, target preimage matches, and a rollback receipt. Automatic collision remapping is opt-in and every source-to-target ID plus rewritten recognized reference is printed for review.\n\nRead-only query batches: add --batch to execute up to 32 semicolon-delimited SELECT/SHOW/DESCRIBE/EXPLAIN statements from one SQL file. Use --batch-format=text|json for independently shaped, labeled result sets. Batches reject --write and single-result --output switches; SELECT file output is always blocked.";
     if (code == 0) Console.WriteLine(message); else Console.Error.WriteLine(message); return code;

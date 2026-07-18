@@ -17,7 +17,10 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly ListBox _dependencies = new();
     private readonly TextBlock _status = Info("Read-only native inspection · no legacy map executable required");
     private readonly MapGridControl _grid = new();
+    private readonly TextBox _heightDelta = new() { Text = "0", PlaceholderText = "Signed terrain height delta" };
     private CancellationTokenSource? _operation;
+    private MapAssetInspection? _inspection;
+    private AdtHeightEditPlan? _heightPlan;
 
     public event EventHandler? BackRequested;
 
@@ -26,7 +29,11 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
         var inspect = new Button { Content = "Inspect / reload" }; inspect.Click += async (_, _) => await OpenAsync(_path.Text);
-        _grid.CellSelected += (_, cell) => _selected.Text = cell is null ? "No cell selected." : Describe(cell);
+        _grid.CellsSelected += (_, cells) => _selected.Text = cells.Count == 0 ? "No cells selected." : cells.Count == 1 ? Describe(cells[0]) : $"{cells.Count:N0} present terrain cells selected.\nHold Ctrl while clicking to toggle individual cells.";
+        var selectAll = new Button { Content = "Select all present" }; selectAll.Click += (_, _) => _grid.SelectAllPresent();
+        var clear = new Button { Content = "Clear selection" }; clear.Click += (_, _) => _grid.ClearSelection();
+        var previewHeight = new Button { Content = "Preview height offset" }; previewHeight.Click += async (_, _) => await PreviewHeightAsync();
+        var saveHeight = new Button { Content = "Write edited ADT…" }; saveHeight.Click += async (_, _) => await SaveHeightAsync();
 
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 10, Margin = new Thickness(12, 8) };
         heading.Children.Add(back);
@@ -47,7 +54,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             Content = new StackPanel
             {
                 Margin = new Thickness(10), Spacing = 8,
-                Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL"), Card(_selected), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
+                Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
             }
         };
         var body = new Grid { ColumnDefinitions = new("3*,Auto,2*") };
@@ -71,13 +78,41 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             _path.Text = Path.GetFullPath(path!); _status.Text = $"Inspecting {Path.GetFileName(path)}…";
             var inspection = await Task.Run(() => { token.ThrowIfCancellationRequested(); return MapAssetInspectionService.Inspect(path!); }, token);
             if (token.IsCancellationRequested) return;
-            _grid.SetInspection(inspection); _summary.Text = Summary(inspection); _selected.Text = "Select a present grid cell for exact terrain metadata.";
+            _inspection = inspection; _heightPlan = null; _grid.SetInspection(inspection); _summary.Text = Summary(inspection); _selected.Text = "Select a present grid cell for exact terrain metadata.";
             _chunks.ItemsSource = inspection.Chunks.Select(chunk => $"{chunk.Id} · {chunk.Occurrences:N0} chunk(s) · {chunk.PayloadBytes:N0} bytes").ToArray();
             _dependencies.ItemsSource = inspection.TexturePaths.Select(value => "Texture · " + value).Concat(inspection.ModelPaths.Select(value => "Model · " + value)).Concat(inspection.WmoPaths.Select(value => "WMO · " + value)).DefaultIfEmpty("No path-list dependencies in this file.").ToArray();
             _status.Text = $"Loaded {inspection.Kind} · {inspection.PresentCells:N0}/{inspection.Cells.Count:N0} present cells · click a cell for details · drop another map file anywhere on the grid";
         }
         catch (OperationCanceledException) { }
         catch (Exception exception) { _grid.SetInspection(null); _summary.Text = "Inspection failed."; _status.Text = exception.Message; DesktopCrashLogger.Log("Map inspection failed", exception); }
+    }
+
+    private async Task PreviewHeightAsync()
+    {
+        try
+        {
+            if (_inspection?.Kind != MapAssetKind.Adt) throw new InvalidOperationException("Terrain-height editing requires an ADT file.");
+            if (!float.TryParse(_heightDelta.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var delta) || !float.IsFinite(delta)) throw new InvalidOperationException("Enter a finite height delta using a period as the decimal separator.");
+            var selected = _grid.SelectedCells.Where(cell => cell.Present).Select(cell => (cell.X, cell.Y)).ToArray();
+            _status.Text = $"Planning {selected.Length:N0} terrain-cell height edit(s)…"; var plan = await Task.Run(() => AdtHeightEditService.Plan(_inspection.Path, selected, delta)); var preview = await Task.Run(() => AdtHeightEditService.Preview(plan));
+            _heightPlan = plan; _grid.SetInspection(preview, plan.Cells.Select(cell => (cell.X, cell.Y))); _summary.Text = Summary(preview); _status.Text = $"Preview only · {plan.Cells.Count:N0} cell(s) offset by {plan.Delta:R} · source bytes unchanged";
+        }
+        catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT height preview failed", exception); }
+    }
+
+    private async Task SaveHeightAsync()
+    {
+        try
+        {
+            if (_heightPlan is null) { await PreviewHeightAsync(); if (_heightPlan is null) return; }
+            var top = TopLevel.GetTopLevel(this); if (top is null) return; var stem = Path.GetFileNameWithoutExtension(_heightPlan.InputPath);
+            var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Write a separate edited ADT", SuggestedFileName = stem + "-height-edit.adt", DefaultExtension = "adt", FileTypeChoices = [new FilePickerFileType("WoW ADT") { Patterns = ["*.adt"] }] });
+            var output = file?.TryGetLocalPath(); if (output is null) return; _status.Text = "Writing and re-validating edited ADT…";
+            var result = await Task.Run(() => AdtHeightEditService.Apply(_heightPlan, output, overwrite: false));
+            _path.Text = result.OutputPath; _inspection = result.Inspection; _heightPlan = null; _grid.SetInspection(result.Inspection); _summary.Text = Summary(result.Inspection);
+            _status.Text = $"Wrote {result.EditedCells:N0} edited terrain cell(s) atomically · receipt {Path.GetFileName(result.ReceiptPath)} · original retained";
+        }
+        catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT height write failed", exception); }
     }
 
     private async Task PickAsync()
@@ -98,10 +133,13 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
 
 internal sealed class MapGridControl : Control
 {
-    private MapAssetInspection? _inspection; private MapTileCell? _selected;
-    public event EventHandler<MapTileCell?>? CellSelected;
+    private MapAssetInspection? _inspection; private readonly HashSet<(int X, int Y)> _selected = [];
+    public event EventHandler<IReadOnlyList<MapTileCell>>? CellsSelected;
+    public IReadOnlyList<MapTileCell> SelectedCells => _inspection is null ? [] : _inspection.Cells.Where(cell => _selected.Contains((cell.X, cell.Y))).ToArray();
     public MapGridControl() { ClipToBounds = true; }
-    public void SetInspection(MapAssetInspection? inspection) { _inspection = inspection; _selected = null; InvalidateVisual(); }
+    public void SetInspection(MapAssetInspection? inspection, IEnumerable<(int X, int Y)>? selection = null) { _inspection = inspection; _selected.Clear(); if (selection is not null) foreach (var cell in selection) _selected.Add(cell); Notify(); }
+    public void SelectAllPresent() { _selected.Clear(); if (_inspection is not null) foreach (var cell in _inspection.Cells.Where(cell => cell.Present)) _selected.Add((cell.X, cell.Y)); Notify(); }
+    public void ClearSelection() { _selected.Clear(); Notify(); }
 
     public override void Render(DrawingContext context)
     {
@@ -113,7 +151,7 @@ internal sealed class MapGridControl : Control
             var rect = new Rect(left + cell.X * cellSize, top + cell.Y * cellSize, Math.Max(0.5, cellSize - 0.35), Math.Max(0.5, cellSize - 0.35));
             IBrush brush = cell.Present ? HeightBrush(cell, min, max) : Brush.Parse("#111722"); context.FillRectangle(brush, rect);
             if (cell.Holes is > 0 && cellSize >= 4) context.DrawRectangle(null, new Pen(Brush.Parse("#FFB84A"), Math.Max(0.6, cellSize * 0.08)), rect);
-            if (_selected == cell) context.DrawRectangle(null, new Pen(Brush.Parse("#FFFFFF"), Math.Max(1, cellSize * 0.13)), rect);
+            if (_selected.Contains((cell.X, cell.Y))) context.DrawRectangle(null, new Pen(Brush.Parse("#FFFFFF"), Math.Max(1, cellSize * 0.13)), rect);
         }
         context.DrawRectangle(null, new Pen(Brush.Parse("#34415A"), 1), new Rect(left, top, size, size));
         DrawText(context, $"{_inspection.Kind} · {_inspection.PresentCells:N0} present · {_inspection.GridWidth}×{_inspection.GridHeight}", new Point(12, 18), Brush.Parse("#D8E2F1"));
@@ -123,8 +161,9 @@ internal sealed class MapGridControl : Control
     {
         base.OnPointerPressed(e); if (_inspection is null) return; var size = Math.Max(1, Math.Min(Bounds.Width, Bounds.Height) - 28); var left = (Bounds.Width - size) / 2; var top = (Bounds.Height - size) / 2; var point = e.GetPosition(this);
         var x = (int)((point.X - left) / size * _inspection.GridWidth); var y = (int)((point.Y - top) / size * _inspection.GridHeight);
-        _selected = x >= 0 && x < _inspection.GridWidth && y >= 0 && y < _inspection.GridHeight ? _inspection.Cells.FirstOrDefault(cell => cell.X == x && cell.Y == y) : null;
-        CellSelected?.Invoke(this, _selected); InvalidateVisual(); e.Handled = true;
+        var cell = x >= 0 && x < _inspection.GridWidth && y >= 0 && y < _inspection.GridHeight ? _inspection.Cells.FirstOrDefault(candidate => candidate.X == x && candidate.Y == y && candidate.Present) : null;
+        if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) _selected.Clear();
+        if (cell is not null && !_selected.Add((cell.X, cell.Y))) _selected.Remove((cell.X, cell.Y)); Notify(); e.Handled = true;
     }
 
     private static IBrush HeightBrush(MapTileCell cell, float? minimum, float? maximum)
@@ -135,4 +174,5 @@ internal sealed class MapGridControl : Control
         return new SolidColorBrush(Color.FromArgb(255, Mix(low.R, high.R), Mix(low.G, high.G), Mix(low.B, high.B)));
     }
     private static void DrawText(DrawingContext context, string text, Point point, IBrush brush) => context.DrawText(new FormattedText(text, System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, Typeface.Default, 12, brush), point);
+    private void Notify() { CellsSelected?.Invoke(this, SelectedCells); InvalidateVisual(); }
 }

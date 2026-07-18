@@ -400,6 +400,11 @@ using (var stream = File.Create(mapAdt)) using (var writer = new BinaryWriter(st
 var adtInspection = MapAssetInspectionService.Inspect(mapAdt); var adtCell = adtInspection.Cells.Single(cell => cell.Present);
 if (adtInspection.Kind != MapAssetKind.Adt || adtInspection.TileX != 31 || adtInspection.TileY != 33 || adtCell.X != 3 || adtCell.Y != 4 || adtCell.AreaId != 12 || adtCell.Holes != 1 || adtCell.MinimumHeight != 100f || adtCell.MaximumHeight != 244f)
     throw new InvalidOperationException("Native ADT MCNK coordinate, area, holes, or MCVT height inspection failed.");
+var heightPlan = AdtHeightEditService.Plan(mapAdt, [(3, 4)], 10f); var heightPreview = AdtHeightEditService.Preview(heightPlan); var heightPreviewCell = heightPreview.Cells.Single(cell => cell.Present);
+var heightPlanPath = Path.Combine(assetFixture, "height-plan.json"); AdtHeightEditService.SavePlan(heightPlan, heightPlanPath); var loadedHeightPlan = AdtHeightEditService.LoadPlan(heightPlanPath); var editedAdt = Path.Combine(assetFixture, "fixture-height-edit.adt");
+var heightResult = AdtHeightEditService.Apply(loadedHeightPlan, editedAdt); var originalAdtCell = MapAssetInspectionService.Inspect(mapAdt).Cells.Single(cell => cell.Present); var writtenAdtCell = heightResult.Inspection.Cells.Single(cell => cell.Present);
+if (heightPreviewCell.MinimumHeight != 110f || heightPreviewCell.MaximumHeight != 254f || originalAdtCell.MinimumHeight != 100f || writtenAdtCell.MinimumHeight != 110f || writtenAdtCell.MaximumHeight != 254f || heightResult.EditedCells != 1 || !File.Exists(heightResult.ReceiptPath))
+    throw new InvalidOperationException("Hash-bound ADT terrain-height preview/apply did not preserve the source or verify the edited output.");
 var geometryModelPath = Path.Combine(assetFixture, "geometry.m2"); var geometryBytes = new byte[0x300];
 System.Text.Encoding.ASCII.GetBytes("MD20").CopyTo(geometryBytes, 0); BitConverter.GetBytes((uint)264).CopyTo(geometryBytes, 4); BitConverter.GetBytes((uint)3).CopyTo(geometryBytes, 0x3C); BitConverter.GetBytes((uint)0x130).CopyTo(geometryBytes, 0x40);
 const int fixtureBoneOffset = 0x220; const int fixtureAttachmentOffset = 0x278; const int fixtureAttachmentLookupOffset = 0x2A0;
