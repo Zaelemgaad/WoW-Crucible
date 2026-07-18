@@ -22,7 +22,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _password = new() { PasswordChar = '●', HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
-    private readonly TextBox _search = new() { PlaceholderText = "Filter loaded scan; enter an exact item ID and press Enter…" };
+    private readonly TextBox _search = new() { PlaceholderText = "Filter scan or enter an exact ID (17802, 17,802, #17802)…" };
     private readonly ComboBox _classification = new()
     {
         ItemsSource = new[] { "No known acquisition path", "Known acquisition path", "All item_template rows" },
@@ -80,7 +80,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         _search.KeyDown += async (_, args) =>
         {
             if (args.Key != Key.Enter) return; args.Handled = true;
-            if (uint.TryParse(_search.Text?.Trim(), out var exactId) && exactId > 0) { _inspectId.Text = exactId.ToString(); await InspectExactAsync(); }
+            if (TryParseItemId(_search.Text, out var exactId)) { _inspectId.Text = exactId.ToString(); await InspectExactAsync(); }
             else if (_audit is null) await AuditAsync();
         };
         _classification.SelectionChanged += (_, _) => ApplyAuditFilter();
@@ -170,7 +170,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private async Task InspectExactAsync()
     {
-        if (!uint.TryParse(_inspectId.Text, out var entry) || entry == 0) { _inspection.Text = "Enter a positive item ID."; return; }
+        if (!TryParseItemId(_inspectId.Text, out var entry)) { _inspection.Text = "Enter a positive item ID. Plain, grouped, and #prefixed forms are accepted (17802, 17,802, or #17802)."; return; }
         SetBusy($"Tracing every acquisition candidate for item {entry:N0}…");
         try
         {
@@ -187,7 +187,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private async Task InspectSearchExactAsync()
     {
-        if (!uint.TryParse(_search.Text?.Trim(), out var entry) || entry == 0)
+        if (!TryParseItemId(_search.Text, out var entry))
         {
             _status.Text = "Enter one positive numeric item ID in the catalog search box for an exact database lookup.";
             return;
@@ -257,7 +257,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private void ApplyAuditFilter()
     {
         if (_audit is null) { _status.Text = "Run the full acquisition scan, or enter an exact numeric item ID here and press Enter for immediate inspection."; return; } var query = _search.Text?.Trim() ?? string.Empty;
-        if (uint.TryParse(query, out var exactId) && exactId > 0)
+        if (TryParseItemId(query, out var exactId))
         {
             var exact = _audit.AllItems.FirstOrDefault(item => item.Entry == exactId);
             if (exact is null)
@@ -288,6 +288,15 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         if (result.Length > 0) { _items.SelectedItem = result[0]; _items.ScrollIntoView(result[0]); }
         var label = mode switch { 1 => "known-path", 2 => "total", _ => "no-known-path" };
         _status.Text = $"Showing {result.Length:N0} {label} item(s). Numeric searches always show an existing exact row and state its classification.";
+    }
+
+    private static bool TryParseItemId(string? text, out uint entry)
+    {
+        var candidate = text?.Trim() ?? string.Empty;
+        if (candidate.StartsWith('#')) candidate = candidate[1..].Trim();
+        if (candidate.Length == 0 || candidate.Any(character => !char.IsDigit(character) && character is not ',' and not '_' and not ' ')) { entry = 0; return false; }
+        candidate = candidate.Replace(",", string.Empty, StringComparison.Ordinal).Replace("_", string.Empty, StringComparison.Ordinal).Replace(" ", string.Empty, StringComparison.Ordinal);
+        return uint.TryParse(candidate, out entry) && entry > 0;
     }
 
     private async Task CloneAsync()
