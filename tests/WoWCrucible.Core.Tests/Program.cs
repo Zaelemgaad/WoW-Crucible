@@ -314,9 +314,19 @@ if (wmoInspection.Version != 17 || wmoInspection.Chunks.Single().Id != "MVER")
     throw new InvalidOperationException("Native WMO inspection did not normalize reversed on-disk chunk identifiers.");
 var conversionWorkspacePath = Path.Combine(Path.GetTempPath(), $"crucible-native-workspace-{Guid.NewGuid():N}");
 var nativeWorkspace = NativeAssetConversionService.CreateWorkspace([wotlkModel, modernModel], conversionWorkspacePath);
-if (nativeWorkspace.CompatibleAssets != 1 || nativeWorkspace.ConversionRequired != 1 || !File.Exists(Path.Combine(conversionWorkspacePath, "conversion-report.json")) ||
-    Directory.EnumerateFiles(Path.Combine(conversionWorkspacePath, "source"), "fixture.m2", SearchOption.AllDirectories).Count() != 1)
+if (nativeWorkspace.FormatVersion != 2 || nativeWorkspace.CompatibleAssets != 1 || nativeWorkspace.ConversionRequired != 1 || !File.Exists(Path.Combine(conversionWorkspacePath, "conversion-report.json")) ||
+    Directory.EnumerateFiles(Path.Combine(conversionWorkspacePath, "source"), "fixture.m2", SearchOption.AllDirectories).Count() != 1 ||
+    !NativeAssetConversionService.ResolveSnapshotPath(nativeWorkspace, nativeWorkspace.Assets.Single(asset => asset.Path == wotlkModel)).Contains($"{Path.DirectorySeparatorChar}asset{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
     throw new InvalidOperationException("Native conversion workspace did not preserve immutable hashed inputs and report compatibility.");
+var reopenedNativeWorkspace = NativeAssetConversionService.LoadWorkspace(Path.Combine(conversionWorkspacePath, "conversion-report.json"));
+var movedConversionWorkspacePath = conversionWorkspacePath + "-moved"; Directory.Move(conversionWorkspacePath, movedConversionWorkspacePath);
+var movedNativeWorkspace = NativeAssetConversionService.LoadWorkspace(movedConversionWorkspacePath);
+if (reopenedNativeWorkspace.Assets.Count != 2 || movedNativeWorkspace.RootPath != Path.GetFullPath(movedConversionWorkspacePath))
+    throw new InvalidOperationException("Native conversion reports could not be reopened or rebound after a workspace move.");
+var tamperedSnapshot = NativeAssetConversionService.ResolveSnapshotPath(movedNativeWorkspace, movedNativeWorkspace.Assets.Single(asset => asset.Path == modernModel)); File.AppendAllText(tamperedSnapshot, "tampered");
+try { _ = NativeAssetConversionService.LoadWorkspace(movedConversionWorkspacePath); throw new InvalidOperationException("Native conversion workspace accepted a tampered immutable snapshot."); }
+catch (InvalidDataException) { }
+Directory.Delete(movedConversionWorkspacePath, true);
 var comparisonRoot = Path.Combine(assetFixture, "comparison-library");
 var oldLegacy = Path.Combine(comparisonRoot, "Archives", "patch-old-a1", "Content", "Character", "BloodElf", "Female");
 var newLegacy = Path.Combine(comparisonRoot, "Archives", "patch-new-b2", "Content", "Character", "BloodElf", "Female"); Directory.CreateDirectory(oldLegacy); Directory.CreateDirectory(newLegacy);
@@ -526,7 +536,7 @@ try
 }
 finally { File.Move(heldTerrain, graphTerrain); }
 Directory.Delete(targetClientFixture, true);
-Directory.Delete(assetFixture, true); Directory.Delete(conversionWorkspacePath, true);
+Directory.Delete(assetFixture, true);
 
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));
 if (targetProfiles.Count != 4 || TargetProfileCatalog.Find(targetProfiles, null).ClientBuild != 12340 ||

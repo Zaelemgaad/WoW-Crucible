@@ -32,8 +32,10 @@ public sealed record NativeConversionWorkspace(
 
 public static class NativeAssetConversionService
 {
+    private const int WorkspaceFormatVersion = 2;
     private const uint WotlkM2Version = 264;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    private static readonly EnumerationOptions RecursiveFiles = new() { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
 
     public static AssetInspection Inspect(string path)
     {
@@ -110,30 +112,97 @@ public static class NativeAssetConversionService
         uint ReadUInt(int offset) => offset + 4 <= data.Length ? BitConverter.ToUInt32(data, offset) : 0;
     }
 
-    public static NativeConversionWorkspace CreateWorkspace(IEnumerable<string> inputs, string outputRoot)
+    public static NativeConversionWorkspace CreateWorkspace(IEnumerable<string> inputs, string outputRoot, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var paths = ExpandInputs(inputs).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (paths.Length == 0) throw new InvalidOperationException("Add at least one M2 or WMO asset to the native conversion workspace.");
         outputRoot = Path.GetFullPath(outputRoot);
         if (Directory.Exists(outputRoot) && Directory.EnumerateFileSystemEntries(outputRoot).Any())
             throw new IOException($"Conversion workspace must be new or empty: {outputRoot}");
-        Directory.CreateDirectory(outputRoot);
-        var sourceRoot = Path.Combine(outputRoot, "source"); Directory.CreateDirectory(sourceRoot);
-        var inspections = paths.Select(Inspect).ToArray();
-        foreach (var inspection in inspections)
+        var parent = Path.GetDirectoryName(outputRoot) ?? throw new InvalidOperationException("Conversion workspace has no parent folder."); Directory.CreateDirectory(parent);
+        var staging = Path.Combine(parent, $".crucible-conversion-{Guid.NewGuid():N}"); Directory.CreateDirectory(staging);
+        try
         {
-            var folder = Path.Combine(sourceRoot, inspection.Sha256[..12]); Directory.CreateDirectory(folder);
-            File.Copy(inspection.Path, Path.Combine(folder, Path.GetFileName(inspection.Path)), false);
-            foreach (var dependency in inspection.Dependencies.Where(dependency => dependency.Exists))
-                File.Copy(dependency.Path, Path.Combine(folder, Path.GetFileName(dependency.Path)), false);
+            var sourceRoot = Path.Combine(staging, "source"); Directory.CreateDirectory(sourceRoot);
+            var inspections = new List<AssetInspection>();
+            foreach (var path in paths) { cancellationToken.ThrowIfCancellationRequested(); inspections.Add(Inspect(path)); }
+            foreach (var inspection in inspections)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var folder = Path.Combine(sourceRoot, HashPrefix(inspection.Sha256));
+                var assetFolder = Path.Combine(folder, "asset"); Directory.CreateDirectory(assetFolder);
+                CopyVerified(inspection.Path, Path.Combine(assetFolder, Path.GetFileName(inspection.Path)), inspection.Sha256);
+                foreach (var dependency in inspection.Dependencies.Where(dependency => dependency.Exists))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var hash = dependency.Sha256 ?? throw new InvalidDataException($"Dependency has no source hash: {dependency.Path}");
+                    var dependencyFolder = Path.Combine(folder, "dependencies", HashPrefix(hash)); Directory.CreateDirectory(dependencyFolder);
+                    CopyVerified(dependency.Path, Path.Combine(dependencyFolder, Path.GetFileName(dependency.Path)), hash);
+                }
+            }
+            Directory.CreateDirectory(Path.Combine(staging, "converted"));
+            var result = new NativeConversionWorkspace(WorkspaceFormatVersion, DateTimeOffset.UtcNow, "WoW 3.3.5a build 12340", outputRoot, inspections,
+                inspections.Count(asset => asset.Compatibility == AssetCompatibility.AlreadyWotlk335),
+                inspections.Count(asset => asset.Compatibility == AssetCompatibility.RequiresNativeConversion),
+                inspections.Count(asset => asset.Compatibility is AssetCompatibility.Invalid or AssetCompatibility.Unsupported));
+            File.WriteAllText(Path.Combine(staging, "conversion-report.json"), JsonSerializer.Serialize(result, JsonOptions));
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Directory.Exists(outputRoot)) Directory.Delete(outputRoot);
+            Directory.Move(staging, outputRoot);
+            return LoadWorkspace(outputRoot);
         }
-        Directory.CreateDirectory(Path.Combine(outputRoot, "converted"));
-        var result = new NativeConversionWorkspace(1, DateTimeOffset.UtcNow, "WoW 3.3.5a build 12340", outputRoot, inspections,
-            inspections.Count(asset => asset.Compatibility == AssetCompatibility.AlreadyWotlk335),
-            inspections.Count(asset => asset.Compatibility == AssetCompatibility.RequiresNativeConversion),
-            inspections.Count(asset => asset.Compatibility is AssetCompatibility.Invalid or AssetCompatibility.Unsupported));
-        File.WriteAllText(Path.Combine(outputRoot, "conversion-report.json"), JsonSerializer.Serialize(result, JsonOptions));
-        return result;
+        finally { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
+    }
+
+    public static NativeConversionWorkspace LoadWorkspace(string reportOrRoot, bool verifySnapshots = true, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = Path.GetFullPath(reportOrRoot); var report = Directory.Exists(path) ? Path.Combine(path, "conversion-report.json") : path;
+        if (!File.Exists(report)) throw new FileNotFoundException("The native conversion report was not found.", report);
+        var workspace = JsonSerializer.Deserialize<NativeConversionWorkspace>(File.ReadAllText(report)) ?? throw new InvalidDataException("The native conversion report is empty.");
+        if (workspace.FormatVersion is not 1 and not WorkspaceFormatVersion) throw new InvalidDataException($"Unsupported native conversion workspace version: {workspace.FormatVersion}");
+        var root = Path.GetDirectoryName(report) ?? throw new InvalidDataException("The native conversion report has no containing workspace.");
+        workspace = workspace with { RootPath = root };
+        if (!verifySnapshots) return workspace;
+        foreach (var asset in workspace.Assets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var snapshot = ResolveSnapshotPath(workspace, asset); VerifyHash(snapshot, asset.Sha256, "asset snapshot");
+            foreach (var dependency in asset.Dependencies.Where(value => value.Exists))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var hash = dependency.Sha256 ?? throw new InvalidDataException($"Dependency has no recorded hash: {dependency.Path}");
+                var dependencySnapshot = workspace.FormatVersion == 1
+                    ? Path.Combine(Path.GetDirectoryName(snapshot)!, Path.GetFileName(dependency.Path))
+                    : Path.Combine(Path.GetFullPath(workspace.RootPath), "source", HashPrefix(asset.Sha256), "dependencies", HashPrefix(hash), Path.GetFileName(dependency.Path));
+                VerifyHash(dependencySnapshot, hash, "dependency snapshot");
+            }
+        }
+        return workspace;
+    }
+
+    public static string ResolveSnapshotPath(NativeConversionWorkspace workspace, AssetInspection asset) =>
+        workspace.FormatVersion == 1
+            ? Path.Combine(Path.GetFullPath(workspace.RootPath), "source", HashPrefix(asset.Sha256), Path.GetFileName(asset.Path))
+            : Path.Combine(Path.GetFullPath(workspace.RootPath), "source", HashPrefix(asset.Sha256), "asset", Path.GetFileName(asset.Path));
+
+    private static void CopyVerified(string source, string destination, string expectedHash)
+    {
+        File.Copy(source, destination, false); VerifyHash(destination, expectedHash, "copied immutable source");
+    }
+
+    private static void VerifyHash(string path, string expectedHash, string label)
+    {
+        if (!File.Exists(path)) throw new FileNotFoundException($"Native conversion {label} is missing.", path);
+        using var stream = File.OpenRead(path); var actual = Convert.ToHexString(SHA256.HashData(stream));
+        if (!actual.Equals(expectedHash, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Native conversion {label} hash mismatch: {path}");
+    }
+
+    private static string HashPrefix(string hash)
+    {
+        if (hash.Length != 64 || hash.Any(character => !Uri.IsHexDigit(character))) throw new InvalidDataException($"Invalid SHA-256 value in native conversion workspace: {hash}");
+        return hash[..12].ToUpperInvariant();
     }
 
     private static IEnumerable<string> ExpandInputs(IEnumerable<string> inputs)
@@ -143,7 +212,7 @@ public static class NativeAssetConversionService
             var path = Path.GetFullPath(raw);
             if (File.Exists(path)) { yield return path; continue; }
             if (!Directory.Exists(path)) throw new FileNotFoundException("Asset input does not exist.", path);
-            foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)
+            foreach (var file in Directory.EnumerateFiles(path, "*", RecursiveFiles)
                          .Where(file => Path.GetExtension(file).Equals(".m2", StringComparison.OrdinalIgnoreCase) || Path.GetExtension(file).Equals(".wmo", StringComparison.OrdinalIgnoreCase)))
                 yield return file;
         }

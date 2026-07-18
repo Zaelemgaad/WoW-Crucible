@@ -51,6 +51,7 @@
                         <Button HorizontalContentAlignment="Left" Click="OpenClientWorkspaceClick"><TextBlock Text="▣  Client workshop" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenTextureWorkspaceClick"><TextBlock Text="▧  Texture lab" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenAssetComparisonClick"><TextBlock Text="⬡  Assets &amp; compare" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenNativeConversionClick"><TextBlock Text="⇄  Modern asset conversion" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenToolInventoryClick"><TextBlock Text="⌂  Tool inventory" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenServerSqlClick"><TextBlock Text="⚙  Server &amp; SQL" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenSqlWorkspaceClick"><TextBlock Text="▤  SQL studio" TextWrapping="Wrap" /></Button>
