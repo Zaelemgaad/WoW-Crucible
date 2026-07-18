@@ -197,6 +197,21 @@ try
     if (mountSources.Count != 2 || mountSources.Single(source => source.Provenance == "patch-A").TexturePath != textureA ||
         mountSources.Single(source => source.Provenance == "patch-B").TexturePath != textureB)
         throw new InvalidOperationException("Item-model mounting crossed provenance boundaries or mismatched ItemDisplayInfo model/texture slots.");
+    var leftA = Path.Combine(sourceA, "shoulder-left.m2"); var rightA = Path.Combine(sourceA, "shoulder-right.m2"); var rightB = Path.Combine(sourceB, "shoulder-right.m2");
+    var leftTextureA = Path.Combine(sourceA, "shoulder-left.blp"); var rightTextureA = Path.Combine(sourceA, "shoulder-right.blp"); var rightTextureB = Path.Combine(sourceB, "shoulder-right.blp");
+    foreach (var path in new[] { leftA, rightA, rightB, leftTextureA, rightTextureA, rightTextureB }) File.WriteAllBytes(path, [2]);
+    var shoulderDisplay = thunderfuryDisplay with { Assets =
+    [
+        new ItemDisplayAsset("model", 0, "shoulder-left.mdx", [], [leftA]),
+        new ItemDisplayAsset("model", 1, "shoulder-right.mdx", [], [rightA, rightB]),
+        new ItemDisplayAsset("model-texture", 0, "shoulder-left.blp", [], [leftTextureA]),
+        new ItemDisplayAsset("model-texture", 1, "shoulder-right.blp", [], [rightTextureA, rightTextureB])
+    ] };
+    var completeShoulders = M2PreviewSceneService.PlanShoulderMounts(shoulderDisplay, leftA);
+    var partialShoulders = M2PreviewSceneService.PlanShoulderMounts(shoulderDisplay, rightB);
+    if (!completeShoulders.Complete || completeShoulders.Placements.Count != 2 || completeShoulders.Placements.Single(value => value.Source.ModelSlot == 0).AttachmentId != 6 || completeShoulders.Placements.Single(value => value.Source.ModelSlot == 1).AttachmentId != 5 ||
+        partialShoulders.Complete || partialShoulders.Placements.Count != 1 || partialShoulders.Placements[0].Source.ModelPath != rightB || partialShoulders.Placements[0].AttachmentId != 5)
+        throw new InvalidOperationException("Paired shoulder mounting did not preserve left/right native attachments or strict same-provenance selection.");
 }
 finally { if (Directory.Exists(mountSourceFixture)) Directory.Delete(mountSourceFixture, true); }
 var chestGeosets = ItemEquipmentPreviewService.ResolveGeosets(5, [2, 3, 4]);

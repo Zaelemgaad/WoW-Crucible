@@ -3,6 +3,8 @@ using System.Numerics;
 namespace WoWCrucible.Core;
 
 public sealed record ItemModelMountSource(int ModelSlot, string ModelPath, string? TexturePath, string Provenance);
+public sealed record ItemModelMountPlacement(ItemModelMountSource Source, uint AttachmentId);
+public sealed record ItemModelMountPlan(IReadOnlyList<ItemModelMountPlacement> Placements, bool Complete, string Message);
 
 public static class M2PreviewSceneService
 {
@@ -34,6 +36,27 @@ public static class M2PreviewSceneService
             }
         }
         return result.OrderBy(source => source.ModelSlot).ThenBy(source => source.Provenance, StringComparer.OrdinalIgnoreCase).ThenBy(source => source.ModelPath, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public static ItemModelMountPlan PlanShoulderMounts(ItemDisplayInfoRecord display, string selectedModelPath)
+    {
+        ArgumentNullException.ThrowIfNull(display);
+        if (string.IsNullOrWhiteSpace(selectedModelPath)) throw new ArgumentException("Select one resolved shoulder model source first.", nameof(selectedModelPath));
+        var sources = FindItemModelSources(display);
+        var selected = sources.FirstOrDefault(source => source.ModelPath.Equals(selectedModelPath, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException("The selected model is no longer part of the resolved ItemDisplayInfo sources.");
+        if (selected.ModelSlot is not 0 and not 1) throw new InvalidDataException($"Shoulder mounting supports ItemDisplayInfo model slots 0 and 1; the selected source reports slot {selected.ModelSlot:N0}.");
+        var sameProvenance = sources.Where(source => source.Provenance.Equals(selected.Provenance, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var left = selected.ModelSlot == 0 ? selected : sameProvenance.FirstOrDefault(source => source.ModelSlot == 0);
+        var right = selected.ModelSlot == 1 ? selected : sameProvenance.FirstOrDefault(source => source.ModelSlot == 1);
+        var placements = new List<ItemModelMountPlacement>(2);
+        if (left is not null) placements.Add(new(left, 6));   // native left-shoulder attachment
+        if (right is not null) placements.Add(new(right, 5)); // native right-shoulder attachment
+        var complete = left is not null && right is not null;
+        var message = complete
+            ? $"Resolved the left and right shoulder models from the same {selected.Provenance} provenance."
+            : $"Only shoulder model slot {selected.ModelSlot:N0} exists in {selected.Provenance}; Crucible will show that exact side without mirroring or borrowing from another patch.";
+        return new(placements, complete, message);
     }
 
     public static uint? RecommendedAttachmentId(int inventoryType) => inventoryType switch

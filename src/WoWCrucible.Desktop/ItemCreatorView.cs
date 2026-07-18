@@ -12,6 +12,7 @@ namespace WoWCrucible.Desktop;
 internal sealed class ItemCreatorView : UserControl, IDisposable
 {
     private sealed record NamedValue(int Value, string Name) { public override string ToString() => Name; }
+    private sealed record MountedItemPreview(M2PreviewGeometry Geometry, uint AttachmentId, RgbaTexture? Texture, string Label, bool FollowPicker);
     private readonly DesktopWorkspaceSession _session;
     private readonly NumericUpDown _entry = Number(1, uint.MaxValue, 1);
     private readonly TextBox _name = new() { Text = "New Custom Item" };
@@ -46,7 +47,8 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private AssetComparisonIndex? _appearanceIndex; private CharacterAppearancePreviewPlan? _appearancePlan; private bool _suppressAppearance;
     private readonly TextBlock _displayDetails = Status("Resolve the current display ID to see every ItemDisplayInfo model, texture, icon, geoset, and visual field.");
     private ItemDisplayInfoRecord? _resolvedDisplay;
-    private M2PreviewGeometry? _mountedItemGeometry; private RgbaTexture? _mountedItemTexture; private string? _mountedItemLabel; private string? _mountCharacterPath;
+    private readonly List<MountedItemPreview> _mountedItems = [];
+    private M2PreviewGeometry? _mountCharacterGeometry; private string? _mountCharacterPath;
     private readonly TextBlock _status = Status("Offline portable schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _commit = AccentButton("Insert into connected database");
     private ItemWritePlan? _pendingInsert;
@@ -90,7 +92,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         var characterPaths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _characterModelPath, WithColumn(browseCharacter,1), WithRow(_characterSkinPath,1), WithRow(WithColumn(browseCharacterSkin,1),1) } };
         var appearanceChoices = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _appearanceSkins, WithColumn(_appearanceFaces,1), WithRow(_appearanceFacialHair,1), WithRow(WithColumn(_appearanceHair,1),1), WithRow(_appearanceSources,2) } }; Grid.SetColumnSpan(_appearanceSources,2);
         foreach(var combo in new[]{_appearanceSkins,_appearanceFaces,_appearanceFacialHair,_appearanceHair,_appearanceSources})combo.SelectionChanged+=async(_,_)=>{if(!_suppressAppearance)await LoadAppearanceChoicesAsync();};
-        var attachmentControls = new Expander { Header = "Native equipment/effect attachment points", Content = new StackPanel { Spacing = 6, Children = { new TextBlock { Text = "Highlights the exact WotLK attachment record where helmets, shoulders, weapons, sheaths, and effects bind. Changing this selector immediately remounts the currently previewed item model. Ambiguous slots such as shoulders deliberately require an explicit choice.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, _showAttachments, _attachmentPicker } } };
+        var attachmentControls = new Expander { Header = "Native equipment/effect attachment points", Content = new StackPanel { Spacing = 6, Children = { new TextBlock { Text = "Highlights the exact WotLK attachment record where helmets, shoulders, weapons, sheaths, and effects bind. Changing this selector immediately remounts a single previewed item. Shoulder model slots 0/1 instead stay mounted on the native left/right pair from one provenance source.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, _showAttachments, _attachmentPicker } } };
         var modelHeader = new StackPanel { Spacing = 7, Children = { new TextBlock { Text="Live item display resolution", FontWeight=FontWeight.SemiBold }, resolverPaths, new WrapPanel { Children = { resolveDisplay, loadResolved, mountResolved, loadModel, clearModel } }, _resolvedModels, _displayDetails, attachmentControls, new Separator(), new TextBlock { Text="Equipped character preview", FontWeight=FontWeight.SemiBold }, new TextBlock { Text="Choose a playable character M2. Load decoded choices to build its real CharSections skin, face, underwear, facial features, hair texture, and hair geosets. Wearable armor composes atlas/geoset changes; helmets, weapons, shields, bows, cloaks, and quivers can mount their real child M2 on a native attachment point.",TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#9AA5B7") }, characterPaths, appearanceChoices, _appearanceStatus, _wearSources, new WrapPanel { Children = { fillCharacter, loadAppearance, previewEquipped } } } };
         var modelPage = new Grid { RowDefinitions = new("2*,Auto,3*,Auto"), Children = { new ScrollViewer { Content=modelHeader }, WithRow(new GridSplitter { ResizeDirection=GridResizeDirection.Rows, Background=Brush.Parse("#2B3445") },1), WithRow(new Border { Background=Brush.Parse("#090D14"), Child=_model },2), WithRow(_modelStatus,3) } };
         var previewTabs = new TabControl { Items = { new TabItem { Header="Tooltip", Content=new ScrollViewer { Content=new Border { Background=Brush.Parse("#080911"), BorderBrush=Brush.Parse("#7C6639"), BorderThickness=new Thickness(1), Margin=new Thickness(8), Child=_tooltip } } }, new TabItem { Header="3D model", Content=modelPage }, new TabItem { Header="SQL preview", Content=_sql } } };
@@ -203,8 +205,9 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
                 ??throw new InvalidOperationException("The selected model is no longer part of the resolved ItemDisplayInfo sources.");
             var characterPath=_characterModelPath.Text?.Trim()??string.Empty;if(!File.Exists(characterPath))throw new FileNotFoundException("Choose an extracted playable character M2 first.",characterPath);
             var previousAttachment=_mountCharacterPath?.Equals(characterPath,StringComparison.OrdinalIgnoreCase)==true?(_attachmentPicker.SelectedItem as M2PreviewAttachment)?.Id:null;
-            var requestedAttachment=M2PreviewSceneService.RecommendedAttachmentId(Selected(_inventory))??previousAttachment;
-            _mountedItemGeometry=null;_mountedItemTexture=null;_mountedItemLabel=null;_model.ClearMountedModels();_modelStatus.Text=$"Loading character and {Path.GetFileName(source.ModelPath)} from {source.Provenance}…";
+            var inventoryType=Selected(_inventory); var shoulderPlan=inventoryType==3?M2PreviewSceneService.PlanShoulderMounts(_resolvedDisplay,selectedModel):null;
+            var requestedAttachment=shoulderPlan?.Placements.FirstOrDefault()?.AttachmentId??M2PreviewSceneService.RecommendedAttachmentId(inventoryType)??previousAttachment;
+            _mountedItems.Clear();_mountCharacterGeometry=null;_model.ClearMountedModels();_modelStatus.Text=$"Loading character and {Path.GetFileName(source.ModelPath)} from {source.Provenance}…";
 
             ComposedCharacterAppearance? appearance=null;M2GeosetSelection? geosetSelection=null;
             if(_appearanceIndex is not null&&_appearancePlan?.SelectedSource is not null)
@@ -222,7 +225,21 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             {
                 var baseSkin=_characterSkinPath.Text?.Trim();if(!string.IsNullOrWhiteSpace(baseSkin)&&File.Exists(baseSkin))_model.SetDecodedTexture(await Task.Run(()=>DecodePreviewTexture(baseSkin)));else _model.SetTexture(null);
             }
-            _mountCharacterPath=characterPath;RefreshAttachmentPoints(characterGeometry,requestedAttachment,requestedAttachment is not null);
+            _mountCharacterGeometry=characterGeometry;_mountCharacterPath=characterPath;RefreshAttachmentPoints(characterGeometry,requestedAttachment,requestedAttachment is not null);
+            if(shoulderPlan is not null)
+            {
+                foreach(var placement in shoulderPlan.Placements)
+                {
+                    var shoulderAttachment=characterGeometry.Attachments.FirstOrDefault(candidate=>candidate.Id==placement.AttachmentId)??throw new InvalidDataException($"The character model has no native shoulder attachment ID {placement.AttachmentId:N0}.");
+                    var shoulderGeometry=await Task.Run(()=>M2PreviewGeometryService.Load(placement.Source.ModelPath,visibilityMode:M2PreviewVisibilityMode.AllGeosets));
+                    var shoulderTexture=placement.Source.TexturePath is null?null:await Task.Run(()=>DecodePreviewTexture(placement.Source.TexturePath));
+                    _mountedItems.Add(new(shoulderGeometry,shoulderAttachment.Id,shoulderTexture,$"{Path.GetFileName(placement.Source.ModelPath)} · {placement.Source.Provenance}",false));
+                }
+                _showAttachments.IsChecked=true;ApplyAttachmentOverlay();
+                _session.Settings.ItemPreviewCharacterModelPath=characterPath;_session.Settings.ItemPreviewCharacterSkinPath=_characterSkinPath.Text??string.Empty;_session.Settings.Save();
+                _modelStatus.Text=$"Mounted {_mountedItems.Count:N0} shoulder model(s) on the native left/right attachment pair. {shoulderPlan.Message} Character and shoulder faces share one depth-sorted scene.";
+                return;
+            }
             if(requestedAttachment is null)
             {
                 _showAttachments.IsChecked=true;ApplyAttachmentOverlay();_modelStatus.Text="The character is loaded, but this item slot has no unambiguous automatic bind point. Choose the exact native attachment above, then press Mount selected model on character again.";return;
@@ -230,7 +247,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             var attachment=_attachmentPicker.SelectedItem as M2PreviewAttachment??throw new InvalidDataException($"The character model has no attachment ID {requestedAttachment:N0} required by this inventory slot.");
             var itemGeometry=await Task.Run(()=>M2PreviewGeometryService.Load(source.ModelPath,visibilityMode:M2PreviewVisibilityMode.AllGeosets));
             var itemTexture=source.TexturePath is null?null:await Task.Run(()=>DecodePreviewTexture(source.TexturePath));
-            _mountedItemGeometry=itemGeometry;_mountedItemTexture=itemTexture;_mountedItemLabel=$"{Path.GetFileName(source.ModelPath)} · {source.Provenance}";_showAttachments.IsChecked=true;ApplyAttachmentOverlay();
+            _mountedItems.Add(new(itemGeometry,attachment.Id,itemTexture,$"{Path.GetFileName(source.ModelPath)} · {source.Provenance}",true));_showAttachments.IsChecked=true;ApplyAttachmentOverlay();
             _session.Settings.ItemPreviewCharacterModelPath=characterPath;_session.Settings.ItemPreviewCharacterSkinPath=_characterSkinPath.Text??string.Empty;_session.Settings.Save();
             _modelStatus.Text=$"Mounted {Path.GetFileName(source.ModelPath)} from {source.Provenance} on {attachment.Id:N0} · {attachment.Name}. Character and item faces share one depth-sorted scene.{(source.TexturePath is null?" No same-provenance model texture was found; the item remains untextured.":$" Texture: {Path.GetFileName(source.TexturePath)}.")}";
         }
@@ -282,14 +299,20 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     {
         var attachment = _attachmentPicker.SelectedItem as M2PreviewAttachment;
         _model.SetAttachmentOverlay(_showAttachments.IsChecked == true, attachment?.Index);
-        if (_mountedItemGeometry is not null && attachment is not null)
-            _model.SetMountedModels([new M2PreviewMountedModel(_mountedItemGeometry, Matrix4x4.CreateTranslation(attachment.Position), _mountedItemTexture, _mountedItemLabel ?? Path.GetFileName(_mountedItemGeometry.ModelPath))]);
-        else _model.ClearMountedModels();
+        if (_mountedItems.Count == 0 || _mountCharacterGeometry is null) { _model.ClearMountedModels(); return; }
+        var mounted = new List<M2PreviewMountedModel>(_mountedItems.Count);
+        foreach (var item in _mountedItems)
+        {
+            var targetId = item.FollowPicker && attachment is not null ? attachment.Id : item.AttachmentId;
+            var target = _mountCharacterGeometry.Attachments.FirstOrDefault(candidate => candidate.Id == targetId);
+            if (target is not null) mounted.Add(new(item.Geometry, Matrix4x4.CreateTranslation(target.Position), item.Texture, item.Label));
+        }
+        _model.SetMountedModels(mounted);
     }
 
     private void ClearMountedPreviewState()
     {
-        _mountedItemGeometry = null; _mountedItemTexture = null; _mountedItemLabel = null; _mountCharacterPath = null;
+        _mountedItems.Clear(); _mountCharacterGeometry = null; _mountCharacterPath = null;
         _model.ClearMountedModels();
     }
 
