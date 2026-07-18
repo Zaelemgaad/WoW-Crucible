@@ -217,6 +217,22 @@ public sealed class PatchArchiveService
         finally { Native.SFileCloseArchive(archive); }
     }
 
+    internal IReadOnlyList<(MpqFileEntry Entry, string FilePath)> ExtractFlat(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, CancellationToken cancellationToken = default)
+    {
+        archivePath = Path.GetFullPath(archivePath); destinationRoot = Path.GetFullPath(destinationRoot); Directory.CreateDirectory(destinationRoot); var entries = files.ToArray(); var result = new List<(MpqFileEntry, string)>(entries.Length);
+        var archive = OpenArchiveWithRetry(archivePath, "open the MPQ archive");
+        try
+        {
+            for (var index = 0; index < entries.Length; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested(); Native.SFileSetLocale(entries[index].Locale); var internalPath = PatchInputMapper.NormalizeArchivePath(entries[index].ArchivePath); var destination = Path.Combine(destinationRoot, $"{index:X8}.bin");
+                ExtractFileAtomically(destination, overwriteExisting: false, temporary => Native.SFileExtractFile(archive, internalPath, temporary, 0), () => ThrowNative($"extract '{internalPath}'")); result.Add((entries[index], destination));
+            }
+        }
+        finally { Native.SFileCloseArchive(archive); }
+        return result;
+    }
+
     internal static void ExtractFileAtomically(string destination, bool overwriteExisting, Func<string, bool> extractToTemporary, Action throwExtractionError)
     {
         destination = Path.GetFullPath(destination);

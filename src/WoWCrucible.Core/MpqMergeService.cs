@@ -17,7 +17,7 @@ public sealed class MpqMergeService
         outputPath = Path.GetFullPath(outputPath);
         if (inputs.Contains(outputPath, StringComparer.OrdinalIgnoreCase)) throw new InvalidOperationException("The merged output cannot overwrite one of its source archives.");
         var parent = Path.GetDirectoryName(outputPath) ?? throw new InvalidOperationException("The output path has no parent folder."); Directory.CreateDirectory(parent);
-        var temporary = Path.Combine(parent, $".crucible-mpq-merge-{Guid.NewGuid():N}"); Directory.CreateDirectory(temporary);
+        var temporary = Path.Combine(parent, $".wcm-{Guid.NewGuid():N}"[..13]); Directory.CreateDirectory(temporary);
         try
         {
             var service = new PatchArchiveService(); var extracted = new List<(string Archive, string InternalPath, string File)>(); var done = 0;
@@ -28,8 +28,8 @@ public sealed class MpqMergeService
                 if (ambiguous is not null) throw new InvalidDataException($"{Path.GetFileName(inputs[index])} contains multiple locale/variant entries named '{ambiguous.Key}'. Merge is blocked until locale-aware resolution is selected.");
                 var anonymous = entries.FirstOrDefault(entry => Path.GetFileName(entry.ArchivePath).StartsWith("File000", StringComparison.OrdinalIgnoreCase));
                 if (anonymous is not null) throw new InvalidDataException($"{Path.GetFileName(inputs[index])} contains unresolved hash-only paths such as {anonymous.ArchivePath}. Supply a compatible listfile before merging so payloads cannot be assigned the wrong client path.");
-                var destination = Path.Combine(temporary, $"source-{index:D3}"); service.Extract(inputs[index], destination, entries, null, cancellationToken);
-                extracted.AddRange(entries.Select(entry => (inputs[index], PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), Path.Combine(destination, entry.ArchivePath.Replace('\\', Path.DirectorySeparatorChar)))));
+                var destination = Path.Combine(temporary, $"s{index:D3}"); var files = service.ExtractFlat(inputs[index], destination, entries, cancellationToken);
+                extracted.AddRange(files.Select(file => (inputs[index], PatchInputMapper.NormalizeArchivePath(file.Entry.ArchivePath), file.FilePath)));
                 progress?.Report((++done, inputs.Length, Path.GetFileName(inputs[index])));
             }
 

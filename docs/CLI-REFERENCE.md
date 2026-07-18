@@ -36,6 +36,8 @@ wowcrucible asset texture-info <file.blp>
 wowcrucible asset map-info <file.adt|wdt|wdl> [--cells] [--format=text|json]
 wowcrucible asset adt-height-plan <input.adt> <delta> <x:y,x:y|all> <plan.json> [--overwrite]
 wowcrucible asset adt-height-apply <plan.json> <output.adt> [--overwrite]
+wowcrucible asset adt-brush-plan <input.adt> <center-x:center-y> <radius> <strength> <plan.json> [--falloff=linear|smooth|constant] [--overwrite]
+wowcrucible asset adt-brush-apply <plan.json> <output.adt> [--overwrite]
 wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]
 wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
 wowcrucible asset texture-validate <file-or-folder> [--recursive]
@@ -69,6 +71,8 @@ The same native inspection/workspace flow is available under **Modern asset conv
 `map-info` validates a WotLK ADT, WDT, or WDL without loading the complete file into memory. The normal report summarizes chunks, terrain/world-grid occupancy, height range, coordinates, and referenced assets; `--cells` emits every present cell and `--format=json` returns the complete inspection model used by the same-window Maps & World grid.
 
 ADT height editing is intentionally two-stage. `adt-height-plan` binds a finite signed delta and explicit `x:y` cells (or all present cells) to the exact source SHA-256 and original MCNK base heights. `adt-height-apply` refuses a changed source or in-place source overwrite, writes a separate ADT atomically, re-parses every edited height range, and emits a companion `.crucible-map-edit.json` receipt. The Maps & World workspace provides the same selection, preview, and write path visually.
+
+`adt-brush-plan` edits the real 145-float MCVT vertex grids with a tile-local radial brush rather than shifting whole cells. The center uses the ADT's `0..16` terrain grid, radius is in that same coordinate space, signed strength raises or lowers, and linear/smooth/constant falloff is explicit. The plan records every exact float offset, preimage, weight, and postimage. `adt-brush-apply` retains the source, writes atomically, re-parses every affected cell, and emits `.crucible-map-brush.json`. The visual grid places the center by click and draws the exact radius before preview/write.
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
 
@@ -186,7 +190,7 @@ Standalone list/tree/extract commands and the desktop archive browser share comp
 
 `update` is transaction-safe but copies the archive first and refuses archives larger than 2 GiB. Treat large client/mod layers as immutable inputs and build a small manifest-driven patch instead.
 
-`merge` treats every source MPQ as immutable. Repeated internal paths are SHA-256 checked and then compared byte-for-byte; exact copies are stored once. Different bytes at the same internal path block output by default. `--conflicts=earlier` or `--conflicts=later` is an explicit global precedence choice. Hash-only `File000...` names and duplicate locale variants are blocked unless their real paths can be resolved safely.
+`merge` treats every source MPQ as immutable. Repeated internal paths are SHA-256 checked and then compared byte-for-byte; exact copies are stored once. Different bytes at the same internal path block output by default. `--conflicts=earlier` or `--conflicts=later` is an explicit global precedence choice. Hash-only `File000...` names and duplicate locale variants are blocked unless their real paths can be resolved safely. Merge payloads use short flat temporary names while logical archive paths remain separate, so deeply nested project/output locations do not exceed StormLib's Windows destination-path limit.
 
 ## Manifest-first patches
 
