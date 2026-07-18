@@ -45,6 +45,7 @@
                     <Button HorizontalContentAlignment="Left" Content="⌘  Behaviors &amp; dialogue" Click="OpenBehaviorWorkspaceClick" />
                     <Button HorizontalContentAlignment="Left" Content="◇  MPQ patches" Click="OpenMpqWorkspaceClick" />
                     <Button HorizontalContentAlignment="Left" Content="▣  Client workshop" Click="OpenClientWorkspaceClick" />
+                    <Button HorizontalContentAlignment="Left" Content="▧  Texture lab" Click="OpenTextureWorkspaceClick" />
                     <Button HorizontalContentAlignment="Left" Content="⬡  Assets &amp; compare" Click="OpenAssetComparisonClick" />
                     <Button HorizontalContentAlignment="Left" Content="⚙  Server &amp; SQL" Click="OpenServerSqlClick" />
                     <Button HorizontalContentAlignment="Left" Content="▤  SQL studio" Click="OpenSqlWorkspaceClick" />

@@ -59,6 +59,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Consolidates older `Loose\Content` libraries into the same content-first tree with a read-only dry run, strict all-or-nothing blocking for non-identical destination conflicts, byte-for-byte duplicate verification, and a durable apply journal.
 - Visually compares PNG assets by content directory rather than filename: a versioned compact sidecar opened the current 162.5 MB test catalog in roughly 0.15 seconds, includes model-only M2/SKIN paths, falls back safely when stale/corrupt/unwritable, and never replaces the CSV as the durable source. Path/source/name filters, selectable filename/source/file-size sorting, cancellable SHA-256 plus byte-for-byte exact-copy grouping, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions, provenance, and direct Explorer reveal remain non-destructive.
 - Opens **Assets & compare** inside the existing Crucible window, with an explicit return-to-editor action, resizable split panes, wrapped tool groups, and scrollable configuration headers so controls remain reachable when the window is resized. M2 discovery stays idle during ordinary PNG browsing, starts automatically for model-only paths or explicitly for Live model preview, and searches only bounded direct provenance scopes instead of recursively probing the whole asset library.
+- Opens a native **Texture Lab** in that same window. It validates and live-previews BLP1/BLP2 mips, decodes palette/JPEG/raw-BGRA/DXT1/DXT3/DXT5 to PNG, encodes Wrath-compatible BLP2 from common images, chooses alpha compression automatically, identifies salvageable corrupt tail mips as warnings, and validates whole folders without any BLPConverter executable.
 - Builds resumable client indexes with per-archive SHA-256 identities and reusable MPQ content catalogs, detects active/inactive locales, backup/custom subdirectory scopes and renamed build-12340 executables, marks anonymous hash-only entries explicitly, recovers names from local/cross-client path corpora, and resumes indexed extraction without rescanning giant archives or rewriting already-complete files.
 - Includes a visual Client Inspector for indexing/resuming a whole installation, color-coded archive scopes, loose runtime/config/AddOn inventory, plain-language compatibility guidance, content-category summaries, direct archive browsing, and provenance-preserving extraction.
 - Turns an extracted/effective client DBC directory into a reviewed client-to-server deployment plan: byte identity, row/field counts, current-core consumer, SQL-overlay warning, restart requirement, unresolved layer conflicts, portable JSON, and separate non-live staging trees for the patch and server DBC candidates.
@@ -122,7 +123,10 @@ wowcrucible client show client-index
 wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]
 wowcrucible client fusion extracted-stock extracted-mod-a extracted-mod-b [--output=fusion-plan.json] [--stage=fusion-review] [--all]
 wowcrucible server client-plan "C:\path\to\installed-server" extracted-effective-dbc [--source=core-source] [--output=plan.json] [--stage=server-review]
-wowcrucible asset library-import extracted-archive asset-library provenance-name BLPConverter.exe [--workers=6]
+wowcrucible asset texture-decode texture.blp texture.png [--mip=0]
+wowcrucible asset texture-encode texture.png texture.blp [--format=auto] [--quality=best]
+wowcrucible asset texture-validate texture-library --recursive
+wowcrucible asset library-import extracted-archive asset-library provenance-name [--workers=6]
 wowcrucible asset library-consolidate asset-library [--apply]
 wowcrucible asset library-catalog asset-library
 wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json] [--listfile=paths.txt]
@@ -217,7 +221,7 @@ The corpus test runner accepts a WDBX 12340 definition XML and a directory conta
 1. Connect the new portable content-project/ID registry to live DBC and SQL occupancy scans and unified validation/change plans.
 2. Complete **Legacy SQL Recovery & Promotion** beyond the implemented snapshot and offline baseline audit: add core-specific dependency closure, explicit selection, baseline → legacy-edited → target conflict analysis, collision-safe ID remapping, SQL/rollback preview, and transactional deployment. The default path remains read-only and never carries deletions into the target implicitly.
 3. Add a WoWDBDefs DBD provider and cross-check it against WDBX definitions per target build.
-4. Add BLP preview/conversion plus recursive M2/WMO/ADT asset dependency validation.
+4. Extend the completed native BLP preview/codec with recursive M2/WMO/ADT material and asset dependency validation.
 5. Expand the Spell Workspace with named flags, searchable references, related-table navigation, and optional project-local SQLite bulk editing.
 6. Guided creature/NPC appearance import, gameobject generation, vendor, loot, quest, race, and class creators on the live capability model.
 7. CASC/DB2 support and complete corpus verification for additional client profiles.

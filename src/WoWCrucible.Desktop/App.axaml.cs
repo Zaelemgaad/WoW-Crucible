@@ -31,6 +31,7 @@ public partial class App : Application
                 window.Opened += (_, _) => window.OpenAssetComparison(library);
             }
             if (arguments.Any(argument => IsOption(argument, "--sql-studio"))) window.Opened += (_, _) => window.OpenSqlWorkspace();
+            else if (arguments.Any(argument => IsOption(argument, "--textures"))) window.Opened += (_, _) => window.OpenTextureWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--gameobjects"))) window.Opened += (_, _) => window.OpenGameObjectWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--quests"))) window.Opened += (_, _) => window.OpenQuestWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--behaviors"))) window.Opened += (_, _) => window.OpenBehaviorWorkspace();

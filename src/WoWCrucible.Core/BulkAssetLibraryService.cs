@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -78,12 +77,15 @@ public static class BulkAssetLibraryService
         return JsonSerializer.Deserialize<BulkAssetLibraryPlan>(File.ReadAllText(path)) ?? throw new InvalidDataException("The asset-library plan is empty or invalid.");
     }
 
-    public static async Task<BulkAssetLibraryRunResult> RunAsync(string libraryRoot, string converterPath, int conversionWorkers = 6,
+    public static Task<BulkAssetLibraryRunResult> RunAsync(string libraryRoot, string converterPath, int conversionWorkers = 6,
+        IProgress<(string Stage, int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default) =>
+        RunAsync(libraryRoot, conversionWorkers, progress, cancellationToken);
+
+    public static async Task<BulkAssetLibraryRunResult> RunAsync(string libraryRoot, int conversionWorkers = 6,
         IProgress<(string Stage, int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
     {
         using var operationLock = AcquireOperationLock(libraryRoot);
         var plan = LoadPlan(libraryRoot); ValidateRoots(plan.SourceRoot, plan.LibraryRoot);
-        converterPath = Path.GetFullPath(converterPath); if (!File.Exists(converterPath)) throw new FileNotFoundException("The BLP converter does not exist.", converterPath);
         conversionWorkers = Math.Clamp(conversionWorkers, 1, 16);
         var checkpointPath = Path.Combine(plan.LibraryRoot, CheckpointFileName);
         var prior = File.Exists(checkpointPath) ? JsonSerializer.Deserialize<BulkAssetLibraryCheckpoint>(File.ReadAllText(checkpointPath)) : null;
@@ -105,7 +107,7 @@ public static class BulkAssetLibraryService
                 var rejectedEntries = new List<string>();
                 archiveService.Extract(archive.SourcePath, contentRoot, entries, null, cancellationToken, overwriteExisting: false, preserveLocaleVariants: true,
                     extractionFailure: (entry, exception) => rejectedEntries.Add($"{entry.ArchivePath}: {exception.Message}"));
-                var conversion = await ConvertBlpsAsync(contentRoot, converterPath, conversionWorkers, cancellationToken);
+                var conversion = await ConvertBlpsAsync(contentRoot, conversionWorkers, cancellationToken);
                 converted += conversion.Converted; conversionFailures += conversion.Failed;
                 var relocation = RelocateContent(plan.LibraryRoot, ArchiveFolderName(archive), contentRoot, true, cancellationToken);
                 if (relocation.Conflicts > 0) throw new IOException($"Content-first relocation found {relocation.Conflicts:N0} existing destination conflict(s); nothing was overwritten.");
@@ -117,25 +119,29 @@ public static class BulkAssetLibraryService
             WriteCheckpoint(checkpointPath, completed, failures, converted);
         }
         progress?.Report(("Convert non-archive sources", 0, plan.LooseBlpFiles, plan.SourceRoot));
-        var looseConversion = await ConvertBlpsAsync(Path.Combine(plan.LibraryRoot, "Archives", "Content"), converterPath, conversionWorkers, cancellationToken);
+        var looseConversion = await ConvertBlpsAsync(Path.Combine(plan.LibraryRoot, "Archives", "Content"), conversionWorkers, cancellationToken);
         converted += looseConversion.Converted; conversionFailures += looseConversion.Failed;
         WriteCheckpoint(checkpointPath, completed, failures, converted);
         var catalog = WriteCatalog(plan, cancellationToken);
         return new(completed.Count, failures.Count, copiedLoose, converted, conversionFailures, catalog, checkpointPath);
     }
 
-    public static async Task<BulkAssetConversionRepairResult> RepairConversionsAsync(string libraryRoot, string converterPath, int conversionWorkers = 6,
+    public static Task<BulkAssetConversionRepairResult> RepairConversionsAsync(string libraryRoot, string converterPath, int conversionWorkers = 6,
+        IProgress<(string Stage, int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default) =>
+        RepairConversionsAsync(libraryRoot, conversionWorkers, progress, cancellationToken);
+
+    public static async Task<BulkAssetConversionRepairResult> RepairConversionsAsync(string libraryRoot, int conversionWorkers = 6,
         IProgress<(string Stage, int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
     {
-        var plan = LoadPlan(libraryRoot); converterPath = Path.GetFullPath(converterPath);
-        if (!File.Exists(converterPath)) throw new FileNotFoundException("The BLP converter does not exist.", converterPath);
+        using var operationLock = AcquireOperationLock(libraryRoot);
+        var plan = LoadPlan(libraryRoot);
         conversionWorkers = Math.Clamp(conversionWorkers, 1, 16);
         var roots = ConversionRoots(plan.LibraryRoot).ToArray();
         var converted = 0; var failed = 0;
         for (var index = 0; index < roots.Length; index++)
         {
             cancellationToken.ThrowIfCancellationRequested(); progress?.Report(("Repair PNGs", index + 1, roots.Length, roots[index].Label));
-            var result = await ConvertBlpsAsync(roots[index].Root, converterPath, conversionWorkers, cancellationToken); converted += result.Converted; failed += result.Failed;
+            var result = await ConvertBlpsAsync(roots[index].Root, conversionWorkers, cancellationToken); converted += result.Converted; failed += result.Failed;
         }
         var checkpointPath = Path.Combine(plan.LibraryRoot, CheckpointFileName);
         var prior = File.Exists(checkpointPath) ? JsonSerializer.Deserialize<BulkAssetLibraryCheckpoint>(File.ReadAllText(checkpointPath)) : null;
@@ -145,17 +151,21 @@ public static class BulkAssetLibraryService
         return new(converted, failed, WriteCatalog(plan, cancellationToken), checkpointPath);
     }
 
-    public static async Task<BulkAssetExtractedImportResult> ImportExtractedArchiveAsync(string sourceRoot, string libraryRoot, string provenance,
+    public static Task<BulkAssetExtractedImportResult> ImportExtractedArchiveAsync(string sourceRoot, string libraryRoot, string provenance,
         string converterPath, int conversionWorkers = 6, IProgress<(string Stage, long Done, long Total, string Path)>? progress = null,
+        CancellationToken cancellationToken = default) =>
+        ImportExtractedArchiveAsync(sourceRoot, libraryRoot, provenance, conversionWorkers, progress, cancellationToken);
+
+    public static async Task<BulkAssetExtractedImportResult> ImportExtractedArchiveAsync(string sourceRoot, string libraryRoot, string provenance,
+        int conversionWorkers = 6, IProgress<(string Stage, long Done, long Total, string Path)>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        sourceRoot = Path.GetFullPath(sourceRoot); libraryRoot = Path.GetFullPath(libraryRoot); converterPath = Path.GetFullPath(converterPath);
+        sourceRoot = Path.GetFullPath(sourceRoot); libraryRoot = Path.GetFullPath(libraryRoot);
         using var operationLock = AcquireOperationLock(libraryRoot);
         ValidateRoots(sourceRoot, libraryRoot);
         var sourceFromLibrary = Path.GetRelativePath(libraryRoot, sourceRoot);
         if (sourceFromLibrary.Equals(".") || !sourceFromLibrary.StartsWith(".." + Path.DirectorySeparatorChar) && sourceFromLibrary != "..")
             throw new InvalidOperationException("The extracted source folder must be outside the asset library.");
-        if (!File.Exists(converterPath)) throw new FileNotFoundException("The BLP converter does not exist.", converterPath);
         var cleanProvenance = SafeName(provenance);
         if (string.IsNullOrWhiteSpace(cleanProvenance) || cleanProvenance is "." or ".." || !cleanProvenance.Equals(provenance.Trim(), StringComparison.Ordinal))
             throw new ArgumentException("Provenance must be a valid folder name without path separators or replacement characters.", nameof(provenance));
@@ -192,7 +202,7 @@ public static class BulkAssetLibraryService
             if ((index & 511) == 0 || index + 1 == sources.Length) progress?.Report(("Copy extracted", index + 1, sources.Length, relative));
         }
 
-        var conversion = await ConvertBlpsAsync(stagingRoot, converterPath, conversionWorkers, cancellationToken);
+        var conversion = await ConvertBlpsAsync(stagingRoot, conversionWorkers, cancellationToken);
         long relocated = 0;
         var relocation = Directory.Exists(stagingRoot)
             ? RelocateContent(libraryRoot, cleanProvenance, stagingRoot, true, cancellationToken,
@@ -337,54 +347,25 @@ public static class BulkAssetLibraryService
         return copied;
     }
 
-    private static async Task<(int Converted, int Failed)> ConvertBlpsAsync(string root, string converterPath, int workers, CancellationToken cancellationToken)
+    private static async Task<(int Converted, int Failed)> ConvertBlpsAsync(string root, int workers, CancellationToken cancellationToken)
     {
         if (!Directory.Exists(root)) return (0, 0);
         var pending = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Where(path => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase) && !File.Exists(Path.ChangeExtension(path, ".png"))).ToArray();
-        var batches = BatchPaths(pending, 28_000, 128);
-        await Parallel.ForEachAsync(batches, new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = cancellationToken }, async (batch, token) =>
+        var failures = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        await Parallel.ForEachAsync(pending, new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = cancellationToken }, (source, token) =>
         {
-            EnsureCompatibleConverter(await RunConverterAsync(converterPath, batch, token), converterPath);
+            token.ThrowIfCancellationRequested();
+            try { BlpTextureService.DecodeToPng(source, Path.ChangeExtension(source, ".png")); }
+            catch (Exception exception) { failures[source] = exception.Message; }
+            return ValueTask.CompletedTask;
         });
-        // Older converters abort the rest of a batch at the first unsupported BLP. Retry
-        // every missing output alone so one invalid modern texture cannot hide valid neighbors.
-        var retry = pending.Where(source => !File.Exists(Path.ChangeExtension(source, ".png"))).ToArray();
-        await Parallel.ForEachAsync(retry, new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = cancellationToken },
-            async (source, token) => EnsureCompatibleConverter(await RunConverterAsync(converterPath, [source], token), converterPath));
         var converted = pending.Count(source => File.Exists(Path.ChangeExtension(source, ".png")));
-        var rejected = pending.Where(source => !File.Exists(Path.ChangeExtension(source, ".png"))).ToArray();
         var rejectionLog = Path.Combine(root, ".blp-conversion-failures.txt");
-        if (rejected.Length > 0) File.WriteAllLines(rejectionLog, rejected.Select(source => Path.GetRelativePath(root, source)));
+        if (failures.Count > 0) File.WriteAllLines(rejectionLog, failures.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(pair => $"{Path.GetRelativePath(root, pair.Key)}\t{pair.Value}"));
         else if (File.Exists(rejectionLog)) File.Delete(rejectionLog);
-        return (converted, rejected.Length);
-    }
-
-    private static async Task<string> RunConverterAsync(string converterPath, IReadOnlyList<string> sources, CancellationToken cancellationToken)
-    {
-        var start = new ProcessStartInfo(converterPath) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        start.ArgumentList.Add("/M"); foreach (var path in sources) start.ArgumentList.Add(path);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the BLP converter.");
-        var output = process.StandardOutput.ReadToEndAsync(cancellationToken); var error = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken); await Task.WhenAll(output, error);
-        return (await output) + Environment.NewLine + (await error);
-    }
-
-    private static void EnsureCompatibleConverter(string output, string converterPath)
-    {
-        if (output.Contains("Invalid filename '/M'", StringComparison.OrdinalIgnoreCase) || output.Contains("Invalid filename \"/M\"", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"The selected executable does not support BLPConverter's /M batch syntax: {converterPath}");
-    }
-
-    private static IReadOnlyList<string[]> BatchPaths(IReadOnlyList<string> paths, int maximumCharacters, int maximumFiles)
-    {
-        var result = new List<string[]>(); var batch = new List<string>(); var characters = 0;
-        foreach (var path in paths)
-        {
-            if (batch.Count > 0 && (batch.Count >= maximumFiles || characters + path.Length + 3 > maximumCharacters)) { result.Add(batch.ToArray()); batch.Clear(); characters = 0; }
-            batch.Add(path); characters += path.Length + 3;
-        }
-        if (batch.Count > 0) result.Add(batch.ToArray()); return result;
+        return (converted, failures.Count);
     }
 
     private static string WriteCatalog(BulkAssetLibraryPlan plan, CancellationToken cancellationToken = default)

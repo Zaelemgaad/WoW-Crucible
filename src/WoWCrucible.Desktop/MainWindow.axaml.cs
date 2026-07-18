@@ -29,6 +29,7 @@ public partial class MainWindow : Window
     private ItemWorkbenchView? _itemWorkbenchView;
     private MpqWorkspaceView? _mpqWorkspaceView;
     private ClientWorkspaceView? _clientWorkspaceView;
+    private TextureWorkspaceView? _textureWorkspaceView;
     private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
     private CreatureWorkspaceView? _creatureWorkspaceView;
     private GameObjectWorkspaceView? _gameObjectWorkspaceView;
@@ -60,7 +61,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { _assetComparisonView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
+        Closed += (_, _) => { _assetComparisonView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -81,7 +82,9 @@ public partial class MainWindow : Window
             ? LoadDbcAsync(path)
             : extension.Equals(".m2", StringComparison.OrdinalIgnoreCase)
                 ? LoadM2Async(path)
-                : ShowErrorAsync("Unsupported file", "The desktop preview currently opens .dbc and .m2 files.");
+                : extension.Equals(".blp", StringComparison.OrdinalIgnoreCase)
+                    ? OpenTextureWorkspaceAsync(path)
+                    : ShowErrorAsync("Unsupported file", "The desktop opens DBC, M2 and BLP files directly.");
     }
 
     private async void OpenDbcClick(object? sender, RoutedEventArgs e)
@@ -589,6 +592,24 @@ public partial class MainWindow : Window
             _clientWorkspaceView.OpenArchiveRequested += async (_, path) => await OpenIndexedArchiveAsync(path);
         }
         OpenFeatureWorkspace(_clientWorkspaceView, "Client Workshop");
+    }
+
+    private void OpenTextureWorkspaceClick(object? sender, RoutedEventArgs e) => OpenTextureWorkspace();
+    public void OpenTextureWorkspace(string? path = null)
+    {
+        if (_textureWorkspaceView is null)
+        {
+            _textureWorkspaceView = new TextureWorkspaceView();
+            _textureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_textureWorkspaceView, "Texture Lab");
+        if (!string.IsNullOrWhiteSpace(path)) _ = _textureWorkspaceView.OpenAsync(path);
+    }
+
+    private async Task OpenTextureWorkspaceAsync(string path)
+    {
+        OpenTextureWorkspace();
+        await _textureWorkspaceView!.OpenAsync(path);
     }
 
     private async Task OpenIndexedArchiveAsync(string path)

@@ -24,13 +24,17 @@ A content project separates Assets, DBC, SQL, Manifests, Reports, and Staging ou
 ## Asset inspection and libraries
 
 ```text
+wowcrucible asset texture-info <file.blp>
+wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]
+wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
+wowcrucible asset texture-validate <file-or-folder> [--recursive]
 wowcrucible asset inspect <model.m2|building.wmo>...
 wowcrucible asset preview-info <wrath-model.m2> [--all-geosets]
 wowcrucible asset workspace <new-output-folder> <files/folders...>
 wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]
-wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]
-wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]
-wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]
+wowcrucible asset library-run <library-folder> [--workers=6]
+wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]
+wowcrucible asset library-repair <library-folder> [--workers=6]
 wowcrucible asset library-layout <library-folder> [--apply]
 wowcrucible asset library-consolidate <library-folder> [--apply]
 wowcrucible asset library-catalog <library-folder>
@@ -44,7 +48,9 @@ wowcrucible asset definitive-stage <library-folder> <output-folder>
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
 
-`library-run` is resumable. It preserves each archive as provenance at the leaf of the shared content-first tree, preserves duplicate locale variants with suffixes, never overwrites an existing extracted file or PNG, copies loose BLPs directly into that same tree without modifying the source, converts in bounded parallel batches, verifies PNG output, writes a checkpoint after every archive, and generates `asset-catalog.csv` with Maps/UI/Characters/Creatures/Items/Textures/ModelsAndWorld/Audio/Other categories. A corrupt or unsupported individual archive entry is recorded in the checkpoint while the remaining entries continue. If the external converter rejects a BLP, Crucible retries its batch neighbors individually and records genuinely unsupported paths for repair. Executables that reject the required `/M` batch syntax now fail immediately instead of spawning a retry for every texture.
+Crucible's native managed texture codec validates and decodes BLP2 palette, raw BGRA, DXT1/DXT1A, DXT3 and DXT5 payloads plus BLP1 palette and JPEG payloads. Encoding writes Wrath-compatible BLP2 with a complete optional mip chain. `auto` selects DXT1 for opaque pixels, DXT1A for binary transparency, and DXT5 for smooth alpha. Output replacement is opt-in and written through a temporary file. Old but top-level-decodable textures with corrupt phantom/trailing mip metadata are reported as `WARN` and expose only their valid mip chain; a broken top mip remains `FAIL`. The same operations are available inside the single-window **Texture Lab**, which opens directly with `--textures` or by opening a `.blp` file.
+
+`library-run` is resumable. It preserves each archive as provenance at the leaf of the shared content-first tree, preserves duplicate locale variants with suffixes, never overwrites an existing extracted file or PNG, copies loose BLPs directly into that same tree without modifying the source, decodes with the native codec in bounded parallel work, verifies PNG output, writes a checkpoint after every archive, and generates `asset-catalog.csv` with Maps/UI/Characters/Creatures/Items/Textures/ModelsAndWorld/Audio/Other categories. A corrupt or unsupported individual archive entry is recorded with its exact codec failure while the remaining entries continue. No BLPConverter executable is required.
 
 `library-import` safely ingests a folder produced by another MPQ extractor while retaining a single explicit provenance label. It preserves every file type, converts staged BLPs, relocates the result directly into the shared content-first tree, uses exact byte comparisons when resuming, refuses differing destination files, and never modifies or deletes the extracted source folder. New imports do not create a parallel `Loose` tree.
 
@@ -52,7 +58,7 @@ Example:
 
 ```powershell
 wowcrucible asset library-plan "G:\extras" "G:\Crucible-Extras-Processed" --max-gb=2
-wowcrucible asset library-run "G:\Crucible-Extras-Processed" "C:\Tools\BLPConverter.exe" --workers=6
+wowcrucible asset library-run "G:\Crucible-Extras-Processed" --workers=6
 wowcrucible asset library-consolidate "G:\Crucible-Extras-Processed"
 wowcrucible asset library-consolidate "G:\Crucible-Extras-Processed" --apply
 wowcrucible asset library-catalog "G:\Crucible-Extras-Processed"
@@ -61,7 +67,7 @@ wowcrucible asset library-status "G:\Crucible-Extras-Processed"
 
 Stopping `library-run` does not discard completed work. Run the same command again to resume past existing extraction/conversion outputs.
 
-Use `library-repair` after upgrading the converter or after opening a library created by an older Crucible build. It never re-extracts MPQs; it retries only BLPs whose matching PNG is absent, refreshes the per-provenance failure lists, and rebuilds the catalog.
+Use `library-repair` after opening a library created by an older Crucible build or after native codec support expands. It never re-extracts MPQs; it retries only BLPs whose matching PNG is absent, refreshes the per-provenance failure lists, and rebuilds the catalog.
 
 Asset libraries use a content-first comparison layout. For example, `Archives\patch-Y-id\Content\Character\BloodElf\Female\hair.png` becomes `Archives\Content\Character\BloodElf\Female\patch-Y-id\hair.png`, placing every source's version of the same content directory beside the others. `library-layout` migrates the older archive-first layout: it is a non-mutating conflict/count dry run by default; add `--apply` to perform the same-volume migration and rebuild the catalog. Existing destinations are never overwritten.
 

@@ -17,6 +17,46 @@ if (!ClientPatchDeploymentService.InvalidateCache(deploymentFixture).Existed || 
     throw new InvalidOperationException("Explicit client cache invalidation failed.");
 Directory.Delete(deploymentFixture, true); File.Delete(patchDeploymentSource);
 
+var textureFixture = Path.Combine(Path.GetTempPath(), $"crucible-native-textures-{Guid.NewGuid():N}"); Directory.CreateDirectory(textureFixture);
+var texturePixels = new byte[8 * 8 * 4];
+for (var y = 0; y < 8; y++) for (var x = 0; x < 8; x++)
+{
+    var offset = (y * 8 + x) * 4; texturePixels[offset] = (byte)(x * 31); texturePixels[offset + 1] = (byte)(y * 31);
+    texturePixels[offset + 2] = (byte)((x + y) * 15); texturePixels[offset + 3] = (byte)((x * 8 + y) * 4);
+}
+var rgbaFixture = new RgbaTexture(8, 8, texturePixels); var nativePng = Path.Combine(textureFixture, "fixture.png");
+BlpTextureService.WritePng(nativePng, rgbaFixture);
+foreach (var format in new[] { BlpOutputFormat.Dxt1, BlpOutputFormat.Dxt1Alpha, BlpOutputFormat.Dxt3, BlpOutputFormat.Dxt5 })
+{
+    var blp = Path.Combine(textureFixture, $"fixture-{format}.blp");
+    BlpTextureService.EncodeBlp2(rgbaFixture, blp, new(format, true, BlpOutputQuality.Balanced));
+    var info = BlpTextureService.Inspect(blp); var decoded = BlpTextureService.Decode(blp);
+    if (info.Version != BlpTextureVersion.Blp2 || info.MipLevels.Count != 4 || decoded.Width != 8 || decoded.Height != 8 || decoded.Pixels.Length != texturePixels.Length)
+        throw new InvalidOperationException($"Native BLP {format} encode/decode did not preserve the texture shape and mip chain.");
+}
+var autoBlp = Path.Combine(textureFixture, "fixture-auto.blp");
+BlpTextureService.EncodeFromImage(nativePng, autoBlp);
+if (BlpTextureService.Inspect(autoBlp).Encoding != "DXT5" || BlpTextureService.Validate(textureFixture).Any(result => !result.Valid))
+    throw new InvalidOperationException("Native PNG input, automatic alpha format selection, or BLP validation failed.");
+var rawBlp = Path.Combine(textureFixture, "fixture-raw3.blp"); var rawBytes = new byte[148 + texturePixels.Length];
+System.Text.Encoding.ASCII.GetBytes("BLP2").CopyTo(rawBytes, 0); BitConverter.GetBytes((uint)1).CopyTo(rawBytes, 4); rawBytes[8] = 3; rawBytes[9] = 8; rawBytes[10] = 8;
+BitConverter.GetBytes((uint)8).CopyTo(rawBytes, 12); BitConverter.GetBytes((uint)8).CopyTo(rawBytes, 16); BitConverter.GetBytes((uint)148).CopyTo(rawBytes, 20); BitConverter.GetBytes((uint)texturePixels.Length).CopyTo(rawBytes, 84);
+for (var pixel = 0; pixel < 64; pixel++) { rawBytes[148 + pixel * 4] = texturePixels[pixel * 4 + 2]; rawBytes[149 + pixel * 4] = texturePixels[pixel * 4 + 1]; rawBytes[150 + pixel * 4] = texturePixels[pixel * 4]; rawBytes[151 + pixel * 4] = texturePixels[pixel * 4 + 3]; }
+File.WriteAllBytes(rawBlp, rawBytes); var rawDecoded = BlpTextureService.Decode(rawBlp);
+if (BlpTextureService.Inspect(rawBlp).Encoding != "BGRA8888" || !rawDecoded.Pixels.SequenceEqual(texturePixels))
+    throw new InvalidOperationException("Native raw BGRA BLP2 decoding changed channel or alpha bytes.");
+var phantomBlp = Path.Combine(textureFixture, "fixture-phantom-mip.blp"); var phantomBytes = File.ReadAllBytes(autoBlp);
+BitConverter.GetBytes((uint)phantomBytes.Length).CopyTo(phantomBytes, 20 + 4 * 4); BitConverter.GetBytes(uint.MaxValue).CopyTo(phantomBytes, 84 + 4 * 4); File.WriteAllBytes(phantomBlp, phantomBytes);
+var phantomInfo = BlpTextureService.Inspect(phantomBlp);
+if (phantomInfo.MipLevels.Count != 4 || !phantomInfo.Warnings.Any(warning => warning.Contains("phantom mip", StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("Native BLP inspection did not isolate a corrupt mip slot after a complete 1x1 chain.");
+var nativeLibrary = Path.Combine(textureFixture, "library"); var nativeLibraryBlp = Path.Combine(nativeLibrary, "Archives", "Content", "Interface", "Test", "fixture-source", "native.blp");
+Directory.CreateDirectory(Path.GetDirectoryName(nativeLibraryBlp)!); File.Copy(autoBlp, nativeLibraryBlp); File.WriteAllText(Path.Combine(nativeLibrary, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(textureFixture, nativeLibrary, long.MaxValue, DateTimeOffset.UtcNow, 0, [])));
+var nativeRepair = BulkAssetLibraryService.RepairConversionsAsync(nativeLibrary, 1).GetAwaiter().GetResult();
+if (nativeRepair.NewlyConvertedPngs != 1 || nativeRepair.RemainingFailures != 0 || !File.Exists(Path.ChangeExtension(nativeLibraryBlp, ".png")))
+    throw new InvalidOperationException("Bulk asset-library repair did not use the native BLP decoder without an external converter.");
+Directory.Delete(textureFixture, true);
+
 var assetFixture = Path.Combine(Path.GetTempPath(), $"crucible-native-assets-{Guid.NewGuid():N}"); Directory.CreateDirectory(assetFixture);
 var wotlkModel = Path.Combine(assetFixture, "fixture.m2"); var wotlkBytes = new byte[0x130];
 System.Text.Encoding.ASCII.GetBytes("MD20").CopyTo(wotlkBytes, 0); BitConverter.GetBytes((uint)264).CopyTo(wotlkBytes, 4); BitConverter.GetBytes((uint)3).CopyTo(wotlkBytes, 0x128);

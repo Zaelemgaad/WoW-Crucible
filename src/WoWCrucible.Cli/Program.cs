@@ -50,6 +50,53 @@ return exitCode;
 static int Asset(string[] args)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["texture-info", var texturePath])
+    {
+        var info = BlpTextureService.Inspect(texturePath);
+        Console.WriteLine($"Path\t{info.Path}\nVersion\t{info.Version}\nDimensions\t{info.Width}x{info.Height}\nEncoding\t{info.Encoding}\nAlphaDepth\t{info.AlphaDepth}\nAlphaEncoding\t{info.AlphaEncoding}\nMipmaps\t{info.MipLevels.Count} (declared={info.DeclaresMipmaps})");
+        foreach (var mip in info.MipLevels) Console.WriteLine($"MIP\t{mip.Index}\t{mip.Width}x{mip.Height}\t{mip.Offset}\t{mip.Size}");
+        foreach (var warning in info.Warnings) Console.WriteLine($"WARN\t{warning}");
+        return 0;
+    }
+    if (args is ["texture-decode", var decodeSource, var decodeOutput, .. var decodeOptions])
+    {
+        var mipText = Option(decodeOptions, "--mip=") ?? "0";
+        var overwrite = decodeOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
+        var unknown = decodeOptions.Where(option => !option.StartsWith("--mip=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset texture-decode option: {unknown[0]}");
+        if (!int.TryParse(mipText, out var mip) || mip < 0) return Fail("--mip must be a non-negative integer.");
+        BlpTextureService.DecodeToPng(decodeSource, decodeOutput, mip, overwrite);
+        Console.Error.WriteLine($"Decoded native BLP mip {mip} to PNG: {Path.GetFullPath(decodeOutput)}");
+        return 0;
+    }
+    if (args is ["texture-encode", var encodeSource, var encodeOutput, .. var encodeOptions])
+    {
+        var formatText = (Option(encodeOptions, "--format=") ?? "auto").Replace("-", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
+        var format = formatText switch { "auto" => BlpOutputFormat.Auto, "dxt1" => BlpOutputFormat.Dxt1, "dxt1a" or "dxt1alpha" => BlpOutputFormat.Dxt1Alpha, "dxt3" => BlpOutputFormat.Dxt3, "dxt5" => BlpOutputFormat.Dxt5, _ => (BlpOutputFormat)(-1) };
+        if ((int)format < 0) return Fail("--format must be auto, dxt1, dxt1a, dxt3, or dxt5.");
+        var qualityText = (Option(encodeOptions, "--quality=") ?? "best").ToLowerInvariant();
+        var quality = qualityText switch { "fast" => BlpOutputQuality.Fast, "balanced" => BlpOutputQuality.Balanced, "best" => BlpOutputQuality.Best, _ => (BlpOutputQuality)(-1) };
+        if ((int)quality < 0) return Fail("--quality must be fast, balanced, or best.");
+        var mipmaps = !encodeOptions.Contains("--no-mips", StringComparer.OrdinalIgnoreCase);
+        var overwrite = encodeOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
+        var unknown = encodeOptions.Where(option => !option.StartsWith("--format=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--quality=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--no-mips", StringComparison.OrdinalIgnoreCase) && !option.Equals("--mips", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset texture-encode option: {unknown[0]}");
+        BlpTextureService.EncodeFromImage(encodeSource, encodeOutput, new(format, mipmaps, quality), overwrite);
+        var info = BlpTextureService.Inspect(encodeOutput);
+        Console.Error.WriteLine($"Encoded {info.Width}x{info.Height} {info.Encoding} BLP2 with {info.MipLevels.Count} mip level(s): {info.Path}");
+        return 0;
+    }
+    if (args is ["texture-validate", var validatePath, .. var validateOptions])
+    {
+        var recursive = validateOptions.Contains("--recursive", StringComparer.OrdinalIgnoreCase);
+        var unknown = validateOptions.Where(option => !option.Equals("--recursive", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset texture-validate option: {unknown[0]}");
+        var summary = BlpTextureService.ValidateEach(validatePath, recursive, result => Console.WriteLine(result.Valid
+            ? $"{(result.Info!.Warnings.Count == 0 ? "PASS" : "WARN")}\t{result.Info.Width}x{result.Info.Height}\t{result.Info.Encoding}\t{result.Info.MipLevels.Count}\t{result.Path}{(result.Info.Warnings.Count == 0 ? string.Empty : $"\t{string.Join(" | ", result.Info.Warnings)}") }"
+            : $"FAIL\t{result.Error}\t{result.Path}"));
+        Console.Error.WriteLine($"Validated {summary.Total:N0} BLP texture(s): {summary.Total - summary.Failures:N0} decodable, {summary.Warnings:N0} with warning(s), {summary.Failures:N0} invalid.");
+        return summary.Failures == 0 && summary.Warnings == 0 ? 0 : 3;
+    }
     if (args is ["library-plan", var sourceRoot, var libraryRoot, .. var planOptions])
     {
         var maxText = Option(planOptions, "--max-gb=") ?? "2";
@@ -60,35 +107,35 @@ static int Asset(string[] args)
         Console.Error.WriteLine($"Asset library plan: {plan.Archives.Count(archive => archive.Eligible):N0} eligible archive(s), {plan.Archives.Count(archive => !archive.Eligible):N0} skipped by size, {plan.Archives.Sum(archive => archive.Entries):N0} archive entries, {plan.LooseBlpFiles + plan.Archives.Sum(archive => archive.BlpFiles):N0} BLP file(s).\nPlan: {Path.Combine(plan.LibraryRoot, "asset-library-plan.json")}");
         return plan.Archives.Any(archive => archive.Error is not null) ? 3 : 0;
     }
-    if (args is ["library-run", var runLibraryRoot, var converterPath, .. var runOptions])
+    if (args is ["library-run", var runLibraryRoot, .. var runOptions])
     {
         var workersText = Option(runOptions, "--workers=") ?? "6";
         var unknown = runOptions.Where(option => !option.StartsWith("--workers=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown asset library-run option: {unknown[0]}");
         var progress = new Progress<(string Stage, int Done, int Total, string Path)>(value => Console.Error.WriteLine($"{value.Stage}\t{value.Done:N0}/{value.Total:N0}\t{value.Path}"));
-        var result = BulkAssetLibraryService.RunAsync(runLibraryRoot, converterPath, int.Parse(workersText, System.Globalization.CultureInfo.InvariantCulture), progress).GetAwaiter().GetResult();
+        var result = BulkAssetLibraryService.RunAsync(runLibraryRoot, int.Parse(workersText, System.Globalization.CultureInfo.InvariantCulture), progress).GetAwaiter().GetResult();
         Console.Error.WriteLine($"Asset library complete: {result.CompletedArchives:N0} archive(s), {result.CopiedLooseBlps:N0} loose BLP copy/copies, {result.ConvertedPngs:N0} PNG conversion(s), {result.FailedArchives:N0} archive failure(s), {result.ConversionFailures:N0} conversion failure(s).\nCatalog: {result.CatalogPath}\nCheckpoint: {result.CheckpointPath}");
         return result.FailedArchives == 0 && result.ConversionFailures == 0 ? 0 : 3;
     }
-    if (args is ["library-import", var extractedRoot, var importLibraryRoot, var provenance, var importConverterPath, .. var importOptions])
+    if (args is ["library-import", var extractedRoot, var importLibraryRoot, var provenance, .. var importOptions])
     {
         var workersText = Option(importOptions, "--workers=") ?? "6";
         var unknown = importOptions.Where(option => !option.StartsWith("--workers=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown asset library-import option: {unknown[0]}");
         var progress = new Progress<(string Stage, long Done, long Total, string Path)>(value =>
             Console.Error.WriteLine(value.Total > 0 ? $"{value.Stage}\t{value.Done:N0}/{value.Total:N0}\t{value.Path}" : $"{value.Stage}\t{value.Path}"));
-        var result = BulkAssetLibraryService.ImportExtractedArchiveAsync(extractedRoot, importLibraryRoot, provenance, importConverterPath,
+        var result = BulkAssetLibraryService.ImportExtractedArchiveAsync(extractedRoot, importLibraryRoot, provenance,
             int.Parse(workersText, System.Globalization.CultureInfo.InvariantCulture), progress).GetAwaiter().GetResult();
         Console.Error.WriteLine($"Extracted archive import complete: {result.Provenance}, {result.SourceFiles:N0} source file(s), {result.SourceBytes / (1024d * 1024 * 1024):0.##} GiB, {result.ImportedFiles:N0} newly copied, {result.ConvertedPngs:N0} PNG conversion(s), {result.ConversionFailures:N0} conversion failure(s).\nCatalog: {result.CatalogPath}");
         return result.ConversionFailures == 0 ? 0 : 3;
     }
-    if (args is ["library-repair", var repairLibraryRoot, var repairConverterPath, .. var repairOptions])
+    if (args is ["library-repair", var repairLibraryRoot, .. var repairOptions])
     {
         var workersText = Option(repairOptions, "--workers=") ?? "6";
         var unknown = repairOptions.Where(option => !option.StartsWith("--workers=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown asset library-repair option: {unknown[0]}");
         var progress = new Progress<(string Stage, int Done, int Total, string Path)>(value => Console.Error.WriteLine($"{value.Stage}\t{value.Done:N0}/{value.Total:N0}\t{value.Path}"));
-        var result = BulkAssetLibraryService.RepairConversionsAsync(repairLibraryRoot, repairConverterPath, int.Parse(workersText, System.Globalization.CultureInfo.InvariantCulture), progress).GetAwaiter().GetResult();
+        var result = BulkAssetLibraryService.RepairConversionsAsync(repairLibraryRoot, int.Parse(workersText, System.Globalization.CultureInfo.InvariantCulture), progress).GetAwaiter().GetResult();
         Console.Error.WriteLine($"Asset conversion repair complete: {result.NewlyConvertedPngs:N0} newly recovered PNG(s), {result.RemainingFailures:N0} genuinely unsupported BLP(s).\nCatalog: {result.CatalogPath}\nCheckpoint: {result.CheckpointPath}");
         return result.RemainingFailures == 0 ? 0 : 3;
     }
@@ -187,7 +234,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2> [--all-geosets]\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset texture-info <file.blp>\n  wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]\n  wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]\n  wowcrucible asset texture-validate <file-or-folder> [--recursive]\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2> [--all-geosets]\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]\n  wowcrucible asset library-repair <library-folder> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Project(string[] args)
 {
