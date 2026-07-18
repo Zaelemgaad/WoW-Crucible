@@ -341,6 +341,18 @@ if (questObjectPlan.Rows.Count != 3 || questObjectPlan.Rows[1].Table != "gameobj
 try { _ = GameObjectTemplateAdapter.CreatePlan(gameObjectDraft with { Type = 5 }, GameObjectTemplateAdapter.CreatePortableCapabilities()); throw new InvalidOperationException("Gameobject loot was accepted for an incompatible type."); }
 catch (InvalidDataException) { }
 
+var portableQuestTable = QuestTemplateAdapter.CreatePortableTable(); var portableQuestValues = QuestTemplateAdapter.CreateDefaultValues(portableQuestTable).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+portableQuestValues["ID"] = 900300u; portableQuestValues["LogTitle"] = "Crucible's Trial"; portableQuestValues["RequiredNpcOrGo1"] = -900200; portableQuestValues["RequiredNpcOrGoCount1"] = 1; portableQuestValues["RewardItem1"] = 6948; portableQuestValues["RewardAmount1"] = 1; portableQuestValues["Flags"] = 0x00001008u;
+static DatabaseTableCapability QuestLinkTable(string name) => new(name, [new("id", "int", "int unsigned", false, "0", "PRI", "", 1), new("quest", "int", "int unsigned", false, "0", "PRI", "", 2)]);
+var questCapabilities = new DatabaseCapabilities("fixture", "world", new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [portableQuestTable.Name] = portableQuestTable, ["creature_queststarter"] = QuestLinkTable("creature_queststarter"), ["creature_questender"] = QuestLinkTable("creature_questender"), ["gameobject_queststarter"] = QuestLinkTable("gameobject_queststarter"), ["gameobject_questender"] = QuestLinkTable("gameobject_questender") });
+var questPlan = QuestTemplateAdapter.CreatePlan(portableQuestTable, portableQuestValues, questCapabilities, new([900100], [900101], [900200], [900201]));
+if (portableQuestTable.Columns.Count != 105 || questPlan.Rows.Count != 5 || questPlan.Rows[0].Values["QuestType"]?.ToString() != "2" || questPlan.Rows[1].Table != "creature_queststarter" || questPlan.Rows[4].Table != "gameobject_questender" || !questPlan.PreviewSql().Contains("Crucible''s Trial") || QuestTemplateAdapter.Group("RewardChoiceItemID6") != "Rewards" || QuestTemplateAdapter.Group("RequiredItemId6") != "Objectives")
+    throw new InvalidOperationException("Complete schema-aware quest planning, defaults, grouping, or giver-link mapping failed.");
+if (QuestSemanticCatalog.Types.Single(type => type.Value == 2).Name.Contains("normal", StringComparison.OrdinalIgnoreCase) == false || QuestSemanticCatalog.Flags.Single(flag => flag.Value == 0x00001000).Name != "Daily")
+    throw new InvalidOperationException("Quest type or flag decoding drifted from the WotLK world schema/core semantics.");
+try { var invalid = new Dictionary<string, object?>(portableQuestValues, StringComparer.OrdinalIgnoreCase) { ["LogTitle"] = "" }; _ = QuestTemplateAdapter.CreatePlan(portableQuestTable, invalid, questCapabilities); throw new InvalidOperationException("A quest without a title was accepted."); }
+catch (InvalidDataException) { }
+
 static IReadOnlyList<DatabaseColumnCapability> ItemColumns(params string[] names) => names.Select((name, index) => new DatabaseColumnCapability(name, "int", "int", false, "0", name == "entry" ? "PRI" : "", "", index + 1)).ToArray();
 
 var schema = DbcSchemaCatalog.Load(args[0]);

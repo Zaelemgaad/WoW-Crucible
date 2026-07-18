@@ -93,6 +93,8 @@ public sealed class DatabaseCapabilityService
         new("crucible_creature_vendor", "npc_vendor", "entry", "creature_template", "entry", false, "AzerothCore creature vendor inventory"),
         new("crucible_creature_queststarter", "creature_queststarter", "id", "creature_template", "entry", false, "AzerothCore creature quest starter"),
         new("crucible_creature_questender", "creature_questender", "id", "creature_template", "entry", false, "AzerothCore creature quest ender"),
+        new("crucible_creature_startquest", "creature_queststarter", "quest", "quest_template", "ID", false, "Quest started by a creature"),
+        new("crucible_creature_endquest", "creature_questender", "quest", "quest_template", "ID", false, "Quest ended by a creature"),
         new("crucible_gameobject_spawn", "gameobject", "id", "gameobject_template", "entry", false, "AzerothCore gameobject spawn template"),
         new("crucible_gameobject_display", "gameobject_template", "displayId", "gameobjectdisplayinfo_dbc", "ID", false, "Client gameobject display definition mirrored by the server"),
         new("crucible_gameobject_queststarter", "gameobject_queststarter", "id", "gameobject_template", "entry", false, "AzerothCore gameobject quest starter"),

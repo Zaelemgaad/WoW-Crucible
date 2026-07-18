@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
     private CreatureWorkspaceView? _creatureWorkspaceView;
     private GameObjectWorkspaceView? _gameObjectWorkspaceView;
+    private QuestWorkspaceView? _questWorkspaceView;
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
     private SqlWorkspaceView? _sqlWorkspaceView;
 
@@ -536,6 +537,16 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_gameObjectWorkspaceView, "Gameobjects");
     }
+    private void OpenQuestWorkspaceClick(object? sender, RoutedEventArgs e) => OpenQuestWorkspace();
+    public void OpenQuestWorkspace()
+    {
+        if (_questWorkspaceView is null)
+        {
+            _questWorkspaceView = new QuestWorkspaceView(_workspaceSession);
+            _questWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_questWorkspaceView, "Quests");
+    }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
     private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e) => CloseFeatureWorkspace();
     private void OpenLayeredDbcsClick(object? sender, RoutedEventArgs e)
@@ -630,6 +641,11 @@ public partial class MainWindow : Window
         {
             if (_gameObjectWorkspaceView is null) { _gameObjectWorkspaceView = new GameObjectWorkspaceView(_workspaceSession); _gameObjectWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
             _gameObjectWorkspaceView.OpenGameObjectRow(request.Row); OpenFeatureWorkspace(_gameObjectWorkspaceView, "Gameobjects");
+        }
+        else if (request.Table.Equals("quest_template", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_questWorkspaceView is null) { _questWorkspaceView = new QuestWorkspaceView(_workspaceSession); _questWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+            _questWorkspaceView.OpenQuestRow(request.Row); OpenFeatureWorkspace(_questWorkspaceView, "Quests");
         }
     }
 

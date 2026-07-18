@@ -41,6 +41,7 @@
                     <Button HorizontalContentAlignment="Left" Content="◈  Items &amp; sets" Click="OpenItemWorkbenchClick" />
                     <Button HorizontalContentAlignment="Left" Content="♟  Creatures &amp; NPCs" Click="OpenCreatureWorkspaceClick" />
                     <Button HorizontalContentAlignment="Left" Content="▱  Gameobjects" Click="OpenGameObjectWorkspaceClick" />
+                    <Button HorizontalContentAlignment="Left" Content="✦  Quests" Click="OpenQuestWorkspaceClick" />
                     <Button HorizontalContentAlignment="Left" Content="◇  MPQ patches" Click="OpenMpqWorkspaceClick" />
                     <Button HorizontalContentAlignment="Left" Content="▣  Client workshop" Click="OpenClientWorkspaceClick" />
                     <Button HorizontalContentAlignment="Left" Content="⬡  Assets &amp; compare" Click="OpenAssetComparisonClick" />

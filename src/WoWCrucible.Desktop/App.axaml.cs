@@ -32,6 +32,7 @@ public partial class App : Application
             }
             if (arguments.Any(argument => IsOption(argument, "--sql-studio"))) window.Opened += (_, _) => window.OpenSqlWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--gameobjects"))) window.Opened += (_, _) => window.OpenGameObjectWorkspace();
+            else if (arguments.Any(argument => IsOption(argument, "--quests"))) window.Opened += (_, _) => window.OpenQuestWorkspace();
             var initialPaths = desktop.Args?.Where(File.Exists).ToArray() ?? [];
             if (initialPaths.Length > 0)
                 window.Opened += async (_, _) =>
