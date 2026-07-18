@@ -12,7 +12,8 @@ public sealed record SqlRowRecord(IReadOnlyDictionary<string, object?> Values, I
 }
 
 public sealed record SqlTablePage(string Table, IReadOnlyList<DatabaseColumnCapability> Columns, IReadOnlyList<string> PrimaryKey,
-    long TotalRows, int Offset, int Limit, string Search, IReadOnlyList<SqlRowRecord> Rows);
+    long TotalRows, int Offset, int Limit, string Search, IReadOnlyList<SqlRowRecord> Rows,
+    string? FilterColumn = null, string? FilterValue = null, string? SortColumn = null, bool SortDescending = false);
 public sealed record SqlQueryResult(IReadOnlyList<string> Columns, IReadOnlyList<IReadOnlyList<object?>> Rows, int AffectedRows, TimeSpan Duration);
 public sealed record SqlInsertResult(int AffectedRows, long InsertedId);
 public sealed record SqlRelationshipMatch(DatabaseRelationCapability Relation, bool Outgoing, string TargetTable, string TargetColumn, object? Value, long MatchingRows);
@@ -148,19 +149,36 @@ public sealed class SqlWorkspaceService
         return new(values, rowKey);
     }
 
-    public async Task<SqlTablePage> ReadPageAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table, int offset, int limit, string? search = null, CancellationToken cancellationToken = default)
+    public Task<SqlTablePage> ReadPageAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table, int offset, int limit,
+        string? search, CancellationToken cancellationToken)
+        => ReadPageAsync(profile, table, offset, limit, search, cancellationToken: cancellationToken);
+
+    public async Task<SqlTablePage> ReadPageAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table, int offset, int limit,
+        string? search = null, string? filterColumn = null, string? filterValue = null, string? sortColumn = null,
+        bool sortDescending = false, CancellationToken cancellationToken = default)
     {
         offset = Math.Max(0, offset); limit = Math.Clamp(limit, 1, 500); search = search?.Trim() ?? string.Empty;
+        filterColumn = string.IsNullOrWhiteSpace(filterColumn) ? null : table.Find(filterColumn)?.Name
+            ?? throw new InvalidOperationException($"Unknown exact-filter column '{filterColumn}'.");
+        filterValue = filterValue?.Trim(); if (filterColumn is null || string.IsNullOrEmpty(filterValue)) { filterColumn = null; filterValue = null; }
+        sortColumn = string.IsNullOrWhiteSpace(sortColumn) ? null : table.Find(sortColumn)?.Name
+            ?? throw new InvalidOperationException($"Unknown sort column '{sortColumn}'.");
         await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
         var searchable = table.Columns.Where(column => !column.Extra.Contains("GENERATED", StringComparison.OrdinalIgnoreCase)).Take(24).ToArray();
-        var where = search.Length == 0 || searchable.Length == 0 ? string.Empty : $" WHERE CONCAT_WS(' ',{string.Join(',', searchable.Select(column => $"CAST({ItemWritePlan.QuoteIdentifier(column.Name)} AS CHAR)"))}) LIKE @search";
+        var predicates = new List<string>();
+        var usesSearch = search.Length > 0 && searchable.Length > 0; var filterIsNull = filterValue?.Equals("<NULL>", StringComparison.OrdinalIgnoreCase) == true;
+        if (usesSearch) predicates.Add($"CONCAT_WS(' ',{string.Join(',', searchable.Select(column => $"CAST({ItemWritePlan.QuoteIdentifier(column.Name)} AS CHAR)"))}) LIKE @search");
+        if (filterColumn is not null) predicates.Add(filterIsNull ? $"{ItemWritePlan.QuoteIdentifier(filterColumn)} IS NULL" : $"CAST({ItemWritePlan.QuoteIdentifier(filterColumn)} AS CHAR) = @filter");
+        var where = predicates.Count == 0 ? string.Empty : $" WHERE {string.Join(" AND ", predicates)}";
         await using var count = new MySqlCommand($"SELECT COUNT(*) FROM {ItemWritePlan.QuoteIdentifier(table.Name)}{where}", connection) { CommandTimeout = 120 };
-        if (search.Length > 0) count.Parameters.AddWithValue("@search", $"%{search}%");
+        if (usesSearch) count.Parameters.AddWithValue("@search", $"%{search}%");
+        if (filterColumn is not null && !filterIsNull) count.Parameters.AddWithValue("@filter", filterValue);
         var total = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         var primary = table.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase)).Select(column => column.Name).ToArray();
-        var order = primary.Length > 0 ? $" ORDER BY {string.Join(',', primary.Select(ItemWritePlan.QuoteIdentifier))}" : string.Empty;
+        var orderedColumns = sortColumn is not null ? new[] { sortColumn }.Concat(primary.Where(column => !column.Equals(sortColumn, StringComparison.OrdinalIgnoreCase))).ToArray() : primary;
+        var order = orderedColumns.Length > 0 ? $" ORDER BY {string.Join(',', orderedColumns.Select(ItemWritePlan.QuoteIdentifier))}{(sortDescending ? " DESC" : string.Empty)}" : string.Empty;
         await using var command = new MySqlCommand($"SELECT {string.Join(',', table.Columns.Select(column => ItemWritePlan.QuoteIdentifier(column.Name)))} FROM {ItemWritePlan.QuoteIdentifier(table.Name)}{where}{order} LIMIT @limit OFFSET @offset", connection) { CommandTimeout = 120 };
-        if (search.Length > 0) command.Parameters.AddWithValue("@search", $"%{search}%"); command.Parameters.AddWithValue("@limit", limit); command.Parameters.AddWithValue("@offset", offset);
+        if (usesSearch) command.Parameters.AddWithValue("@search", $"%{search}%"); if (filterColumn is not null && !filterIsNull) command.Parameters.AddWithValue("@filter", filterValue); command.Parameters.AddWithValue("@limit", limit); command.Parameters.AddWithValue("@offset", offset);
         var rows = new List<SqlRowRecord>(); await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -169,7 +187,7 @@ public sealed class SqlWorkspaceService
             var key = primary.ToDictionary(name => name, name => values[name], StringComparer.OrdinalIgnoreCase);
             rows.Add(new(values, key));
         }
-        return new(table.Name, table.Columns, primary, total, offset, limit, search, rows);
+        return new(table.Name, table.Columns, primary, total, offset, limit, search, rows, filterColumn, filterValue, sortColumn, sortDescending);
     }
 
     public async Task<int> UpdateRowAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table, IReadOnlyDictionary<string, object?> key,

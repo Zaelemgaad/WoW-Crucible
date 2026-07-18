@@ -718,7 +718,8 @@ public partial class MainWindow : Window
         _mpqWorkspaceView.StagePaths(paths);
         OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
     }
-    private void OpenServerSqlClick(object? sender, RoutedEventArgs e)
+    private void OpenServerSqlClick(object? sender, RoutedEventArgs e) => OpenServerSqlWorkspace();
+    private void OpenServerSqlWorkspace()
     {
         if (_serverSqlWorkspaceView is null)
         {
@@ -735,6 +736,7 @@ public partial class MainWindow : Window
         {
             _sqlWorkspaceView = new SqlWorkspaceView(_workspaceSession);
             _sqlWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _sqlWorkspaceView.ConnectionRequested += (_, _) => OpenServerSqlWorkspace();
             _sqlWorkspaceView.GuidedEditRequested += (_, request) => OpenGuidedSqlRow(request);
             _sqlWorkspaceView.OpenDbcRequested += async (_, path) => { CloseAllFeatureWorkspaces(); await LoadDbcAsync(path); };
             _sqlWorkspaceView.OpenMpqRequested += async (_, path) => await OpenIndexedArchiveAsync(path);

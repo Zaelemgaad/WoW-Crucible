@@ -204,6 +204,7 @@ wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schem
 wowcrucible server client-plan <installed-server-folder> <effective-dbc-folder> [--source=core-source] [--output=plan.json] [--stage=review-folder]
 wowcrucible db inspect <host> <port> <user> <database> --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db schemas <host> <port> <user> <database> --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db rows <host> <port> <user> <database> <table> [--search=text] [--filter=column=value] [--sort=column] [--descending] [--offset=N] [--limit=N] [--format=text|json]
 wowcrucible db table-admin <host> <port> <user> <database> <table> [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db process-list <host> <port> <user> <database> [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db user-list <host> <port> <user> <database> [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
@@ -232,6 +233,8 @@ wowcrucible db spell-inspect <host> <port> <user> <database> <spell-id> [--passw
 Server detection reads the live `worldserver.conf`; it does not accept `.dist` templates. Database passwords should be passed through an environment variable so they do not enter command history. DBC audits report the effective runtime value when the core applies an SQL overlay and can export an idempotent migration without applying it.
 
 `db schemas` lists every database visible to the login. The desktop SQL Studio uses the same discovery to switch locally among world, characters, auth, or other accessible schemas; it does not rewrite the shared server workspace's saved world-database target. A favorite records its database and complete primary key and switches back to that schema when reopened.
+
+`db rows` is the read-only CLI half of the complete live table browser. It always returns every live-schema column, supports broad search plus an exact `column=value` filter (`column=<NULL>` for SQL null), validates requested sort/filter columns against the inspected schema, adds primary-key tie breakers for stable paging, and bounds one page to 1–500 rows. The desktop exposes the same operations and can clone any complete primary-keyed row into a new identity; every insert column independently selects VALUE, NULL, or OMIT, so defaults and explicit nulls are not conflated.
 
 `db table-admin` reports the complete live column shape, `SHOW CREATE TABLE` DDL, and every index. `db process-list` reports every connection visible to the supplied login. `db user-list` deliberately reads account metadata without password hashes and reports the server permission error when the login cannot inspect `mysql.user`; it never converts that denial into an empty result.
 
