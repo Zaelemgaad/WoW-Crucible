@@ -29,6 +29,9 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _recoveryPlan = new() { PlaceholderText = "Target-bound synchronization plan" };
     private readonly TextBox _recoveryReceipt = new() { PlaceholderText = "Apply receipt for exact rollback" };
     private readonly CheckBox _recoveryRemovals = new() { Content = "Include explicitly reviewed removals" };
+    private readonly CheckBox _recoveryAutoRemap = new() { Content = "Remap occupied added IDs" };
+    private readonly TextBox _recoveryRemapStart = new() { PlaceholderText = "Optional first remapped ID" };
+    private readonly TextBlock _recoveryRemapSummary = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#D5B56A")), IsVisible = false };
     private readonly ListBox _recoveryOperations = new();
     private readonly Border _recoveryConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private DatabaseSyncPlan? _loadedRecoveryPlan;
@@ -209,9 +212,10 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                     audit,
                     new Border { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _legacyStatus },
                     new TextBlock { Text = "Compare and synchronize with the connected target", FontSize = 18, FontWeight = FontWeight.SemiBold },
-                    new TextBlock { Text = "A plan requires a verified matching-core baseline audit. Crucible compares every selected primary-keyed row with the live target, excludes removals by default, blocks collisions, and binds the result to this exact host/user/database. Apply rechecks every preimage under row locks and produces the receipt required for rollback.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
+                    new TextBlock { Text = "A plan requires a verified matching-core baseline audit. Crucible compares every selected primary-keyed row with the live target, excludes removals by default, and binds the result to this exact host/user/database. Occupied added IDs remain conflicts unless remapping is explicitly enabled; every resulting mapping and recognized reference rewrite is shown before apply.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
                     auditPath,
-                    new WrapPanel { Children = { _recoveryRemovals, buildPlan } },
+                    new WrapPanel { Children = { _recoveryRemovals, _recoveryAutoRemap, _recoveryRemapStart, buildPlan } },
+                    _recoveryRemapSummary,
                     planPath,
                     new WrapPanel { Children = { exportSql, applyPlan } },
                     receiptPath,
@@ -553,13 +557,19 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     {
         if (!_session.DatabaseTested || _session.DatabaseProfile is null) { _legacyStatus.Text = "Connect and verify the target database first."; return; }
         var audit = _recoveryAudit.Text; if (string.IsNullOrWhiteSpace(audit) || !File.Exists(audit)) { _legacyStatus.Text = "Choose a verified baseline-to-edited recovery audit first."; return; }
+        uint? remapStart = null;
+        if (!string.IsNullOrWhiteSpace(_recoveryRemapStart.Text))
+        {
+            if (!uint.TryParse(_recoveryRemapStart.Text.Trim(), out var parsed) || parsed == 0) { _legacyStatus.Text = "The optional first remapped ID must be a positive whole number."; return; }
+            remapStart = parsed;
+        }
         var destination = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Save target-bound database synchronization plan", SuggestedFileName = $"{_session.DatabaseProfile.Database}.crucible-db-sync.json", FileTypeChoices = [new FilePickerFileType("Crucible database synchronization plan") { Patterns = ["*.crucible-db-sync.json", "*.json"] }] });
         var output = destination?.TryGetLocalPath(); if (output is null) return; if (File.Exists(output)) { _legacyStatus.Text = "That plan path already exists. Choose a new file so a reviewed plan is never silently replaced."; return; }
         BeginOperation("Comparing every selected audit row with the connected target…");
         try
         {
             var progress = new Progress<(string Stage, string? Table, int Completed, int Total)>(value => _legacyStatus.Text = $"{value.Stage}{(value.Table is null ? string.Empty : $" · {value.Table}")} · {value.Completed:N0}/{value.Total:N0} tables");
-            var result = await new DatabaseSynchronizationService().BuildPlanAsync(audit, _session.DatabaseProfile, output, new(Patterns(_legacyIncludes.Text), _recoveryRemovals.IsChecked == true), progress, _operation!.Token);
+            var result = await new DatabaseSynchronizationService().BuildPlanAsync(audit, _session.DatabaseProfile, output, new(Patterns(_legacyIncludes.Text), _recoveryRemovals.IsChecked == true, AutoRemapCollisions: _recoveryAutoRemap.IsChecked == true, RemapStart: remapStart), progress, _operation!.Token);
             _recoveryPlan.Text = result.Path; ShowDatabaseSyncPlan(result.Plan);
         }
         catch (OperationCanceledException) { _legacyStatus.Text = "Target comparison cancelled; no partial plan was published."; }
@@ -579,7 +589,9 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private void ShowDatabaseSyncPlan(DatabaseSyncPlan plan)
     {
         _loadedRecoveryPlan = plan; _recoveryOperations.ItemsSource = plan.Operations;
-        _legacyStatus.Text = $"Verified target plan for {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}.\n{plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already applied · {plan.Conflicts:N0} conflicts · {plan.Blocked:N0} blocked · {plan.Operations.Count:N0} total.\n{(plan.RemovalsIncluded ? "Explicit removals are included." : "Removals are excluded.")}";
+        _recoveryRemapSummary.IsVisible = plan.IdRemaps.Count > 0;
+        _recoveryRemapSummary.Text = plan.IdRemaps.Count == 0 ? string.Empty : "ID remaps — review before apply:\n" + string.Join(Environment.NewLine, plan.IdRemaps.Select(remap => $"{remap.Table}.{remap.Column}: {remap.SourceId} → {remap.TargetId} · {remap.RewrittenReferences:N0} recognized reference(s) rewritten"));
+        _legacyStatus.Text = $"Verified target plan for {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}.\n{plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already applied · {plan.Conflicts:N0} conflicts · {plan.Blocked:N0} blocked · {plan.IdRemaps.Count:N0} ID remaps · {plan.Operations.Count:N0} total.\n{(plan.RemovalsIncluded ? "Explicit removals are included." : "Removals are excluded.")}";
     }
 
     private async Task ExportDatabaseSyncPreviewAsync()

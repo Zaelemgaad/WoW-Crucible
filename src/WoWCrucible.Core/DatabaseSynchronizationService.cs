@@ -12,6 +12,7 @@ public enum DatabaseSyncOperationStatus { Ready, AlreadyApplied, Conflict, Block
 
 public sealed record DatabaseSyncTarget(string Host, uint Port, string User, string Database, string ServerVersion);
 public sealed record DatabaseSyncField(string Column, LegacyDatabaseAuditValue Before, LegacyDatabaseAuditValue After);
+public sealed record DatabaseSyncIdRemap(string Table, string Column, uint SourceId, uint TargetId, int RewrittenReferences);
 public sealed record DatabaseSyncOperation(
     string Table,
     LegacyDatabaseContentDomain Domain,
@@ -39,6 +40,7 @@ public sealed record DatabaseSyncPlan(
     DatabaseSyncTarget Target,
     bool RemovalsIncluded,
     IReadOnlyList<string> IncludePatterns,
+    IReadOnlyList<DatabaseSyncIdRemap> IdRemaps,
     IReadOnlyList<DatabaseSyncOperation> Operations,
     string ContentSha256,
     IReadOnlyList<string> Warnings)
@@ -53,7 +55,9 @@ public sealed record DatabaseSyncBuildOptions(
     IReadOnlyList<string>? IncludePatterns = null,
     bool IncludeRemovals = false,
     int MaximumOperations = 100_000,
-    bool Overwrite = false);
+    bool Overwrite = false,
+    bool AutoRemapCollisions = false,
+    uint? RemapStart = null);
 
 public sealed record DatabaseSyncPlanResult(string Path, DatabaseSyncPlan Plan, long Bytes);
 public sealed record DatabaseSyncApplyResult(string ReceiptPath, int Applied, int AlreadyApplied);
@@ -77,7 +81,8 @@ public sealed class DatabaseSynchronizationService
 {
     public const string PlanFormat = "wow-crucible-database-sync-plan";
     public const string ReceiptFormat = "wow-crucible-database-sync-receipt";
-    public const int FormatVersion = 1;
+    public const int FormatVersion = 2;
+    public const int ReceiptFormatVersion = 1;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.General)
     {
         WriteIndented = true,
@@ -115,7 +120,7 @@ public sealed class DatabaseSynchronizationService
 
         var capabilities = await new DatabaseCapabilityService().InspectAsync(target, cancellationToken);
         await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(target)); await connection.OpenAsync(cancellationToken);
-        var operations = new List<DatabaseSyncOperation>();
+        var sourceOperations = new List<DatabaseSyncOperation>();
         for (var tableIndex = 0; tableIndex < selectedTables.Length; tableIndex++)
         {
             var table = selectedTables[tableIndex]; progress?.Report(("Comparing target rows", table.Name, tableIndex, selectedTables.Length));
@@ -123,21 +128,33 @@ public sealed class DatabaseSynchronizationService
             {
                 if (change.Kind == LegacyDatabaseRowChangeKind.Removed && !options.IncludeRemovals) continue;
                 if (change.Kind == LegacyDatabaseRowChangeKind.UnattributedCandidate) continue;
-                if (operations.Count >= options.MaximumOperations) throw new InvalidOperationException($"The plan exceeded the explicit {options.MaximumOperations:N0}-operation safety limit. Narrow the table selection or raise the limit deliberately.");
-                operations.Add(await AnalyzeAsync(connection, null, target, capabilities, FromAuditChange(change), lockRow: false, cancellationToken));
+                if (sourceOperations.Count >= options.MaximumOperations) throw new InvalidOperationException($"The plan exceeded the explicit {options.MaximumOperations:N0}-operation safety limit. Narrow the table selection or raise the limit deliberately.");
+                sourceOperations.Add(FromAuditChange(change));
             }
             progress?.Report(("Compared target rows", table.Name, tableIndex + 1, selectedTables.Length));
         }
-        var ordered = OrderOperations(operations, capabilities).ToArray();
+        var preliminary = new List<DatabaseSyncOperation>(sourceOperations.Count);
+        foreach (var operation in sourceOperations) preliminary.Add(await AnalyzeAsync(connection, null, target, capabilities, operation, lockRow: false, cancellationToken));
+        IReadOnlyList<DatabaseSyncIdRemap> remaps = [];
+        IReadOnlyList<DatabaseSyncOperation> rewritten = sourceOperations;
+        if (options.AutoRemapCollisions)
+        {
+            var allocated = await AllocateRemapsAsync(connection, target, capabilities, sourceOperations, preliminary, options.RemapStart, cancellationToken);
+            rewritten = RewriteRemappedReferences(sourceOperations, capabilities, allocated, out remaps);
+        }
+        var analyzed = new List<DatabaseSyncOperation>(rewritten.Count);
+        if (remaps.Count == 0) analyzed.AddRange(preliminary); else foreach (var operation in rewritten) analyzed.Add(await AnalyzeAsync(connection, null, target, capabilities, operation, lockRow: false, cancellationToken));
+        var ordered = OrderOperations(analyzed, capabilities).ToArray();
         var warnings = new List<string>
         {
             "Rows marked Conflict or Blocked are never written. Apply refuses the complete plan while either status remains.",
             options.IncludeRemovals ? "Explicit removals are included and require exact full-row preimages before DELETE." : "Source removals are excluded. Crucible never carries deletions into a target implicitly."
         };
+        if (remaps.Count > 0) warnings.Add($"Automatically allocated {remaps.Count:N0} collision-free ID remap(s) above live target maxima and rewrote {remaps.Sum(remap => remap.RewrittenReferences):N0} recognized selected reference(s). Review every mapping before apply.");
         if (manifest.Warnings.Count > 0) warnings.AddRange(manifest.Warnings.Select(warning => $"Source audit: {warning}"));
         var sourceAuditSha256 = await Sha256FileAsync(audit, cancellationToken); var binding = new DatabaseSyncTarget(target.Host, target.Port, target.User, target.Database, capabilities.ServerVersion);
         var plan = new DatabaseSyncPlan(PlanFormat, FormatVersion, ToolVersion(), DateTimeOffset.UtcNow, sourceAuditSha256,
-            binding, options.IncludeRemovals, patterns, ordered, HashPlanContent(sourceAuditSha256, binding, options.IncludeRemovals, patterns, ordered), warnings);
+            binding, options.IncludeRemovals, patterns, remaps, ordered, HashPlanContent(sourceAuditSha256, binding, options.IncludeRemovals, patterns, remaps, ordered), warnings);
         await WriteAtomicAsync(output, plan, options.Overwrite, cancellationToken);
         return new(output, plan, new FileInfo(output).Length);
     }
@@ -147,7 +164,7 @@ public sealed class DatabaseSynchronizationService
         await using var stream = new FileStream(Path.GetFullPath(path), FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var plan = await JsonSerializer.DeserializeAsync<DatabaseSyncPlan>(stream, Json, cancellationToken) ?? throw new InvalidDataException("Synchronization plan is empty.");
         if (plan.Format != PlanFormat || plan.FormatVersion != FormatVersion) throw new InvalidDataException($"Unsupported synchronization plan format {plan.Format} v{plan.FormatVersion}.");
-        if (!HashPlanContent(plan.SourceAuditSha256, plan.Target, plan.RemovalsIncluded, plan.IncludePatterns, plan.Operations).Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Synchronization plan content hash mismatch.");
+        if (!HashPlanContent(plan.SourceAuditSha256, plan.Target, plan.RemovalsIncluded, plan.IncludePatterns, plan.IdRemaps, plan.Operations).Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Synchronization plan content hash mismatch.");
         return plan;
     }
 
@@ -170,7 +187,7 @@ public sealed class DatabaseSynchronizationService
                 if (live.Status != DatabaseSyncOperationStatus.Ready) throw new DBConcurrencyException($"Stale synchronization plan at {planned.Identity}: {live.Finding}");
                 await ExecuteAsync(connection, transaction, target, capabilities, live, cancellationToken); applied.Add(live);
             }
-            var planSha256 = await Sha256FileAsync(planPath, cancellationToken); var receiptModel = new DatabaseSyncReceipt(ReceiptFormat, FormatVersion, DateTimeOffset.UtcNow, planSha256, plan.Target, applied, HashReceiptContent(planSha256, plan.Target, applied));
+            var planSha256 = await Sha256FileAsync(planPath, cancellationToken); var receiptModel = new DatabaseSyncReceipt(ReceiptFormat, ReceiptFormatVersion, DateTimeOffset.UtcNow, planSha256, plan.Target, applied, HashReceiptContent(planSha256, plan.Target, applied));
             pendingReceipt = TemporaryFor(receipt); Directory.CreateDirectory(Path.GetDirectoryName(receipt)!);
             await File.WriteAllTextAsync(pendingReceipt, JsonSerializer.Serialize(receiptModel, Json) + Environment.NewLine, new UTF8Encoding(false), cancellationToken);
             await transaction.CommitAsync(cancellationToken); committed = true;
@@ -192,7 +209,7 @@ public sealed class DatabaseSynchronizationService
     public async Task<DatabaseSyncApplyResult> RollbackAsync(string receiptPath, DatabaseConnectionProfile target, CancellationToken cancellationToken = default)
     {
         var path = Path.GetFullPath(receiptPath); var model = JsonSerializer.Deserialize<DatabaseSyncReceipt>(await File.ReadAllTextAsync(path, cancellationToken), Json) ?? throw new InvalidDataException("Synchronization receipt is empty.");
-        if (model.Format != ReceiptFormat || model.FormatVersion != FormatVersion || model.RolledBack) throw new InvalidDataException(model.RolledBack ? "This synchronization receipt is already marked rolled back." : "Unsupported synchronization receipt.");
+        if (model.Format != ReceiptFormat || model.FormatVersion != ReceiptFormatVersion || model.RolledBack) throw new InvalidDataException(model.RolledBack ? "This synchronization receipt is already marked rolled back." : "Unsupported synchronization receipt.");
         if (!HashReceiptContent(model.PlanSha256, model.Target, model.AppliedOperations).Equals(model.ApplyContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Synchronization receipt content hash mismatch.");
         ValidateTarget(model.Target, target); var capabilities = await new DatabaseCapabilityService().InspectAsync(target, cancellationToken);
         var reverse = model.AppliedOperations.Reverse().Select(Reverse).ToArray();
@@ -217,13 +234,96 @@ public sealed class DatabaseSynchronizationService
 
     public string PreviewSql(DatabaseSyncPlan plan)
     {
-        var builder = new StringBuilder(); builder.AppendLine("-- WoW Crucible target-bound database synchronization preview"); builder.AppendLine($"-- Target: {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}"); builder.AppendLine("-- Apply through Crucible for transactional row locking, exact preimage verification, and a rollback receipt."); builder.AppendLine("START TRANSACTION;");
+        var builder = new StringBuilder(); builder.AppendLine("-- WoW Crucible target-bound database synchronization preview"); builder.AppendLine($"-- Target: {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}"); builder.AppendLine("-- Apply through Crucible for transactional row locking, exact preimage verification, and a rollback receipt.");
+        foreach (var remap in plan.IdRemaps) builder.AppendLine($"-- ID REMAP: {remap.Table}.{remap.Column} {remap.SourceId} -> {remap.TargetId}; {remap.RewrittenReferences:N0} recognized selected reference(s) rewritten.");
+        builder.AppendLine("START TRANSACTION;");
         foreach (var operation in plan.Operations.Where(operation => operation.Status == DatabaseSyncOperationStatus.Ready)) builder.AppendLine(Preview(operation));
         builder.AppendLine("-- Preview intentionally does not COMMIT. Use Crucible apply after every conflict is resolved."); builder.AppendLine("ROLLBACK;"); return builder.ToString();
     }
 
     private static DatabaseSyncOperation FromAuditChange(LegacyDatabaseRowChange change) => new(change.Table, change.Domain, change.Kind, change.Key,
         change.Fields.Select(field => new DatabaseSyncField(field.Column, field.Baseline, field.Legacy)).ToArray(), DatabaseSyncOperationStatus.Ready, "Not analyzed");
+
+    private static async Task<IReadOnlyList<DatabaseSyncIdRemap>> AllocateRemapsAsync(MySqlConnection connection, DatabaseConnectionProfile target,
+        DatabaseCapabilities capabilities, IReadOnlyList<DatabaseSyncOperation> source, IReadOnlyList<DatabaseSyncOperation> preliminary, uint? requestedStart, CancellationToken cancellationToken)
+    {
+        var candidates = source.Select((operation, index) => (Operation: operation, Analysis: preliminary[index]))
+            .Where(value => value.Operation.Kind == LegacyDatabaseRowChangeKind.Added && value.Analysis.Status == DatabaseSyncOperationStatus.Conflict && value.Analysis.Finding.Contains("key is already occupied", StringComparison.OrdinalIgnoreCase))
+            .Select(value =>
+            {
+                if (value.Operation.Key.Count != 1 || value.Operation.Key[0].Value.State != LegacyDatabaseAuditValueState.Scalar || !uint.TryParse(value.Operation.Key[0].Value.Value, NumberStyles.None, CultureInfo.InvariantCulture, out var id)) return (Valid: false, value.Operation, Column: string.Empty, Id: 0u);
+                return (Valid: true, value.Operation, value.Operation.Key[0].Column, Id: id);
+            }).Where(value => value.Valid).ToArray();
+        var result = new List<DatabaseSyncIdRemap>();
+        foreach (var group in candidates.GroupBy(value => (value.Operation.Table, value.Column), new TableColumnComparer()))
+        {
+            var table = capabilities.FindTable(group.Key.Table); var column = table?.Find(group.Key.Column); if (table is null || column is null || !IsInteger(column.DataType)) continue;
+            var capacity = IntegerCapacity(column.ColumnType); var reserved = source.Where(operation => operation.Kind == LegacyDatabaseRowChangeKind.Added && operation.Table.Equals(group.Key.Table, StringComparison.OrdinalIgnoreCase) && operation.Key.Count == 1 && operation.Key[0].Column.Equals(group.Key.Column, StringComparison.OrdinalIgnoreCase) && operation.Key[0].Value.State == LegacyDatabaseAuditValueState.Scalar)
+                .Select(operation => ulong.TryParse(operation.Key[0].Value.Value, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ? value : 0).Where(value => value > 0).ToHashSet();
+            await using var maximumCommand = new MySqlCommand($"SELECT COALESCE(MAX({Quote(group.Key.Column)}),0) FROM {Qualified(target.Database, group.Key.Table)} WHERE {Quote(group.Key.Column)} >= 0", connection);
+            var maximum = Convert.ToUInt64(await maximumCommand.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture); var candidate = Math.Max(maximum + 1, requestedStart ?? 1u);
+            foreach (var collision in group.OrderBy(value => value.Id))
+            {
+                while (reserved.Contains(candidate)) candidate++;
+                if (candidate == 0 || candidate > capacity || candidate > uint.MaxValue) throw new OverflowException($"No collision-free ID remains in {group.Key.Table}.{group.Key.Column} above {maximum:N0} within {column.ColumnType}.");
+                result.Add(new(group.Key.Table, group.Key.Column, collision.Id, (uint)candidate, 0)); reserved.Add(candidate); candidate++;
+            }
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<DatabaseSyncOperation> RewriteRemappedReferences(IReadOnlyList<DatabaseSyncOperation> source, DatabaseCapabilities capabilities,
+        IReadOnlyList<DatabaseSyncIdRemap> allocated, out IReadOnlyList<DatabaseSyncIdRemap> completed)
+    {
+        var operations = source.ToArray(); var remaps = new List<DatabaseSyncIdRemap>(allocated.Count);
+        foreach (var remap in allocated)
+        {
+            var references = capabilities.Relationships.Where(relation => relation.ToTable.Equals(remap.Table, StringComparison.OrdinalIgnoreCase) && relation.ToColumn.Equals(remap.Column, StringComparison.OrdinalIgnoreCase)).ToArray(); var rewrittenReferences = 0;
+            for (var index = 0; index < operations.Length; index++)
+            {
+                var operation = operations[index]; var key = operation.Key.ToArray(); var fields = operation.Fields.ToArray();
+                if (operation.Kind == LegacyDatabaseRowChangeKind.Added && operation.Table.Equals(remap.Table, StringComparison.OrdinalIgnoreCase))
+                {
+                    key = key.Select(part => part.Column.Equals(remap.Column, StringComparison.OrdinalIgnoreCase) && IsScalar(part.Value, remap.SourceId) ? part with { Value = Scalar(remap.TargetId) } : part).ToArray();
+                    fields = fields.Select(field => field.Column.Equals(remap.Column, StringComparison.OrdinalIgnoreCase) && IsScalar(field.After, remap.SourceId) ? field with { After = Scalar(remap.TargetId) } : field).ToArray();
+                }
+                foreach (var relation in references.Where(relation => relation.FromTable.Equals(operation.Table, StringComparison.OrdinalIgnoreCase)))
+                {
+                    var referenceChanged = false;
+                    fields = fields.Select(field =>
+                    {
+                        if (!field.Column.Equals(relation.FromColumn, StringComparison.OrdinalIgnoreCase) || !IsScalar(field.After, remap.SourceId) || operation.Kind is LegacyDatabaseRowChangeKind.Removed) return field;
+                        referenceChanged = true; return field with { After = Scalar(remap.TargetId) };
+                    }).ToArray();
+                    if (operation.Kind == LegacyDatabaseRowChangeKind.Added)
+                        key = key.Select(part =>
+                        {
+                            if (!part.Column.Equals(relation.FromColumn, StringComparison.OrdinalIgnoreCase) || !IsScalar(part.Value, remap.SourceId)) return part;
+                            referenceChanged = true; return part with { Value = Scalar(remap.TargetId) };
+                        }).ToArray();
+                    if (referenceChanged) rewrittenReferences++;
+                }
+                operations[index] = operation with { Key = key, Fields = fields };
+            }
+            remaps.Add(remap with { RewrittenReferences = rewrittenReferences });
+        }
+        completed = remaps; return operations;
+    }
+
+    private static bool IsInteger(string dataType) => dataType.ToLowerInvariant() is "tinyint" or "smallint" or "mediumint" or "int" or "integer" or "bigint";
+    private static ulong IntegerCapacity(string columnType)
+    {
+        var unsigned = columnType.Contains("unsigned", StringComparison.OrdinalIgnoreCase); var dataType = columnType.Split(['(', ' '], StringSplitOptions.RemoveEmptyEntries)[0].ToLowerInvariant();
+        return dataType switch { "tinyint" => unsigned ? byte.MaxValue : (ulong)sbyte.MaxValue, "smallint" => unsigned ? ushort.MaxValue : (ulong)short.MaxValue, "mediumint" => unsigned ? 16_777_215u : 8_388_607u, "int" or "integer" => unsigned ? uint.MaxValue : int.MaxValue, "bigint" => uint.MaxValue, _ => 0 };
+    }
+    private static bool IsScalar(LegacyDatabaseAuditValue value, uint expected) => value.State == LegacyDatabaseAuditValueState.Scalar && uint.TryParse(value.Value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) && parsed == expected;
+    private static LegacyDatabaseAuditValue Scalar(uint value) => new(LegacyDatabaseAuditValueState.Scalar, value.ToString(CultureInfo.InvariantCulture));
+
+    private sealed class TableColumnComparer : IEqualityComparer<(string Table, string Column)>
+    {
+        public bool Equals((string Table, string Column) x, (string Table, string Column) y) => x.Table.Equals(y.Table, StringComparison.OrdinalIgnoreCase) && x.Column.Equals(y.Column, StringComparison.OrdinalIgnoreCase);
+        public int GetHashCode((string Table, string Column) value) => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(value.Table), StringComparer.OrdinalIgnoreCase.GetHashCode(value.Column));
+    }
 
     private static async Task<DatabaseSyncOperation> AnalyzeAsync(MySqlConnection connection, MySqlTransaction? transaction, DatabaseConnectionProfile target,
         DatabaseCapabilities capabilities, DatabaseSyncOperation operation, bool lockRow, CancellationToken cancellationToken)
@@ -364,8 +464,8 @@ public sealed class DatabaseSynchronizationService
     }
     private static string Quote(string name) => ItemWritePlan.QuoteIdentifier(name);
     private static string Qualified(string database, string table) => $"{Quote(database)}.{Quote(table)}";
-    private static string HashPlanContent(string sourceAuditSha256, DatabaseSyncTarget target, bool removalsIncluded, IReadOnlyList<string> patterns, IReadOnlyList<DatabaseSyncOperation> operations)
-        => Hash(new { sourceAuditSha256, target, removalsIncluded, patterns, operations });
+    private static string HashPlanContent(string sourceAuditSha256, DatabaseSyncTarget target, bool removalsIncluded, IReadOnlyList<string> patterns, IReadOnlyList<DatabaseSyncIdRemap> remaps, IReadOnlyList<DatabaseSyncOperation> operations)
+        => Hash(new { sourceAuditSha256, target, removalsIncluded, patterns, remaps, operations });
     private static string HashReceiptContent(string planSha256, DatabaseSyncTarget target, IReadOnlyList<DatabaseSyncOperation> operations)
         => Hash(new { planSha256, target, operations });
     private static string Hash<T>(T value) => Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(value, HashJson))).ToLowerInvariant();
