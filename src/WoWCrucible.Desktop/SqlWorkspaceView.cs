@@ -50,6 +50,12 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly ListBox _processes = new();
     private readonly TextBox _processDetail = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
     private readonly ListBox _databaseUsers = new();
+    private readonly ListBox _databaseObjects = new();
+    private readonly ComboBox _databaseObjectType = new() { ItemsSource = new[] { "All objects", "Views", "Triggers", "Procedures", "Functions", "Events" }, SelectedIndex = 0 };
+    private readonly TextBox _databaseObjectSearch = new() { PlaceholderText = "Filter object names or details…" };
+    private readonly TextBox _databaseObjectDefinition = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
+    private readonly TextBox _viewName = new() { PlaceholderText = "View name" };
+    private readonly TextBox _viewSelect = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "SELECT entry, name FROM item_template;" };
     private readonly TextBox _accountUser = new() { PlaceholderText = "Database account user" };
     private readonly TextBox _accountHost = new() { Text = "localhost", PlaceholderText = "Account host" };
     private readonly TextBox _accountPassword = new() { PasswordChar = '●', PlaceholderText = "New password (memory only)" };
@@ -95,6 +101,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private string? _browseTable;
     private SqlQueryResult? _queryResult;
     private SqlQueryBatch? _queryBatch;
+    private IReadOnlyList<SqlDatabaseObjectInfo> _databaseObjectCache = [];
 
     public event EventHandler? BackRequested;
     public event EventHandler? ConnectionRequested;
@@ -120,6 +127,9 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _queryResultSets.SelectionChanged += (_, _) => SelectQueryResultSet();
         _processes.SelectionChanged += (_, _) => ShowSelectedProcess();
         _databaseUsers.SelectionChanged += (_, _) => SelectDatabaseUser();
+        _databaseObjectSearch.TextChanged += (_, _) => FilterDatabaseObjects();
+        _databaseObjectType.SelectionChanged += (_, _) => FilterDatabaseObjects();
+        _databaseObjects.SelectionChanged += async (_, _) => await LoadSelectedDatabaseObjectAsync();
         RefreshConnectionStatus(); RefreshFavorites(); RefreshQueryHistory(); PopulateTables(); PopulateRelations();
     }
 
@@ -215,7 +225,8 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _indexes.ItemTemplate = new FuncDataTemplate<SqlIndexInfo>((index, _) => new TextBlock { Text = index?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
         _processes.ItemTemplate = new FuncDataTemplate<SqlProcessInfo>((process, _) => new TextBlock { Text = process?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
         _databaseUsers.ItemTemplate = new FuncDataTemplate<SqlUserAccountInfo>((account, _) => new TextBlock { Text = account?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
-        var pages = new TabControl { Items = { new TabItem { Header = "Table DDL & indexes", Content = TableAdministrationPage() }, new TabItem { Header = "Processes", Content = ProcessAdministrationPage() }, new TabItem { Header = "Database users", Content = UserAdministrationPage() }, new TabItem { Header = "Visual joins", Content = JoinDesignerPage() } } };
+        _databaseObjects.ItemTemplate = new FuncDataTemplate<SqlDatabaseObjectInfo>((item, _) => item is null ? new TextBlock() : new StackPanel { Margin = new Thickness(4, 3), Children = { new TextBlock { Text = item.Display, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap }, new TextBlock { Text = $"Definer {item.Definer}{(item.Modified is null ? string.Empty : $" · modified {item.Modified:yyyy-MM-dd HH:mm:ss}")}", Foreground = Brush.Parse("#8995A9"), TextWrapping = TextWrapping.Wrap } } });
+        var pages = new TabControl { Items = { new TabItem { Header = "Table DDL & indexes", Content = TableAdministrationPage() }, new TabItem { Header = "Database objects", Content = DatabaseObjectsPage() }, new TabItem { Header = "Processes", Content = ProcessAdministrationPage() }, new TabItem { Header = "Database users", Content = UserAdministrationPage() }, new TabItem { Header = "Visual joins", Content = JoinDesignerPage() } } };
         return new Grid { RowDefinitions = new("*,Auto"), RowSpacing = 7, Children = { pages, WithRow(_administrationStatus, 1) } };
     }
 
@@ -228,6 +239,35 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var ddl = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Exact SHOW CREATE TABLE", FontWeight = FontWeight.SemiBold }, WithRow(_tableDdl, 1) } };
         var indexes = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Live indexes", FontWeight = FontWeight.SemiBold }, WithRow(_indexes, 1) } };
         return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { controls, WithRow(new Grid { ColumnDefinitions = new("2*,Auto,*"), ColumnSpacing = 7, Children = { ddl, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(indexes, 2) } }, 1) } };
+    }
+
+    private Control DatabaseObjectsPage()
+    {
+        var refresh = AccentButton("Refresh objects"); refresh.Click += async (_, _) => await LoadDatabaseObjectsAsync(refresh);
+        var export = new Button { Content = "Export all exact definitions…" }; export.Click += async (_, _) => await ExportDatabaseObjectsAsync(export);
+        var drop = new Button { Content = "Review DROP selected" }; drop.Click += (_, _) => PrepareDropDatabaseObject();
+        var enable = new Button { Content = "Review ENABLE event" }; enable.Click += (_, _) => PrepareEventState(true);
+        var disable = new Button { Content = "Review DISABLE event" }; disable.Click += (_, _) => PrepareEventState(false);
+        var reviewView = AccentButton("Review CREATE / REPLACE view"); reviewView.Click += (_, _) => PrepareCreateOrReplaceView();
+        var controls = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
+            Content = new WrapPanel { Children = { refresh, _databaseObjectType, _databaseObjectSearch, export, drop, enable, disable } }
+        };
+        var selected = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 5, Children = { new TextBlock { Text = "Exact SHOW CREATE definition", FontWeight = FontWeight.SemiBold }, WithRow(_databaseObjectDefinition, 1) } };
+        var viewEditor = new Grid
+        {
+            RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 5,
+            Children =
+            {
+                new TextBlock { Text = "Guided view editor · exactly one read-only SELECT", FontWeight = FontWeight.SemiBold },
+                WithRow(_viewName, 1), WithRow(_viewSelect, 2), WithRow(new WrapPanel { Children = { reviewView, new TextBlock { Text = "DDL may implicitly commit. The exact SQL is always shown before execution.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9"), VerticalAlignment = VerticalAlignment.Center } } }, 3)
+            }
+        };
+        var details = new Grid { RowDefinitions = new("2*,Auto,*"), RowSpacing = 5, Children = { selected, WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 1), WithRow(viewEditor, 2) } };
+        var body = new Grid { ColumnDefinitions = new("*,Auto,2*"), ColumnSpacing = 7, Children = { _databaseObjects, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(details, 2) } };
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { controls, WithRow(body, 1) } };
     }
 
     private Control ProcessAdministrationPage()
@@ -528,6 +568,99 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Permanently remove this index? Query performance and uniqueness enforcement may change immediately. MySQL may implicitly commit DDL.\n{sql}", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
         }
         catch (Exception exception) { _administrationStatus.Text = $"Cannot drop index: {exception.Message}"; }
+    }
+
+    private async Task LoadDatabaseObjectsAsync(Button button)
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        try
+        {
+            button.IsEnabled = false; Begin("Reading views, triggers, routines, and scheduled events…");
+            _databaseObjectCache = await new SqlDatabaseObjectService().ListAsync(_profile, _operation!.Token); FilterDatabaseObjects();
+            _administrationStatus.Text = $"{_profile.Database} · {_databaseObjectCache.Count:N0} database object(s). Select one to read its exact SHOW CREATE definition.";
+        }
+        catch (OperationCanceledException) { _administrationStatus.Text = "Database-object refresh cancelled."; }
+        catch (Exception exception) { Fail("Database-object refresh failed", exception); _administrationStatus.Text = exception.Message; }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private void FilterDatabaseObjects()
+    {
+        var identity = (_databaseObjects.SelectedItem as SqlDatabaseObjectInfo)?.Identity;
+        var type = _databaseObjectType.SelectedIndex switch { 1 => SqlDatabaseObjectType.View, 2 => SqlDatabaseObjectType.Trigger, 3 => SqlDatabaseObjectType.Procedure, 4 => SqlDatabaseObjectType.Function, 5 => SqlDatabaseObjectType.Event, _ => (SqlDatabaseObjectType?)null };
+        var query = _databaseObjectSearch.Text?.Trim() ?? string.Empty;
+        var filtered = _databaseObjectCache.Where(item => (type is null || item.Type == type) && (query.Length == 0 || item.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || item.Details.Contains(query, StringComparison.OrdinalIgnoreCase) || item.Definer.Contains(query, StringComparison.OrdinalIgnoreCase))).ToArray();
+        _databaseObjects.ItemsSource = filtered;
+        if (identity is not null) _databaseObjects.SelectedItem = filtered.FirstOrDefault(item => item.Identity.Equals(identity, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task LoadSelectedDatabaseObjectAsync()
+    {
+        if (_profile is null || _databaseObjects.SelectedItem is not SqlDatabaseObjectInfo item) { _databaseObjectDefinition.Text = string.Empty; return; }
+        try
+        {
+            Begin($"Reading exact definition for {item.Type} {item.Name}…");
+            var definition = await new SqlDatabaseObjectService().ShowCreateAsync(_profile, item, _operation!.Token); _databaseObjectDefinition.Text = definition.CreateSql;
+            if (item.Type == SqlDatabaseObjectType.View) _viewName.Text = item.Name;
+            _administrationStatus.Text = $"{item.Display} · definer {item.Definer}. Exact definition loaded.";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { Fail("SHOW CREATE failed", exception); _administrationStatus.Text = exception.Message; }
+        finally { End(); }
+    }
+
+    private async Task ExportDatabaseObjectsAsync(Button button)
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        try
+        {
+            var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Export exact database-object definitions", SuggestedFileName = $"{_profile.Database}-objects.sql", FileTypeChoices = [new FilePickerFileType("SQL script") { Patterns = ["*.sql"] }] });
+            var path = file?.TryGetLocalPath(); if (path is null) return;
+            if (File.Exists(path)) { _administrationStatus.Text = "That export target already exists. Choose a new file so Crucible never silently replaces a database-object backup."; return; }
+            button.IsEnabled = false; Begin("Exporting exact database-object definitions atomically…");
+            var result = await new SqlDatabaseObjectService().ExportAsync(_profile, path, cancellationToken: _operation!.Token);
+            _administrationStatus.Text = $"Exported {result.Objects:N0} exact definition(s), {result.Bytes:N0} bytes, to {result.Path}. Review DEFINER clauses before importing elsewhere.";
+        }
+        catch (OperationCanceledException) { _administrationStatus.Text = "Database-object export cancelled."; }
+        catch (Exception exception) { Fail("Database-object export failed", exception); _administrationStatus.Text = exception.Message; }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private void PrepareCreateOrReplaceView()
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        try
+        {
+            var name = _viewName.Text ?? string.Empty; var selectSql = _viewSelect.Text ?? string.Empty; var sql = SqlDatabaseObjectService.BuildCreateOrReplaceViewSql(_profile.Database, name, selectSql);
+            var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false; var confirm = AccentButton("Execute CREATE / REPLACE VIEW");
+            confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; Begin($"Creating or replacing view {name}…"); await new SqlDatabaseObjectService().CreateOrReplaceViewAsync(_profile, name, selectSql, _operation!.Token); _confirmation.IsVisible = false; _administrationStatus.Text = $"Created or replaced {_profile.Database}.{name}. Refresh objects to read the server-normalized definition."; } catch (Exception exception) { Fail("CREATE OR REPLACE VIEW failed", exception); _administrationStatus.Text = exception.Message; } finally { confirm.IsEnabled = true; End(); } };
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Execute this schema-changing DDL? It may implicitly commit. The guided editor permits exactly one read-only SELECT and blocks batches and file output.\n{sql}", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+        }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot prepare view: {exception.Message}"; }
+    }
+
+    private void PrepareDropDatabaseObject()
+    {
+        if (_profile is null || _databaseObjects.SelectedItem is not SqlDatabaseObjectInfo item) { _administrationStatus.Text = "Select a live database object first."; return; }
+        try
+        {
+            var sql = SqlDatabaseObjectService.BuildDropSql(item); var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false; var confirm = new Button { Content = $"Drop {item.Type} {item.Name}" };
+            confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; Begin($"Dropping exact {item.Type} {item.Name}…"); await new SqlDatabaseObjectService().DropAsync(_profile, item, _operation!.Token); _confirmation.IsVisible = false; _databaseObjectCache = _databaseObjectCache.Where(candidate => !candidate.Identity.Equals(item.Identity, StringComparison.OrdinalIgnoreCase)).ToArray(); FilterDatabaseObjects(); _databaseObjectDefinition.Text = string.Empty; _administrationStatus.Text = $"Dropped exact {item.Type} {_profile.Database}.{item.Name}."; } catch (Exception exception) { Fail($"DROP {item.Type} failed", exception); _administrationStatus.Text = exception.Message; } finally { confirm.IsEnabled = true; End(); } };
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"DESTRUCTIVE SCHEMA CHANGE. Export definitions first if this object matters. MySQL DDL may implicitly commit and cannot be promised rollback.\n{sql}", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+        }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot prepare DROP: {exception.Message}"; }
+    }
+
+    private void PrepareEventState(bool enabled)
+    {
+        if (_profile is null || _databaseObjects.SelectedItem is not SqlDatabaseObjectInfo { Type: SqlDatabaseObjectType.Event } item) { _administrationStatus.Text = "Select a scheduled event first."; return; }
+        try
+        {
+            var sql = SqlDatabaseObjectService.BuildEventStateSql(item, enabled); var action = enabled ? "ENABLE" : "DISABLE"; var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false; var confirm = AccentButton($"Execute {action}");
+            confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; Begin($"Setting event {item.Name} {action}…"); await new SqlDatabaseObjectService().SetEventEnabledAsync(_profile, item, enabled, _operation!.Token); _confirmation.IsVisible = false; _administrationStatus.Text = $"Event {_profile.Database}.{item.Name} is now {(enabled ? "enabled" : "disabled")}. Refresh objects to verify server state."; } catch (Exception exception) { Fail($"ALTER EVENT {action} failed", exception); _administrationStatus.Text = exception.Message; } finally { confirm.IsEnabled = true; End(); } };
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Change this scheduled event's live execution state? MySQL DDL may implicitly commit.\n{sql}", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+        }
+        catch (Exception exception) { _administrationStatus.Text = $"Cannot prepare event change: {exception.Message}"; }
     }
 
     private async Task LoadProcessesAsync(Button button)

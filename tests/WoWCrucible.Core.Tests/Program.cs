@@ -869,6 +869,17 @@ if (!joinSql.Contains("source.`entry` AS `source__entry`", StringComparison.Ordi
     throw new InvalidOperationException("Visual SQL joins no longer produce exact, uniquely aliased read-only output.");
 try { _ = SqlAdministrationService.BuildJoinSql(joinRelation, joinSource, joinTarget, "CROSS", 25); throw new InvalidOperationException("An unsupported visual join type was accepted."); }
 catch (ArgumentException) { }
+var fixtureView = new SqlDatabaseObjectInfo(SqlDatabaseObjectType.View, "acore_world", "crucible_items", "fixture@localhost", "security DEFINER");
+var fixtureEvent = new SqlDatabaseObjectInfo(SqlDatabaseObjectType.Event, "acore_world", "crucible_tick", "fixture@localhost", "recurring", State: "ENABLED");
+var viewSql = SqlDatabaseObjectService.BuildCreateOrReplaceViewSql("acore_world", "crucible_items", "-- exact\nSELECT 'semi;colon' AS value");
+if (!viewSql.StartsWith("CREATE OR REPLACE VIEW `acore_world`.`crucible_items`", StringComparison.Ordinal) ||
+    SqlDatabaseObjectService.BuildDropSql(fixtureView) != "DROP VIEW `acore_world`.`crucible_items`;" ||
+    SqlDatabaseObjectService.BuildEventStateSql(fixtureEvent, false) != "ALTER EVENT `acore_world`.`crucible_tick` DISABLE;")
+    throw new InvalidOperationException("Guided database-object SQL did not preserve exact qualified identity or quoted SELECT content.");
+try { _ = SqlDatabaseObjectService.BuildCreateOrReplaceViewSql("acore_world", "bad", "SELECT 1; DROP TABLE item_template"); throw new InvalidOperationException("Guided view creation accepted a second statement."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("exactly one SELECT", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = SqlDatabaseObjectService.BuildCreateOrReplaceViewSql("acore_world", "bad", "SELECT * FROM item_template INTO OUTFILE '/tmp/leak'"); throw new InvalidOperationException("Guided view creation accepted SELECT file output."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("exactly one SELECT", StringComparison.OrdinalIgnoreCase)) { }
 var createIndexSql = SqlAdministrationService.BuildCreateIndexSql(joinSource, "crucible_name", ["name"], true);
 if (createIndexSql != "CREATE UNIQUE INDEX `crucible_name` ON `item_template` (`name`);")
     throw new InvalidOperationException("Reviewed index SQL generation changed unexpectedly.");
