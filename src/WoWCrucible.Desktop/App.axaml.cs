@@ -19,11 +19,16 @@ public partial class App : Application
         {
             var window = new MainWindow();
             desktop.MainWindow = window;
-            var assetComparison = desktop.Args?.FirstOrDefault(argument => argument.StartsWith("--asset-compare", StringComparison.OrdinalIgnoreCase));
-            if (assetComparison is not null)
+            var arguments = desktop.Args ?? [];
+            var assetComparisonIndex = Array.FindIndex(arguments, argument =>
+                IsOption(argument, "--asset-compare") || IsOption(argument, "--asset-library"));
+            if (assetComparisonIndex >= 0)
             {
+                var assetComparison = arguments[assetComparisonIndex];
                 var separator = assetComparison.IndexOf('='); var library = separator < 0 ? null : assetComparison[(separator + 1)..].Trim('"');
-                window.Opened += async (_, _) => await new AssetComparisonWindow(library).ShowDialog(window);
+                if (string.IsNullOrWhiteSpace(library) && assetComparisonIndex + 1 < arguments.Length && !arguments[assetComparisonIndex + 1].StartsWith("--", StringComparison.Ordinal))
+                    library = arguments[assetComparisonIndex + 1].Trim('"');
+                window.Opened += (_, _) => window.OpenAssetComparison(library);
             }
             var initialPaths = desktop.Args?.Where(File.Exists).ToArray() ?? [];
             if (initialPaths.Length > 0)
@@ -35,4 +40,6 @@ public partial class App : Application
 
         base.OnFrameworkInitializationCompleted();
     }
+
+    private static bool IsOption(string argument, string name) => argument.Equals(name, StringComparison.OrdinalIgnoreCase) || argument.StartsWith(name + "=", StringComparison.OrdinalIgnoreCase);
 }

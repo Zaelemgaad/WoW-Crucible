@@ -15,6 +15,9 @@ Specialized WoW Crucible editors should provide:
 - Flags presented as named checkboxes with the raw hexadecimal mask available.
 - Immediate validation beside the affected field.
 - Related-record previews and navigation without leaving the editor.
+- Major workspaces should replace the main content area and provide a clear way back instead of multiplying top-level windows without need.
+- Every workflow must remain operable at its supported minimum window size: controls wrap or scroll, dense panes use splitters, and resizing must not leave actions permanently off-screen.
+- Form fields use content-aware, minimum, and stretch sizing instead of hard-coded widths. Fixed dimensions are reserved for intrinsically fixed visuals such as icons or preview tiles, not ordinary inputs.
 - A change preview showing both the portable content change and generated target-specific output.
 - A clear distinction between a complete deployment and only the fields changed by the current action.
 - Multi-row sub-editors for effects, loot, conditions, and similar repeated structures.

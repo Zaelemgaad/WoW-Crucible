@@ -12,6 +12,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
+- Captures a legacy world database through a SELECT-only, streaming phase-one snapshot into an atomic compressed artifact with schema/primary-key metadata, exact row counts, and integrity hashes; three-way change auditing and selective promotion remain the next SQL-recovery phase.
 - Searches the live world schema for items with no known vendor, loot, quest, starting-item, profession, fishing, or spell-loot acquisition path; the result is searchable in the Avalonia item workbench and exportable from the CLI.
 - Clones a complete item to a new ID transactionally, preserving every current/custom `item_template` column and locale row, with optional item-set reassignment and strict no-overwrite behavior.
 - Inspects and clones `ItemSet.dbc` rows with explicit member-ID remapping, resolves set-bonus spell names, and edits all eight bonus slots into a separate output DBC.
@@ -42,8 +43,10 @@ Client formats and server integration are separate: a client-build profile decla
 - Keeps normal use silent: no startup, success, or activity logs, with only unhandled fatal diagnostics retained when possible. Opt-in **Devbug Mode** adds a live structured terminal and detailed asynchronous session log, retains only the newest three sessions, and never records database passwords. See [docs/DEVBUG-MODE.md](docs/DEVBUG-MODE.md).
 - Houses Crucible-owned settings, profiles, and logs in organized folders beside the executable. Read-only installations fall back to `%LOCALAPPDATA%\\WoWCrucible`, and every Devbug session identifies the effective data root.
 - Browses large MPQs without loading file contents, filters paths instantly, and extracts selected files or whole archives in the background.
-- Builds content-first asset libraries where patch provenance is inserted immediately before each file, keeping different patches' versions of the same Character/UI/World directory adjacent instead of burying them under separate archive trees.
-- Visually compares archive and Loose PNG assets by content directory rather than filename: fast catalog indexing, path/source/name filters, selectable filename/source/file-size sorting, cancellable SHA-256 plus byte-for-byte exact-copy grouping and collapsing, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions and provenance, and direct Explorer reveal. Duplicate inspection never deletes files.
+- Builds content-first asset libraries where provenance is inserted immediately before each file, keeping every archive and imported-folder version of the same Character/UI/World directory adjacent instead of splitting sources into separate trees. New loose-file scans and extracted-folder imports write directly into that layout.
+- Consolidates older `Loose\Content` libraries into the same content-first tree with a read-only dry run, strict all-or-nothing blocking for non-identical destination conflicts, byte-for-byte duplicate verification, and a durable apply journal.
+- Visually compares PNG assets by content directory rather than filename: fast catalog indexing, path/source/name filters, selectable filename/source/file-size sorting, cancellable SHA-256 plus byte-for-byte exact-copy grouping and collapsing, 96-image lazy pages, two arbitrary comparison slots, synchronized pixel zoom/pan, dimensions and provenance, and direct Explorer reveal. Duplicate inspection never deletes files.
+- Opens **Assets & compare** inside the existing Crucible window, with an explicit return-to-editor action, resizable split panes, wrapped tool groups, and scrollable configuration headers so controls remain reachable when the window is resized.
 - Builds resumable client indexes with per-archive SHA-256 identities and reusable MPQ content catalogs, detects active/inactive locales, backup/custom subdirectory scopes and renamed build-12340 executables, marks anonymous hash-only entries explicitly, recovers names from local/cross-client path corpora, and resumes indexed extraction without rescanning giant archives or rewriting already-complete files.
 - Includes a visual Client Inspector for indexing/resuming a whole installation, color-coded archive scopes, loose runtime/config/AddOn inventory, plain-language compatibility guidance, content-category summaries, direct archive browsing, and provenance-preserving extraction.
 - Turns an extracted/effective client DBC directory into a reviewed client-to-server deployment plan: byte identity, row/field counts, current-core consumer, SQL-overlay warning, restart requirement, unresolved layer conflicts, portable JSON, and separate non-live staging trees for the patch and server DBC candidates.
@@ -89,6 +92,8 @@ wowcrucible server inspect "C:\path\to\installed-server"
 wowcrucible server bindings "C:\path\to\installed-server" [--source="C:\path\to\core-source"]
 wowcrucible server dbc-audit "C:\path\to\installed-server" gtRegenMPPerSpt.dbc schema.xml [--source="C:\path\to\core-source"] [--all] [--migration=sync.sql]
 wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
+wowcrucible db snapshot 127.0.0.1 3306 admin old_world old-world.crucible-db-snapshot --password-env=WOW_CRUCIBLE_DB_PASSWORD
+wowcrucible db snapshot-inspect old-world.crucible-db-snapshot
 wowcrucible client install-patch patch-Z.MPQ "C:\Games\WoW" [--name=patch-Z.MPQ]
 wowcrucible client clear-cache "C:\Games\WoW"
 wowcrucible client index "C:\Games\WoW" client-index [--no-hash] [--listfile=known-paths.txt] [--client-exe=Wow.exe]
@@ -99,6 +104,8 @@ wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filt
 wowcrucible client fusion extracted-stock extracted-mod-a extracted-mod-b [--output=fusion-plan.json] [--stage=fusion-review] [--all]
 wowcrucible server client-plan "C:\path\to\installed-server" extracted-effective-dbc [--source=core-source] [--output=plan.json] [--stage=server-review]
 wowcrucible asset library-import extracted-archive asset-library provenance-name BLPConverter.exe [--workers=6]
+wowcrucible asset library-consolidate asset-library [--apply]
+wowcrucible asset library-catalog asset-library
 wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json] [--listfile=paths.txt]
 wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N] [--listfile=paths.txt]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
@@ -135,7 +142,7 @@ Open a DBC or WotLK M2 directly in the Avalonia preview:
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- "C:\path\to\Spell.dbc"
 ```
 
-Open the visual asset comparison workspace directly:
+Open the visual asset comparison workspace directly inside the main Crucible window:
 
 ```powershell
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- "--asset-compare=G:\Crucible-Extras-Processed"
@@ -164,12 +171,13 @@ The corpus test runner accepts a WDBX 12340 definition XML and a directory conta
 ## Roadmap
 
 1. Connect the new portable content-project/ID registry to live DBC and SQL occupancy scans and unified validation/change plans.
-2. Add a WoWDBDefs DBD provider and cross-check it against WDBX definitions per target build.
-3. Add BLP preview/conversion plus recursive M2/WMO/ADT asset dependency validation.
-4. Expand the Spell Workspace with named flags, searchable references, related-table navigation, and optional project-local SQLite bulk editing.
-5. Guided creature/NPC appearance import, gameobject generation, vendor, loot, quest, race, and class creators on the live capability model.
-6. CASC/DB2 support and complete corpus verification for additional client profiles.
-7. Expand the revision-aware AzerothCore/TrinityCore DBC binding and audit engine into transactional multi-destination deployment plans.
+2. Add **Legacy SQL Recovery & Promotion**: capture a portable, credential-free audit first; derive intended changes with a three-way baseline → legacy-edited → target comparison; then let the user selectively promote approved item, class/race, pet, spell, creature, and related-table changes. The default path remains read-only and never carries deletions into the target implicitly.
+3. Add a WoWDBDefs DBD provider and cross-check it against WDBX definitions per target build.
+4. Add BLP preview/conversion plus recursive M2/WMO/ADT asset dependency validation.
+5. Expand the Spell Workspace with named flags, searchable references, related-table navigation, and optional project-local SQLite bulk editing.
+6. Guided creature/NPC appearance import, gameobject generation, vendor, loot, quest, race, and class creators on the live capability model.
+7. CASC/DB2 support and complete corpus verification for additional client profiles.
+8. Expand the revision-aware AzerothCore/TrinityCore DBC binding and audit engine into transactional multi-destination deployment plans.
 
 The detailed decisions from legacy and newly added local tools are recorded in [the reference-tool audit](docs/REFERENCE-TOOL-AUDIT.md).
 

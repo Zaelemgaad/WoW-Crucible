@@ -12,11 +12,11 @@ namespace WoWCrucible.Desktop;
 
 internal sealed class ItemWorkbenchWindow : Window
 {
-    private readonly TextBox _host = new() { Text = "127.0.0.1", Width = 125 };
-    private readonly NumericUpDown _port = new() { Value = 3306, Minimum = 1, Maximum = 65535, Width = 82 };
-    private readonly TextBox _user = new() { Width = 105 };
-    private readonly TextBox _password = new() { PasswordChar = '●', Width = 110 };
-    private readonly TextBox _database = new() { Text = "acore_world", Width = 130 };
+    private readonly TextBox _host = new() { Text = "127.0.0.1", MinWidth = 130, HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly NumericUpDown _port = new() { Value = 3306, Minimum = 1, Maximum = 65535, MinWidth = 130, HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly TextBox _user = new() { MinWidth = 120, HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly TextBox _password = new() { PasswordChar = '●', MinWidth = 130, HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly TextBox _database = new() { Text = "acore_world", MinWidth = 150, HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly TextBox _search = new() { PlaceholderText = "Filter by ID, name, quality, level, or set ID…" };
     private readonly ListBox _items = new();
@@ -56,10 +56,14 @@ internal sealed class ItemWorkbenchWindow : Window
 
     private Control ConnectionBar()
     {
-        var bar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7, Margin = new Thickness(12), VerticalAlignment = VerticalAlignment.Center };
-        bar.Children.Add(new TextBlock { Text = "LIVE WORLD DATABASE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = new SolidColorBrush(Color.Parse("#C58A2B")), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,0,8,0) });
-        foreach (var pair in new[] { ("Host", (Control)_host), ("Port", _port), ("User", _user), ("Password", _password), ("Database", _database) }) { bar.Children.Add(new TextBlock { Text = pair.Item1, VerticalAlignment = VerticalAlignment.Center, FontSize = 11 }); bar.Children.Add(pair.Item2); }
-        bar.Children.Add(new TextBlock { Text = "Password remains in memory only.", Foreground = new SolidColorBrush(Color.Parse("#78859A")), FontSize = 10, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8,0,0,0) }); return new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Child = bar };
+        var bar = new Grid { ColumnDefinitions = new("*,*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 14, RowSpacing = 7, Margin = new Thickness(12, 8) };
+        var heading = new TextBlock { Text = "LIVE WORLD DATABASE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = new SolidColorBrush(Color.Parse("#C58A2B")), VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumnSpan(heading, 3); bar.Children.Add(heading);
+        AddConnectionField(bar, "Host", _host, 1, 0); AddConnectionField(bar, "Port", _port, 1, 1); AddConnectionField(bar, "User", _user, 1, 2);
+        AddConnectionField(bar, "Password", _password, 2, 0); AddConnectionField(bar, "Database", _database, 2, 1);
+        var privacy = new TextBlock { Text = "Password remains in memory only.", Foreground = new SolidColorBrush(Color.Parse("#78859A")), FontSize = 10, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetRow(privacy, 2); Grid.SetColumn(privacy, 2); bar.Children.Add(privacy);
+        return new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Child = bar };
     }
 
     private Control AcquisitionPage()
@@ -160,8 +164,9 @@ internal sealed class ItemWorkbenchWindow : Window
     private static Button AccentButton(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
     private static Grid Form(params (string Label, Control Control)[] rows) { var grid = new Grid { ColumnDefinitions = new("190,*"), RowDefinitions = new(string.Join(',', Enumerable.Repeat("Auto", rows.Length))) }; for (var index=0; index<rows.Length; index++) { var label = new TextBlock { Text = rows[index].Label, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,5,12,5) }; Grid.SetRow(label,index); grid.Children.Add(label); rows[index].Control.Margin = new Thickness(0,4); Grid.SetRow(rows[index].Control,index); Grid.SetColumn(rows[index].Control,1); grid.Children.Add(rows[index].Control); } return grid; }
     private static Grid Row(Control first, Control second) { var grid = new Grid { ColumnDefinitions = new("*,Auto") }; grid.Children.Add(first); Grid.SetColumn(second,1); second.Margin = new Thickness(6,0,0,0); grid.Children.Add(second); return grid; }
+    private static void AddConnectionField(Grid grid, string label, Control input, int row, int column) { var field = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Stretch }; field.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center, FontSize = 11 }); Grid.SetColumn(input, 1); field.Children.Add(input); Grid.SetRow(field, row); Grid.SetColumn(field, column); grid.Children.Add(field); }
     private static void AddPath(Grid grid, int row, string label, Control field, Control button) { var text = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center }; Grid.SetRow(text,row); grid.Children.Add(text); Grid.SetRow(field,row); Grid.SetColumn(field,1); field.Margin = new Thickness(6,3); grid.Children.Add(field); Grid.SetRow(button,row); Grid.SetColumn(button,2); grid.Children.Add(button); }
     private static T WithRow<T>(T control, int row) where T:Control { Grid.SetRow(control,row); return control; }
-    private static void AddCell(Grid grid, string text, int column, FontWeight weight = default) { var value = new TextBlock { Text = text, TextTrimming = TextTrimming.CharacterEllipsis, FontWeight = weight, Margin = new Thickness(4) }; Grid.SetColumn(value,column); grid.Children.Add(value); }
+    private static void AddCell(Grid grid, string text, int column, FontWeight? weight = null) { var value = new TextBlock { Text = text, TextTrimming = TextTrimming.CharacterEllipsis, FontWeight = weight ?? FontWeight.Normal, Margin = new Thickness(4) }; Grid.SetColumn(value,column); grid.Children.Add(value); }
     private static string QualityName(int quality) => quality switch { 0=>"Poor",1=>"Common",2=>"Uncommon",3=>"Rare",4=>"Epic",5=>"Legendary",6=>"Artifact",7=>"Heirloom",_=>$"Quality {quality}" };
 }

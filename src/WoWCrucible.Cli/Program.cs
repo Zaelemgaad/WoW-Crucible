@@ -86,6 +86,25 @@ static int Asset(string[] args)
         Console.Error.WriteLine($"Content-first layout {(result.Applied ? "migration" : "dry run")}: {result.SourceFolders:N0} provenance folder(s), {result.Files:N0} file(s), {result.Bytes / (1024d * 1024 * 1024):0.##} GiB, {result.MovedFiles:N0} moved, {result.Conflicts:N0} conflict(s).{(result.Applied ? $"\nCatalog: {result.CatalogPath}" : "\nRun again with --apply after reviewing this result.")}");
         return result.Conflicts == 0 ? 0 : 3;
     }
+    if (args is ["library-consolidate", var consolidateLibraryRoot, .. var consolidateOptions])
+    {
+        var apply = consolidateOptions.Any(option => option.Equals("--apply", StringComparison.OrdinalIgnoreCase));
+        var unknown = consolidateOptions.Where(option => !option.Equals("--apply", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset library-consolidate option: {unknown[0]}");
+        var progress = new Progress<(long Done, long Total, string Path)>(value => Console.Error.WriteLine($"Consolidate\t{value.Done:N0}/{value.Total:N0}\t{value.Path}"));
+        var result = BulkAssetLibraryService.ConsolidateLooseLayout(consolidateLibraryRoot, apply, progress);
+        var catalogStatus = result.CatalogRebuildError is null
+            ? result.Applied ? $"\nCatalog: {result.CatalogPath}" : string.Empty
+            : $"\nCATALOG REBUILD FAILED after file consolidation committed: {result.CatalogRebuildError}\nRecover with: wowcrucible asset library-catalog \"{Path.GetFullPath(consolidateLibraryRoot)}\"";
+        Console.Error.WriteLine($"Loose consolidation {(result.Applied ? "applied" : "dry run")}: {result.Files:N0} file(s), {result.Bytes / (1024d * 1024 * 1024):0.##} GiB, {result.MovedFiles:N0} move(s), {result.ExactDuplicates:N0} byte-identical duplicate(s), {result.Conflicts:N0} non-identical conflict(s).{(result.Applied ? $"\nJournal: {result.JournalPath}{catalogStatus}" : result.Conflicts == 0 ? "\nNo files changed. Run again with --apply after reviewing this result." : "\nNo files changed. Resolve every conflict before applying.")}");
+        return result.Conflicts == 0 && result.CatalogRebuildError is null ? 0 : 3;
+    }
+    if (args is ["library-catalog", var catalogLibraryRoot])
+    {
+        var catalogPath = BulkAssetLibraryService.RebuildCatalog(catalogLibraryRoot);
+        Console.Error.WriteLine($"Asset catalog rebuilt successfully: {catalogPath}");
+        return 0;
+    }
     if (args is ["library-status", var statusLibraryRoot])
     {
         var plan = BulkAssetLibraryService.LoadPlan(statusLibraryRoot);
@@ -151,7 +170,7 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset preview-info <wrath-model.m2>\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
 
 static int Project(string[] args)
 {
@@ -353,16 +372,53 @@ static int ServerHelp(int code = 0)
 static async Task<int> Database(string[] args)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return DatabaseHelp();
+    if (args[0].Equals("snapshot-inspect", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 2) return DatabaseHelp(2);
+        var inspectOptions = args[2..];
+        var quick = inspectOptions.Any(option => option.Equals("--quick", StringComparison.OrdinalIgnoreCase));
+        var unknown = inspectOptions.Where(option => !option.Equals("--quick", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown snapshot-inspect option: {unknown[0]}");
+        var inspection = await new LegacyDatabaseSnapshotService().InspectAsync(args[1], verifyRows: !quick);
+        if (inspection.Manifest is { } manifest)
+        {
+            Console.WriteLine($"Format\t{manifest.Format}\t{manifest.FormatVersion}\nCapturedUtc\t{manifest.CapturedUtc:O}\nDatabase\t{manifest.Source?.Database ?? "<missing>"}\nServer\t{manifest.Source?.ServerVersion ?? "<missing>"}\nTables\t{manifest.Tables?.Count ?? 0}\nRows\t{manifest.TotalRows}\nSchemaSha256\t{manifest.SchemaSha256}\nContentSha256\t{manifest.ContentSha256}\nConsistentSnapshot\t{manifest.ConsistentSnapshotStarted}\nReadOnlyTransaction\t{manifest.ReadOnlyTransactionEnforced}");
+            if (manifest.Source?.CoreIdentity is not null) foreach (var identity in manifest.Source.CoreIdentity) Console.WriteLine($"CORE\t{identity.Key}\t{identity.Value}");
+            if (manifest.Tables is not null) foreach (var table in manifest.Tables) Console.WriteLine($"TABLE\t{table.Name}\t{table.Rows}\t{table.Columns?.Count ?? 0}\t{string.Join(',', table.PrimaryKey ?? [])}\t{table.RowsSha256}");
+        }
+        foreach (var finding in inspection.Findings) Console.Error.WriteLine($"INVALID\t{finding}");
+        Console.Error.WriteLine(inspection.Valid ? $"Snapshot is valid ({(quick ? "hash-only" : "full row-structure verification")})." : "Snapshot validation failed.");
+        return inspection.Valid ? 0 : 3;
+    }
     if (args.Length < 5) return DatabaseHelp(2);
     var operation = args[0]; var host = args[1]; var portText = args[2]; var user = args[3]; var database = args[4];
+    if (operation.Equals("snapshot", StringComparison.OrdinalIgnoreCase) && (args.Length < 6 || args[5].StartsWith("--", StringComparison.Ordinal)))
+        return Fail("db snapshot requires an output artifact path after the database name.");
     if (!uint.TryParse(portText, out var port) || port is 0 or > 65535) return Fail("Database port must be from 1 to 65535.");
-    var rawOptions = args[5..];
+    var rawOptions = operation.Equals("snapshot", StringComparison.OrdinalIgnoreCase) && args.Length >= 6 ? args[6..] : args[5..];
     var passwordEnvironment = rawOptions.FirstOrDefault(option => option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase))?[15..] ?? "WOW_CRUCIBLE_DB_PASSWORD";
     var sslText = rawOptions.FirstOrDefault(option => option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase))?[6..] ?? "Preferred";
+    if (string.IsNullOrWhiteSpace(passwordEnvironment)) return Fail("--password-env requires a non-empty environment-variable name.");
     var password = Environment.GetEnvironmentVariable(passwordEnvironment);
     if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
     if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
     var profile = new DatabaseConnectionProfile(host, port, user, password, database, ssl);
+    if (operation.Equals("snapshot", StringComparison.OrdinalIgnoreCase))
+    {
+        var includes = rawOptions.Where(option => option.StartsWith("--include=", StringComparison.OrdinalIgnoreCase)).Select(option => option[10..]).ToArray();
+        var excludes = rawOptions.Where(option => option.StartsWith("--exclude=", StringComparison.OrdinalIgnoreCase)).Select(option => option[10..]).ToArray();
+        var includeSensitive = rawOptions.Any(option => option.Equals("--include-sensitive", StringComparison.OrdinalIgnoreCase));
+        var overwrite = rawOptions.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase));
+        var unknown = rawOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) &&
+            !option.StartsWith("--include=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--exclude=", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--include-sensitive", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown snapshot option: {unknown[0]}");
+        var progress = new Progress<LegacyDatabaseSnapshotProgress>(value =>
+            Console.Error.WriteLine(value.Table is null ? $"{value.Stage}" : $"{value.Stage}\t{value.CompletedTables:N0}/{value.TotalTables:N0}\t{value.Table}\t{value.Rows:N0} rows"));
+        var result = await new LegacyDatabaseSnapshotService().CaptureAsync(profile, args[5], new(includes, excludes, includeSensitive, overwrite), progress);
+        Console.Error.WriteLine($"Read-only legacy world snapshot complete: {result.Manifest.Tables.Count:N0} table(s), {result.Manifest.TotalRows:N0} row(s), {result.ArtifactBytes / (1024d * 1024):0.##} MiB.\nArtifact: {result.Path}\nSchema: {result.Manifest.SchemaSha256}\nContent: {result.Manifest.ContentSha256}\nConsistent snapshot: {result.Manifest.ConsistentSnapshotStarted}; database-enforced read-only: {result.Manifest.ReadOnlyTransactionEnforced}.\nExcluded by safety/filters: {result.Manifest.Policy.ExcludedTables.Count:N0} table(s).");
+        return 0;
+    }
     if (operation.Equals("inspect", StringComparison.OrdinalIgnoreCase))
     {
         var unknown = rawOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -394,7 +450,7 @@ static async Task<int> Database(string[] args)
     return DatabaseHelp(2);
 }
 
-static int DatabaseHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db item-audit <host> <port> <user> <database> [--password-env=NAME] [--output=report.json]\n  wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=\" Variant\"] [--itemset=ID]\n\nPasswords are read from WOW_CRUCIBLE_DB_PASSWORD by default and are never accepted as command arguments.", code);
+static int DatabaseHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible db inspect <host> <port> <user> <database> [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]\n  wowcrucible db snapshot-inspect <snapshot-file> [--quick]\n  wowcrucible db item-audit <host> <port> <user> <database> [--password-env=NAME] [--output=report.json]\n  wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=\" Variant\"] [--itemset=ID]\n\nSnapshot capture is SELECT-only, streams base-table rows into a compressed portable artifact, and excludes known auth/character runtime-state tables by default. --include-sensitive is an explicit override; --quick still verifies every data hash but skips row-structure decoding. Passwords are read from WOW_CRUCIBLE_DB_PASSWORD by default and are never accepted as command arguments.", code);
 
 static int Manifest(string[] args)
 {

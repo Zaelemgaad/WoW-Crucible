@@ -32,6 +32,8 @@ wowcrucible asset library-run <library-folder> <blpconverter.exe> [--workers=6]
 wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> <blpconverter.exe> [--workers=6]
 wowcrucible asset library-repair <library-folder> <blpconverter.exe> [--workers=6]
 wowcrucible asset library-layout <library-folder> [--apply]
+wowcrucible asset library-consolidate <library-folder> [--apply]
+wowcrucible asset library-catalog <library-folder>
 wowcrucible asset library-status <library-folder>
 wowcrucible asset compare-folders <library-folder> [path-filter]
 wowcrucible asset compare-files <library-folder> <logical-directory>
@@ -42,15 +44,18 @@ wowcrucible asset definitive-stage <library-folder> <output-folder>
 
 `library-plan` recursively inventories loose BLP files and MPQs, but only reads archive file tables for MPQs below `--max-gb`. The library must be outside the source tree. The plan records source paths, archive identities, logical extraction sizes, entry counts, BLP counts, and skipped/failed archives.
 
-`library-run` is resumable. It preserves each archive in a distinct provenance folder, preserves duplicate locale variants with suffixes, never overwrites an existing extracted file or PNG, copies loose BLPs into the library without modifying the source, converts in bounded parallel batches, verifies PNG output, writes a checkpoint after every archive, and generates `asset-catalog.csv` with Maps/UI/Characters/Creatures/Items/Textures/ModelsAndWorld/Audio/Other categories. A corrupt or unsupported individual archive entry is recorded in the checkpoint while the remaining entries continue. If the external converter rejects a BLP, Crucible retries its batch neighbors individually and writes the genuinely unsupported paths to `.blp-conversion-failures.txt` inside that provenance root. Executables that reject the required `/M` batch syntax now fail immediately instead of spawning a retry for every texture.
+`library-run` is resumable. It preserves each archive as provenance at the leaf of the shared content-first tree, preserves duplicate locale variants with suffixes, never overwrites an existing extracted file or PNG, copies loose BLPs directly into that same tree without modifying the source, converts in bounded parallel batches, verifies PNG output, writes a checkpoint after every archive, and generates `asset-catalog.csv` with Maps/UI/Characters/Creatures/Items/Textures/ModelsAndWorld/Audio/Other categories. A corrupt or unsupported individual archive entry is recorded in the checkpoint while the remaining entries continue. If the external converter rejects a BLP, Crucible retries its batch neighbors individually and records genuinely unsupported paths for repair. Executables that reject the required `/M` batch syntax now fail immediately instead of spawning a retry for every texture.
 
-`library-import` safely ingests a folder produced by another MPQ extractor while retaining a single explicit provenance label. It preserves every file type, converts staged BLPs, uses exact byte comparisons when resuming, refuses differing destination files, and never modifies or deletes the extracted source folder.
+`library-import` safely ingests a folder produced by another MPQ extractor while retaining a single explicit provenance label. It preserves every file type, converts staged BLPs, relocates the result directly into the shared content-first tree, uses exact byte comparisons when resuming, refuses differing destination files, and never modifies or deletes the extracted source folder. New imports do not create a parallel `Loose` tree.
 
 Example:
 
 ```powershell
 wowcrucible asset library-plan "G:\extras" "G:\Crucible-Extras-Processed" --max-gb=2
 wowcrucible asset library-run "G:\Crucible-Extras-Processed" "C:\Tools\BLPConverter.exe" --workers=6
+wowcrucible asset library-consolidate "G:\Crucible-Extras-Processed"
+wowcrucible asset library-consolidate "G:\Crucible-Extras-Processed" --apply
+wowcrucible asset library-catalog "G:\Crucible-Extras-Processed"
 wowcrucible asset library-status "G:\Crucible-Extras-Processed"
 ```
 
@@ -58,11 +63,15 @@ Stopping `library-run` does not discard completed work. Run the same command aga
 
 Use `library-repair` after upgrading the converter or after opening a library created by an older Crucible build. It never re-extracts MPQs; it retries only BLPs whose matching PNG is absent, refreshes the per-provenance failure lists, and rebuilds the catalog.
 
-Archive libraries use a content-first comparison layout. For example, `Archives\patch-Y-id\Content\Character\BloodElf\Female\hair.png` becomes `Archives\Content\Character\BloodElf\Female\patch-Y-id\hair.png`, placing every patch's version of the same content directory beside the others. `library-layout` is a non-mutating conflict/count dry run by default; add `--apply` to perform the resumable same-volume migration and rebuild the catalog. Existing destinations are never overwritten.
+Asset libraries use a content-first comparison layout. For example, `Archives\patch-Y-id\Content\Character\BloodElf\Female\hair.png` becomes `Archives\Content\Character\BloodElf\Female\patch-Y-id\hair.png`, placing every source's version of the same content directory beside the others. `library-layout` migrates the older archive-first layout: it is a non-mutating conflict/count dry run by default; add `--apply` to perform the same-volume migration and rebuild the catalog. Existing destinations are never overwritten.
+
+`library-consolidate` is the separate one-time migration for older `Loose\Content` libraries. It canonicalizes recognizable client paths and places the former top-level package name in the provenance leaf, so `Loose\Content\classic (1)\Character\Human\...` joins `Archives\Content\Character\Human\classic (1)\...`. Run it without `--apply` first: the dry run changes nothing and reports planned moves, exact duplicates, bytes, and non-identical conflicts. Any non-identical destination conflict blocks the entire apply. With `--apply`, a duplicate source is removed only after a streaming byte-for-byte comparison proves that its destination is identical; planned and completed dispositions are retained in `Reports\loose-consolidation-journal.json`, and empty `Loose` directories are removed. A failure during file consolidation rolls moved files back instead of leaving a partial layout. Catalog generation is a second phase after the file commit: if it fails, the command reports that the files were committed, exits nonzero, and preserves the journal error. `library-catalog` safely retries only the catalog phase and clears that recovery marker after success.
 
 Comparison is directory-first because expansions frequently rename equivalent assets. `compare-folders` searches logical content paths and reports PNG/source counts; `compare-files` lists every direct PNG from every provenance folder in the selected path without requiring filenames to match. The Avalonia **Assets & compare** workspace exposes the same model visually with paged, lazy thumbnails and two comparison slots.
 
-Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`. Selecting `Character\BloodElf\Female`, for example, shows all direct PNGs under every archive patch folder plus direct PNGs from the matching `Loose\Content` path; it does not guess that differently named files are equivalent. Loose-only paths also appear in the same navigator with `Loose` as their source.
+Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`, or choose **Assets & compare** from the main navigation. It replaces the current workspace inside the same application window instead of opening a separate window; **← Editor** returns to the previous workspace. Its directory, cards, and preview columns have draggable splitters, tool groups wrap, and the configuration headers scroll when vertical space is limited so resizing does not strand controls off-screen.
+
+Selecting `Character\BloodElf\Female`, for example, shows all direct PNGs under every provenance leaf in that shared logical path; it does not guess that differently named files are equivalent. Libraries created or consolidated by current Crucible builds no longer depend on a separate `Loose` source tree.
 
 The visual workspace can sort cards by source/name, filename, or file size in either direction. `Scan exact copies` first narrows candidates by byte length, verifies SHA-256, and finally performs a streaming byte-for-byte comparison. It only labels exact groups and enables a collapsed comparison view; it never deletes source or processed assets. The preview-pane selector can switch from synchronized left/right images to compatible WotLK M2 + SKIN sources found by the automatic model browser. The embedded model view is live and rotatable; applying a selected PNG uses the model's real first UV map but remains an explicitly labeled candidate preview until replaceable slots and full `CharSections` composition are resolved.
 
@@ -145,11 +154,17 @@ wowcrucible server bindings <installed-server-folder> [--source=core-source]
 wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all] [--summary] [--migration=sync.sql]
 wowcrucible server client-plan <installed-server-folder> <effective-dbc-folder> [--source=core-source] [--output=plan.json] [--stage=review-folder]
 wowcrucible db inspect <host> <port> <user> <database> --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=ENV_NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
+wowcrucible db snapshot-inspect <snapshot-file> [--quick]
 wowcrucible db item-audit <host> <port> <user> <database> [--password-env=ENV_NAME] [--output=report.json]
 wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=" Variant"] [--itemset=ID]
 ```
 
 Server detection reads the live `worldserver.conf`; it does not accept `.dist` templates. Database passwords should be passed through an environment variable so they do not enter command history. DBC audits report the effective runtime value when the core applies an SQL overlay and can export an idempotent migration without applying it.
+
+`db snapshot` is phase one of legacy SQL recovery. It issues only fixed metadata queries and `SELECT` statements, requests a consistent read-only transaction where the server supports one, streams base-table rows without loading the database into memory, and publishes the compressed artifact atomically. By default it verifies that the selected schema looks like a world database and excludes known auth/character runtime-state tables while retaining reusable definitions such as `mail_loot_template`, `instance_template`, `guild_rewards`, and `pet_levelstats`. Repeat `--include` or `--exclude` for table-name globs. `--include-sensitive` deliberately removes the runtime-state safety filter; those captured rows may themselves contain account secrets even though the live connection password is never serialized.
+
+`db snapshot-inspect` performs offline schema, entry, byte-count, row-count, and SHA-256 integrity checks. The default also decodes every row structure; `--quick` still reads and hashes every table but skips structural decoding. Snapshot comparison against a verified baseline, domain grouping, dependency analysis, three-way target translation, and selective SQL promotion are not implemented in phase one.
 
 `item-audit` discovers the current schema instead of assuming one core revision. It checks vendor, creature/gameobject/item/mail/pickpocket/skinning/disenchant/fishing/spell/reference/prospecting/milling loot, character starting items, and every quest reward/choice slot that exists. The report calls an item **no known acquisition path**, not certainly unobtainable, because custom server scripts can grant items without a database relationship.
 

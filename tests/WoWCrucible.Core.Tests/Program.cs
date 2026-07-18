@@ -69,21 +69,31 @@ var newLegacy = Path.Combine(comparisonRoot, "Archives", "patch-new-b2", "Conten
 File.WriteAllText(Path.Combine(oldLegacy, "old-expansion-name.png"), "old"); File.WriteAllText(Path.Combine(newLegacy, "completely-renamed.png"), "new"); File.WriteAllText(Path.Combine(newLegacy, "exact-copy.png"), "old");
 File.Copy(geometryModelPath, Path.Combine(oldLegacy, "geometry.m2")); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(oldLegacy, "geometry00.skin"));
 File.WriteAllText(Path.Combine(oldLegacy, "fixture.blp"), "embedded texture");
-var looseMatching = Path.Combine(comparisonRoot, "Loose", "Content", "Character", "BloodElf", "Female"); var looseOnly = Path.Combine(comparisonRoot, "Loose", "Content", "ExtendedSkins", "Character", "Human", "Female");
+var looseMatching = Path.Combine(comparisonRoot, "Loose", "Content", "loose-source", "Character", "BloodElf", "Female"); var looseOnly = Path.Combine(comparisonRoot, "Loose", "Content", "ExtendedSkins", "Character", "Human", "Female");
 Directory.CreateDirectory(looseMatching); Directory.CreateDirectory(looseOnly); File.WriteAllText(Path.Combine(looseMatching, "loose-variant.png"), "loose"); File.WriteAllText(Path.Combine(looseOnly, "human-only.png"), "loose only");
+var looseModernRace = Path.Combine(comparisonRoot, "Loose", "Content", "WOW Mods", "Textures", "Dracthyr"); var looseMurlocVariant = Path.Combine(comparisonRoot, "Loose", "Content", "WOW Mods", "Textures", "Creature", "Murloc", "1. Oil - Low"); var looseOutfit = Path.Combine(comparisonRoot, "Loose", "Content", "WOW Mods", "Outfits & Armor"); var looseWrappedPatch = Path.Combine(comparisonRoot, "Loose", "Content", "patchzer", "Patch-U_(1.7.1)", "Creature", "DoomGuard");
+Directory.CreateDirectory(looseModernRace); Directory.CreateDirectory(looseMurlocVariant); Directory.CreateDirectory(looseOutfit); Directory.CreateDirectory(looseWrappedPatch);
+File.WriteAllText(Path.Combine(looseModernRace, "dracthyrfemale_skin.png"), "race"); File.WriteAllText(Path.Combine(looseMurlocVariant, "murloc.png"), "variant"); File.WriteAllText(Path.Combine(looseOutfit, "armor_fixture_lu_u.png"), "outfit"); File.WriteAllText(Path.Combine(looseWrappedPatch, "doomguard.png"), "creature");
 File.WriteAllText(Path.Combine(comparisonRoot, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(comparisonRoot, comparisonRoot, 1, DateTimeOffset.UtcNow, 0, [])));
 var layoutDryRun = BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, false); var layoutApplied = BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, true);
 if (layoutDryRun.Files != 6 || layoutDryRun.Conflicts != 0 || layoutApplied.MovedFiles != 6 || BulkAssetLibraryService.MigrateToContentFirstLayout(comparisonRoot, false).SourceFolders != 0)
     throw new InvalidOperationException("Content-first layout migration was destructive, conflicting, or not resumable.");
+var consolidationDryRun = BulkAssetLibraryService.ConsolidateLooseLayout(comparisonRoot, false); var consolidationApplied = BulkAssetLibraryService.ConsolidateLooseLayout(comparisonRoot, true);
+if (consolidationDryRun.Files != 6 || consolidationDryRun.MovedFiles != 6 || consolidationDryRun.Conflicts != 0 || !consolidationApplied.Applied || consolidationApplied.MovedFiles != 6 || Directory.Exists(Path.Combine(comparisonRoot, "Loose")) || !File.Exists(consolidationApplied.JournalPath) ||
+    !File.Exists(Path.Combine(comparisonRoot, "Archives", "Content", "Character", "Dracthyr", "Female", "WOW Mods", "dracthyrfemale_skin.png")) ||
+    !File.Exists(Path.Combine(comparisonRoot, "Archives", "Content", "Creature", "Murloc", "WOW Mods - Murloc - 1. Oil - Low", "murloc.png")) ||
+    !File.Exists(Path.Combine(comparisonRoot, "Archives", "Content", "Item", "TextureComponents", "LegUpperTexture", "WOW Mods", "armor_fixture_lu_u.png")) ||
+    !File.Exists(Path.Combine(comparisonRoot, "Archives", "Content", "Creature", "DoomGuard", "patchzer - Patch-U_(1.7.1)", "doomguard.png")))
+    throw new InvalidOperationException("Loose content consolidation did not preview, journal, and apply a content-first move safely.");
 var comparisonIndex = AssetComparisonService.BuildIndex(comparisonRoot); var comparisonEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, @"Character\BloodElf\Female");
 var matchingDirectory = comparisonIndex.Directories.Single(directory => directory.LogicalPath == @"Character\BloodElf\Female");
-var looseOnlyEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, @"ExtendedSkins\Character\Human\Female");
+var looseOnlyEntries = AssetComparisonService.GetDirectoryPngs(comparisonIndex, @"Character\Human\Female");
 var exactDuplicates = AssetComparisonService.FindExactDuplicates(comparisonEntries);
 var comparisonModels = AssetComparisonService.GetDirectoryModels(comparisonIndex, @"Character\BloodElf\Female");
 var ancestorModels = AssetComparisonService.GetRelevantModels(comparisonIndex, @"Character\BloodElf\Female\Hair");
-if (comparisonIndex.TotalPngFiles != 5 || matchingDirectory.ProvenanceSources != 3 || comparisonEntries.Count != 4 || comparisonEntries.Select(entry => entry.FileName).Distinct().Count() != 4 ||
-    looseOnlyEntries.Count != 1 || looseOnlyEntries[0].Provenance != "Loose" || exactDuplicates.Count != 1 || exactDuplicates[0].Entries.Count != 2 || exactDuplicates[0].RecoverableBytes != 3 || comparisonModels.Count != 1 || comparisonModels[0].Compatibility != AssetModelCompatibility.Ready || ancestorModels.DiscoveryScope != @"Character\BloodElf\Female" || ancestorModels.Models.Count != 1)
-    throw new InvalidOperationException("Directory-first visual comparison did not merge matching Loose content or preserve Loose-only paths.");
+if (comparisonIndex.TotalPngFiles != 9 || matchingDirectory.ProvenanceSources != 3 || comparisonEntries.Count != 4 || comparisonEntries.Select(entry => entry.FileName).Distinct().Count() != 4 ||
+    looseOnlyEntries.Count != 1 || looseOnlyEntries[0].Provenance != "ExtendedSkins" || exactDuplicates.Count != 1 || exactDuplicates[0].Entries.Count != 2 || exactDuplicates[0].RecoverableBytes != 3 || comparisonModels.Count != 1 || comparisonModels[0].Compatibility != AssetModelCompatibility.Ready || ancestorModels.DiscoveryScope != @"Character\BloodElf\Female" || ancestorModels.Models.Count != 1)
+    throw new InvalidOperationException("Directory-first visual comparison did not merge matching provenance sources after Loose consolidation.");
 var definitivePath = DefinitiveAssetProjectService.DefaultPath(comparisonRoot); var definitive = DefinitiveAssetProjectService.LoadOrCreate(definitivePath, comparisonRoot);
 definitive = DefinitiveAssetProjectService.RecordTexture(definitivePath, definitive, comparisonEntries[0], AssetDecision.Keeper, "Race", "fixture keeper");
 var dependencyGraph = AssetDependencyGraphService.AnalyzeModel(comparisonIndex, comparisonModels[0]);
@@ -101,6 +111,59 @@ var imported = BulkAssetLibraryService.ImportExtractedArchiveAsync(extractedImpo
 var resumedImport = BulkAssetLibraryService.ImportExtractedArchiveAsync(extractedImport, comparisonRoot, "manual-patch", wotlkModel, 1).GetAwaiter().GetResult();
 if (imported.ImportedFiles != 1 || resumedImport.ImportedFiles != 0 || !File.Exists(Path.Combine(comparisonRoot, "Archives", "Content", "Interface", "FrameXML", "manual-patch", "fixture.lua")))
     throw new InvalidOperationException("Extracted archive import did not preserve provenance or resume with an exact byte comparison.");
+var conflictLibrary = Path.Combine(assetFixture, "consolidation-conflict"); var conflictSource = Path.Combine(conflictLibrary, "Loose", "Content", "conflict-source", "Character", "Human", "same.png"); var conflictDestination = Path.Combine(conflictLibrary, "Archives", "Content", "Character", "Human", "conflict-source", "same.png");
+Directory.CreateDirectory(Path.GetDirectoryName(conflictSource)!); Directory.CreateDirectory(Path.GetDirectoryName(conflictDestination)!); File.WriteAllText(conflictSource, "legacy"); File.WriteAllText(conflictDestination, "different");
+File.WriteAllText(Path.Combine(conflictLibrary, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(conflictLibrary, conflictLibrary, 1, DateTimeOffset.UtcNow, 0, [])));
+var blockedConsolidation = BulkAssetLibraryService.ConsolidateLooseLayout(conflictLibrary, true);
+if (blockedConsolidation.Applied || blockedConsolidation.Conflicts != 1 || File.ReadAllText(conflictSource) != "legacy" || File.ReadAllText(conflictDestination) != "different")
+    throw new InvalidOperationException("Loose consolidation did not block a non-identical destination without changing either file.");
+
+var exactLibrary = Path.Combine(assetFixture, "consolidation-exact"); var exactSource = Path.Combine(exactLibrary, "Loose", "Content", "same-source", "Character", "Human", "same.png"); var exactDestination = Path.Combine(exactLibrary, "Archives", "Content", "Character", "Human", "same-source", "same.png");
+Directory.CreateDirectory(Path.GetDirectoryName(exactSource)!); Directory.CreateDirectory(Path.GetDirectoryName(exactDestination)!); File.WriteAllText(exactSource, "identical"); File.WriteAllText(exactDestination, "identical");
+File.WriteAllText(Path.Combine(exactLibrary, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(exactLibrary, exactLibrary, 1, DateTimeOffset.UtcNow, 0, [])));
+var exactConsolidation = BulkAssetLibraryService.ConsolidateLooseLayout(exactLibrary, true);
+if (!exactConsolidation.Applied || exactConsolidation.ExactDuplicates != 1 || File.Exists(exactSource) || File.ReadAllText(exactDestination) != "identical")
+    throw new InvalidOperationException("Loose consolidation removed a source without a verified byte-identical destination.");
+
+var relocationLibrary = Path.Combine(assetFixture, "relocation-preflight"); var relocationLegacy = Path.Combine(relocationLibrary, "Archives", "legacy-source", "Content", "Character", "Human");
+var relocationSafeSource = Path.Combine(relocationLegacy, "safe.png"); var relocationConflictSource = Path.Combine(relocationLegacy, "conflict.png"); var relocationConflictDestination = Path.Combine(relocationLibrary, "Archives", "Content", "Character", "Human", "legacy-source", "conflict.png");
+Directory.CreateDirectory(relocationLegacy); Directory.CreateDirectory(Path.GetDirectoryName(relocationConflictDestination)!); File.WriteAllText(relocationSafeSource, "safe"); File.WriteAllText(relocationConflictSource, "source"); File.WriteAllText(relocationConflictDestination, "destination");
+File.WriteAllText(Path.Combine(relocationLibrary, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(relocationLibrary, relocationLibrary, 1, DateTimeOffset.UtcNow, 0, [])));
+var blockedRelocation = BulkAssetLibraryService.MigrateToContentFirstLayout(relocationLibrary, true);
+if (blockedRelocation.Applied || blockedRelocation.MovedFiles != 0 || blockedRelocation.Conflicts != 1 || !File.Exists(relocationSafeSource) || File.Exists(Path.Combine(relocationLibrary, "Archives", "Content", "Character", "Human", "legacy-source", "safe.png")))
+    throw new InvalidOperationException("Content relocation moved files before its complete conflict preflight passed.");
+
+var directSourceRoot = Path.Combine(assetFixture, "direct-source"); var directSource = Path.Combine(directSourceRoot, "Character", "Human", "Male", "collision.blp"); var directLibrary = Path.Combine(assetFixture, "direct-library");
+Directory.CreateDirectory(Path.GetDirectoryName(directSource)!); File.WriteAllText(directSource, "ABCD"); BulkAssetLibraryService.CreatePlan(directSourceRoot, directLibrary, long.MaxValue);
+var directProvenance = Path.GetFileName(directSourceRoot); var directDestination = Path.Combine(directLibrary, "Archives", "Content", "Character", "Human", "Male", directProvenance, "collision.blp");
+Directory.CreateDirectory(Path.GetDirectoryName(directDestination)!); File.WriteAllText(directDestination, "WXYZ");
+var fixedStamp = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc); File.SetLastWriteTimeUtc(directSource, fixedStamp); File.SetLastWriteTimeUtc(directDestination, fixedStamp);
+var directHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(directSource))).ToLowerInvariant()[..24]; var directVariant = Path.Combine(Path.GetDirectoryName(directDestination)!, $"collision.variant-{directHash}.blp");
+File.WriteAllText(Path.ChangeExtension(directDestination, ".png"), "preview"); File.WriteAllText(Path.ChangeExtension(directVariant, ".png"), "variant preview");
+var firstDirectRun = BulkAssetLibraryService.RunAsync(directLibrary, wotlkModel, 1).GetAwaiter().GetResult(); var resumedDirectRun = BulkAssetLibraryService.RunAsync(directLibrary, wotlkModel, 1).GetAwaiter().GetResult();
+if (firstDirectRun.CopiedLooseBlps != 1 || resumedDirectRun.CopiedLooseBlps != 0 || File.ReadAllText(directDestination) != "WXYZ" || File.ReadAllText(directVariant) != "ABCD" || Directory.EnumerateFiles(Path.GetDirectoryName(directDestination)!, "collision.variant-*.blp").Count() != 1)
+    throw new InvalidOperationException("Direct loose intake trusted timestamps, lost a differing file, produced an unstable variant, or discarded root provenance.");
+var directCatalogText = File.ReadAllText(firstDirectRun.CatalogPath);
+if (directCatalogText.Contains("asset-library-plan", StringComparison.OrdinalIgnoreCase) || directCatalogText.Contains("asset-library-checkpoint", StringComparison.OrdinalIgnoreCase) || directCatalogText.Contains(".asset-library-operation.lock", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("The asset catalog included library control files instead of only processed asset roots.");
+
+var provenanceLibrary = Path.Combine(assetFixture, "provenance-collision"); var sharedProvenancePrefix = new string('p', 60); var rawProvenanceA = sharedProvenancePrefix + "-first"; var rawProvenanceB = sharedProvenancePrefix + "-second";
+var provenanceSourceA = Path.Combine(provenanceLibrary, "Loose", "Content", rawProvenanceA, "Character", "Human", "same.png"); var provenanceSourceB = Path.Combine(provenanceLibrary, "Loose", "Content", rawProvenanceB, "Character", "Human", "same.png");
+Directory.CreateDirectory(Path.GetDirectoryName(provenanceSourceA)!); Directory.CreateDirectory(Path.GetDirectoryName(provenanceSourceB)!); File.WriteAllText(provenanceSourceA, "first"); File.WriteAllText(provenanceSourceB, "second");
+File.WriteAllText(Path.Combine(provenanceLibrary, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(provenanceLibrary, provenanceLibrary, 1, DateTimeOffset.UtcNow, 0, [])));
+var provenanceConsolidation = BulkAssetLibraryService.ConsolidateLooseLayout(provenanceLibrary, true); var provenanceDestinations = Directory.EnumerateDirectories(Path.Combine(provenanceLibrary, "Archives", "Content", "Character", "Human")).ToArray();
+if (!provenanceConsolidation.Applied || provenanceConsolidation.Conflicts != 0 || provenanceDestinations.Length != 2 || provenanceDestinations.Select(path => File.ReadAllText(Path.Combine(path, "same.png"))).Order().SequenceEqual(new[] { "first", "second" }) == false)
+    throw new InvalidOperationException("Sanitized or truncated provenance labels collapsed two distinct source packages.");
+
+var recoverableLibrary = Path.Combine(assetFixture, "recoverable-catalog"); var recoverableSource = Path.Combine(recoverableLibrary, "Loose", "Content", "recovery-source", "Character", "Human", "recovery.png");
+Directory.CreateDirectory(Path.GetDirectoryName(recoverableSource)!); File.WriteAllText(recoverableSource, "recovery"); File.WriteAllText(Path.Combine(recoverableLibrary, "asset-library-plan.json"), System.Text.Json.JsonSerializer.Serialize(new BulkAssetLibraryPlan(recoverableLibrary, recoverableLibrary, 1, DateTimeOffset.UtcNow, 0, [])));
+var catalogBlocker = Path.Combine(recoverableLibrary, "asset-catalog.csv"); Directory.CreateDirectory(catalogBlocker); var recoverableConsolidation = BulkAssetLibraryService.ConsolidateLooseLayout(recoverableLibrary, true);
+var failedJournal = System.Text.Json.JsonSerializer.Deserialize<LooseAssetConsolidationJournal>(File.ReadAllText(recoverableConsolidation.JournalPath));
+if (!recoverableConsolidation.Applied || recoverableConsolidation.CatalogRebuildError is null || failedJournal?.FilesCommittedUtc is null || failedJournal.CatalogCompletedUtc is not null || File.Exists(recoverableSource) || !File.Exists(Path.Combine(recoverableLibrary, "Archives", "Content", "Character", "Human", "recovery-source", "recovery.png")))
+    throw new InvalidOperationException("A post-commit catalog failure obscured or rolled back an already-safe Loose consolidation.");
+Directory.Delete(catalogBlocker); var rebuiltCatalog = BulkAssetLibraryService.RebuildCatalog(recoverableLibrary); var recoveredJournal = System.Text.Json.JsonSerializer.Deserialize<LooseAssetConsolidationJournal>(File.ReadAllText(recoverableConsolidation.JournalPath));
+if (!File.Exists(rebuiltCatalog) || recoveredJournal?.CatalogCompletedUtc is null || recoveredJournal.CatalogRebuildError is not null || File.ReadAllText(rebuiltCatalog).Contains("Reports", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("The catalog could not be rebuilt independently or its journal did not record recovery.");
 Directory.Delete(assetFixture, true); Directory.Delete(conversionWorkspacePath, true);
 
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));
@@ -585,6 +648,69 @@ catch (InvalidDataException ex) when (ex.Message.Contains("No DBC files", String
 var recursiveValidation = DbcCorpusValidator.Validate(args[0], validationParent, verifyRoundTrip: false, recursive: true);
 if (recursiveValidation.Count != 1 || !Path.GetFileName(recursiveValidation[0].Path).Equals("AnimationData.dbc", StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException("Recursive DBC validation did not discover the nested corpus.");
+
+var snapshotColumns = new[]
+{
+    new LegacyDatabaseSnapshotColumn("entry", 1, "int", "int unsigned", false, null, "PRI", "", null, null, null, 10, 0, null, null),
+    new LegacyDatabaseSnapshotColumn("name", 2, "varchar", "varchar(255)", false, "", "", "", "utf8", "utf8_general_ci", 255, null, null, null, null)
+};
+LegacyDatabaseTableSchema SnapshotSchema(string name, string type = "BASE TABLE") => new(name, type, "InnoDB", "utf8_general_ci", "fixture", 1, name == "item_template" ? ["entry"] : [], snapshotColumns);
+var snapshotSchemas = new[]
+{
+    SnapshotSchema("item_template"), SnapshotSchema("creature_template"), SnapshotSchema("playercreateinfo"),
+    SnapshotSchema("mail_loot_template"), SnapshotSchema("instance_template"), SnapshotSchema("guild_rewards"), SnapshotSchema("pet_levelstats"),
+    SnapshotSchema("character_inventory"), SnapshotSchema("account"), SnapshotSchema("mail"), SnapshotSchema("pet_aura"), SnapshotSchema("guild_member"), SnapshotSchema("instance_reset"),
+    SnapshotSchema("item_view", "VIEW")
+};
+var selectedSnapshotTables = LegacyDatabaseSnapshotService.SelectTables(snapshotSchemas, new(), true, out var excludedSnapshotTables);
+if (selectedSnapshotTables.Count != 7 || selectedSnapshotTables.Any(table => table.Name is "character_inventory" or "account" or "mail" or "pet_aura" or "guild_member" or "instance_reset" or "item_view") ||
+    !selectedSnapshotTables.Any(table => table.Name == "mail_loot_template") || !selectedSnapshotTables.Any(table => table.Name == "instance_template") ||
+    !selectedSnapshotTables.Any(table => table.Name == "guild_rewards") || !selectedSnapshotTables.Any(table => table.Name == "pet_levelstats") ||
+    !excludedSnapshotTables.Contains("character_inventory") || !excludedSnapshotTables.Contains("item_view"))
+    throw new InvalidOperationException("Legacy SQL snapshot safety did not retain world definitions while excluding account/character state and views.");
+var deliberatelySensitive = LegacyDatabaseSnapshotService.SelectTables(snapshotSchemas, new(IncludeSensitiveState: true), true, out _);
+if (deliberatelySensitive.Count != 13 || !LegacyDatabaseSnapshotService.GlobMatches("creature_template", "creature_*") || LegacyDatabaseSnapshotService.GlobMatches("item_template", "creature_*"))
+    throw new InvalidOperationException("Legacy SQL snapshot explicit inclusion or table glob matching failed.");
+try
+{
+    _ = LegacyDatabaseSnapshotService.SelectTables(snapshotSchemas, new(IncludePatterns: [""]), true, out _);
+    throw new InvalidOperationException("Legacy SQL snapshot accepted an empty include pattern that would unexpectedly select every table.");
+}
+catch (ArgumentException exception) when (exception.Message.Contains("cannot be empty", StringComparison.Ordinal)) { }
+
+var snapshotArtifact = Path.Combine(layerRoot, "fixture.crucible-db-snapshot");
+var snapshotSchema = SnapshotSchema("item_template"); var snapshotSchemaHash = LegacyDatabaseSnapshotService.ComputeSchemaHash(snapshotSchema);
+if (LegacyDatabaseSnapshotService.ComputeSchemaHash(snapshotSchema with { EstimatedRows = 999 }) != snapshotSchemaHash)
+    throw new InvalidOperationException("Legacy SQL schema fingerprints incorrectly depend on estimated row counts.");
+var snapshotRows = System.Text.Encoding.UTF8.GetBytes("[[\"1\",\"Crucible Sword\"]]");
+var snapshotRowsHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(snapshotRows)).ToLowerInvariant();
+var snapshotTable = new LegacyDatabaseSnapshotTable(snapshotSchema.Name, snapshotSchema.TableType, snapshotSchema.Engine, snapshotSchema.Collation, snapshotSchema.Comment,
+    snapshotSchema.EstimatedRows, snapshotSchema.PrimaryKey, snapshotSchema.Columns, snapshotSchemaHash, "tables/item_template.rows.json", "entry", 1, snapshotRows.Length, snapshotRowsHash);
+var snapshotManifest = new LegacyDatabaseSnapshotManifest(LegacyDatabaseSnapshotService.ArtifactFormat, LegacyDatabaseSnapshotService.ArtifactFormatVersion, "fixture", DateTimeOffset.UtcNow,
+    new("legacy_world", "fixture server", "fixture database", "utf8", "utf8_general_ci", new Dictionary<string, string> { ["core_version"] = "fixture" }),
+    new([], [], false, ["account"]), [snapshotTable], 1,
+    LegacyDatabaseSnapshotService.ComputeSchemaAggregateHash([(snapshotTable.Name, snapshotTable.SchemaSha256)]),
+    LegacyDatabaseSnapshotService.ComputeAggregateHash([(snapshotTable.Name, snapshotTable.RowsSha256, snapshotTable.Rows)]), true, true);
+using (var stream = File.Create(snapshotArtifact))
+using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Create))
+{
+    using (var rowsStream = archive.CreateEntry(snapshotTable.DataEntry).Open()) rowsStream.Write(snapshotRows);
+    using var manifestStream = archive.CreateEntry("manifest.json").Open();
+    System.Text.Json.JsonSerializer.Serialize(manifestStream, snapshotManifest, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+}
+var snapshotInspection = new LegacyDatabaseSnapshotService().InspectAsync(snapshotArtifact).GetAwaiter().GetResult();
+if (!snapshotInspection.Valid || snapshotInspection.Manifest?.TotalRows != 1 || System.Text.Json.JsonSerializer.Serialize(snapshotInspection.Manifest).Contains("password", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException($"Portable legacy SQL snapshot validation failed: {string.Join("; ", snapshotInspection.Findings)}");
+using (var stream = File.Open(snapshotArtifact, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Update))
+{
+    archive.GetEntry("manifest.json")!.Delete();
+    using var manifestStream = archive.CreateEntry("manifest.json").Open();
+    System.Text.Json.JsonSerializer.Serialize(manifestStream, snapshotManifest with { TotalRows = 2 }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+}
+var corruptSnapshotInspection = new LegacyDatabaseSnapshotService().InspectAsync(snapshotArtifact).GetAwaiter().GetResult();
+if (corruptSnapshotInspection.Valid || !corruptSnapshotInspection.Findings.Any(finding => finding.Contains("total row count", StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("Legacy SQL snapshot validation did not reject a tampered aggregate row count.");
 Directory.Delete(layerRoot, true);
 
 Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, layered comparison, manifest build, and MPQ workflows.");

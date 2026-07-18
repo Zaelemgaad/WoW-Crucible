@@ -65,6 +65,25 @@ Portable content model
 
 This permits one custom spell/item/race/class project to be validated and deployed to either supported server family where the requested feature is implementable.
 
+## Legacy SQL recovery: capture implemented, comparison and promotion pending
+
+An old customized database is evidence, not a deployable patch by itself. Phase one is now implemented as `wowcrucible db snapshot`: a SELECT-only streaming capture of world base tables into an atomic compressed `.crucible-db-snapshot` artifact. It records server/core identity where discoverable, table engines and collations, ordered primary keys (including composite keys), columns/types/nullability/defaults, exact row counts, canonical row values, and per-table plus aggregate SHA-256 hashes. `db snapshot-inspect` validates the artifact completely offline.
+
+The live connection password is never serialized. Known auth and character runtime-state tables are excluded by default without excluding reusable world definitions such as mail loot, instance templates, guild rewards, or pet level stats. `--include-sensitive` is an explicit override and can place account-derived secrets from table rows into the artifact, so such captures must be protected accordingly. A consistent read-only transaction is requested and its actual support state is recorded; the service still contains no database-writing command when an older server can provide only a best-effort consistent read.
+
+The remaining **Legacy SQL Recovery & Promotion** phases use a three-way model:
+
+```text
+verified baseline → legacy edited server → current target server
+                  └─ captured intent ──────┘
+```
+
+The pending baseline-to-legacy comparison will identify additions, edits, and removals made by the old project. The pending target comparison will then prove which approved changes can be applied unchanged, which require column translation or ID remapping, and which depend on related rows that must move together. Table families will be grouped into understandable domains such as items and sets, classes/races and starting data, pets, spells, creatures, vendors, loot, quests, and supporting locale/condition tables rather than exposed as one undifferentiated SQL dump.
+
+The snapshot intentionally does not claim to infer intent, relationships, or safe deployment by itself. Those are phase-two/three audit decisions. Target-specific SQL will be generated only after live capability inspection, dependency validation, collision checks, explicit user selection, and a reviewable diff.
+
+Safety defaults are deliberately conservative: a detected difference is not automatically treated as intentional, nothing is written during capture or comparison, credentials are excluded from every artifact, and legacy deletions are not exported or applied by default. Any future deployment step must retain SQL preview, parameterized operations, transactions, and an explicit rollback path.
+
 ## What legacy material is used for
 
 The `Ac-Web Repack v1.0` directory is useful as an extracted corpus of real 3.3.5a DBC files. It is not an authoritative database schema, API, or deployment target.

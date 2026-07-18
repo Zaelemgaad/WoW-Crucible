@@ -24,6 +24,7 @@ public partial class MainWindow : Window
     private DbcSchemaCatalog? _schemaCatalog;
     private string _schemaSource = "Built-in 12340 definitions";
     private bool _syncingScrollbars;
+    private AssetComparisonView? _assetComparisonView;
 
     private DbcDocumentSession? Current => _activeDocument >= 0 && _activeDocument < _documents.Count ? _documents[_activeDocument] : null;
     private WdbcFile? CurrentFile => Current?.File;
@@ -48,6 +49,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
+        Closed += (_, _) => _assetComparisonView?.Dispose();
     }
 
     private void DevbugModeChanged(object? sender, RoutedEventArgs e)
@@ -444,7 +446,41 @@ public partial class MainWindow : Window
 
     private void OpenLogsClick(object? sender, RoutedEventArgs e) => DesktopCrashLogger.OpenDirectory();
     private async void OpenItemWorkbenchClick(object? sender, RoutedEventArgs e) => await new ItemWorkbenchWindow().ShowDialog(this);
-    private async void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => await new AssetComparisonWindow().ShowDialog(this);
+    private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
+
+    public void OpenAssetComparison(string? libraryRoot = null)
+    {
+        if (_assetComparisonView is null)
+        {
+            _assetComparisonView = new AssetComparisonView();
+            _assetComparisonView.BackRequested += (_, _) => CloseAssetComparison();
+            AssetComparisonHost.Child = _assetComparisonView;
+        }
+
+        MainHeader.IsVisible = false;
+        NavigationPane.IsVisible = false;
+        EditorWorkspace.IsVisible = false;
+        InspectorPane.IsVisible = false;
+        MainStatusBar.IsVisible = false;
+        AssetComparisonHost.IsVisible = true;
+        _assetComparisonView.Activate(libraryRoot);
+        Dispatcher.UIThread.Post(() => _assetComparisonView.Focus(), DispatcherPriority.Input);
+        Title = "WoW Crucible — Asset Comparison";
+        DesktopCrashLogger.Debug("UI", "asset-workspace-opened", ("library", libraryRoot));
+    }
+
+    private void CloseAssetComparison()
+    {
+        _assetComparisonView?.Suspend();
+        AssetComparisonHost.IsVisible = false;
+        MainHeader.IsVisible = true;
+        NavigationPane.IsVisible = true;
+        EditorWorkspace.IsVisible = true;
+        InspectorPane.IsVisible = true;
+        MainStatusBar.IsVisible = true;
+        Title = "WoW Crucible — Desktop Preview";
+        DesktopCrashLogger.Debug("UI", "asset-workspace-closed");
+    }
     private async void OpenCliGuideClick(object? sender, RoutedEventArgs e)
     {
         var path = Path.Combine(AppContext.BaseDirectory, "docs", "CLI-REFERENCE.md");
