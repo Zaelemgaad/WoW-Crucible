@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
@@ -24,6 +25,13 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _legacyIncludes = new() { AcceptsReturn = true, PlaceholderText = "Optional table globs to include, one per line" };
     private readonly TextBox _legacyExcludes = new() { AcceptsReturn = true, PlaceholderText = "Optional table globs to exclude, one per line" };
     private readonly TextBlock _legacyStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
+    private readonly TextBox _recoveryAudit = new() { PlaceholderText = "Verified baseline-to-edited recovery audit" };
+    private readonly TextBox _recoveryPlan = new() { PlaceholderText = "Target-bound synchronization plan" };
+    private readonly TextBox _recoveryReceipt = new() { PlaceholderText = "Apply receipt for exact rollback" };
+    private readonly CheckBox _recoveryRemovals = new() { Content = "Include explicitly reviewed removals" };
+    private readonly ListBox _recoveryOperations = new();
+    private readonly Border _recoveryConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
+    private DatabaseSyncPlan? _loadedRecoveryPlan;
     private readonly TextBox _syncSourceDbc = new() { PlaceholderText = "Edited source DBC" };
     private readonly TextBox _syncSchema = new() { PlaceholderText = "Matching WotLK schema XML" };
     private readonly TextBox _syncBundle = new() { PlaceholderText = "New or existing deployment-bundle folder" };
@@ -148,6 +156,24 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         audit.Click += async (_, _) => await BuildRecoveryAuditAsync();
         var inspectAudit = new Button { Content = "Verify an audit…" };
         inspectAudit.Click += async (_, _) => await InspectAuditAsync();
+        var browseAudit = new Button { Content = "Audit…" }; browseAudit.Click += async (_, _) => await PickRecoveryInputAsync(_recoveryAudit, "Select a verified baseline-to-edited audit", "*.crucible-db-audit");
+        var buildPlan = AccentButton("Compare audit with connected target"); buildPlan.Click += async (_, _) => await BuildDatabaseSyncPlanAsync();
+        var browsePlan = new Button { Content = "Plan…" }; browsePlan.Click += async (_, _) => await PickRecoveryInputAsync(_recoveryPlan, "Select a target-bound synchronization plan", "*.json");
+        var inspectPlan = new Button { Content = "Verify / load plan" }; inspectPlan.Click += async (_, _) => await LoadDatabaseSyncPlanAsync();
+        var exportSql = new Button { Content = "Export non-committing SQL preview…" }; exportSql.Click += async (_, _) => await ExportDatabaseSyncPreviewAsync();
+        var chooseReceipt = new Button { Content = "Receipt output…" }; chooseReceipt.Click += async (_, _) => await PickDatabaseSyncReceiptOutputAsync();
+        var applyPlan = AccentButton("Review transactional apply"); applyPlan.Click += async (_, _) => await ReviewDatabaseSyncApplyAsync();
+        var browseReceipt = new Button { Content = "Existing receipt…" }; browseReceipt.Click += async (_, _) => await PickRecoveryInputAsync(_recoveryReceipt, "Select a database synchronization receipt", "*.json");
+        var rollback = new Button { Content = "Review exact rollback" }; rollback.Click += (_, _) => ReviewDatabaseSyncRollback();
+        _recoveryOperations.ItemTemplate = new FuncDataTemplate<DatabaseSyncOperation>((operation, _) => operation is null ? new TextBlock() : new StackPanel
+        {
+            Margin = new Thickness(4, 3),
+            Children =
+            {
+                new TextBlock { Text = $"{operation.Status} · {operation.Kind} · {operation.Identity}", FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap },
+                new TextBlock { Text = $"{operation.Domain} · {operation.Fields.Count:N0} field(s) · {operation.Finding}", Foreground = new SolidColorBrush(Color.Parse("#8995A9")), TextWrapping = TextWrapping.Wrap }
+            }
+        });
         var paths = new Grid { ColumnDefinitions = new("*,Auto,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 8 };
         Grid.SetRow(_legacySnapshot, 0); paths.Children.Add(_legacySnapshot);
         Grid.SetRow(browseLegacy, 0); Grid.SetColumn(browseLegacy, 1); paths.Children.Add(browseLegacy);
@@ -159,7 +185,10 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             Header = "Optional table filters",
             Content = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { _legacyIncludes, WithColumn(_legacyExcludes, 1) } }
         };
-        return new ScrollViewer
+        var auditPath = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Children = { _recoveryAudit, WithColumn(browseAudit, 1) } };
+        var planPath = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { _recoveryPlan, WithColumn(browsePlan, 1), WithColumn(inspectPlan, 2) } };
+        var receiptPath = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { _recoveryReceipt, WithColumn(chooseReceipt, 1), WithColumn(browseReceipt, 2) } };
+        var configuration = new ScrollViewer
         {
             Content = new StackPanel
             {
@@ -178,10 +207,20 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                     paths,
                     filters,
                     audit,
-                    new Border { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _legacyStatus }
+                    new Border { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _legacyStatus },
+                    new TextBlock { Text = "Compare and synchronize with the connected target", FontSize = 18, FontWeight = FontWeight.SemiBold },
+                    new TextBlock { Text = "A plan requires a verified matching-core baseline audit. Crucible compares every selected primary-keyed row with the live target, excludes removals by default, blocks collisions, and binds the result to this exact host/user/database. Apply rechecks every preimage under row locks and produces the receipt required for rollback.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
+                    auditPath,
+                    new WrapPanel { Children = { _recoveryRemovals, buildPlan } },
+                    planPath,
+                    new WrapPanel { Children = { exportSql, applyPlan } },
+                    receiptPath,
+                    rollback,
+                    _recoveryConfirmation
                 }
             }
         };
+        return new Grid { RowDefinitions = new("2*,Auto,*"), RowSpacing = 7, Children = { configuration, WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = new SolidColorBrush(Color.Parse("#2B3445")) }, 1), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _recoveryOperations }, 2) } };
     }
 
     private Control DbcSqlDeploymentPage()
@@ -478,7 +517,8 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                 _legacyStatus.Text = $"{value.Stage}{(value.Table is null ? string.Empty : $" · {value.Table}")} · {value.CompletedTables:N0}/{value.TotalTables:N0} tables · {value.Rows:N0} change records");
             var options = new LegacyDatabaseAuditOptions(Patterns(_legacyIncludes.Text), Patterns(_legacyExcludes.Text));
             var result = await new LegacyDatabaseAuditService().AuditAsync(legacy, output, baseline, options, progress, _operation!.Token);
-            _legacyStatus.Text = $"Created {(result.Manifest.Mode == LegacyDatabaseAuditMode.BaselineCompared ? "baseline-attributed" : "unattributed")} audit with {result.Manifest.TotalChangeRecords:N0} change records and {result.Manifest.TotalChangedFields:N0} changed fields.\nArtifact: {result.Path}\nPromotion remains review-only; no target database was modified.";
+            _recoveryAudit.Text = result.Path;
+            _legacyStatus.Text = $"Created {(result.Manifest.Mode == LegacyDatabaseAuditMode.BaselineCompared ? "baseline-attributed" : "unattributed")} audit with {result.Manifest.TotalChangeRecords:N0} change records and {result.Manifest.TotalChangedFields:N0} changed fields.\nArtifact: {result.Path}\nNo target database was modified; build a target comparison plan below when the audit is attributable.";
         }
         catch (OperationCanceledException) { _legacyStatus.Text = "Recovery audit cancelled; no partial artifact was published."; }
         catch (Exception exception) { _legacyStatus.Text = $"Recovery audit failed: {exception.Message}"; DesktopCrashLogger.Log("Legacy recovery audit failed", exception); }
@@ -495,6 +535,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         });
         var path = files.FirstOrDefault()?.TryGetLocalPath();
         if (path is null) return;
+        _recoveryAudit.Text = path;
         BeginOperation("Verifying the recovery audit…");
         try
         {
@@ -506,6 +547,92 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         catch (OperationCanceledException) { _legacyStatus.Text = "Audit verification cancelled."; }
         catch (Exception exception) { _legacyStatus.Text = $"Audit verification failed: {exception.Message}"; DesktopCrashLogger.Log("Recovery audit verification failed", exception); }
         finally { EndOperation(); }
+    }
+
+    private async Task BuildDatabaseSyncPlanAsync()
+    {
+        if (!_session.DatabaseTested || _session.DatabaseProfile is null) { _legacyStatus.Text = "Connect and verify the target database first."; return; }
+        var audit = _recoveryAudit.Text; if (string.IsNullOrWhiteSpace(audit) || !File.Exists(audit)) { _legacyStatus.Text = "Choose a verified baseline-to-edited recovery audit first."; return; }
+        var destination = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Save target-bound database synchronization plan", SuggestedFileName = $"{_session.DatabaseProfile.Database}.crucible-db-sync.json", FileTypeChoices = [new FilePickerFileType("Crucible database synchronization plan") { Patterns = ["*.crucible-db-sync.json", "*.json"] }] });
+        var output = destination?.TryGetLocalPath(); if (output is null) return; if (File.Exists(output)) { _legacyStatus.Text = "That plan path already exists. Choose a new file so a reviewed plan is never silently replaced."; return; }
+        BeginOperation("Comparing every selected audit row with the connected target…");
+        try
+        {
+            var progress = new Progress<(string Stage, string? Table, int Completed, int Total)>(value => _legacyStatus.Text = $"{value.Stage}{(value.Table is null ? string.Empty : $" · {value.Table}")} · {value.Completed:N0}/{value.Total:N0} tables");
+            var result = await new DatabaseSynchronizationService().BuildPlanAsync(audit, _session.DatabaseProfile, output, new(Patterns(_legacyIncludes.Text), _recoveryRemovals.IsChecked == true), progress, _operation!.Token);
+            _recoveryPlan.Text = result.Path; ShowDatabaseSyncPlan(result.Plan);
+        }
+        catch (OperationCanceledException) { _legacyStatus.Text = "Target comparison cancelled; no partial plan was published."; }
+        catch (Exception exception) { _legacyStatus.Text = $"Target comparison failed: {exception.Message}"; DesktopCrashLogger.Log("Database synchronization plan failed", exception); }
+        finally { EndOperation(); }
+    }
+
+    private async Task LoadDatabaseSyncPlanAsync()
+    {
+        var path = _recoveryPlan.Text; if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) { _legacyStatus.Text = "Choose an existing synchronization plan first."; return; }
+        BeginOperation("Verifying synchronization plan hashes…");
+        try { ShowDatabaseSyncPlan(await new DatabaseSynchronizationService().LoadPlanAsync(path, _operation!.Token)); }
+        catch (Exception exception) { _loadedRecoveryPlan = null; _recoveryOperations.ItemsSource = null; _legacyStatus.Text = $"Plan verification failed: {exception.Message}"; DesktopCrashLogger.Log("Database synchronization plan verification failed", exception); }
+        finally { EndOperation(); }
+    }
+
+    private void ShowDatabaseSyncPlan(DatabaseSyncPlan plan)
+    {
+        _loadedRecoveryPlan = plan; _recoveryOperations.ItemsSource = plan.Operations;
+        _legacyStatus.Text = $"Verified target plan for {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}.\n{plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already applied · {plan.Conflicts:N0} conflicts · {plan.Blocked:N0} blocked · {plan.Operations.Count:N0} total.\n{(plan.RemovalsIncluded ? "Explicit removals are included." : "Removals are excluded.")}";
+    }
+
+    private async Task ExportDatabaseSyncPreviewAsync()
+    {
+        if (_loadedRecoveryPlan is null) { await LoadDatabaseSyncPlanAsync(); if (_loadedRecoveryPlan is null) return; }
+        var destination = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Export non-committing synchronization SQL preview", SuggestedFileName = "database-sync-preview.sql", FileTypeChoices = [new FilePickerFileType("SQL preview") { Patterns = ["*.sql"] }] });
+        var path = destination?.TryGetLocalPath(); if (path is null) return; if (File.Exists(path)) { _legacyStatus.Text = "That SQL preview already exists. Choose a new path so it is not silently replaced."; return; }
+        var temporary = path + $".{Guid.NewGuid():N}.tmp";
+        try { await File.WriteAllTextAsync(temporary, new DatabaseSynchronizationService().PreviewSql(_loadedRecoveryPlan)); File.Move(temporary, path); _legacyStatus.Text = $"Exported a non-committing, stale-safe SQL review to {path}. Apply through Crucible to retain row locks and a rollback receipt."; }
+        catch (Exception exception) { _legacyStatus.Text = $"SQL preview export failed: {exception.Message}"; DesktopCrashLogger.Log("Database synchronization SQL preview failed", exception); }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+
+    private async Task PickDatabaseSyncReceiptOutputAsync()
+    {
+        var destination = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Choose a new database synchronization receipt", SuggestedFileName = "database-sync-receipt.json", FileTypeChoices = [new FilePickerFileType("Crucible database synchronization receipt") { Patterns = ["*.json"] }] });
+        var path = destination?.TryGetLocalPath(); if (path is not null) _recoveryReceipt.Text = path;
+    }
+
+    private async Task ReviewDatabaseSyncApplyAsync()
+    {
+        if (!_session.DatabaseTested || _session.DatabaseProfile is null) { _legacyStatus.Text = "Connect and verify the exact target database first."; return; }
+        if (_loadedRecoveryPlan is null) { await LoadDatabaseSyncPlanAsync(); if (_loadedRecoveryPlan is null) return; }
+        if (_loadedRecoveryPlan.Conflicts != 0 || _loadedRecoveryPlan.Blocked != 0) { _legacyStatus.Text = $"Apply is blocked by {_loadedRecoveryPlan.Conflicts:N0} conflict(s) and {_loadedRecoveryPlan.Blocked:N0} unsupported operation(s). Narrow or repair the plan first."; return; }
+        if (string.IsNullOrWhiteSpace(_recoveryReceipt.Text)) await PickDatabaseSyncReceiptOutputAsync(); var receipt = _recoveryReceipt.Text;
+        if (string.IsNullOrWhiteSpace(receipt)) return; if (File.Exists(receipt)) { _legacyStatus.Text = "The receipt output already exists. Choose a new path so rollback evidence is never overwritten."; return; }
+        var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _recoveryConfirmation.IsVisible = false; var confirm = AccentButton("Commit exact synchronized rows");
+        confirm.Click += async (_, _) => await ApplyDatabaseSyncAsync(confirm, receipt);
+        _recoveryConfirmation.Child = new StackPanel { Spacing = 8, Children = { new TextBlock { Text = $"Apply {_loadedRecoveryPlan.Ready:N0} ready operation(s) to {_loadedRecoveryPlan.Target.Database}? Crucible will lock and recheck every primary-keyed preimage, abort the complete transaction on any stale row, and publish the exact rollback receipt only after commit.", TextWrapping = TextWrapping.Wrap }, new WrapPanel { Children = { cancel, confirm } } } }; _recoveryConfirmation.IsVisible = true;
+    }
+
+    private async Task ApplyDatabaseSyncAsync(Button button, string receipt)
+    {
+        if (_session.DatabaseProfile is null || string.IsNullOrWhiteSpace(_recoveryPlan.Text)) return; BeginOperation("Locking, revalidating, and applying synchronized rows…");
+        try { button.IsEnabled = false; var result = await new DatabaseSynchronizationService().ApplyAsync(_recoveryPlan.Text, _session.DatabaseProfile, receipt, cancellationToken: _operation!.Token); _recoveryConfirmation.IsVisible = false; _legacyStatus.Text = $"Committed {result.Applied:N0} exact row operation(s); {result.AlreadyApplied:N0} were already applied.\nRollback receipt: {result.ReceiptPath}"; }
+        catch (Exception exception) { _legacyStatus.Text = $"Synchronization apply failed without a partial commit: {exception.Message}"; DesktopCrashLogger.Log("Database synchronization apply failed", exception); }
+        finally { button.IsEnabled = true; EndOperation(); }
+    }
+
+    private void ReviewDatabaseSyncRollback()
+    {
+        if (!_session.DatabaseTested || _session.DatabaseProfile is null) { _legacyStatus.Text = "Connect and verify the receipt's exact target database first."; return; }
+        var receipt = _recoveryReceipt.Text; if (string.IsNullOrWhiteSpace(receipt) || !File.Exists(receipt)) { _legacyStatus.Text = "Choose an existing synchronization receipt first."; return; }
+        var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _recoveryConfirmation.IsVisible = false; var confirm = new Button { Content = "Rollback exact synchronized rows" }; confirm.Click += async (_, _) => await RollbackDatabaseSyncAsync(confirm, receipt);
+        _recoveryConfirmation.Child = new StackPanel { Spacing = 8, Children = { new TextBlock { Text = "Rollback this receipt? Crucible reverses operations in dependency-safe order, locks and verifies every current postimage, and aborts the complete rollback if any synchronized row changed afterward.", TextWrapping = TextWrapping.Wrap }, new WrapPanel { Children = { cancel, confirm } } } }; _recoveryConfirmation.IsVisible = true;
+    }
+
+    private async Task RollbackDatabaseSyncAsync(Button button, string receipt)
+    {
+        if (_session.DatabaseProfile is null) return; BeginOperation("Revalidating postimages and rolling back synchronized rows…");
+        try { button.IsEnabled = false; var result = await new DatabaseSynchronizationService().RollbackAsync(receipt, _session.DatabaseProfile, _operation!.Token); _recoveryConfirmation.IsVisible = false; _legacyStatus.Text = $"Rolled back {result.Applied:N0} exact row operation(s); {result.AlreadyApplied:N0} were already restored. The receipt is marked rolled back."; }
+        catch (Exception exception) { _legacyStatus.Text = $"Synchronization rollback failed without a partial commit: {exception.Message}"; DesktopCrashLogger.Log("Database synchronization rollback failed", exception); }
+        finally { button.IsEnabled = true; EndOperation(); }
     }
 
     private IStorageProvider Storage() => TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The server workspace is not attached to the main window.");
@@ -545,4 +672,5 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
 
     private static Button AccentButton(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
     private static T WithColumn<T>(T control, int column) where T : Control { Grid.SetColumn(control, column); return control; }
+    private static T WithRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
 }

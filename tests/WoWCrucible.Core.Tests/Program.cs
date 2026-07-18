@@ -880,6 +880,13 @@ try { _ = SqlDatabaseObjectService.BuildCreateOrReplaceViewSql("acore_world", "b
 catch (InvalidDataException exception) when (exception.Message.Contains("exactly one SELECT", StringComparison.OrdinalIgnoreCase)) { }
 try { _ = SqlDatabaseObjectService.BuildCreateOrReplaceViewSql("acore_world", "bad", "SELECT * FROM item_template INTO OUTFILE '/tmp/leak'"); throw new InvalidOperationException("Guided view creation accepted SELECT file output."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("exactly one SELECT", StringComparison.OrdinalIgnoreCase)) { }
+var syncKey = new[] { new LegacyDatabaseAuditKeyPart("entry", new(LegacyDatabaseAuditValueState.Scalar, "17")) };
+var syncFields = new[] { new DatabaseSyncField("name", new(LegacyDatabaseAuditValueState.Scalar, "Before"), new(LegacyDatabaseAuditValueState.Scalar, "After")) };
+var syncOperation = new DatabaseSyncOperation("item_template", LegacyDatabaseContentDomain.ItemsAndSets, LegacyDatabaseRowChangeKind.Modified, syncKey, syncFields, DatabaseSyncOperationStatus.Ready, "fixture");
+var syncPlan = new DatabaseSyncPlan(DatabaseSynchronizationService.PlanFormat, DatabaseSynchronizationService.FormatVersion, "fixture", DateTimeOffset.UnixEpoch, new string('a', 64), new("127.0.0.1", 3306, "acore", "acore_world", "fixture"), false, [], [syncOperation], new string('b', 64), []);
+var syncPreview = new DatabaseSynchronizationService().PreviewSql(syncPlan);
+if (!syncPreview.Contains("UPDATE `item_template`", StringComparison.Ordinal) || !syncPreview.Contains("`entry` <=>", StringComparison.Ordinal) || !syncPreview.Contains("`name` <=>", StringComparison.Ordinal) || !syncPreview.EndsWith("ROLLBACK;" + Environment.NewLine, StringComparison.Ordinal) || syncPreview.Contains("COMMIT;", StringComparison.Ordinal))
+    throw new InvalidOperationException("Database synchronization preview no longer preserves keys, preimages, or the non-committing review boundary.");
 var createIndexSql = SqlAdministrationService.BuildCreateIndexSql(joinSource, "crucible_name", ["name"], true);
 if (createIndexSql != "CREATE UNIQUE INDEX `crucible_name` ON `item_template` (`name`);")
     throw new InvalidOperationException("Reviewed index SQL generation changed unexpectedly.");
