@@ -35,6 +35,8 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private readonly M2PreviewView _model = new(); private readonly TextBlock _modelStatus = Status("Load an extracted WotLK M2 with its companion SKIN to preview geometry.");
     private readonly TextBox _displayDbcPath = new(); private readonly TextBox _displaySchemaPath = new(); private readonly TextBox _assetLibraryPath = new();
     private readonly ComboBox _resolvedModels = new() { PlaceholderText = "Resolved model source" };
+    private readonly TextBox _characterModelPath = new(); private readonly TextBox _characterSkinPath = new();
+    private readonly ComboBox _wearSources = new() { PlaceholderText = "Resolved armor texture source" };
     private readonly TextBlock _displayDetails = Status("Resolve the current display ID to see every ItemDisplayInfo model, texture, icon, geoset, and visual field.");
     private ItemDisplayInfoRecord? _resolvedDisplay;
     private readonly TextBlock _status = Status("Offline portable schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
@@ -50,6 +52,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         _displayDbcPath.Text = string.IsNullOrWhiteSpace(session.Settings.CoreDbcPath) ? string.Empty : Path.Combine(session.Settings.CoreDbcPath, "ItemDisplayInfo.dbc");
         _displaySchemaPath.Text = session.Settings.SchemaDefinitionPath;
         _assetLibraryPath.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
+        _characterModelPath.Text = session.Settings.ItemPreviewCharacterModelPath; _characterSkinPath.Text = session.Settings.ItemPreviewCharacterSkinPath;
         _class.SelectionChanged += (_, _) => { UpdateSubclassChoices(); RefreshPreview(); };
         foreach (var number in Numbers()) number.ValueChanged += (_, _) => RefreshPreview();
         foreach (var combo in Combos().Where(combo => !ReferenceEquals(combo, _class))) combo.SelectionChanged += (_, _) => RefreshPreview();
@@ -63,11 +66,16 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         var loadResolved = new Button { Content = "Load selected resolved model" }; loadResolved.Click += async (_, _) => await LoadResolvedModelAsync();
         var loadModel = new Button { Content = "Load other extracted M2…" }; loadModel.Click += async (_, _) => await LoadModelAsync();
         var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _modelStatus.Text = "Model preview cleared."; };
+        var browseCharacter = new Button { Content = "Character M2…" }; browseCharacter.Click += async (_, _) => await PickFileAsync(_characterModelPath, "Choose a playable character M2", "*.m2");
+        var browseCharacterSkin = new Button { Content = "Base skin…" }; browseCharacterSkin.Click += async (_, _) => await PickTextureAsync(_characterSkinPath, "Choose that character's base skin atlas");
+        var fillCharacter = new Button { Content = "Use extracted Human female" }; fillCharacter.Click += (_, _) => FillDefaultCharacter();
+        var previewEquipped = AccentButton("Preview equipped on character"); previewEquipped.Click += async (_, _) => await PreviewEquippedAsync();
         var browseDisplay = new Button { Content = "DBC…" }; browseDisplay.Click += async (_, _) => await PickFileAsync(_displayDbcPath, "Choose ItemDisplayInfo.dbc", "*.dbc");
         var browseSchema = new Button { Content = "Schema…" }; browseSchema.Click += async (_, _) => await PickFileAsync(_displaySchemaPath, "Choose WotLK schema XML", "*.xml");
         var browseLibrary = new Button { Content = "Assets…" }; browseLibrary.Click += async (_, _) => await PickFolderAsync(_assetLibraryPath, "Choose processed asset library");
         var resolverPaths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _displayDbcPath, WithColumn(browseDisplay,1), WithRow(_displaySchemaPath,1), WithRow(WithColumn(browseSchema,1),1), WithRow(_assetLibraryPath,2), WithRow(WithColumn(browseLibrary,1),2) } };
-        var modelHeader = new StackPanel { Spacing = 7, Children = { new TextBlock { Text="Live item display resolution", FontWeight=FontWeight.SemiBold }, resolverPaths, new WrapPanel { Children = { resolveDisplay, loadResolved, loadModel, clearModel } }, _resolvedModels, _displayDetails } };
+        var characterPaths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5, Children = { _characterModelPath, WithColumn(browseCharacter,1), WithRow(_characterSkinPath,1), WithRow(WithColumn(browseCharacterSkin,1),1) } };
+        var modelHeader = new StackPanel { Spacing = 7, Children = { new TextBlock { Text="Live item display resolution", FontWeight=FontWeight.SemiBold }, resolverPaths, new WrapPanel { Children = { resolveDisplay, loadResolved, loadModel, clearModel } }, _resolvedModels, _displayDetails, new Separator(), new TextBlock { Text="Equipped armor preview", FontWeight=FontWeight.SemiBold }, new TextBlock { Text="Choose one playable character M2 and its 256-based base skin atlas. Crucible overlays this item's eight wearable regions and applies its inventory-aware geosets without mixing patch sources.",TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#9AA5B7") }, characterPaths, _wearSources, new WrapPanel { Children = { fillCharacter, previewEquipped } } } };
         var modelPage = new Grid { RowDefinitions = new("2*,Auto,3*,Auto"), Children = { new ScrollViewer { Content=modelHeader }, WithRow(new GridSplitter { ResizeDirection=GridResizeDirection.Rows, Background=Brush.Parse("#2B3445") },1), WithRow(new Border { Background=Brush.Parse("#090D14"), Child=_model },2), WithRow(_modelStatus,3) } };
         var previewTabs = new TabControl { Items = { new TabItem { Header="Tooltip", Content=new ScrollViewer { Content=new Border { Background=Brush.Parse("#080911"), BorderBrush=Brush.Parse("#7C6639"), BorderThickness=new Thickness(1), Margin=new Thickness(8), Child=_tooltip } } }, new TabItem { Header="3D model", Content=modelPage }, new TabItem { Header="SQL preview", Content=_sql } } };
 
@@ -140,18 +148,19 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     {
         try
         {
-            var displayId=(uint)(_display.Value??0); if(displayId==0){_resolvedDisplay=null;_resolvedModels.ItemsSource=Array.Empty<string>();_displayDetails.Text="Display ID 0 has no ItemDisplayInfo record.";return;}
+            var displayId=(uint)(_display.Value??0); if(displayId==0){_resolvedDisplay=null;_resolvedModels.ItemsSource=Array.Empty<string>();_wearSources.ItemsSource=Array.Empty<ItemWearSourceSet>();_displayDetails.Text="Display ID 0 has no ItemDisplayInfo record.";return;}
             var dbc=_displayDbcPath.Text?.Trim()??string.Empty; if(!File.Exists(dbc))throw new FileNotFoundException("Configure the server's ItemDisplayInfo.dbc path.",dbc);
             _modelStatus.Text=$"Resolving display {displayId:N0}…";
             var resolved=await Task.Run(()=>ItemDisplayInfoService.Resolve(dbc,EmptyNull(_displaySchemaPath.Text),displayId,Selected(_class),Selected(_subclass),Selected(_inventory),EmptyNull(_assetLibraryPath.Text)));
             _resolvedDisplay=resolved; var models=resolved.ExistingModels.ToArray(); _resolvedModels.ItemsSource=models; _resolvedModels.SelectedIndex=models.Length>0?0:-1;
+            var wearSources=ItemEquipmentPreviewService.FindWearSources(resolved); _wearSources.ItemsSource=wearSources; _wearSources.SelectedIndex=wearSources.Count>0?0:-1;
             var assets=resolved.Assets.Select(asset=>$"{asset.Kind} {asset.Slot}: {asset.Name} · {(asset.ExistingPaths.Count==0?"not found in processed library":$"{asset.ExistingPaths.Count:N0} source file(s)")}");
             _displayDetails.Text=$"Display {resolved.Id:N0} · geosets {string.Join(", ",resolved.GeosetGroups)} · helmet visibility {string.Join(", ",resolved.HelmetGeosetVisibility)} · flags 0x{resolved.Flags:X8}\nSpell visual {resolved.SpellVisualId:N0} · item visual {resolved.ItemVisualId:N0} · particle color {resolved.ParticleColorId:N0} · sound group {resolved.GroupSoundIndex:N0}\n{string.Join("\n",assets)}";
-            _modelStatus.Text=models.Length>0?$"Resolved display {displayId:N0} to {resolved.Assets.Count:N0} dependency slot(s) and {models.Length:N0} extracted model source(s).":"DBC record resolved, but no extracted M2 matched the configured processed library. Every expected client path is listed above.";
+            _modelStatus.Text=models.Length>0?$"Resolved display {displayId:N0} to {resolved.Assets.Count:N0} dependency slot(s) and {models.Length:N0} extracted model source(s).":wearSources.Count>0?$"Armor display resolved to {wearSources.Count:N0} gender/provenance choice(s). Use Equipped armor preview; wearable armor normally has no standalone M2.":"DBC record resolved, but no extracted standalone M2 or wearable texture matched the configured processed library. Every expected client path is listed above.";
             _session.Settings.ProcessedAssetLibraryPath=_assetLibraryPath.Text??string.Empty; _session.Settings.Save();
             if(loadFirstModel&&models.Length>0)await LoadResolvedModelAsync();
         }
-        catch(Exception exception){_resolvedDisplay=null;_resolvedModels.ItemsSource=Array.Empty<string>();_displayDetails.Text=$"Display resolution failed: {exception.Message}";_modelStatus.Text=_displayDetails.Text;if(loadFirstModel)DesktopCrashLogger.Log("Item display resolution failed",exception);else DesktopCrashLogger.Debug("ITEM","automatic-display-resolution-unavailable",("display_id",(uint)(_display.Value??0)),("error",exception.Message));}
+        catch(Exception exception){_resolvedDisplay=null;_resolvedModels.ItemsSource=Array.Empty<string>();_wearSources.ItemsSource=Array.Empty<ItemWearSourceSet>();_displayDetails.Text=$"Display resolution failed: {exception.Message}";_modelStatus.Text=_displayDetails.Text;if(loadFirstModel)DesktopCrashLogger.Log("Item display resolution failed",exception);else DesktopCrashLogger.Debug("ITEM","automatic-display-resolution-unavailable",("display_id",(uint)(_display.Value??0)),("error",exception.Message));}
     }
 
     private async Task LoadResolvedModelAsync()
@@ -166,11 +175,48 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         catch(Exception exception){_modelStatus.Text=$"Resolved model could not be rendered: {exception.Message}";DesktopCrashLogger.Log("Resolved item model preview failed",exception);}
     }
 
+    private async Task PreviewEquippedAsync()
+    {
+        try
+        {
+            if(_resolvedDisplay is null) await ResolveDisplayAsync(false);
+            if(_resolvedDisplay is null) throw new InvalidOperationException("Resolve a valid ItemDisplayInfo display ID first.");
+            if(_wearSources.SelectedItem is not ItemWearSourceSet source) throw new InvalidOperationException("No extracted wear-texture source was found for this display. Choose an asset library containing its Item\\TextureComponents files.");
+            var modelPath=_characterModelPath.Text?.Trim()??string.Empty; var skinPath=_characterSkinPath.Text?.Trim()??string.Empty;
+            if(!File.Exists(modelPath)) throw new FileNotFoundException("Choose an extracted playable character M2.",modelPath);
+            var normalized=modelPath.Replace('/','\\'); if(normalized.Contains("\\Female\\",StringComparison.OrdinalIgnoreCase)&&source.Source.EndsWith(" · male",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("The selected wear source is male but the character model path is female. Choose a female source."); if(normalized.Contains("\\Male\\",StringComparison.OrdinalIgnoreCase)&&source.Source.EndsWith(" · female",StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("The selected wear source is female but the character model path is male. Choose a male source.");
+            _modelStatus.Text=$"Composing display {_resolvedDisplay.Id:N0} from {source.Source}…";
+            var preview=await Task.Run(()=>ItemEquipmentPreviewService.Compose(skinPath,_resolvedDisplay,Selected(_inventory),source));
+            var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(modelPath,visibilityMode:M2PreviewVisibilityMode.BaseAppearance,geosetSelection:preview.Geosets));
+            _model.SetGeometry(geometry); _model.SetDecodedTexture(preview.Atlas);
+            _session.Settings.ItemPreviewCharacterModelPath=modelPath; _session.Settings.ItemPreviewCharacterSkinPath=skinPath; _session.Settings.Save();
+            var geosets=preview.Geosets.GroupVariants.Count==0?"no equipment geoset override":string.Join(", ",preview.Geosets.GroupVariants.Select(pair=>$"{pair.Key}:{pair.Value}"));
+            _modelStatus.Text=$"Equipped display {_resolvedDisplay.Id:N0} · {source.Source} · wear slots {(preview.AppliedSlots.Count==0?"none":string.Join(", ",preview.AppliedSlots))} · {geosets}{(preview.MissingSlots.Count==0?string.Empty:$" · missing source slots {string.Join(", ",preview.MissingSlots)}")}";
+        }
+        catch(Exception exception){_modelStatus.Text=$"Equipped preview failed: {exception.Message}";DesktopCrashLogger.Log("Equipped item preview failed",exception);}
+    }
+
+    private void FillDefaultCharacter()
+    {
+        try
+        {
+            var root=Path.Combine(_assetLibraryPath.Text?.Trim()??string.Empty,"Archives","Content","Character","Human","Female"); if(!Directory.Exists(root))throw new DirectoryNotFoundException("The processed library has no Archives\\Content\\Character\\Human\\Female path.");
+            var sources=Directory.EnumerateDirectories(root).OrderBy(path=>path,StringComparer.OrdinalIgnoreCase).ToArray();
+            var model=sources.Select(path=>Directory.EnumerateFiles(path,"*",SearchOption.TopDirectoryOnly).FirstOrDefault(file=>Path.GetFileName(file).Equals("HumanFemale.m2",StringComparison.OrdinalIgnoreCase))).FirstOrDefault(path=>path is not null);
+            var skin=sources.Select(path=>Directory.EnumerateFiles(path,"*",SearchOption.TopDirectoryOnly).FirstOrDefault(file=>Path.GetFileName(file).Equals("HumanFemaleSkin00_00.blp",StringComparison.OrdinalIgnoreCase)||Path.GetFileName(file).Equals("HumanFemaleSkin00_00.png",StringComparison.OrdinalIgnoreCase))).FirstOrDefault(path=>path is not null);
+            if(model is null||skin is null)throw new FileNotFoundException("The Human female path does not contain both HumanFemale.m2 and HumanFemaleSkin00_00 BLP/PNG sources."); _characterModelPath.Text=model;_characterSkinPath.Text=skin;
+            if(_wearSources.ItemsSource is IEnumerable<ItemWearSourceSet> wear){var female=wear.FirstOrDefault(value=>value.Source.EndsWith(" · female",StringComparison.OrdinalIgnoreCase));if(female is not null)_wearSources.SelectedItem=female;}
+            _modelStatus.Text=$"Selected extracted Human female model from {Path.GetFileName(Path.GetDirectoryName(model))} and base skin from {Path.GetFileName(Path.GetDirectoryName(skin))}. Review the explicit wear source below, then preview.";
+        }
+        catch(Exception exception){_modelStatus.Text=$"Default character selection failed: {exception.Message}";}
+    }
+
     private void UpdateSubclassChoices(){ _subclass.ItemsSource=Selected(_class) switch{0=>Values((0,"Consumable"),(1,"Potion"),(2,"Elixir"),(3,"Flask"),(4,"Scroll"),(5,"Food & Drink"),(6,"Item Enhancement"),(7,"Bandage")),1=>Values((0,"Bag"),(1,"Soul Bag"),(2,"Herb Bag"),(3,"Enchanting Bag"),(4,"Engineering Bag"),(5,"Gem Bag")),2=>Values((0,"One-Handed Axe"),(1,"Two-Handed Axe"),(2,"Bow"),(3,"Gun"),(4,"One-Handed Mace"),(5,"Two-Handed Mace"),(6,"Polearm"),(7,"One-Handed Sword"),(8,"Two-Handed Sword"),(10,"Staff"),(13,"Fist Weapon"),(15,"Dagger"),(16,"Thrown"),(18,"Crossbow"),(19,"Wand"),(20,"Fishing Pole")),4=>Values((0,"Miscellaneous Armor"),(1,"Cloth"),(2,"Leather"),(3,"Mail"),(4,"Plate"),(6,"Shield"),(7,"Libram"),(8,"Idol"),(9,"Totem"),(10,"Sigil")),_=>Values((0,"Generic"))};_subclass.SelectedIndex=0; }
     private void SessionChanged(object? sender,EventArgs e)=>RefreshSchemaStatus(); private void RefreshSchemaStatus(){var cap=_session.DatabaseCapabilities;_status.Text=cap?.FindTable("item_template") is{ } table?$"Live schema ready · {cap.Database}.item_template · {table.Columns.Count:N0} columns":"Offline portable schema ready · connect Server & SQL for live deployment.";}
     public void Dispose()=>_session.Changed-=SessionChanged;
     private IStorageProvider Storage()=>TopLevel.GetTopLevel(this)?.StorageProvider??throw new InvalidOperationException("Item Creator is not attached to the main window.");
     private async Task PickFileAsync(TextBox target,string title,string pattern){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType(title){Patterns=[pattern]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
+    private async Task PickTextureAsync(TextBox target,string title){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType("Character texture"){Patterns=["*.blp","*.png","*.jpg","*.jpeg","*.bmp","*.tga"]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
     private async Task PickFolderAsync(TextBox target,string title){var folders=await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions{Title=title,AllowMultiple=false});var path=folders.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
     private IEnumerable<NumericUpDown> Numbers()=>new[]{_entry,_display,_itemLevel,_requiredLevel,_buy,_sell,_flags,_armor,_damageMin,_damageMax,_delay,_durability,_itemSet}.Concat(_statValues).Concat(_spellIds).Concat(_spellCharges).Concat(_spellPpm).Concat(_spellCooldowns).Concat(_spellCategories).Concat(_spellCategoryCooldowns);
     private IEnumerable<ComboBox> Combos()=>new[]{_class,_subclass,_quality,_inventory,_bonding}.Concat(_statTypes).Concat(_spellTriggers);

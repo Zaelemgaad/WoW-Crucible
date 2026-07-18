@@ -1,6 +1,20 @@
 namespace WoWCrucible.Core;
 
-public enum CharacterTextureRegion { FaceUpper, FaceLower, Torso, Pelvis }
+public enum CharacterTextureRegion
+{
+    ArmUpper,
+    ArmLower,
+    Hand,
+    TorsoUpper,
+    TorsoLower,
+    LegUpper,
+    LegLower,
+    Foot,
+    FaceUpper,
+    FaceLower,
+    Torso = TorsoUpper,
+    Pelvis = LegUpper
+}
 public sealed record CharacterTextureLayer(RgbaTexture Texture, CharacterTextureRegion Region);
 
 public static class CharacterTextureComposer
@@ -14,10 +28,16 @@ public static class CharacterTextureComposer
         {
             var region = layer.Region switch
             {
+                CharacterTextureRegion.ArmUpper => (X: 0, Y: 0, Width: 128, Height: 64),
+                CharacterTextureRegion.ArmLower => (X: 0, Y: 64, Width: 128, Height: 64),
+                CharacterTextureRegion.Hand => (X: 0, Y: 128, Width: 128, Height: 32),
+                CharacterTextureRegion.TorsoUpper => (X: 128, Y: 0, Width: 128, Height: 64),
+                CharacterTextureRegion.TorsoLower => (X: 128, Y: 64, Width: 128, Height: 32),
+                CharacterTextureRegion.LegUpper => (X: 128, Y: 96, Width: 128, Height: 64),
+                CharacterTextureRegion.LegLower => (X: 128, Y: 160, Width: 128, Height: 64),
+                CharacterTextureRegion.Foot => (X: 128, Y: 224, Width: 128, Height: 32),
                 CharacterTextureRegion.FaceUpper => (X: 0, Y: 160, Width: 128, Height: 32),
                 CharacterTextureRegion.FaceLower => (X: 0, Y: 192, Width: 128, Height: 64),
-                CharacterTextureRegion.Torso => (X: 128, Y: 0, Width: 128, Height: 64),
-                CharacterTextureRegion.Pelvis => (X: 128, Y: 96, Width: 128, Height: 64),
                 _ => throw new ArgumentOutOfRangeException(nameof(layers))
             };
             Burn(output, baseTexture.Width, baseTexture.Height, layer.Texture, region.X * scale, region.Y * scale, region.Width * scale, region.Height * scale);

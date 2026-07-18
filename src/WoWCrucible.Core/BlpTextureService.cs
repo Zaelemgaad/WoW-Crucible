@@ -83,6 +83,15 @@ public static class BlpTextureService
         return Decode(stream, path, mipLevel);
     }
 
+    public static RgbaTexture DecodeImage(string path)
+    {
+        path = Path.GetFullPath(path);
+        if (!File.Exists(path)) throw new FileNotFoundException("The image does not exist.", path);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 256 * 1024, FileOptions.SequentialScan);
+        var image = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
+        return new RgbaTexture(image.Width, image.Height, image.Data);
+    }
+
     public static RgbaTexture Decode(Stream stream, string sourceName = "<stream>", int mipLevel = 0)
     {
         ArgumentNullException.ThrowIfNull(stream);

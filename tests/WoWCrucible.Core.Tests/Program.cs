@@ -7,13 +7,34 @@ if (args.Length != 2)
 var itemDisplayPath = Path.Combine(args[1], "ItemDisplayInfo.dbc");
 var martinDisplay = ItemDisplayInfoService.Resolve(itemDisplayPath, args[0], 7016, 4, 4, 4);
 if (martinDisplay.InventoryIcons.FirstOrDefault() != "INV_Chest_Samurai" || martinDisplay.ModelNames.Any(value => value.Length > 0) ||
-    !martinDisplay.Assets.Any(asset => asset.Kind == "wear-texture" && asset.ClientPaths.Any(path => path.EndsWith(@"Item\TextureComponents\ArmUpperTexture\Plate_A_01Silver_Sleeve_AU.blp", StringComparison.OrdinalIgnoreCase))))
+    !martinDisplay.Assets.Any(asset => asset.Kind == "wear-texture" && asset.ClientPaths.Any(path => path.EndsWith(@"Item\TextureComponents\ArmUpperTexture\Plate_A_01Silver_Sleeve_AU.blp", StringComparison.OrdinalIgnoreCase)) &&
+        asset.ClientPaths.Any(path => path.EndsWith(@"Plate_A_01Silver_Sleeve_AU_F.blp", StringComparison.OrdinalIgnoreCase)) && asset.ClientPaths.Any(path => path.EndsWith(@"Plate_A_01Silver_Sleeve_AU_M.blp", StringComparison.OrdinalIgnoreCase))))
     throw new InvalidOperationException("ItemDisplayInfo resolution did not preserve the real armor icon and wearable texture-slot paths for display 7016.");
 var thunderfuryDisplay = ItemDisplayInfoService.Resolve(itemDisplayPath, null, 30606, 2, 8, 17);
 if (thunderfuryDisplay.ModelNames.FirstOrDefault() != "Sword_2H_Ashbringer02.mdx" ||
     !thunderfuryDisplay.Assets.Any(asset => asset.Kind == "model" && asset.ClientPaths.First().Equals(@"Item\ObjectComponents\Weapon\Sword_2H_Ashbringer02.m2", StringComparison.OrdinalIgnoreCase)) ||
     !thunderfuryDisplay.Assets.Any(asset => asset.Kind == "model-texture" && asset.ClientPaths.First().EndsWith(@"Sword_2H_Ashbringer_A_01Blue.blp", StringComparison.OrdinalIgnoreCase)))
     throw new InvalidOperationException("Built-in ItemDisplayInfo resolution did not map a real WotLK weapon display to canonical M2 and texture paths.");
+var chestGeosets = ItemEquipmentPreviewService.ResolveGeosets(5, [2, 3, 4]);
+var legGeosets = ItemEquipmentPreviewService.ResolveGeosets(7, [1, 2, 3]);
+var bootGeosets = ItemEquipmentPreviewService.ResolveGeosets(8, [4, 5, 0]);
+if (chestGeosets.GroupVariants[8] != 3 || chestGeosets.GroupVariants[10] != 4 || chestGeosets.GroupVariants[13] != 5 ||
+    legGeosets.GroupVariants[11] != 2 || legGeosets.GroupVariants[9] != 3 || legGeosets.GroupVariants[13] != 4 ||
+    bootGeosets.GroupVariants[5] != 5 || bootGeosets.GroupVariants[20] != 6 || ItemEquipmentPreviewService.ResolveGeosets(2, [9, 9, 9]).GroupVariants.Count != 0)
+    throw new InvalidOperationException("Item inventory types did not resolve to the verified Wrath character geoset groups and one-based variants.");
+var wearSourceFixture = Path.Combine(Path.GetTempPath(), $"crucible-wear-source-{Guid.NewGuid():N}"); var wearProvenance = Path.Combine(wearSourceFixture, "patch-test"); Directory.CreateDirectory(wearProvenance);
+var femaleWear0 = Path.Combine(wearProvenance, "fixture_AU_F.blp"); var femaleWear3 = Path.Combine(wearProvenance, "fixture_TU_F.blp"); var maleWear0 = Path.Combine(wearProvenance, "fixture_AU_M.blp"); var maleWear3 = Path.Combine(wearProvenance, "fixture_TU_M.blp");
+foreach (var path in new[] { femaleWear0, femaleWear3, maleWear0, maleWear3 }) File.WriteAllBytes(path, [1]);
+var wearAssets = new[]
+{
+    new ItemDisplayAsset("wear-texture",0,"fixture_AU",[],[femaleWear0,maleWear0]),
+    new ItemDisplayAsset("wear-texture",3,"fixture_TU",[],[femaleWear3,maleWear3])
+};
+var wearDisplay = martinDisplay with { Assets = wearAssets, WearTextures = new[] { "fixture_AU", "", "", "fixture_TU", "", "", "", "" } };
+var wearSources = ItemEquipmentPreviewService.FindWearSources(wearDisplay);
+if (wearSources.Count != 2 || wearSources.Any(source => source.SlotFiles.Count != 2) || !wearSources.Any(source => source.Source == "patch-test · female") || !wearSources.Any(source => source.Source == "patch-test · male"))
+    throw new InvalidOperationException("Gendered item wear textures were mixed across provenance choices.");
+Directory.Delete(wearSourceFixture,true);
 
 var deploymentFixture = Path.Combine(Path.GetTempPath(), $"crucible-client-deploy-{Guid.NewGuid():N}");
 var deploymentData = Path.Combine(deploymentFixture, "Data"); var deploymentCache = Path.Combine(deploymentFixture, "Cache", "WDB", "enUS");
@@ -216,6 +237,15 @@ var composedAtlas = CharacterTextureComposer.Compose(new(256, 256, atlasPixels),
 var insideUpper = (160 * 256) * 4; var outsideUpper = (159 * 256) * 4;
 if (composedAtlas.Pixels[insideUpper] != 12 || composedAtlas.Pixels[insideUpper + 1] != 34 || composedAtlas.Pixels[insideUpper + 2] != 56 || composedAtlas.Pixels[outsideUpper] != 255)
     throw new InvalidOperationException("Native character atlas composition did not constrain the face-upper layer to its verified Wrath region.");
+var equipmentRegions = new (int Slot, int X, int Y)[] { (0,0,0),(1,0,64),(2,0,128),(3,128,0),(4,128,64),(5,128,96),(6,128,160),(7,128,224) };
+foreach (var (slot, x, y) in equipmentRegions)
+{
+    var component = new byte[] { 91, 73, 55, 255 }; var empty = new byte[256 * 256 * 4];
+    var equipmentAtlas = CharacterTextureComposer.Compose(new(256,256,empty), [new(new(1,1,component), ItemEquipmentPreviewService.RegionForSlot(slot))]);
+    var inside = (y * 256 + x) * 4;
+    if (equipmentAtlas.Pixels[inside] != 91 || equipmentAtlas.Pixels[inside + 1] != 73 || equipmentAtlas.Pixels[inside + 2] != 55)
+        throw new InvalidOperationException($"Wear texture slot {slot} did not map to the verified Wrath atlas origin {x},{y}.");
+}
 var modernModel = Path.Combine(assetFixture, "modern.m2");
 using (var stream = File.Create(modernModel)) using (var writer = new BinaryWriter(stream))
 {

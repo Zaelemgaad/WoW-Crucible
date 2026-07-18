@@ -12,6 +12,8 @@ internal sealed class DesktopSettings
     public string ClientExecutablePath { get; set; } = string.Empty;
     public string ClientIndexPath { get; set; } = string.Empty;
     public string ProcessedAssetLibraryPath { get; set; } = string.Empty;
+    public string ItemPreviewCharacterModelPath { get; set; } = string.Empty;
+    public string ItemPreviewCharacterSkinPath { get; set; } = string.Empty;
     public string CoreSourcePath { get; set; } = string.Empty;
     public string BaseDbcPath { get; set; } = string.Empty;
     public string OverrideDbcPath { get; set; } = string.Empty;
