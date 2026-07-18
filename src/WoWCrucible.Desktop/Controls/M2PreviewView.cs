@@ -20,6 +20,8 @@ public sealed class M2PreviewView : Control, IDisposable
     private float _pitch = 0.35f;
     private float _zoom = 1;
     private Avalonia.Point? _dragStart;
+    private bool _showAttachments;
+    private int? _highlightedAttachmentIndex;
 
     public M2PreviewView() => ClipToBounds = true;
 
@@ -68,6 +70,13 @@ public sealed class M2PreviewView : Control, IDisposable
         InvalidateVisual();
     }
 
+    public void SetAttachmentOverlay(bool visible, int? highlightedAttachmentIndex = null)
+    {
+        _showAttachments = visible;
+        _highlightedAttachmentIndex = highlightedAttachmentIndex;
+        InvalidateVisual();
+    }
+
     private static SKBitmap CreateBitmap(RgbaTexture texture)
     {
         var bitmap = new SKBitmap(new SKImageInfo(texture.Width, texture.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
@@ -94,7 +103,7 @@ public sealed class M2PreviewView : Control, IDisposable
         base.Render(context);
         context.FillRectangle(new SolidColorBrush(Color.Parse("#090D14")), Bounds);
         if (_geometry is null) return;
-        context.Custom(new M2DrawOperation(Bounds, _geometry, _texture, _materialTextures, _yaw, _pitch, _zoom));
+        context.Custom(new M2DrawOperation(Bounds, _geometry, _texture, _materialTextures, _yaw, _pitch, _zoom, _showAttachments, _highlightedAttachmentIndex));
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
@@ -132,7 +141,7 @@ public sealed class M2PreviewView : Control, IDisposable
         e.Handled = true;
     }
 
-    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, float yaw, float pitch, float zoom) : ICustomDrawOperation
+    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex) : ICustomDrawOperation
     {
         public Rect Bounds => bounds;
         public bool HitTest(Avalonia.Point point) => Bounds.Contains(point);
@@ -218,12 +227,36 @@ public sealed class M2PreviewView : Control, IDisposable
                 }
             }
 
+            if (showAttachments && geometry.Attachments.Count > 0)
+            {
+                using var marker = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(69, 211, 255, 210) };
+                using var markerEdge = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1.5f, Color = new SKColor(6, 14, 24, 230) };
+                using var labelBack = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(5, 10, 18, 220) };
+                using var labelText = new SKPaint { IsAntialias = true, Color = new SKColor(232, 247, 255) };
+                using var labelFont = new SKFont(SKTypeface.Default, 12);
+                foreach (var attachment in geometry.Attachments)
+                {
+                    var point = Vector3.Transform(attachment.Position - center, rotation);
+                    var x = width * 0.5f + point.X * scale; var y = height * 0.5f - point.Z * scale;
+                    var selected = highlightedAttachmentIndex == attachment.Index;
+                    var radius = selected ? 6f : 3.2f;
+                    marker.Color = selected ? new SKColor(255, 189, 72, 245) : new SKColor(69, 211, 255, 190);
+                    canvas.DrawCircle(x, y, radius, marker); canvas.DrawCircle(x, y, radius, markerEdge);
+                    if (!selected) continue;
+                    var label = $"{attachment.Id:N0} · {attachment.Name} · bone {attachment.BoneIndex:N0}";
+                    var widthText = labelFont.MeasureText(label, labelText); var left = Math.Clamp(x + 9, 4, Math.Max(4, width - widthText - 12)); var top = Math.Clamp(y - 21, 4, Math.Max(4, height - 25));
+                    canvas.DrawRoundRect(new SKRect(left - 4, top - 2, left + widthText + 4, top + 17), 4, 4, labelBack);
+                    canvas.DrawText(label, left, top + 12, SKTextAlign.Left, labelFont, labelText);
+                }
+            }
+
             using var text = new SKPaint { IsAntialias = true, Color = new SKColor(225, 231, 240) };
             using var titleFont = new SKFont(SKTypeface.Default, 13);
             using var hintFont = new SKFont(SKTypeface.Default, 12);
             var geosets = geometry.Submeshes.Count == 0 ? "complete mesh" : $"{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} geosets";
             var textureCount = texture is not null ? "manual texture" : $"{materialTextures.Count:N0} material texture(s)";
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces", 12, 23, SKTextAlign.Left, titleFont, text);
+            var attachments = showAttachments ? $" · {geometry.Attachments.Count:N0} attachment point(s)" : string.Empty;
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces{attachments}", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }

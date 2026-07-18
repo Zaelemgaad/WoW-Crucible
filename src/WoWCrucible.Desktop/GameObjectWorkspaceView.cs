@@ -31,6 +31,7 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
     private readonly StackPanel _lootRows = new() { Spacing = 7 }; private readonly TextBox _startsQuests = new() { PlaceholderText = "Quest IDs separated by commas, spaces, or new lines" }; private readonly TextBox _endsQuests = new() { PlaceholderText = "Quest IDs separated by commas, spaces, or new lines" };
     private readonly TextBlock _summary = new() { TextWrapping = TextWrapping.Wrap }; private readonly TextBox _sql = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
     private readonly M2PreviewView _model = new(); private readonly TextBlock _modelStatus = Status("Load an extracted WotLK M2/SKIN when this display uses an M2. WMO geometry support is a separate renderer stage.");
+    private readonly CheckBox _showAttachments = new() { Content = "Show attachment points" }; private readonly ComboBox _attachmentPicker = new() { PlaceholderText = "No attachment points loaded" };
     private readonly TextBlock _status = Status("Offline current-core gameobject schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _commit = AccentButton("Insert into connected world database"); private WorldContentWritePlan? _pendingPlan; private uint? _loadedEntry;
 
@@ -43,8 +44,9 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "GAMEOBJECTS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1) } };
         var editor = new TabControl { Items = { new TabItem { Header = "Template", Content = new ScrollViewer { Content = TemplateForm() } }, new TabItem { Header = "Type-aware Data0–23", Content = DataPage() }, new TabItem { Header = "World spawn", Content = new ScrollViewer { Content = SpawnForm() } }, new TabItem { Header = "Loot & quests", Content = LootQuestPage() } } };
-        var loadModel = new Button { Content = "Load extracted M2…" }; loadModel.Click += async (_, _) => await LoadModelAsync(); var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _modelStatus.Text = "Model preview cleared."; };
-        var modelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { loadModel, clearModel } }, WithRow(new Border { Background = Brush.Parse("#090D14"), Child = _model }, 1), WithRow(_modelStatus, 2) } };
+        var loadModel = new Button { Content = "Load extracted M2…" }; loadModel.Click += async (_, _) => await LoadModelAsync(); var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _attachmentPicker.ItemsSource = null; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
+        _showAttachments.Click += (_, _) => ApplyAttachmentOverlay(); _attachmentPicker.SelectionChanged += (_, _) => ApplyAttachmentOverlay();
+        var modelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { loadModel, clearModel, _showAttachments, _attachmentPicker } }, WithRow(new Border { Background = Brush.Parse("#090D14"), Child = _model }, 1), WithRow(_modelStatus, 2) } };
         var preview = new TabControl { Items = { new TabItem { Header = "Decoded summary", Content = new ScrollViewer { Content = new Border { Padding = new Thickness(16), BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _summary } } }, new TabItem { Header = "3D model", Content = modelPage }, new TabItem { Header = "SQL change plan", Content = _sql } } };
         var workspace = new Grid { ColumnDefinitions = new("3*,Auto,2*"), Children = { editor, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(preview, 2) } };
         var export = new Button { Content = "Export SQL…" }; export.Click += async (_, _) => await ExportAsync(); var exportDraft = new Button { Content = "Export portable draft…" }; exportDraft.Click += async (_, _) => await ExportDraftAsync(); _commit.Click += (_, _) => PrepareCommit();
@@ -158,9 +160,17 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
 
     private async Task LoadModelAsync()
     {
-        try { var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose an extracted WotLK gameobject M2", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WotLK M2") { Patterns = ["*.m2"] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _modelStatus.Text = "Loading model…"; var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); _model.SetGeometry(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} visible geosets · {geometry.TriangleIndices.Count / 3:N0} triangles"; }
+        try { var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose an extracted WotLK gameobject M2", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WotLK M2") { Patterns = ["*.m2"] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _modelStatus.Text = "Loading model…"; var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); _model.SetGeometry(geometry); RefreshAttachmentPoints(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} visible geosets · {geometry.TriangleIndices.Count / 3:N0} triangles · {geometry.Attachments.Count:N0} attachment points"; }
         catch (Exception exception) { _modelStatus.Text = $"M2 preview failed: {exception.Message}"; }
     }
+
+    private void RefreshAttachmentPoints(M2PreviewGeometry geometry)
+    {
+        _attachmentPicker.ItemsSource = geometry.Attachments; _attachmentPicker.IsEnabled = geometry.Attachments.Count > 0;
+        _attachmentPicker.SelectedItem = geometry.Attachments.FirstOrDefault(); ApplyAttachmentOverlay();
+    }
+
+    private void ApplyAttachmentOverlay() => _model.SetAttachmentOverlay(_showAttachments.IsChecked == true, (_attachmentPicker.SelectedItem as M2PreviewAttachment)?.Index);
 
     private void SessionChanged(object? sender, EventArgs e) { RefreshSchemaStatus(); RefreshPreview(); }
     private void RefreshSchemaStatus() { var capabilities = _session.DatabaseCapabilities; _status.Text = capabilities?.FindTable("gameobject_template") is { } table ? $"Live schema ready · {capabilities.Database}.gameobject_template · {table.Columns.Count:N0} columns" : "Offline current-core gameobject schema ready · connect Server & SQL for live deployment."; }

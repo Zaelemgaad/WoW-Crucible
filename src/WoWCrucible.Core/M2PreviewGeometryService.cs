@@ -3,6 +3,11 @@ using System.Numerics;
 namespace WoWCrucible.Core;
 
 public sealed record M2TextureSlot(int Index, uint Type, uint Flags, string? EmbeddedPath);
+public sealed record M2PreviewBone(int Index, uint Flags, short ParentIndex, ushort SubmeshId, Vector3 Pivot);
+public sealed record M2PreviewAttachment(int Index, uint Id, string Name, int BoneIndex, Vector3 Position, IReadOnlyList<int> LookupSlots)
+{
+    public override string ToString() => $"{Id:N0} · {Name} · bone {BoneIndex:N0}";
+}
 public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
 public sealed record M2GeosetSelection(IReadOnlyDictionary<int, int> GroupVariants, string Source);
 public sealed record M2PreviewSubmesh(int Index, ushort GeosetId, ushort Level, int VertexStart, int VertexCount, int TriangleStart, int TriangleIndexCount, bool Visible)
@@ -18,6 +23,8 @@ public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadO
     public IReadOnlyList<M2PreviewSubmesh> Submeshes { get; init; } = [];
     public IReadOnlyList<M2PreviewMaterialUnit> MaterialUnits { get; init; } = [];
     public IReadOnlyList<M2PreviewBatch> Batches { get; init; } = [];
+    public IReadOnlyList<M2PreviewBone> Bones { get; init; } = [];
+    public IReadOnlyList<M2PreviewAttachment> Attachments { get; init; } = [];
     public int TotalTriangleIndices { get; init; } = TriangleIndices.Count;
     public M2PreviewVisibilityMode VisibilityMode { get; init; } = M2PreviewVisibilityMode.BaseAppearance;
     public M2GeosetSelection? GeosetSelection { get; init; }
@@ -52,6 +59,8 @@ public static class M2PreviewGeometryService
             vertices[index] = vertex; normals[index] = normal; textureCoordinates[index] = Finite(uv) ? uv : Vector2.Zero; minimum = Vector3.Min(minimum, vertex); maximum = Vector3.Max(maximum, vertex);
         }
 
+        var bones = ReadBones(model);
+        var attachments = ReadAttachments(model, bones.Count);
         var textureSlots = ReadTextureSlots(model);
         var textureLookup = ReadTextureLookup(model, textureSlots.Count);
         skinPath = ResolveSkin(modelPath, skinPath);
@@ -83,6 +92,8 @@ public static class M2PreviewGeometryService
             Submeshes = submeshes,
             MaterialUnits = materialUnits,
             Batches = batches,
+            Bones = bones,
+            Attachments = attachments,
             TotalTriangleIndices = allTriangles.Length,
             VisibilityMode = visibilityMode,
             GeosetSelection = geosetSelection
@@ -111,6 +122,59 @@ public static class M2PreviewGeometryService
                 path = System.Text.Encoding.UTF8.GetString(model, start, length).TrimEnd('\0');
             }
             result[index] = new(index, type, flags, path);
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<M2PreviewBone> ReadBones(byte[] model)
+    {
+        const int CountOffset = 0x2C; const int DataOffset = 0x30; const int BoneStride = 88; const int MaximumBones = 65_536;
+        if (model.Length < DataOffset + 4) return [];
+        var count = CheckedCount(ReadUInt(model, CountOffset), MaximumBones, "M2 bone");
+        var offset = CheckedOffset(ReadUInt(model, DataOffset), "M2 bone");
+        RequireRange(model, offset, count, BoneStride, "M2 bones");
+        var result = new M2PreviewBone[count];
+        for (var index = 0; index < count; index++)
+        {
+            var item = offset + index * BoneStride;
+            var parent = ReadShort(model, item + 8);
+            if (parent < -1 || parent >= count) throw new InvalidDataException($"M2 bone {index:N0} has invalid parent {parent:N0}; the model contains {count:N0} bones.");
+            var pivot = ReadVector(model, item + 76);
+            if (!Finite(pivot)) throw new InvalidDataException($"M2 bone {index:N0} contains a non-finite pivot.");
+            result[index] = new(index, ReadUInt(model, item + 4), parent, ReadUShort(model, item + 10), pivot);
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<M2PreviewAttachment> ReadAttachments(byte[] model, int boneCount)
+    {
+        const int CountOffset = 0xF0; const int DataOffset = 0xF4; const int AttachmentStride = 40; const int MaximumAttachments = 4096;
+        const int LookupCountOffset = 0xF8; const int LookupDataOffset = 0xFC; const int MaximumLookups = 65_536;
+        if (model.Length < LookupDataOffset + 4) return [];
+        var count = CheckedCount(ReadUInt(model, CountOffset), MaximumAttachments, "M2 attachment");
+        var offset = CheckedOffset(ReadUInt(model, DataOffset), "M2 attachment");
+        RequireRange(model, offset, count, AttachmentStride, "M2 attachments");
+        var lookupCount = CheckedCount(ReadUInt(model, LookupCountOffset), MaximumLookups, "M2 attachment lookup");
+        var lookupOffset = CheckedOffset(ReadUInt(model, LookupDataOffset), "M2 attachment lookup");
+        RequireRange(model, lookupOffset, lookupCount, 2, "M2 attachment lookup");
+        var lookupSlots = Enumerable.Range(0, count).Select(_ => new List<int>()).ToArray();
+        for (var slot = 0; slot < lookupCount; slot++)
+        {
+            var attachmentIndex = ReadShort(model, lookupOffset + slot * 2);
+            if (attachmentIndex == -1) continue;
+            if (attachmentIndex < 0 || attachmentIndex >= count)
+                throw new InvalidDataException($"M2 attachment lookup slot {slot:N0} references attachment {attachmentIndex:N0}, but only {count:N0} records exist.");
+            lookupSlots[attachmentIndex].Add(slot);
+        }
+        var result = new M2PreviewAttachment[count];
+        for (var index = 0; index < count; index++)
+        {
+            var item = offset + index * AttachmentStride;
+            var id = ReadUInt(model, item); var rawBone = ReadUInt(model, item + 4);
+            if (rawBone >= boneCount) throw new InvalidDataException($"M2 attachment {index:N0} ({M2AttachmentCatalog.Name(id)}) references bone {rawBone:N0}, but only {boneCount:N0} bones exist.");
+            var position = ReadVector(model, item + 8);
+            if (!Finite(position)) throw new InvalidDataException($"M2 attachment {index:N0} contains a non-finite position.");
+            result[index] = new(index, id, M2AttachmentCatalog.Name(id), checked((int)rawBone), position, lookupSlots[index].ToArray());
         }
         return result;
     }

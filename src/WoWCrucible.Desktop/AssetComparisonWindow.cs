@@ -46,6 +46,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Character appearance (DBC-driven)", "Naked base (no hair or facial hair)", "Manual: exactly one variant per group", "Everything stacked (diagnostic only)" }, SelectedIndex = 0 };
     private readonly ItemsControl _geosetGroups = new();
     private readonly TextBlock _geosetInspectorStatus = new() { Text = "Load a compatible character M2 to inspect its named geoset groups.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), FontSize = 11 };
+    private readonly CheckBox _showAttachmentPoints = new() { Content = "Show native attachment points" };
+    private readonly ComboBox _attachmentPicker = new() { PlaceholderText = "No attachment points loaded", HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly TextBlock _attachmentStatus = new() { Text = "Load a compatible M2 to inspect equipment and effect attachment points.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), FontSize = 11 };
     private readonly ComboBox _skinPicker = new() { PlaceholderText = "No CharSections base skins loaded" };
     private readonly ComboBox _facePicker = new() { PlaceholderText = "No face layers" };
     private readonly ComboBox _facialHairPicker = new() { PlaceholderText = "No facial-hair layers" };
@@ -99,6 +102,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _previewMode.SelectionChanged += async (_, _) => { if (!_suppressPreviewModeChange) await RunUiActionAsync("preview-mode-change", ChangePreviewModeAsync); };
         _modelPicker.SelectionChanged += async (_, _) => { if (!_suppressModelSelection) await RunUiActionAsync("model-selection", LoadSelectedModelAsync); };
         _geosetMode.SelectionChanged += async (_, _) => await RunUiActionAsync("geoset-mode-change", LoadSelectedModelAsync);
+        _showAttachmentPoints.Click += (_, _) => ApplyAttachmentOverlay();
+        _attachmentPicker.SelectionChanged += (_, _) => ApplyAttachmentOverlay();
         _skinPicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-skin-change", LoadSelectedModelAsync); };
         _facePicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-face-change", LoadSelectedModelAsync); };
         _facialHairPicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-facial-hair-change", LoadSelectedModelAsync); };
@@ -233,7 +238,22 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                 }
             }
         };
-        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _geosetMode, geosetInspector, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
+        var attachmentInspector = new Expander
+        {
+            Header = "Equipment & effect attachment points",
+            Content = new StackPanel
+            {
+                Spacing = 6,
+                Children =
+                {
+                    new TextBlock { Text = "These are the model's native WotLK attachment records—not guessed screen positions. Select one to highlight where helmets, shoulders, weapons, sheaths, spell effects, or vehicle seats bind. Item-model mounting will reuse this exact data.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8793A7"), FontSize = 11 },
+                    _showAttachmentPoints,
+                    _attachmentPicker,
+                    _attachmentStatus
+                }
+            }
+        };
+        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _geosetMode, geosetInspector, attachmentInspector, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
         var modelHeaderScroll = new ScrollViewer { Content = modelHeader, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
         var modelPane = new Grid { RowDefinitions = new("2*,Auto,3*"), IsVisible = false, Children = { modelHeaderScroll } };
         var modelSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }; Grid.SetRow(modelSplitter, 1); modelPane.Children.Add(modelSplitter);
@@ -515,12 +535,13 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         if (_modelPicker.SelectedItem is not AssetComparisonModel model)
         {
             ClearGeosetInspector("Choose a compatible M2 to inspect its geosets.");
+            ClearAttachmentInspector("Choose a compatible M2 to inspect its attachment points.");
             _modelStatus.Text = _allModels.Count == 0
                 ? "No M2 files were found in this path or its parent content paths."
                 : $"{_allModels.Count:N0} M2 file(s) were discovered, but none match the current model filter. Choose All models to inspect compatibility details.";
             return;
         }
-        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _modelDependencyGraph = null; _modelView.ClearGeometry(); ClearGeosetInspector("This model has no compatible M2/SKIN geometry to inspect."); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
+        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _modelDependencyGraph = null; _modelView.ClearGeometry(); ClearGeosetInspector("This model has no compatible M2/SKIN geometry to inspect."); ClearAttachmentInspector("This model has no compatible attachment data to inspect."); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
         _modelStatus.Text = $"Loading {model.FileName}…";
         var stopwatch = Stopwatch.StartNew();
         DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
@@ -576,7 +597,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                     if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
                 }
             }
-            _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _resolvedModelTexturePath = embeddedTexturePath; _resolvedModelTextureCount = embeddedTextures.Count; RefreshGeosetInspector(geometry); _modelView.SetGeometry(geometry);
+            _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _resolvedModelTexturePath = embeddedTexturePath; _resolvedModelTextureCount = embeddedTextures.Count; RefreshGeosetInspector(geometry); RefreshAttachmentInspector(geometry); _modelView.SetGeometry(geometry); ApplyAttachmentOverlay();
             if (_selectedTexture is null) _modelView.SetDecodedTextures(embeddedTextures);
             UpdateModelStatus();
             DesktopCrashLogger.Debug("MODEL", "comparison-preview-success", ("model", model.ModelPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("texture_slots", geometry.TextureSlots.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
@@ -585,7 +606,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         catch (Exception exception)
         {
             if (!IsCurrent(token, activity) || request != _modelRequest) return;
-            DesktopCrashLogger.Log($"Comparison model preview failed: {model.ModelPath}", exception); ClearGeosetInspector("Model loading failed before the geoset table could be inspected.");
+            DesktopCrashLogger.Log($"Comparison model preview failed: {model.ModelPath}", exception); ClearGeosetInspector("Model loading failed before the geoset table could be inspected."); ClearAttachmentInspector("Model loading failed before attachment points could be inspected.");
             _modelStatus.Text = $"Could not load {model.FileName}: {exception.Message}";
         }
     }
@@ -646,6 +667,34 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private void ClearGeosetInspector(string message)
     {
         _geosetInspectorModel = null; _manualGeosetVariants.Clear(); _geosetGroups.ItemsSource = null; _geosetInspectorStatus.Text = message;
+    }
+
+    private void RefreshAttachmentInspector(M2PreviewGeometry geometry)
+    {
+        var previous = (_attachmentPicker.SelectedItem as M2PreviewAttachment)?.Id;
+        _attachmentPicker.ItemsSource = geometry.Attachments;
+        _attachmentPicker.IsEnabled = geometry.Attachments.Count > 0;
+        _attachmentPicker.SelectedItem = geometry.Attachments.FirstOrDefault(attachment => attachment.Id == previous)
+            ?? geometry.Attachments.FirstOrDefault(attachment => attachment.Id == 11)
+            ?? geometry.Attachments.FirstOrDefault();
+        var lookupSlots = geometry.Attachments.SelectMany(attachment => attachment.LookupSlots).Distinct().Count();
+        _attachmentStatus.Text = geometry.Attachments.Count == 0
+            ? "This M2 contains no attachment records."
+            : $"{geometry.Attachments.Count:N0} attachment record(s) · {lookupSlots:N0} populated lookup slot(s) · {geometry.Bones.Count:N0} validated bones.";
+    }
+
+    private void ClearAttachmentInspector(string message)
+    {
+        _attachmentPicker.ItemsSource = null; _attachmentPicker.SelectedItem = null; _attachmentPicker.IsEnabled = false; _attachmentStatus.Text = message;
+        _modelView.SetAttachmentOverlay(false);
+    }
+
+    private void ApplyAttachmentOverlay()
+    {
+        var selected = _attachmentPicker.SelectedItem as M2PreviewAttachment;
+        _modelView.SetAttachmentOverlay(_showAttachmentPoints.IsChecked == true, selected?.Index);
+        if (selected is not null)
+            _attachmentStatus.Text = $"ID {selected.Id:N0} · {selected.Name} · record {selected.Index:N0} · bone {selected.BoneIndex:N0} · bind position ({selected.Position.X:0.###}, {selected.Position.Y:0.###}, {selected.Position.Z:0.###}) · lookup slot(s) {(selected.LookupSlots.Count == 0 ? "none" : string.Join(", ", selected.LookupSlots))}.";
     }
 
     private Control BuildGeosetGroupRow(M2GeosetGroup group)

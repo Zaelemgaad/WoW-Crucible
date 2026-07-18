@@ -59,6 +59,8 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly M2PreviewView _model = new();
     private readonly TextBlock _modelStatus = Status("Load an extracted M2/SKIN to preview the chosen creature appearance geometry.");
+    private readonly CheckBox _showAttachments = new() { Content = "Show attachment points" };
+    private readonly ComboBox _attachmentPicker = new() { PlaceholderText = "No attachment points loaded" };
     private WorldContentWritePlan? _pendingPlan;
     private readonly Button _commit = AccentButton("Insert into connected world database");
     private uint? _loadedEntry;
@@ -85,8 +87,9 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
             }
         };
         var loadModel = new Button { Content = "Load extracted M2…" }; loadModel.Click += async (_, _) => await LoadModelAsync();
-        var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _modelStatus.Text = "Model preview cleared."; };
-        var modelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { loadModel, clearModel } }, WithRow(new Border { Background = Brush.Parse("#090D14"), Child = _model }, 1), WithRow(_modelStatus, 2) } };
+        var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _attachmentPicker.ItemsSource = null; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
+        _showAttachments.Click += (_, _) => ApplyAttachmentOverlay(); _attachmentPicker.SelectionChanged += (_, _) => ApplyAttachmentOverlay();
+        var modelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { loadModel, clearModel, _showAttachments, _attachmentPicker } }, WithRow(new Border { Background = Brush.Parse("#090D14"), Child = _model }, 1), WithRow(_modelStatus, 2) } };
         var preview = new TabControl
         {
             Items =
@@ -273,10 +276,18 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         {
             var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose an extracted WotLK creature M2", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WotLK M2") { Patterns = ["*.m2"] }] });
             var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _modelStatus.Text = "Loading model…";
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); _model.SetGeometry(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} base geosets · {geometry.TriangleIndices.Count / 3:N0} triangles";
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); _model.SetGeometry(geometry); RefreshAttachmentPoints(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} base geosets · {geometry.TriangleIndices.Count / 3:N0} triangles · {geometry.Attachments.Count:N0} attachment points";
         }
         catch (Exception exception) { _modelStatus.Text = $"Model load failed: {exception.Message}"; }
     }
+
+    private void RefreshAttachmentPoints(M2PreviewGeometry geometry)
+    {
+        _attachmentPicker.ItemsSource = geometry.Attachments; _attachmentPicker.IsEnabled = geometry.Attachments.Count > 0;
+        _attachmentPicker.SelectedItem = geometry.Attachments.FirstOrDefault(attachment => attachment.Id == 11) ?? geometry.Attachments.FirstOrDefault(); ApplyAttachmentOverlay();
+    }
+
+    private void ApplyAttachmentOverlay() => _model.SetAttachmentOverlay(_showAttachments.IsChecked == true, (_attachmentPicker.SelectedItem as M2PreviewAttachment)?.Index);
 
     private void SessionChanged(object? sender, EventArgs e) { RefreshSchemaStatus(); RefreshPreview(); }
     private void RefreshSchemaStatus() { var capabilities = _session.DatabaseCapabilities; _status.Text = capabilities?.FindTable("creature_template") is { } table ? $"Live creature schema ready · {capabilities.Database}.creature_template · {table.Columns.Count:N0} columns · models {(capabilities.FindTable("creature_template_model") is null ? "embedded/legacy" : "normalized/current")}" : "Offline current-core schema ready · connect Server & SQL for live deployment."; }

@@ -339,8 +339,13 @@ File.WriteAllBytes(wotlkModel, wotlkBytes); File.WriteAllText(Path.Combine(asset
 var compatibleModel = NativeAssetConversionService.Inspect(wotlkModel);
 if (compatibleModel.Compatibility != AssetCompatibility.AlreadyWotlk335 || compatibleModel.Version != 264 || compatibleModel.Dependencies.Count != 1)
     throw new InvalidOperationException("Native asset inspection did not recognize a Wrath M2 and its skin dependency.");
-var geometryModelPath = Path.Combine(assetFixture, "geometry.m2"); var geometryBytes = new byte[0x130 + 3 * 48 + 80];
+var geometryModelPath = Path.Combine(assetFixture, "geometry.m2"); var geometryBytes = new byte[0x300];
 System.Text.Encoding.ASCII.GetBytes("MD20").CopyTo(geometryBytes, 0); BitConverter.GetBytes((uint)264).CopyTo(geometryBytes, 4); BitConverter.GetBytes((uint)3).CopyTo(geometryBytes, 0x3C); BitConverter.GetBytes((uint)0x130).CopyTo(geometryBytes, 0x40);
+const int fixtureBoneOffset = 0x220; const int fixtureAttachmentOffset = 0x278; const int fixtureAttachmentLookupOffset = 0x2A0;
+BitConverter.GetBytes((uint)1).CopyTo(geometryBytes, 0x2C); BitConverter.GetBytes((uint)fixtureBoneOffset).CopyTo(geometryBytes, 0x30); BitConverter.GetBytes((short)-1).CopyTo(geometryBytes, fixtureBoneOffset + 8); BitConverter.GetBytes(1.25f).CopyTo(geometryBytes, fixtureBoneOffset + 84);
+BitConverter.GetBytes((uint)1).CopyTo(geometryBytes, 0xF0); BitConverter.GetBytes((uint)fixtureAttachmentOffset).CopyTo(geometryBytes, 0xF4); BitConverter.GetBytes((uint)12).CopyTo(geometryBytes, 0xF8); BitConverter.GetBytes((uint)fixtureAttachmentLookupOffset).CopyTo(geometryBytes, 0xFC);
+BitConverter.GetBytes((uint)11).CopyTo(geometryBytes, fixtureAttachmentOffset); BitConverter.GetBytes((uint)0).CopyTo(geometryBytes, fixtureAttachmentOffset + 4); BitConverter.GetBytes(0.25f).CopyTo(geometryBytes, fixtureAttachmentOffset + 8); BitConverter.GetBytes(-0.5f).CopyTo(geometryBytes, fixtureAttachmentOffset + 12); BitConverter.GetBytes(1.25f).CopyTo(geometryBytes, fixtureAttachmentOffset + 16);
+for (var index = 0; index < 12; index++) BitConverter.GetBytes((short)-1).CopyTo(geometryBytes, fixtureAttachmentLookupOffset + index * 2); BitConverter.GetBytes((short)0).CopyTo(geometryBytes, fixtureAttachmentLookupOffset + 11 * 2);
 var textureDefinitionOffset = 0x130 + 3 * 48; BitConverter.GetBytes((uint)1).CopyTo(geometryBytes, 0x50); BitConverter.GetBytes((uint)textureDefinitionOffset).CopyTo(geometryBytes, 0x54);
 var textureLookupOffset = geometryBytes.Length - 2; BitConverter.GetBytes((uint)1).CopyTo(geometryBytes, 0x80); BitConverter.GetBytes((uint)textureLookupOffset).CopyTo(geometryBytes, 0x84); BitConverter.GetBytes((ushort)0).CopyTo(geometryBytes, textureLookupOffset);
 var embeddedFixturePath = @"Character\BloodElf\Female\fixture.blp"; var embeddedFixtureBytes = System.Text.Encoding.ASCII.GetBytes(embeddedFixturePath + "\0");
@@ -374,8 +379,13 @@ if (previewGeometry.Vertices.Count != 3 || previewGeometry.TriangleIndices.Count
     allGeosetGeometry.TriangleIndices.Count != 9 || allGeosetGeometry.Submeshes.Count(section => section.Visible) != 3 || previewGeometry.Minimum.X != -1f || previewGeometry.Maximum.Z != 1f || previewGeometry.TextureSlots.Count != 1 || previewGeometry.TextureSlots[0].EmbeddedPath != embeddedFixturePath || previewGeometry.TextureSlots[0].Flags != 3 ||
     previewGeometry.MaterialUnits.Count != 1 || previewGeometry.MaterialUnits[0].SubmeshIndex != 0 || previewGeometry.MaterialUnits[0].TextureDefinitionIndex != 0 || previewGeometry.Batches.Count != 2 || previewGeometry.Batches[0].TextureDefinitionIndex != 0 ||
     selectedHairGeometry.TriangleIndices.Count != 9 || selectedHairGeometry.Submeshes.Count(section => section.Visible) != 3 || selectedHairGeometry.GeosetSelection?.GroupVariants[0] != 2 ||
-    nakedGeometry.TriangleIndices.Count != 6 || nakedGeometry.Submeshes.Count(section => section.Visible) != 2 || nakedGeometry.GeosetSelection?.GroupVariants[0] != 0)
+    nakedGeometry.TriangleIndices.Count != 6 || nakedGeometry.Submeshes.Count(section => section.Visible) != 2 || nakedGeometry.GeosetSelection?.GroupVariants[0] != 0 ||
+    previewGeometry.Bones.Count != 1 || previewGeometry.Bones[0].ParentIndex != -1 || previewGeometry.Bones[0].Pivot.Z != 1.25f ||
+    previewGeometry.Attachments.Count != 1 || previewGeometry.Attachments[0].Id != 11 || previewGeometry.Attachments[0].Name != "Helmet" || previewGeometry.Attachments[0].BoneIndex != 0 || previewGeometry.Attachments[0].Position.Y != -0.5f || !previewGeometry.Attachments[0].LookupSlots.SequenceEqual([11]))
     throw new InvalidOperationException("Native M2/SKIN preview geometry parsing failed.");
+var invalidAttachmentModel = Path.Combine(assetFixture, "geometry-invalid.m2"); var invalidAttachmentBytes = geometryBytes.ToArray(); BitConverter.GetBytes((uint)2).CopyTo(invalidAttachmentBytes, fixtureAttachmentOffset + 4); File.WriteAllBytes(invalidAttachmentModel, invalidAttachmentBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-invalid00.skin"));
+try { _ = M2PreviewGeometryService.Load(invalidAttachmentModel); throw new InvalidOperationException("An M2 attachment pointing beyond the bone table was accepted."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("references bone", StringComparison.Ordinal)) { }
 var bloodElfFemale = CharacterAppearanceService.Infer(@"Character\BloodElf\Female", "BloodElfFemale.M2");
 if (bloodElfFemale is null || bloodElfFemale.RaceId != 10 || bloodElfFemale.SexId != 1) throw new InvalidOperationException("Character appearance inference did not distinguish Blood Elf female from male.");
 var bloodElfSkins = CharacterAppearanceService.LoadBaseSkins(Path.Combine(args[1], "CharSections.dbc"), bloodElfFemale);
