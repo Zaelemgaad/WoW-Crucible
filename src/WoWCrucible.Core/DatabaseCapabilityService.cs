@@ -8,10 +8,16 @@ public sealed record DatabaseTableCapability(string Name, IReadOnlyList<Database
 {
     public DatabaseColumnCapability? Find(string name) => Columns.FirstOrDefault(column => column.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
 }
-public sealed record DatabaseCapabilities(string ServerVersion, string Database, IReadOnlyDictionary<string, DatabaseTableCapability> Tables)
+public sealed record DatabaseRelationCapability(string Name, string FromTable, string FromColumn, string ToTable, string ToColumn, bool Declared, string Description)
+{
+    public bool Touches(string table) => FromTable.Equals(table, StringComparison.OrdinalIgnoreCase) || ToTable.Equals(table, StringComparison.OrdinalIgnoreCase);
+}
+public sealed record DatabaseCapabilities(string ServerVersion, string Database, IReadOnlyDictionary<string, DatabaseTableCapability> Tables,
+    IReadOnlyList<DatabaseRelationCapability>? Relations = null)
 {
     public DatabaseTableCapability? FindTable(string name) => Tables.TryGetValue(name, out var table) ? table : null;
     public IReadOnlyList<DatabaseTableCapability> DbcOverlayTables => Tables.Values.Where(table => table.Name.EndsWith("_dbc", StringComparison.OrdinalIgnoreCase)).OrderBy(table => table.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+    public IReadOnlyList<DatabaseRelationCapability> Relationships => Relations ?? [];
 }
 
 public sealed class DatabaseCapabilityService
@@ -31,24 +37,64 @@ public sealed class DatabaseCapabilityService
                    COLUMN_DEFAULT, COLUMN_KEY, EXTRA, ORDINAL_POSITION
             FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = @database
-              AND (TABLE_NAME IN ('item_template','creature_template','creature_template_model','creature','quest_template','creature_queststarter','creature_questender','gameobject_queststarter','gameobject_questender','npc_vendor','creature_loot_template','gameobject_template','gameobject','spell_proc')
-                   OR TABLE_NAME LIKE '%\\_dbc')
             ORDER BY TABLE_NAME, ORDINAL_POSITION
             """;
         var columns = new Dictionary<string, List<DatabaseColumnCapability>>(StringComparer.OrdinalIgnoreCase);
-        await using var command = new MySqlCommand(sql, connection) { CommandTimeout = 15 };
-        command.Parameters.AddWithValue("@database", profile.Database);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        await using (var command = new MySqlCommand(sql, connection) { CommandTimeout = 15 })
         {
-            var table = reader.GetString(0);
-            if (!columns.TryGetValue(table, out var list)) columns[table] = list = [];
-            list.Add(new(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4) == "YES",
-                reader.IsDBNull(5) ? null : Convert.ToString(reader.GetValue(5)), reader.GetString(6), reader.GetString(7), reader.GetInt32(8)));
+            command.Parameters.AddWithValue("@database", profile.Database);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var table = reader.GetString(0);
+                if (!columns.TryGetValue(table, out var list)) columns[table] = list = [];
+                list.Add(new(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4) == "YES",
+                    reader.IsDBNull(5) ? null : Convert.ToString(reader.GetValue(5)), reader.GetString(6), reader.GetString(7), reader.GetInt32(8)));
+            }
         }
         var tables = columns.ToDictionary(pair => pair.Key, pair => new DatabaseTableCapability(pair.Key, pair.Value), StringComparer.OrdinalIgnoreCase);
-        return new(version, profile.Database, tables);
+        var relations = await ReadRelationsAsync(connection, profile.Database, tables, cancellationToken);
+        return new(version, profile.Database, tables, relations);
     }
+
+    private static async Task<IReadOnlyList<DatabaseRelationCapability>> ReadRelationsAsync(MySqlConnection connection, string database,
+        IReadOnlyDictionary<string, DatabaseTableCapability> tables, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = @database AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION
+            """;
+        var result = new List<DatabaseRelationCapability>();
+        await using (var command = new MySqlCommand(sql, connection) { CommandTimeout = 15 })
+        {
+            command.Parameters.AddWithValue("@database", database);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                result.Add(new(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), true, "Declared by the database schema"));
+        }
+        foreach (var relation in InferredRelations)
+        {
+            if (!tables.TryGetValue(relation.FromTable, out var from) || from.Find(relation.FromColumn) is null ||
+                !tables.TryGetValue(relation.ToTable, out var to) || to.Find(relation.ToColumn) is null) continue;
+            if (result.Any(existing => existing.FromTable.Equals(relation.FromTable, StringComparison.OrdinalIgnoreCase) && existing.FromColumn.Equals(relation.FromColumn, StringComparison.OrdinalIgnoreCase) && existing.ToTable.Equals(relation.ToTable, StringComparison.OrdinalIgnoreCase) && existing.ToColumn.Equals(relation.ToColumn, StringComparison.OrdinalIgnoreCase))) continue;
+            result.Add(relation);
+        }
+        return result;
+    }
+
+    private static readonly DatabaseRelationCapability[] InferredRelations =
+    [
+        new("crucible_item_vendor", "npc_vendor", "item", "item_template", "entry", false, "AzerothCore item sold by a vendor"),
+        new("crucible_item_creature_loot", "creature_loot_template", "Item", "item_template", "entry", false, "AzerothCore creature loot item"),
+        new("crucible_creature_spawn", "creature", "id1", "creature_template", "entry", false, "AzerothCore creature spawn template"),
+        new("crucible_creature_model", "creature_template_model", "CreatureID", "creature_template", "entry", false, "AzerothCore creature display mapping"),
+        new("crucible_creature_vendor", "npc_vendor", "entry", "creature_template", "entry", false, "AzerothCore creature vendor inventory"),
+        new("crucible_creature_queststarter", "creature_queststarter", "id", "creature_template", "entry", false, "AzerothCore creature quest starter"),
+        new("crucible_creature_questender", "creature_questender", "id", "creature_template", "entry", false, "AzerothCore creature quest ender"),
+        new("crucible_gameobject_spawn", "gameobject", "id", "gameobject_template", "entry", false, "AzerothCore gameobject spawn template")
+    ];
 
     public static string BuildConnectionString(DatabaseConnectionProfile profile)
     {

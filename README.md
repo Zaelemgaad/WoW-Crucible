@@ -14,7 +14,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
 - Connects to a live MySQL/MariaDB world database, keeps the password in memory only, and inspects actual content-table capabilities before enabling server writes.
-- Includes a same-window SQL Studio with filtered/paged schema browsing, every live row column, primary-key-safe complete-row editing, read queries, separately confirmed write statements, and persistent favorites for arbitrary item/creature/pet/quest/other rows. Favorites can retain notes plus optional related DBC and MPQ paths and route known tables into decoded guided editors without hiding custom columns.
+- Includes a same-window SQL Studio that discovers every table in the connected schema, provides filtered/paged browsing and every live row column, primary-key-safe create/edit/delete, declared and recognized AzerothCore relationship navigation, read queries, separately confirmed write statements, streaming complete-table CSV/JSONL export, dry-run-first transactional CSV import, and persistent favorites for arbitrary item/creature/pet/quest/other rows. Favorites can retain notes plus optional related DBC and MPQ paths and route known tables into decoded guided editors without hiding custom columns.
 - Starts, stops, and restarts auth/world servers natively from the shared Server & SQL workspace. WSL shutdown sends `SIGINT` and waits for graceful completion; a locally launched worldserver receives `saveall` before shutdown. Crucible does not execute the workspace's PowerShell wrapper scripts or force-kill an unowned server process.
 - Keeps DBC editing, Items & Sets, MPQ work, Assets & Compare, Server & SQL, dialogs, and the CLI guide inside one splitter-driven Avalonia window; feature navigation no longer creates a pile of child windows or depends on fixed panel widths.
 - Reads the selected installed server's `worldserver.conf` (including the split Windows/WSL test layout), verifies the detected database, and shares that in-memory session with item and recovery workflows.
@@ -102,6 +102,8 @@ wowcrucible server bindings "C:\path\to\installed-server" [--source="C:\path\to\
 wowcrucible server dbc-audit "C:\path\to\installed-server" gtRegenMPPerSpt.dbc schema.xml [--source="C:\path\to\core-source"] [--all] [--migration=sync.sql]
 wowcrucible db inspect 127.0.0.1 3306 admin acore_world --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db query 127.0.0.1 3306 admin acore_world reviewed-query.sql --password-env=WOW_CRUCIBLE_DB_PASSWORD
+wowcrucible db export 127.0.0.1 3306 admin acore_world item_template item_template.csv --password-env=WOW_CRUCIBLE_DB_PASSWORD
+wowcrucible db import 127.0.0.1 3306 admin acore_world item_template reviewed-items.csv --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db snapshot 127.0.0.1 3306 admin old_world old-world.crucible-db-snapshot --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db snapshot-inspect old-world.crucible-db-snapshot
 wowcrucible db recovery-audit old-world.crucible-db-snapshot old-world.crucible-db-audit --baseline=matching-stock.crucible-db-snapshot

@@ -234,6 +234,28 @@ if (profilesWithCustom.Count != 5 || profilesWithCustom.Single(profile => profil
     throw new InvalidOperationException("External target profile loading failed.");
 Directory.Delete(customProfileDirectory, true);
 
+var sqlTransferFixture = Path.Combine(Path.GetTempPath(), $"crucible-sql-transfer-{Guid.NewGuid():N}.csv");
+var sqlTransferTable = new DatabaseTableCapability("fixture_table",
+[
+    new("id", "int", "int unsigned", false, null, "PRI", string.Empty, 1),
+    new("name", "varchar", "varchar(255)", false, null, string.Empty, string.Empty, 2),
+    new("notes", "text", "text", true, null, string.Empty, string.Empty, 3)
+]);
+File.WriteAllText(sqlTransferFixture, $"id,name,notes{Environment.NewLine}1,\"Quoted, name\",\\N{Environment.NewLine}2,\"Multi{Environment.NewLine}line\",text{Environment.NewLine}");
+var sqlImportPlan = new SqlTransferService().AnalyzeCsv(sqlTransferFixture, sqlTransferTable);
+using (var sqlReader = new StringReader(File.ReadAllText(sqlTransferFixture)))
+{
+    var decoded = SqlCsvCodec.ReadRows(sqlReader).ToArray();
+    if (decoded.Length != 3 || decoded[1][1] != "Quoted, name" || decoded[1][2] is not null || decoded[2][1] != $"Multi{Environment.NewLine}line")
+        throw new InvalidOperationException("SQL CSV codec did not preserve commas, quotes, multiline text, or NULL values.");
+}
+if (!sqlImportPlan.CanApply || sqlImportPlan.Rows != 2 || !sqlImportPlan.Columns.SequenceEqual(["id", "name", "notes"]))
+    throw new InvalidOperationException("SQL CSV dry-run did not validate the complete import shape.");
+File.WriteAllText(sqlTransferFixture, $"id,unknown{Environment.NewLine}1,nope{Environment.NewLine}");
+if (new SqlTransferService().AnalyzeCsv(sqlTransferFixture, sqlTransferTable).CanApply)
+    throw new InvalidOperationException("SQL CSV dry-run accepted an unknown column or omitted a required field.");
+File.Delete(sqlTransferFixture);
+
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
 Directory.CreateDirectory(Path.Combine(serverFixture, "etc")); Directory.CreateDirectory(Path.Combine(serverFixture, "data", "dbc"));
 File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf"), """

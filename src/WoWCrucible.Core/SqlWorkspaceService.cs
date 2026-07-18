@@ -14,6 +14,7 @@ public sealed record SqlRowRecord(IReadOnlyDictionary<string, object?> Values, I
 public sealed record SqlTablePage(string Table, IReadOnlyList<DatabaseColumnCapability> Columns, IReadOnlyList<string> PrimaryKey,
     long TotalRows, int Offset, int Limit, string Search, IReadOnlyList<SqlRowRecord> Rows);
 public sealed record SqlQueryResult(IReadOnlyList<string> Columns, IReadOnlyList<IReadOnlyList<object?>> Rows, int AffectedRows, TimeSpan Duration);
+public sealed record SqlInsertResult(int AffectedRows, long InsertedId);
 public sealed record SqlRowFavorite(string Database, string Table, IReadOnlyDictionary<string, string?> Key, string Label, string Notes, DateTimeOffset AddedUtc, string? DbcPath = null, string? MpqPath = null)
 {
     public string Identity => $"{Database}\u001f{Table}\u001f{string.Join("\u001e", Key.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase).Select(pair => $"{pair.Key}={pair.Value}"))}";
@@ -61,6 +62,59 @@ public sealed class SqlWorkspaceService
         var keyIndex = 0; foreach (var value in key.Values) command.Parameters.AddWithValue($"@k{keyIndex++}", value ?? DBNull.Value);
         var affected = await command.ExecuteNonQueryAsync(cancellationToken);
         if (affected != 1) throw new InvalidOperationException($"Expected exactly one changed row but MySQL reported {affected}. The transaction was not committed.");
+        await transaction.CommitAsync(cancellationToken); return affected;
+    }
+
+    public async Task<SqlInsertResult> InsertRowAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table,
+        IReadOnlyDictionary<string, object?> values, CancellationToken cancellationToken = default)
+    {
+        var unknown = values.Keys.Where(name => table.Find(name) is null).ToArray();
+        if (unknown.Length > 0) throw new InvalidOperationException($"Unknown column(s): {string.Join(", ", unknown)}.");
+        var writable = table.Columns.Where(column => values.ContainsKey(column.Name) && !column.Extra.Contains("GENERATED", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (writable.Length == 0) throw new InvalidOperationException("No writable fields were supplied.");
+        var requiredMissing = table.Columns.Where(column => !column.Nullable && column.DefaultValue is null &&
+            !column.Extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase) && !column.Extra.Contains("GENERATED", StringComparison.OrdinalIgnoreCase) && !values.ContainsKey(column.Name)).Select(column => column.Name).ToArray();
+        if (requiredMissing.Length > 0) throw new InvalidOperationException($"Required column(s) are missing: {string.Join(", ", requiredMissing)}.");
+        var key = table.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase) && values.ContainsKey(column.Name)).ToArray();
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        if (key.Length > 0)
+        {
+            var predicates = key.Select((column, index) => $"{ItemWritePlan.QuoteIdentifier(column.Name)} <=> @pk{index}");
+            await using var exists = new MySqlCommand($"SELECT COUNT(*) FROM {ItemWritePlan.QuoteIdentifier(table.Name)} WHERE {string.Join(" AND ", predicates)}", connection, transaction);
+            for (var index = 0; index < key.Length; index++) exists.Parameters.AddWithValue($"@pk{index}", values[key[index].Name] ?? DBNull.Value);
+            if (Convert.ToInt64(await exists.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) > 0)
+                throw new InvalidOperationException("A row with the supplied primary key already exists. Crucible does not silently replace or upsert rows.");
+        }
+        var names = string.Join(',', writable.Select(column => ItemWritePlan.QuoteIdentifier(column.Name)));
+        var parameters = string.Join(',', writable.Select((_, index) => $"@v{index}"));
+        await using var command = new MySqlCommand($"INSERT INTO {ItemWritePlan.QuoteIdentifier(table.Name)} ({names}) VALUES ({parameters})", connection, transaction);
+        for (var index = 0; index < writable.Length; index++) command.Parameters.AddWithValue($"@v{index}", values[writable[index].Name] ?? DBNull.Value);
+        var affected = await command.ExecuteNonQueryAsync(cancellationToken);
+        if (affected != 1) throw new InvalidOperationException($"Expected exactly one inserted row but MySQL reported {affected}. The transaction was not committed.");
+        var insertedId = command.LastInsertedId; await transaction.CommitAsync(cancellationToken); return new(affected, insertedId);
+    }
+
+    public async Task<int> DeleteRowAsync(DatabaseConnectionProfile profile, DatabaseTableCapability table,
+        IReadOnlyDictionary<string, object?> key, CancellationToken cancellationToken = default)
+    {
+        if (key.Count == 0) throw new InvalidOperationException("This table has no primary key; Crucible refuses an ambiguous delete.");
+        foreach (var name in key.Keys)
+            if (table.Find(name) is not { Key: var kind } || !kind.Equals("PRI", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"{name} is not a primary-key column of {table.Name}.");
+        var predicates = key.Keys.Select((name, index) => $"{ItemWritePlan.QuoteIdentifier(name)} <=> @k{index}").ToArray();
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var count = new MySqlCommand($"SELECT COUNT(*) FROM {ItemWritePlan.QuoteIdentifier(table.Name)} WHERE {string.Join(" AND ", predicates)}", connection, transaction))
+        {
+            var index = 0; foreach (var value in key.Values) count.Parameters.AddWithValue($"@k{index++}", value ?? DBNull.Value);
+            var matches = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+            if (matches != 1) throw new InvalidOperationException($"Expected the primary key to identify exactly one row, but it matched {matches}. Nothing was deleted.");
+        }
+        await using var command = new MySqlCommand($"DELETE FROM {ItemWritePlan.QuoteIdentifier(table.Name)} WHERE {string.Join(" AND ", predicates)} LIMIT 1", connection, transaction);
+        var keyIndex = 0; foreach (var value in key.Values) command.Parameters.AddWithValue($"@k{keyIndex++}", value ?? DBNull.Value);
+        var affected = await command.ExecuteNonQueryAsync(cancellationToken);
+        if (affected != 1) throw new InvalidOperationException($"Expected exactly one deleted row but MySQL reported {affected}. The transaction was not committed.");
         await transaction.CommitAsync(cancellationToken); return affected;
     }
 

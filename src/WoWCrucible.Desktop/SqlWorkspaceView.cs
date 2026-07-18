@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Platform.Storage;
 using WoWCrucible.Core;
 
 namespace WoWCrucible.Desktop;
@@ -33,6 +34,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly Dictionary<string, (TextBox Text, CheckBox Null)> _editors = new(StringComparer.OrdinalIgnoreCase);
     private SqlTablePage? _page;
     private SqlRowRecord? _selectedRow;
+    private bool _creatingRow;
     private int _offset;
     private CancellationTokenSource? _operation;
 
@@ -60,7 +62,11 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var refresh = Button("Refresh", async () => await LoadPageAsync(false)); var search = Button("Search", async () => { _offset = 0; await LoadPageAsync(false); });
         var previous = Button("← Previous", async () => { _offset = Math.Max(0, _offset - (_page?.Limit ?? 200)); await LoadPageAsync(false); });
         var next = Button("Next →", async () => { if (_page is not null) _offset += _page.Limit; await LoadPageAsync(false); });
-        var controls = new WrapPanel { Children = { refresh, _rowSearch, search, previous, next, _pageStatus } };
+        var create = AccentButton("New row"); create.Click += (_, _) => BeginCreateRow();
+        var exportCsv = new Button { Content = "Export table CSV" }; exportCsv.Click += async (_, _) => await ExportTableAsync(SqlExportFormat.Csv);
+        var exportJson = new Button { Content = "Export table JSONL" }; exportJson.Click += async (_, _) => await ExportTableAsync(SqlExportFormat.JsonLines);
+        var importCsv = new Button { Content = "Import CSV…" }; importCsv.Click += async (_, _) => await PrepareImportAsync();
+        var controls = new WrapPanel { Children = { refresh, _rowSearch, search, previous, next, create, exportCsv, exportJson, importCsv, _pageStatus } };
         var right = new Grid { RowDefinitions = new("Auto,2*,Auto,*"), Children = { controls, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _rows }, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(new ScrollViewer { Content = _rowEditor }, 3) } };
         var left = new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(0, 0, 8, 0), Children = { _tableFilter, WithRow(_tables, 1) } };
         return new Grid { ColumnDefinitions = new("*,Auto,3*"), Children = { left, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(right, 2) } };
@@ -110,12 +116,13 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private void SelectRow()
     {
-        _selectedRow = _rows.SelectedItem as SqlRowRecord; _editors.Clear(); _rowEditor.Children.Clear(); _confirmation.IsVisible = false;
+        _creatingRow = false; _selectedRow = _rows.SelectedItem as SqlRowRecord; _editors.Clear(); _rowEditor.Children.Clear(); _confirmation.IsVisible = false;
         if (_selectedRow is null || _page is null) return;
-        var heading = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8 };
+        var heading = new StackPanel { Spacing = 6 };
         heading.Children.Add(new TextBlock { Text = $"Complete row editor · {_page.Table} · {_selectedRow.Display}", FontSize = 16, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap });
-        var favorite = new Button { Content = "★ Favorite" }; favorite.Click += (_, _) => FavoriteSelected(); heading.Children.Add(WithColumn(favorite, 1));
-        if (_page.Table is "item_template" or "creature_template") { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => GuidedEditRequested?.Invoke(this, new(_page.Table, _selectedRow.Values)); heading.Children.Add(WithColumn(guided, 2)); }
+        var actions = new WrapPanel(); var favorite = new Button { Content = "★ Favorite" }; favorite.Click += (_, _) => FavoriteSelected(); actions.Children.Add(favorite);
+        if (_page.Table is "item_template" or "creature_template") { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => GuidedEditRequested?.Invoke(this, new(_page.Table, _selectedRow.Values)); actions.Children.Add(guided); }
+        var delete = new Button { Content = "Delete exactly this row" }; delete.Click += (_, _) => PrepareDelete(); actions.Children.Add(delete); heading.Children.Add(actions);
         _rowEditor.Children.Add(heading); _rowEditor.Children.Add(new Grid { ColumnDefinitions = new("*,*,*"), ColumnSpacing = 8, Children = { _favoriteNotes, WithColumn(_favoriteDbc, 1), WithColumn(_favoriteMpq, 2) } });
         foreach (var column in _page.Columns)
         {
@@ -125,7 +132,27 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             var label = new TextBlock { Text = $"{column.Name}  ·  {column.ColumnType}{(column.Key == "PRI" ? "  ·  PRIMARY KEY" : string.Empty)}", VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
             _rowEditor.Children.Add(new Grid { ColumnDefinitions = new("Auto,*,Auto"), ColumnSpacing = 8, Children = { label, WithColumn(text, 1), WithColumn(nullValue, 2) } }); _editors[column.Name] = (text, nullValue);
         }
-        var save = AccentButton("Review complete row update"); save.Click += (_, _) => PrepareRowUpdate(); _rowEditor.Children.Add(save);
+        var save = AccentButton("Review complete row update"); save.Click += (_, _) => PrepareRowUpdate(); _rowEditor.Children.Add(save); AddRelationships();
+    }
+
+    private void BeginCreateRow()
+    {
+        if (_page is null || _tables.SelectedItem is not TableChoice) { _status.Text = "Select a table first."; return; }
+        _rows.SelectedItem = null; _creatingRow = true; _selectedRow = null; _editors.Clear(); _rowEditor.Children.Clear(); _confirmation.IsVisible = false;
+        _rowEditor.Children.Add(new TextBlock { Text = $"New {_page.Table} row · every schema column is available", FontSize = 16, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap });
+        _rowEditor.Children.Add(new TextBlock { Text = "Auto-increment and generated fields may be omitted. Required fields are identified from the live schema. This is INSERT-only: existing keys are never replaced.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") });
+        foreach (var column in _page.Columns)
+        {
+            var generated = column.Extra.Contains("GENERATED", StringComparison.OrdinalIgnoreCase); var automatic = column.Extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase);
+            var text = new TextBox { Text = column.DefaultValue ?? string.Empty, IsReadOnly = generated };
+            var omit = generated || automatic || column.Nullable || column.DefaultValue is not null;
+            var nullValue = new CheckBox { Content = generated || automatic ? "OMIT" : "NULL / OMIT", IsChecked = omit, IsEnabled = !generated };
+            nullValue.IsCheckedChanged += (_, _) => text.IsEnabled = nullValue.IsChecked != true; text.IsEnabled = !omit;
+            var required = !column.Nullable && column.DefaultValue is null && !automatic && !generated;
+            var label = new TextBlock { Text = $"{column.Name}  ·  {column.ColumnType}{(required ? "  ·  REQUIRED" : string.Empty)}{(automatic ? "  ·  AUTO" : string.Empty)}", VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
+            _rowEditor.Children.Add(new Grid { ColumnDefinitions = new("Auto,*,Auto"), ColumnSpacing = 8, Children = { label, WithColumn(text, 1), WithColumn(nullValue, 2) } }); _editors[column.Name] = (text, nullValue);
+        }
+        var insert = AccentButton("Review new row insert"); insert.Click += (_, _) => PrepareInsert(); _rowEditor.Children.Add(insert);
     }
 
     private void FavoriteSelected()
@@ -144,6 +171,98 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;
         var confirm = AccentButton("Commit exactly this row"); confirm.Click += async (_, _) => { try { confirm.IsEnabled = false; await _service.UpdateRowAsync(_session.DatabaseProfile, _page.Columns.Count > 0 ? (_tables.SelectedItem as TableChoice)!.Table : throw new InvalidOperationException(), _selectedRow.Key, values); _confirmation.IsVisible = false; _status.Text = "One row updated transactionally."; await LoadPageAsync(false); } catch (Exception exception) { Fail("Row update failed", exception); } finally { confirm.IsEnabled = true; } };
         _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Update every writable field of {_page.Table} where {_selectedRow.Display}? The primary key identifies exactly one row; no INSERT/DELETE is implied.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+    }
+
+    private void PrepareInsert()
+    {
+        if (!_creatingRow || _page is null || _session.DatabaseProfile is null || _tables.SelectedItem is not TableChoice selected) return;
+        var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in _editors)
+        {
+            if (pair.Value.Null.IsChecked == true) continue;
+            var column = _page.Columns.Single(value => value.Name.Equals(pair.Key, StringComparison.OrdinalIgnoreCase));
+            values[pair.Key] = ParseCell(column, pair.Value.Text.Text);
+        }
+        var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;
+        var confirm = AccentButton("Insert one new row"); confirm.Click += async (_, _) =>
+        {
+            try { confirm.IsEnabled = false; var result = await _service.InsertRowAsync(_session.DatabaseProfile, selected.Table, values); _confirmation.IsVisible = false; _status.Text = result.InsertedId > 0 ? $"One row inserted transactionally · generated ID {result.InsertedId}." : "One row inserted transactionally."; _creatingRow = false; await LoadPageAsync(false); }
+            catch (Exception exception) { Fail("Row insert failed", exception); } finally { confirm.IsEnabled = true; }
+        };
+        _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Insert one new row into {_page.Table} using {values.Count:N0} supplied field(s)? Existing primary keys are blocked; Crucible will not replace or upsert.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+    }
+
+    private void PrepareDelete()
+    {
+        if (_selectedRow is null || _page is null || _session.DatabaseProfile is null || _tables.SelectedItem is not TableChoice selected) return;
+        if (_selectedRow.Key.Count == 0) { _status.Text = "This table has no primary key; Crucible refuses an ambiguous delete."; return; }
+        var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;
+        var confirm = new Button { Content = $"Delete {_selectedRow.Display}" }; confirm.Click += async (_, _) =>
+        {
+            try { confirm.IsEnabled = false; await _service.DeleteRowAsync(_session.DatabaseProfile, selected.Table, _selectedRow.Key); _confirmation.IsVisible = false; _status.Text = "Exactly one row deleted transactionally."; await LoadPageAsync(false); }
+            catch (Exception exception) { Fail("Row delete failed", exception); } finally { confirm.IsEnabled = true; }
+        };
+        _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Permanently delete exactly one {_page.Table} row where {_selectedRow.Display}? Crucible preflights that the full primary key matches one row and rolls back if it does not.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+    }
+
+    private void AddRelationships()
+    {
+        if (_selectedRow is null || _page is null || _session.DatabaseCapabilities is null) return;
+        var relations = _session.DatabaseCapabilities.Relationships.Where(relation => relation.Touches(_page.Table)).ToArray();
+        _rowEditor.Children.Add(new TextBlock { Text = relations.Length == 0 ? "Relationships · none declared or recognized for this table" : $"Relationships · {relations.Length:N0}", FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 8, 0, 0) });
+        if (relations.Length == 0) return;
+        var buttons = new WrapPanel();
+        foreach (var relation in relations)
+        {
+            var outgoing = relation.FromTable.Equals(_page.Table, StringComparison.OrdinalIgnoreCase); var sourceColumn = outgoing ? relation.FromColumn : relation.ToColumn;
+            var targetTable = outgoing ? relation.ToTable : relation.FromTable; var targetColumn = outgoing ? relation.ToColumn : relation.FromColumn;
+            if (!_selectedRow.Values.TryGetValue(sourceColumn, out var value) || value is null) continue;
+            var button = new Button { Content = $"{targetTable}.{targetColumn} = {CellText(value)}  ·  {(relation.Declared ? "FK" : "inferred")}" };
+            button.Click += async (_, _) => await OpenRelatedAsync(targetTable, value); ToolTip.SetTip(button, relation.Description); buttons.Children.Add(button);
+        }
+        _rowEditor.Children.Add(buttons);
+    }
+
+    private async Task OpenRelatedAsync(string tableName, object value)
+    {
+        PopulateTables(); var choice = (_tables.ItemsSource as IEnumerable<TableChoice>)?.FirstOrDefault(item => item.Table.Name.Equals(tableName, StringComparison.OrdinalIgnoreCase));
+        if (choice is null) { _status.Text = $"Related table {tableName} is not available in the connected schema."; return; }
+        _tables.SelectedItem = choice; _rowSearch.Text = CellText(value); _offset = 0; await LoadPageAsync(true);
+    }
+
+    private async Task ExportTableAsync(SqlExportFormat format)
+    {
+        if (_session.DatabaseProfile is null || _tables.SelectedItem is not TableChoice selected) { _status.Text = "Connect SQL and select a table first."; return; }
+        try
+        {
+            var extension = format == SqlExportFormat.Csv ? "csv" : "jsonl";
+            var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = $"Export complete {selected.Table.Name} table", SuggestedFileName = $"{selected.Table.Name}.{extension}", FileTypeChoices = [new FilePickerFileType(format == SqlExportFormat.Csv ? "CSV" : "JSON Lines") { Patterns = [$"*.{extension}"] }] });
+            var path = file?.TryGetLocalPath(); if (path is null) return;
+            Begin($"Streaming complete {selected.Table.Name} export…"); var result = await new SqlTransferService().ExportTableAsync(_session.DatabaseProfile, selected.Table, path, format, overwrite: true, cancellationToken: _operation!.Token); _status.Text = $"Exported {result.Rows:N0} row(s) to {result.Path}.";
+        }
+        catch (OperationCanceledException) { _status.Text = "Table export cancelled."; }
+        catch (Exception exception) { Fail("Table export failed", exception); }
+        finally { End(); }
+    }
+
+    private async Task PrepareImportAsync()
+    {
+        if (_session.DatabaseProfile is null || _tables.SelectedItem is not TableChoice selected) { _status.Text = "Connect SQL and select a table first."; return; }
+        try
+        {
+            var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = $"Import CSV rows into {selected.Table.Name}", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("CSV") { Patterns = ["*.csv"] }] });
+            var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return;
+            var plan = await Task.Run(() => new SqlTransferService().AnalyzeCsv(path, selected.Table));
+            if (!plan.CanApply) { _status.Text = $"CSV import blocked: {string.Join(" ", plan.Findings)}"; return; }
+            var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;
+            var confirm = AccentButton($"Insert {plan.Rows:N0} row(s)"); confirm.Click += async (_, _) =>
+            {
+                try { confirm.IsEnabled = false; var inserted = await new SqlTransferService().ImportCsvAsync(_session.DatabaseProfile, selected.Table, plan.Path); _confirmation.IsVisible = false; _status.Text = $"Imported {inserted:N0} row(s) transactionally. Any duplicate/error would have rolled back the entire import."; await LoadPageAsync(false); }
+                catch (Exception exception) { Fail("CSV import failed", exception); } finally { confirm.IsEnabled = true; }
+            };
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Dry-run passed: {plan.Rows:N0} row(s), {plan.Columns.Count:N0} mapped column(s), zero structural findings. Insert into {selected.Table.Name}? This is insert-only and one transaction; duplicate keys never overwrite existing data.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+        }
+        catch (Exception exception) { Fail("CSV analysis failed", exception); }
     }
 
     private async Task RunQueryAsync()
@@ -189,6 +308,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private static bool IsReadOnly(string sql) => SqlWorkspaceService.IsReadOnlyStatement(sql);
     private static string FormatResult(SqlQueryResult result) { var builder = new StringBuilder(); builder.AppendLine(string.Join('\t', result.Columns)); foreach (var row in result.Rows) builder.AppendLine(string.Join('\t', row.Select(CellText))); return builder.ToString(); }
     private static string? EmptyNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private IStorageProvider Storage() => TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("SQL Studio is not attached to the main window.");
     private static Button Button(string text, Func<Task> action) { var button = new Button { Content = text }; button.Click += async (_, _) => await action(); return button; }
     private static Button AccentButton(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
     private static TextBlock Status(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), VerticalAlignment = VerticalAlignment.Center };
