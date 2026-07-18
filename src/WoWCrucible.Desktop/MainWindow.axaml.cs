@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private ClientWorkspaceView? _clientWorkspaceView;
     private TextureWorkspaceView? _textureWorkspaceView;
     private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
+    private DbdSchemaAuditView? _dbdSchemaAuditView;
     private CreatureWorkspaceView? _creatureWorkspaceView;
     private GameObjectWorkspaceView? _gameObjectWorkspaceView;
     private QuestWorkspaceView? _questWorkspaceView;
@@ -645,6 +646,16 @@ public partial class MainWindow : Window
             _layeredDbcWorkspaceView.StageOverridesRequested += (_, paths) => OpenPatchBuilderWithPaths(paths);
         }
         OpenFeatureWorkspace(_layeredDbcWorkspaceView, "DBC Layers & Promotion");
+    }
+    private void OpenDbdSchemasClick(object? sender, RoutedEventArgs e) => OpenDbdSchemaAudit();
+    public void OpenDbdSchemaAudit()
+    {
+        if (_dbdSchemaAuditView is null)
+        {
+            _dbdSchemaAuditView = new DbdSchemaAuditView(_workspaceSession);
+            _dbdSchemaAuditView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_dbdSchemaAuditView, "DBD Schemas & Audit");
     }
     private void OpenMpqWorkspaceClick(object? sender, RoutedEventArgs e)
         => OpenMpqWorkspace();

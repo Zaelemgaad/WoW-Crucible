@@ -18,6 +18,7 @@ internal sealed class DesktopSettings
     public string BaseDbcPath { get; set; } = string.Empty;
     public string OverrideDbcPath { get; set; } = string.Empty;
     public string SchemaDefinitionPath { get; set; } = string.Empty;
+    public string DbdDefinitionsPath { get; set; } = string.Empty;
     public string DatabaseHost { get; set; } = "127.0.0.1";
     public uint DatabasePort { get; set; } = 3306;
     public string DatabaseUser { get; set; } = string.Empty;
@@ -36,7 +37,7 @@ internal sealed class DesktopSettings
             {
                 using var legacy = JsonDocument.Parse(File.ReadAllText(CruciblePaths.SettingsFileForRead)); var root = legacy.RootElement;
                 settings.ServerRootPath = Fill(settings.ServerRootPath, root, "ServerRootPath"); settings.CoreDbcPath = Fill(settings.CoreDbcPath, root, "CoreDbcPath"); settings.ClientDataPath = Fill(settings.ClientDataPath, root, "ClientDataPath");
-                settings.ClientExecutablePath = Fill(settings.ClientExecutablePath, root, "ClientExecutablePath"); settings.ClientIndexPath = Fill(settings.ClientIndexPath, root, "ClientIndexPath"); settings.CoreSourcePath = Fill(settings.CoreSourcePath, root, "CoreSourcePath"); settings.SchemaDefinitionPath = Fill(settings.SchemaDefinitionPath, root, "SchemaDefinitionPath");
+                settings.ClientExecutablePath = Fill(settings.ClientExecutablePath, root, "ClientExecutablePath"); settings.ClientIndexPath = Fill(settings.ClientIndexPath, root, "ClientIndexPath"); settings.CoreSourcePath = Fill(settings.CoreSourcePath, root, "CoreSourcePath"); settings.SchemaDefinitionPath = Fill(settings.SchemaDefinitionPath, root, "SchemaDefinitionPath"); settings.DbdDefinitionsPath = Fill(settings.DbdDefinitionsPath, root, "DbdDefinitionsPath");
                 settings.ProcessedAssetLibraryPath = Fill(settings.ProcessedAssetLibraryPath, root, "ProcessedAssetLibraryPath");
                 settings.BaseDbcPath = Fill(settings.BaseDbcPath, root, "BaseDbcPath"); settings.OverrideDbcPath = Fill(settings.OverrideDbcPath, root, "OverrideDbcPath");
                 if (!desktopSettingsExist)

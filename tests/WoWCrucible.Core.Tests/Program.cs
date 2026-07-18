@@ -5,6 +5,41 @@ if (args.Length != 2)
     throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
 
 var itemDisplayPath = Path.Combine(args[1], "ItemDisplayInfo.dbc");
+var dbdFixture=Path.Combine(Path.GetTempPath(),$"crucible-dbd-{Guid.NewGuid():N}.dbd");
+try
+{
+    File.WriteAllText(dbdFixture,"""
+COLUMNS
+int ID
+string Name
+locstring Label_lang
+float Values
+
+BUILD 3.0.1.8303-3.3.5.12340
+$id$ID<32>
+Name
+Label_lang
+Values[2]
+
+BUILD 4.0.0.11792-4.3.4.15595
+$noninline,id$ID<32>
+Name
+Values[3]
+""");
+    var fixture=DbdSchemaService.Load(dbdFixture);var wrathColumns=DbdSchemaService.ResolveColumns(fixture,12340);var cataColumns=DbdSchemaService.ResolveColumns(fixture,15595);
+    if(wrathColumns.Count!=21||cataColumns.Count!=4||fixture.ForBuild(12340)?.Builds.Single().Start.Major!=3||fixture.ForBuild(15595)?.Builds.Single().Start.Major!=4)
+        throw new InvalidOperationException("DBD full-version build selection, localized-string expansion, arrays, or non-inline fields regressed.");
+}
+finally { if(File.Exists(dbdFixture))File.Delete(dbdFixture); }
+var workspaceRoot=Directory.GetParent(Directory.GetCurrentDirectory())?.FullName;var localDbdRoot=workspaceRoot is null?string.Empty:Path.Combine(workspaceRoot,"Tools","WoWDBDefs","definitions");
+if(Directory.Exists(localDbdRoot))
+{
+    var itemDisplayDbd=DbdSchemaService.Load(Path.Combine(localDbdRoot,"ItemDisplayInfo.dbd"));var charSectionsDbd=DbdSchemaService.Load(Path.Combine(localDbdRoot,"CharSections.dbd"));var spellDbd=DbdSchemaService.Load(Path.Combine(localDbdRoot,"Spell.dbd"));
+    if(DbdSchemaService.ResolveColumns(itemDisplayDbd,12340).Count!=25||DbdSchemaService.ResolveColumns(charSectionsDbd,12340).Count!=10||DbdSchemaService.ResolveColumns(spellDbd,12340).Count!=234)
+        throw new InvalidOperationException("WoWDBDefs build-range resolution did not expand the real build-12340 ItemDisplayInfo, CharSections, and Spell layouts to their exact WDBC field counts.");
+    var dbdAudit=DbdSchemaService.Audit(localDbdRoot,args[1],12340,args[0]);if(dbdAudit.Rows.Count<246||dbdAudit.Matches<236||dbdAudit.EmptyPlaceholders!=1||dbdAudit.Failures!=9||dbdAudit.Rows.Count(row=>row.Status==DbdAuditStatus.InvalidDefinition)>0)
+        throw new InvalidOperationException($"WoWDBDefs corpus audit was incomplete or invalid: rows={dbdAudit.Rows.Count}, matches={dbdAudit.Matches}, empty={dbdAudit.EmptyPlaceholders}, failures={dbdAudit.Failures}, invalid={dbdAudit.Rows.Count(row=>row.Status==DbdAuditStatus.InvalidDefinition)}.");
+}
 var spellTooltipCatalog=SpellTooltipService.Load(Path.Combine(args[1],"Spell.dbc"));
 if(spellTooltipCatalog.Records.Count<40000||!spellTooltipCatalog.Records.TryGetValue(133,out var fireballTooltip)||fireballTooltip.Name!="Fireball"||string.IsNullOrWhiteSpace(fireballTooltip.Description)||SpellTooltipService.Clean("|cffffffff  A\r\n B  |r")!="A B")
     throw new InvalidOperationException("Cached WotLK spell tooltip decoding did not preserve real names/descriptions or clean client color/whitespace codes.");

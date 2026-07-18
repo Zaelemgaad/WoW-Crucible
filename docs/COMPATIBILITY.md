@@ -2,6 +2,8 @@
 
 WoW Crucible's primary, verified client target is World of Warcraft 3.3.5a, build 12340. Client compatibility is profile-driven so community contributors can add targets without scattering build checks throughout the editor. Server compatibility is deliberately not fixed to a bundled repack, database dump, or historical core revision.
 
+WoWDBDefs `.dbd` build ranges are now a native schema source and corpus-audit layer for WDBC tables. This improves profile authoring and cross-expansion field validation, but it does not imply that post-WotLK DB2 container formats are already readable or writable; each container family still requires an explicit verified adapter.
+
 ## Client target profiles
 
 Built-in profiles currently describe:

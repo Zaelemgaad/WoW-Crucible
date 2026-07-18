@@ -109,6 +109,8 @@ For rapid triage, **Undecided only** hides recorded images, **Auto-advance** sel
 
 ```text
 wowcrucible dbc info <file.dbc>
+wowcrucible dbc dbd-info <file.dbd> <build> [--format=text|json]
+wowcrucible dbc schema-audit <definitions-root> <dbc-folder> <build> [--xml=schema.xml] [--only-problems] [--format=text|json]
 wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [--class=N] [--subclass=N] [--inventory=N] [--assets=processed-library] [--format=text|json]
 wowcrucible dbc spell-tooltip <Spell.dbc> <spell-id>... [--format=text|json]
 wowcrucible dbc item-equipped <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> <base-skin.blp|image> <output.png> --inventory=N --assets=processed-library [--source=name] [--overwrite]
@@ -127,6 +129,8 @@ wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id>
 ```
 
 `item-display` decodes the exact WotLK build-12340 `ItemDisplayInfo` record behind an SQL `item_template.displayid`. It reports both model names, model textures, inventory icons, all eight wearable texture components, geoset groups, helmet visibility masks, flags, spell/item visuals, particle color, and sound group. Class/subclass/inventory values order canonical object-component paths correctly; `--assets` checks only those bounded logical directories in a processed content-first library and reports every matching provenance source. Use `-` for the schema argument to use Crucible's validated built-in 25-field layout.
+
+`dbd-info` resolves one WoWDBDefs table for the requested full client expansion/build and prints its physical WDBC fields after array, localized-string, width, signedness, ID, and non-inline rules are applied. `schema-audit` compares every top-level DBC with the matching DBD build layout and optionally the existing WDBX XML corpus. An intentional zero-byte server placeholder is informational; missing build definitions and physical field-count disagreements produce review exit code `3`.
 
 `spell-tooltip` reads the exact build-12340 English spell name, subtext, description, and aura description for each requested ID. The Items & Sets tooltip keeps one cached catalog for the configured `Spell.dbc`, refreshes it only when the file changes, and uses these decoded fields for all five item spell slots instead of displaying bare numeric IDs. Runtime `$` tokens are preserved rather than guessed.
 
