@@ -18,6 +18,17 @@ if (!ClientPatchDeploymentService.InvalidateCache(deploymentFixture).Existed || 
 Directory.Delete(deploymentFixture, true); File.Delete(patchDeploymentSource);
 
 var textureFixture = Path.Combine(Path.GetTempPath(), $"crucible-native-textures-{Guid.NewGuid():N}"); Directory.CreateDirectory(textureFixture);
+var atomicExtractTarget = Path.Combine(textureFixture, "atomic-extract.bin"); File.WriteAllText(atomicExtractTarget, "known-good");
+try
+{
+    PatchArchiveService.ExtractFileAtomically(atomicExtractTarget, true,
+        temporary => { File.WriteAllText(temporary, "partial-garbage"); return false; },
+        () => throw new IOException("simulated native extraction failure"));
+    throw new InvalidOperationException("A simulated failed native extraction unexpectedly succeeded.");
+}
+catch (IOException exception) when (exception.Message.Contains("simulated native extraction failure", StringComparison.Ordinal)) { }
+if (File.ReadAllText(atomicExtractTarget) != "known-good" || Directory.EnumerateFiles(textureFixture, "*.extracting").Any())
+    throw new InvalidOperationException("Atomic MPQ extraction did not preserve the existing destination or clean its partial temporary file after failure.");
 var texturePixels = new byte[8 * 8 * 4];
 for (var y = 0; y < 8; y++) for (var x = 0; x < 8; x++)
 {
@@ -41,6 +52,10 @@ if (BlpTextureService.Inspect(autoBlp).Encoding != "DXT5" || BlpTextureService.V
 var emptyBlp = Path.Combine(textureFixture, "fixture-empty.blp"); File.WriteAllBytes(emptyBlp, []); var emptyResult = BlpTextureService.Validate(emptyBlp).Single();
 if (emptyResult.Valid || emptyResult.Error is null || !emptyResult.Error.Contains("zero-byte", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Zero-byte BLP validation did not report a precise extraction-artifact diagnosis.");
 File.Delete(emptyBlp);
+var zeroFilledBlp = Path.Combine(textureFixture, "fixture-zero-filled.blp"); File.WriteAllBytes(zeroFilledBlp, new byte[4096]); var zeroFilledResult = BlpTextureService.Validate(zeroFilledBlp).Single();
+if (zeroFilledResult.Valid || zeroFilledResult.Error is null || !zeroFilledResult.Error.Contains("only zero bytes", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Zero-filled source payload validation did not distinguish the invalid archive entry from an ordinary unknown signature.");
+File.Delete(zeroFilledBlp);
 var rawBlp = Path.Combine(textureFixture, "fixture-raw3.blp"); var rawBytes = new byte[148 + texturePixels.Length];
 System.Text.Encoding.ASCII.GetBytes("BLP2").CopyTo(rawBytes, 0); BitConverter.GetBytes((uint)1).CopyTo(rawBytes, 4); rawBytes[8] = 3; rawBytes[9] = 8; rawBytes[10] = 8;
 BitConverter.GetBytes((uint)8).CopyTo(rawBytes, 12); BitConverter.GetBytes((uint)8).CopyTo(rawBytes, 16); BitConverter.GetBytes((uint)148).CopyTo(rawBytes, 20); BitConverter.GetBytes((uint)texturePixels.Length).CopyTo(rawBytes, 84);
@@ -48,6 +63,10 @@ for (var pixel = 0; pixel < 64; pixel++) { rawBytes[148 + pixel * 4] = texturePi
 File.WriteAllBytes(rawBlp, rawBytes); var rawDecoded = BlpTextureService.Decode(rawBlp);
 if (BlpTextureService.Inspect(rawBlp).Encoding != "BGRA8888" || !rawDecoded.Pixels.SequenceEqual(texturePixels))
     throw new InvalidOperationException("Native raw BGRA BLP2 decoding changed channel or alpha bytes.");
+var truncatedBlp = Path.Combine(textureFixture, "fixture-truncated.blp"); File.WriteAllBytes(truncatedBlp, rawBytes[..200]); var truncatedResult = BlpTextureService.Validate(truncatedBlp).Single();
+if (truncatedResult.Valid || truncatedResult.Error is null || !truncatedResult.Error.Contains("Truncated/corrupt BLP payload", StringComparison.OrdinalIgnoreCase) || !truncatedResult.Error.Contains("physical file", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Truncated top-level BLP payload validation did not report declared-versus-physical size evidence.");
+File.Delete(truncatedBlp);
 var cumulativeBlp = Path.Combine(textureFixture, "fixture-cumulative-ends.blp"); var cumulativeBytes = File.ReadAllBytes(autoBlp);
 for (var mip = 0; mip < 16; mip++)
 {
@@ -67,6 +86,23 @@ Directory.CreateDirectory(Path.GetDirectoryName(nativeLibraryBlp)!); File.Copy(a
 var nativeRepair = BulkAssetLibraryService.RepairConversionsAsync(nativeLibrary, 1).GetAwaiter().GetResult();
 if (nativeRepair.NewlyConvertedPngs != 1 || nativeRepair.RemainingFailures != 0 || !File.Exists(Path.ChangeExtension(nativeLibraryBlp, ".png")))
     throw new InvalidOperationException("Bulk asset-library repair did not use the native BLP decoder without an external converter.");
+var artifactSourceRoot = Path.Combine(textureFixture, "artifact-source"); Directory.CreateDirectory(artifactSourceRoot);
+var artifactArchive = Path.Combine(artifactSourceRoot, "artifact-source.mpq"); var zeroSource = Path.Combine(textureFixture, "source-zero.blp"); File.WriteAllBytes(zeroSource, new byte[512]);
+new PatchArchiveService().Create(artifactArchive,
+[
+    new PatchEntry(autoBlp, @"Interface\Test\valid.blp"),
+    new PatchEntry(zeroSource, @"Interface\Test\zero.blp")
+]);
+var artifactLibrary = Path.Combine(textureFixture, "artifact-library"); var artifactPlan = BulkAssetLibraryService.CreatePlan(artifactSourceRoot, artifactLibrary, long.MaxValue);
+var artifactProvenance = $"artifact-source-{artifactPlan.Archives.Single().Identity}"; var artifactDirectory = Path.Combine(artifactLibrary, "Archives", "Content", "Interface", "Test", artifactProvenance); Directory.CreateDirectory(artifactDirectory);
+var partialProcessed = Path.Combine(artifactDirectory, "valid.blp"); File.WriteAllBytes(partialProcessed, File.ReadAllBytes(autoBlp)[..160]);
+var zeroProcessed = Path.Combine(artifactDirectory, "zero.blp"); File.WriteAllBytes(zeroProcessed, new byte[512]);
+var artifactDryRun = BulkAssetLibraryService.RepairArchiveArtifacts(artifactLibrary, false);
+if (artifactDryRun.InvalidArtifacts != 2 || artifactDryRun.Recovered != 1 || artifactDryRun.SourceInvalid != 1 || artifactDryRun.Quarantined != 0 || !File.Exists(partialProcessed) || !File.Exists(zeroProcessed))
+    throw new InvalidOperationException("Archive artifact repair dry run changed files or failed to distinguish a recoverable partial extraction from a source-invalid entry.");
+var artifactApplied = BulkAssetLibraryService.RepairArchiveArtifacts(artifactLibrary, true);
+if (artifactApplied.InvalidArtifacts != 2 || artifactApplied.Recovered != 1 || artifactApplied.SourceInvalid != 1 || artifactApplied.Quarantined != 1 || !File.Exists(partialProcessed) || File.Exists(zeroProcessed) || BlpTextureService.Validate(partialProcessed).Single().Valid == false || !Directory.EnumerateFiles(Path.Combine(artifactLibrary, "Reports", "InvalidArchiveArtifacts"), "zero.blp", SearchOption.AllDirectories).Any())
+    throw new InvalidOperationException("Archive artifact repair did not atomically recover the valid source or quarantine the proven source-invalid generated artifact.");
 Directory.Delete(textureFixture, true);
 
 var assetFixture = Path.Combine(Path.GetTempPath(), $"crucible-native-assets-{Guid.NewGuid():N}"); Directory.CreateDirectory(assetFixture);

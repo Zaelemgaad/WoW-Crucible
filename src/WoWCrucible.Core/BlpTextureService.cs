@@ -71,6 +71,8 @@ public static class BlpTextureService
         stream.Position = start;
         return magic.AsSpan().SequenceEqual("BLP2"u8) ? InspectBlp2(stream, sourceName, start)
             : magic.AsSpan().SequenceEqual("BLP1"u8) ? InspectBlp1(stream, sourceName, start)
+            : magic.All(value => value == 0) && ContainsOnlyZeroBytes(stream, start)
+                ? throw new InvalidDataException($"{sourceName} contains only zero bytes; the source payload is not a BLP texture.")
             : throw new InvalidDataException($"{sourceName} is not a BLP1 or BLP2 texture.");
     }
 
@@ -427,7 +429,9 @@ public static class BlpTextureService
             if (absoluteEnd > streamLength)
             {
                 if (mips.Count > 0) { warnings.Add($"Stopped before truncated trailing mip {index}, which extends {absoluteEnd - streamLength:N0} bytes past EOF."); break; }
-                throw new InvalidDataException($"Mip {index} extends {absoluteEnd - streamLength:N0} bytes past the end of the file.");
+                var physicalBytes = streamLength - streamStart;
+                throw new InvalidDataException($"Truncated/corrupt BLP payload: mip {index} declares offset {offset:N0} and size {size:N0} " +
+                    $"(ending at byte {offset + size:N0}), but the physical file is only {physicalBytes:N0} bytes; {absoluteEnd - streamLength:N0} byte(s) are missing.");
             }
             foreach (var range in ranges)
                 if (absoluteStart < range.End && absoluteEnd > range.Start)
@@ -567,6 +571,18 @@ public static class BlpTextureService
         var bytes = new byte[count];
         stream.ReadExactly(bytes);
         return bytes;
+    }
+
+    private static bool ContainsOnlyZeroBytes(Stream stream, long start)
+    {
+        stream.Position = start;
+        Span<byte> buffer = stackalloc byte[4096];
+        while (true)
+        {
+            var read = stream.Read(buffer);
+            if (read == 0) return true;
+            for (var index = 0; index < read; index++) if (buffer[index] != 0) return false;
+        }
     }
 
     private static string PrepareOutputPath(string outputPath, bool overwrite)

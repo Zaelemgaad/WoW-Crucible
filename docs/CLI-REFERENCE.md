@@ -37,6 +37,7 @@ wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]
 wowcrucible asset library-run <library-folder> [--workers=6]
 wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]
 wowcrucible asset library-repair <library-folder> [--workers=6]
+wowcrucible asset library-artifacts <library-folder> [--source-root=folder]... [--apply]
 wowcrucible asset library-layout <library-folder> [--apply]
 wowcrucible asset library-consolidate <library-folder> [--apply]
 wowcrucible asset library-catalog <library-folder>
@@ -70,6 +71,8 @@ wowcrucible asset library-status "G:\Crucible-Extras-Processed"
 Stopping `library-run` does not discard completed work. Run the same command again to resume past existing extraction/conversion outputs.
 
 Use `library-repair` after opening a library created by an older Crucible build or after native codec support expands. It never re-extracts MPQs; it retries only BLPs whose matching PNG is absent, refreshes the per-provenance failure lists, and rebuilds the catalog.
+
+Use `library-artifacts` when a prior extractor may have left truncated or zero-filled generated BLPs. It maps each invalid processed texture back through its provenance folder, re-extracts the exact logical path to isolated staging, and validates that source result. Archive provenance is accumulated in `asset-library-sources.json` across later plan replacements; for a library made by an older build, repeat `--source-root=folder` to reconstruct that registry from the original MPQ trees. The default is a non-mutating asset audit written to `Reports\archive-artifact-audit.json`. With `--apply`, a valid source replaces the artifact atomically; a source-invalid entry or repeatable extraction failure moves the generated artifact under `Reports\InvalidArchiveArtifacts` instead of deleting it. Unmapped files remain untouched. MPQ extraction itself always writes to a sibling temporary file now, so a native failure cannot publish a partial output or overwrite an existing good file.
 
 Asset libraries use a content-first comparison layout. For example, `Archives\patch-Y-id\Content\Character\BloodElf\Female\hair.png` becomes `Archives\Content\Character\BloodElf\Female\patch-Y-id\hair.png`, placing every source's version of the same content directory beside the others. `library-layout` migrates the older archive-first layout: it is a non-mutating conflict/count dry run by default; add `--apply` to perform the same-volume migration and rebuild the catalog. Existing destinations are never overwritten.
 

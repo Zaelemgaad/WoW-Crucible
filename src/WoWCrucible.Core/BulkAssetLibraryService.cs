@@ -9,8 +9,15 @@ namespace WoWCrucible.Core;
 public sealed record BulkAssetArchivePlan(string SourcePath, string RelativePath, string Identity, long ArchiveBytes, bool Eligible, int Entries, int BlpFiles, long LogicalBytes, string? Error);
 public sealed record BulkAssetLibraryPlan(string SourceRoot, string LibraryRoot, long MaximumArchiveBytes, DateTimeOffset CreatedUtc, int LooseBlpFiles, IReadOnlyList<BulkAssetArchivePlan> Archives);
 public sealed record BulkAssetLibraryCheckpoint(DateTimeOffset UpdatedUtc, IReadOnlyList<string> CompletedArchiveIds, IReadOnlyDictionary<string, string> Failures, int ConvertedPngFiles);
+public sealed record BulkAssetArchiveSourceRegistry(int FormatVersion, DateTimeOffset UpdatedUtc, IReadOnlyList<BulkAssetArchivePlan> Archives);
 public sealed record BulkAssetLibraryRunResult(int CompletedArchives, int FailedArchives, int CopiedLooseBlps, int ConvertedPngs, int ConversionFailures, string CatalogPath, string CheckpointPath);
 public sealed record BulkAssetConversionRepairResult(int NewlyConvertedPngs, int RemainingFailures, string CatalogPath, string CheckpointPath);
+public sealed record BulkAssetArchiveArtifact(
+    string ProcessedPath, string LogicalPath, string Provenance, string? SourceArchive, string ProcessedDiagnosis,
+    string SourceDiagnosis, string Action, string Sha256);
+public sealed record BulkAssetArchiveArtifactRepairResult(
+    bool Applied, int InvalidArtifacts, int Recovered, int Quarantined, int SourceInvalid, int ExtractionFailures, int Unmapped,
+    string ReportPath, string CatalogPath, IReadOnlyList<BulkAssetArchiveArtifact> Artifacts);
 public sealed record BulkAssetLayoutResult(bool Applied, int SourceFolders, long Files, long Bytes, long MovedFiles, int Conflicts, string CatalogPath);
 public sealed record BulkAssetExtractedImportResult(string Provenance, long SourceFiles, long SourceBytes, long ImportedFiles, int ConvertedPngs, int ConversionFailures, string CatalogPath);
 [JsonConverter(typeof(JsonStringEnumConverter<LooseAssetDisposition>))]
@@ -25,6 +32,7 @@ public static class BulkAssetLibraryService
 {
     private const string PlanFileName = "asset-library-plan.json";
     private const string CheckpointFileName = "asset-library-checkpoint.json";
+    private const string SourceRegistryFileName = "asset-library-sources.json";
     private static readonly HashSet<string> ContentAnchors = new(StringComparer.OrdinalIgnoreCase)
     {
         "character-fromscratch", "Character", "Creature", "Item", "Interface", "World", "Textures", "XTextures", "Tileset", "Sound", "Spell", "Spells", "Shaders", "_Shaders", "Interiors", "Dungeons", "Environments", "Buildings", "Particles", "Cameras", "Fonts", "DBFilesClient"
@@ -68,7 +76,7 @@ public static class BulkAssetLibraryService
             progress?.Report((index + 1, mpqs.Length, relative));
         }
         var plan = new BulkAssetLibraryPlan(sourceRoot, libraryRoot, maximumArchiveBytes, DateTimeOffset.UtcNow, looseBlps, archives);
-        Directory.CreateDirectory(libraryRoot); WriteJsonAtomic(Path.Combine(libraryRoot, PlanFileName), plan); return plan;
+        Directory.CreateDirectory(libraryRoot); WriteJsonAtomic(Path.Combine(libraryRoot, PlanFileName), plan); RegisterArchiveSources(libraryRoot, archives); return plan;
     }
 
     public static BulkAssetLibraryPlan LoadPlan(string libraryRoot)
@@ -105,15 +113,18 @@ public static class BulkAssetLibraryService
                 progress?.Report(("Extract", done, eligible.Length, archive.RelativePath));
                 var entries = archiveService.ListFiles(archive.SourcePath).Where(entry => !entry.IsMetadata).ToArray();
                 var rejectedEntries = new List<string>();
-                archiveService.Extract(archive.SourcePath, contentRoot, entries, null, cancellationToken, overwriteExisting: false, preserveLocaleVariants: true,
+                archiveService.Extract(archive.SourcePath, contentRoot, entries, null, cancellationToken, overwriteExisting: true, preserveLocaleVariants: true,
                     extractionFailure: (entry, exception) => rejectedEntries.Add($"{entry.ArchivePath}: {exception.Message}"));
                 var conversion = await ConvertBlpsAsync(contentRoot, conversionWorkers, cancellationToken);
                 converted += conversion.Converted; conversionFailures += conversion.Failed;
                 var relocation = RelocateContent(plan.LibraryRoot, ArchiveFolderName(archive), contentRoot, true, cancellationToken);
                 if (relocation.Conflicts > 0) throw new IOException($"Content-first relocation found {relocation.Conflicts:N0} existing destination conflict(s); nothing was overwritten.");
-                completed.Add(archive.Identity);
-                if (rejectedEntries.Count == 0) failures.Remove(archive.Identity);
-                else failures[archive.Identity] = $"{rejectedEntries.Count:N0} entry failure(s): {string.Join(" | ", rejectedEntries.Take(10))}";
+                if (rejectedEntries.Count == 0) { completed.Add(archive.Identity); failures.Remove(archive.Identity); }
+                else
+                {
+                    completed.Remove(archive.Identity);
+                    failures[archive.Identity] = $"{rejectedEntries.Count:N0} entry failure(s): {string.Join(" | ", rejectedEntries.Take(10))}";
+                }
             }
             catch (Exception exception) { failures[archive.Identity] = exception.Message; }
             WriteCheckpoint(checkpointPath, completed, failures, converted);
@@ -149,6 +160,131 @@ public static class BulkAssetLibraryService
             .Count(path => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase) && File.Exists(Path.ChangeExtension(path, ".png")));
         WriteCheckpoint(checkpointPath, (prior?.CompletedArchiveIds ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase), new Dictionary<string, string>(prior?.Failures ?? new Dictionary<string, string>()), matchingPngs);
         return new(converted, failed, WriteCatalog(plan, cancellationToken), checkpointPath);
+    }
+
+    public static BulkAssetArchiveArtifactRepairResult RepairArchiveArtifacts(string libraryRoot, bool apply, IEnumerable<string>? additionalSourceRoots = null,
+        IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
+    {
+        libraryRoot = Path.GetFullPath(libraryRoot);
+        using var operationLock = AcquireOperationLock(libraryRoot);
+        var plan = LoadPlan(libraryRoot); var contentRoot = Path.Combine(plan.LibraryRoot, "Archives", "Content");
+        var reportsRoot = Path.Combine(plan.LibraryRoot, "Reports"); Directory.CreateDirectory(reportsRoot);
+        var reportPath = Path.Combine(reportsRoot, "archive-artifact-audit.json");
+        if (!Directory.Exists(contentRoot))
+        {
+            var empty = new BulkAssetArchiveArtifactRepairResult(apply, 0, 0, 0, 0, 0, 0, reportPath, WriteCatalog(plan, cancellationToken), []);
+            WriteJsonAtomic(reportPath, empty); return empty;
+        }
+
+        var invalid = new List<(string Path, string Diagnosis)>();
+        foreach (var path in Directory.EnumerateFiles(contentRoot, "*", SearchOption.AllDirectories)
+                     .Where(path => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase) && !File.Exists(Path.ChangeExtension(path, ".png"))))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try { _ = BlpTextureService.Inspect(path); }
+            catch (Exception exception) { invalid.Add((path, exception.Message)); }
+        }
+
+        var knownArchives = LoadRegisteredArchiveSources(plan).Concat(DiscoverArchiveSources(additionalSourceRoots))
+            .GroupBy(archive => archive.Identity, StringComparer.OrdinalIgnoreCase).Select(group => group.Last()).ToArray();
+        RegisterArchiveSources(plan.LibraryRoot, knownArchives);
+        var archives = knownArchives.GroupBy(ArchiveFolderName, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+        var archivesByIdentity = knownArchives.GroupBy(archive => archive.Identity, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+        var entryCache = new Dictionary<string, (IReadOnlyList<MpqFileEntry> Entries, string? Error)>(StringComparer.OrdinalIgnoreCase);
+        var service = new PatchArchiveService(); var results = new List<BulkAssetArchiveArtifact>(invalid.Count);
+        var recovered = 0; var quarantined = 0; var sourceInvalid = 0; var extractionFailures = 0; var unmapped = 0;
+        var stagingRoot = Path.Combine(plan.LibraryRoot, ".staging", "ArtifactRepair");
+        var prepared = new List<PreparedArchiveArtifact>(invalid.Count);
+        try
+        {
+            for (var index = 0; index < invalid.Count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested(); var artifact = invalid[index];
+                var relative = Path.GetRelativePath(contentRoot, artifact.Path); var parts = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var provenance = parts.Length >= 2 ? parts[^2] : string.Empty;
+                var logicalPath = parts.Length >= 2 ? Path.Combine([.. parts[..^2], parts[^1]]).Replace(Path.DirectorySeparatorChar, '\\') : Path.GetFileName(artifact.Path);
+                var hash = Sha256(artifact.Path);
+                archives.TryGetValue(provenance, out var archive);
+                if (archive is null && ProvenanceIdentity(provenance) is { } provenanceIdentity) archivesByIdentity.TryGetValue(provenanceIdentity, out archive);
+                if (archive is null || !File.Exists(archive.SourcePath))
+                {
+                    unmapped++; results.Add(new(artifact.Path, logicalPath, provenance, archive?.SourcePath, artifact.Diagnosis,
+                        archive is null ? "No source archive matches the provenance folder." : "The recorded source archive no longer exists.", "LeftInPlace", hash)); continue;
+                }
+
+                if (!entryCache.TryGetValue(archive.Identity, out var cachedIndex))
+                {
+                    try { cachedIndex = (service.ListFiles(archive.SourcePath).Where(entry => !entry.IsMetadata).ToArray(), null); }
+                    catch (Exception exception) { cachedIndex = ([], exception.Message); }
+                    entryCache[archive.Identity] = cachedIndex;
+                }
+                if (cachedIndex.Error is not null)
+                {
+                    extractionFailures++; var action = QuarantineGeneratedArtifact(artifact.Path, contentRoot, reportsRoot, apply) ? "Quarantined" : apply ? "QuarantineFailed" : "WouldQuarantine";
+                    if (action == "Quarantined") quarantined++;
+                    results.Add(new(artifact.Path, logicalPath, provenance, archive.SourcePath, artifact.Diagnosis, cachedIndex.Error, action, hash)); continue;
+                }
+                var entry = cachedIndex.Entries.FirstOrDefault(candidate => PatchInputMapper.NormalizeArchivePath(candidate.ArchivePath).Equals(logicalPath, StringComparison.OrdinalIgnoreCase));
+                if (entry is null)
+                {
+                    unmapped++; results.Add(new(artifact.Path, logicalPath, provenance, archive.SourcePath, artifact.Diagnosis,
+                        "The source archive index has no matching logical path.", "LeftInPlace", hash)); continue;
+                }
+                prepared.Add(new(artifact.Path, artifact.Diagnosis, logicalPath, provenance, hash, archive, entry));
+            }
+
+            var processed = results.Count;
+            progress?.Report((processed, invalid.Count, $"Mapped {prepared.Count:N0} artifact(s) to {prepared.Select(item => item.Archive.Identity).Distinct(StringComparer.OrdinalIgnoreCase).Count():N0} source archive(s)"));
+            foreach (var group in prepared.GroupBy(item => item.Archive.Identity, StringComparer.OrdinalIgnoreCase))
+            {
+                cancellationToken.ThrowIfCancellationRequested(); var batch = group.ToArray(); var archive = batch[0].Archive;
+                var archiveStaging = Path.Combine(stagingRoot, archive.Identity); var extractionErrors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    service.Extract(archive.SourcePath, archiveStaging, batch.Select(item => item.Entry), cancellationToken: cancellationToken, overwriteExisting: true,
+                        extractionFailure: (entry, exception) => extractionErrors[PatchInputMapper.NormalizeArchivePath(entry.ArchivePath)] = exception.Message);
+                }
+                catch (Exception exception)
+                {
+                    foreach (var item in batch) extractionErrors.TryAdd(item.LogicalPath, exception.Message);
+                }
+
+                foreach (var item in batch)
+                {
+                    cancellationToken.ThrowIfCancellationRequested(); processed++; progress?.Report((processed, invalid.Count, item.LogicalPath));
+                    var extractedPath = Path.Combine(archiveStaging, item.LogicalPath.Replace('\\', Path.DirectorySeparatorChar));
+                    try
+                    {
+                        if (extractionErrors.TryGetValue(item.LogicalPath, out var extractionError)) throw new IOException(extractionError);
+                        if (!File.Exists(extractedPath)) throw new IOException("The source archive produced no output file for this entry.");
+                        _ = BlpTextureService.Inspect(extractedPath);
+                        if (apply)
+                        {
+                            Directory.CreateDirectory(Path.GetDirectoryName(item.ProcessedPath)!);
+                            File.Move(extractedPath, item.ProcessedPath, true); TryDelete(Path.ChangeExtension(item.ProcessedPath, ".png"));
+                        }
+                        recovered++; results.Add(new(item.ProcessedPath, item.LogicalPath, item.Provenance, archive.SourcePath, item.ProcessedDiagnosis,
+                            "The source archive produced a structurally valid BLP.", apply ? "Recovered" : "WouldRecover", item.Sha256));
+                    }
+                    catch (Exception exception)
+                    {
+                        var extractedInvalid = File.Exists(extractedPath);
+                        if (extractedInvalid) sourceInvalid++; else extractionFailures++;
+                        var action = QuarantineGeneratedArtifact(item.ProcessedPath, contentRoot, reportsRoot, apply) ? "Quarantined" : apply ? "QuarantineFailed" : "WouldQuarantine";
+                        if (action == "Quarantined") quarantined++;
+                        results.Add(new(item.ProcessedPath, item.LogicalPath, item.Provenance, archive.SourcePath, item.ProcessedDiagnosis,
+                            extractedInvalid ? $"The source entry is itself invalid: {exception.Message}" : exception.Message, action, item.Sha256));
+                    }
+                    finally { TryDelete(extractedPath); }
+                }
+                if (Directory.Exists(archiveStaging)) RemoveEmptyDirectories(archiveStaging, plan.LibraryRoot);
+            }
+        }
+        finally { if (Directory.Exists(stagingRoot)) RemoveEmptyDirectories(stagingRoot, plan.LibraryRoot); }
+
+        var catalog = apply ? WriteCatalog(plan, cancellationToken) : Path.Combine(plan.LibraryRoot, "asset-catalog.csv");
+        var result = new BulkAssetArchiveArtifactRepairResult(apply, invalid.Count, recovered, quarantined, sourceInvalid, extractionFailures, unmapped, reportPath, catalog, results);
+        WriteJsonAtomic(reportPath, result); return result;
     }
 
     public static Task<BulkAssetExtractedImportResult> ImportExtractedArchiveAsync(string sourceRoot, string libraryRoot, string provenance,
@@ -509,6 +645,47 @@ public static class BulkAssetLibraryService
         return destination;
     }
 
+    private static IReadOnlyList<BulkAssetArchivePlan> LoadRegisteredArchiveSources(BulkAssetLibraryPlan plan)
+    {
+        var registryPath = Path.Combine(plan.LibraryRoot, SourceRegistryFileName);
+        var registered = File.Exists(registryPath)
+            ? JsonSerializer.Deserialize<BulkAssetArchiveSourceRegistry>(File.ReadAllText(registryPath))?.Archives ?? []
+            : [];
+        return registered.Concat(plan.Archives).GroupBy(archive => archive.Identity, StringComparer.OrdinalIgnoreCase).Select(group => group.Last()).ToArray();
+    }
+
+    private static IEnumerable<BulkAssetArchivePlan> DiscoverArchiveSources(IEnumerable<string>? sourceRoots)
+    {
+        if (sourceRoots is null) yield break;
+        foreach (var sourceRoot in sourceRoots.Where(root => !string.IsNullOrWhiteSpace(root)).Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!Directory.Exists(sourceRoot)) throw new DirectoryNotFoundException($"Archive source discovery root does not exist: {sourceRoot}");
+            foreach (var sourcePath in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories).Where(path => Path.GetExtension(path).Equals(".mpq", StringComparison.OrdinalIgnoreCase)))
+            {
+                var info = new FileInfo(sourcePath); var relative = Path.GetRelativePath(sourceRoot, sourcePath);
+                yield return new(sourcePath, relative, Identity(relative, info.Length, info.LastWriteTimeUtc.Ticks), info.Length, true, 0, 0, 0, null);
+            }
+        }
+    }
+
+    private static void RegisterArchiveSources(string libraryRoot, IEnumerable<BulkAssetArchivePlan> archives)
+    {
+        var incoming = archives.ToArray(); if (incoming.Length == 0) return;
+        var path = Path.Combine(Path.GetFullPath(libraryRoot), SourceRegistryFileName);
+        var existing = File.Exists(path) ? JsonSerializer.Deserialize<BulkAssetArchiveSourceRegistry>(File.ReadAllText(path))?.Archives ?? [] : [];
+        var merged = existing.Concat(incoming).GroupBy(archive => archive.Identity, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.Last()).OrderBy(archive => archive.RelativePath, StringComparer.OrdinalIgnoreCase).ToArray();
+        WriteJsonAtomic(path, new BulkAssetArchiveSourceRegistry(1, DateTimeOffset.UtcNow, merged));
+    }
+
+    private static string? ProvenanceIdentity(string provenance)
+    {
+        var separator = provenance.LastIndexOf('-');
+        if (separator < 0 || provenance.Length - separator - 1 != 12) return null;
+        var candidate = provenance[(separator + 1)..];
+        return candidate.All(Uri.IsHexDigit) ? candidate.ToLowerInvariant() : null;
+    }
+
     private static bool FilesEqual(string left, string right)
     {
         var leftInfo = new FileInfo(left); var rightInfo = new FileInfo(right);
@@ -524,6 +701,33 @@ public static class BulkAssetLibraryService
             if (leftRead == 0) return true;
             if (!leftBuffer.AsSpan(0, leftRead).SequenceEqual(rightBuffer.AsSpan(0, rightRead))) return false;
         }
+    }
+
+    private static bool QuarantineGeneratedArtifact(string path, string contentRoot, string reportsRoot, bool apply)
+    {
+        if (!apply || !File.Exists(path)) return false;
+        EnsureInside(contentRoot, path);
+        var relative = Path.GetRelativePath(contentRoot, path);
+        var destination = Path.GetFullPath(Path.Combine(reportsRoot, "InvalidArchiveArtifacts", relative));
+        EnsureInside(Path.Combine(reportsRoot, "InvalidArchiveArtifacts"), destination);
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        if (File.Exists(destination))
+        {
+            if (FilesEqual(path, destination)) { File.Delete(path); return true; }
+            destination = ContentVariantPath(destination, path, true);
+        }
+        File.Move(path, destination, false); TryDelete(Path.ChangeExtension(path, ".png")); return true;
+    }
+
+    private static string Sha256(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
     }
 
     private static void RemoveEmptyDirectories(string root, string libraryRoot)
@@ -648,4 +852,6 @@ public static class BulkAssetLibraryService
     {
         public string SourcePath { get; } = sourcePath; public string DestinationPath { get; } = destinationPath; public bool ExactDuplicate { get; set; }
     }
+    private sealed record PreparedArchiveArtifact(string ProcessedPath, string ProcessedDiagnosis, string LogicalPath, string Provenance, string Sha256,
+        BulkAssetArchivePlan Archive, MpqFileEntry Entry);
 }

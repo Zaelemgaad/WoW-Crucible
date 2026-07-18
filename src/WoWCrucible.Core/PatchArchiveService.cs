@@ -204,15 +204,39 @@ public sealed class PatchArchiveService
                     throw new InvalidOperationException($"Unsafe archive path: {internalPath}");
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
                 if (!overwriteExisting && File.Exists(destination)) { progress?.Report((index + 1, entries.Length, outputPath)); continue; }
-                if (!Native.SFileExtractFile(archive, internalPath, destination, 0))
+                try
                 {
-                    try { ThrowNative($"extract '{internalPath}'"); }
-                    catch (Exception exception) when (extractionFailure is not null) { extractionFailure(entries[index], exception); }
+                    ExtractFileAtomically(destination, overwriteExisting,
+                        temporary => Native.SFileExtractFile(archive, internalPath, temporary, 0),
+                        () => ThrowNative($"extract '{internalPath}'"));
                 }
+                catch (Exception exception) when (extractionFailure is not null) { extractionFailure(entries[index], exception); }
                 progress?.Report((index + 1, entries.Length, outputPath));
             }
         }
         finally { Native.SFileCloseArchive(archive); }
+    }
+
+    internal static void ExtractFileAtomically(string destination, bool overwriteExisting, Func<string, bool> extractToTemporary, Action throwExtractionError)
+    {
+        destination = Path.GetFullPath(destination);
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        var temporary = destination + $".{Environment.ProcessId}.{Guid.NewGuid():N}.extracting";
+        try
+        {
+            if (!extractToTemporary(temporary))
+            {
+                throwExtractionError();
+                throw new IOException($"Archive extraction failed without reporting an operating-system error: {destination}");
+            }
+            if (!File.Exists(temporary)) throw new IOException($"Archive extraction reported success but created no file: {destination}");
+            File.Move(temporary, destination, overwriteExisting);
+        }
+        catch
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+            throw;
+        }
     }
 
     public void Update(string archivePath, IEnumerable<PatchEntry> sourceEntries)
