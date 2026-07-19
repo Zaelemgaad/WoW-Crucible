@@ -139,6 +139,7 @@ public sealed class M2PreviewView : UserControl, IDisposable
 internal sealed class M2PreviewCanvas : Control, IDisposable
 {
     private static readonly ConcurrentDictionary<string, byte> LoggedParticleFailures = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, byte> LoggedRibbonFailures = new(StringComparer.Ordinal);
     private sealed record MountedModel(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? Texture, string Label, int? ParentAttachmentIndex);
     private M2PreviewGeometry? _geometry;
     private SKBitmap? _texture;
@@ -503,53 +504,110 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                 }
             }
 
+            string? ribbonFailure = null;
+            var displayedRibbonSections = 0;
+            var ribbonEmitterCount = sources.Sum(source => source.Geometry.RibbonEmitters.Count);
+            for (var effectSourceIndex = 0; effectSourceIndex < sources.Count; effectSourceIndex++)
+            {
+                var effectSource = sources[effectSourceIndex]; IReadOnlyList<M2PreviewRibbonTrail> ribbonTrails;
+                try { ribbonTrails = M2RibbonPreviewService.BuildTrails(effectSource.Geometry, effectSourceIndex == 0 ? pose : null); }
+                catch (Exception exception) when (exception is InvalidDataException or NotSupportedException)
+                {
+                    ribbonTrails = []; ribbonFailure ??= exception.Message;
+                    var key = effectSource.Geometry.ModelPath + "\0" + exception.Message;
+                    if (LoggedRibbonFailures.TryAdd(key, 0)) DesktopCrashLogger.Log($"M2 ribbon preview unavailable: {effectSource.Geometry.ModelPath}", exception);
+                }
+                foreach (var trail in ribbonTrails)
+                {
+                    if (trail.Sections.Count < 2) continue;
+                    var positions = new SKPoint[trail.Sections.Count * 2]; var coordinates = new SKPoint[positions.Length]; var colors = new SKColor[positions.Length]; var visible = true;
+                    var tint = new SKColor(Channel(trail.Color.X * 255), Channel(trail.Color.Y * 255), Channel(trail.Color.Z * 255), Channel(trail.Color.W * 255));
+                    for (var sectionIndex = 0; sectionIndex < trail.Sections.Count; sectionIndex++)
+                    {
+                        var section = trail.Sections[sectionIndex]; AddPoint(section.Center + section.Up * section.Above, sectionIndex * 2, section.TextureU, 0); AddPoint(section.Center - section.Up * section.Below, sectionIndex * 2 + 1, section.TextureU, 1);
+                    }
+                    if (!visible) continue;
+                    var blend = trail.BlendMode switch { 3 or 4 => SKBlendMode.Plus, 5 or 6 => SKBlendMode.Modulate, _ => SKBlendMode.SrcOver };
+                    using var ribbonPaint = new SKPaint { IsAntialias = true, BlendMode = blend, Color = tint };
+                    var ribbonTexture = effectSource.ManualTexture;
+                    if (ribbonTexture is null) effectSource.MaterialTextures?.TryGetValue(trail.TextureDefinitionIndex, out ribbonTexture);
+                    if (ribbonTexture is not null)
+                    {
+                        for (var index = 0; index < coordinates.Length; index++) coordinates[index] = new(coordinates[index].X * ribbonTexture.Width, coordinates[index].Y * ribbonTexture.Height);
+                        using var texturedMesh = SKVertices.CreateCopy(SKVertexMode.TriangleStrip, positions, coordinates, colors); using var shader = SKShader.CreateBitmap(ribbonTexture, SKShaderTileMode.Repeat, SKShaderTileMode.Clamp);
+                        ribbonPaint.Shader = shader; canvas.DrawVertices(texturedMesh, SKBlendMode.Modulate, ribbonPaint);
+                    }
+                    else { using var ribbonMesh = SKVertices.CreateCopy(SKVertexMode.TriangleStrip, positions, coordinates, colors); canvas.DrawVertices(ribbonMesh, SKBlendMode.Src, ribbonPaint); }
+                    displayedRibbonSections += trail.Sections.Count;
+
+                    void AddPoint(Vector3 sourcePoint, int destination, float u, float v)
+                    {
+                        var mountedPoint = Vector3.Transform(sourcePoint, effectSource.Transform); Vector3 point;
+                        if (useNativeCamera)
+                        {
+                            var view = cameraProjection!.ToViewPoint(Vector3.Transform(mountedPoint, sceneTransform));
+                            if (!cameraProjection.ContainsDepth(view.Y)) { visible = false; return; }
+                            point = cameraProjection.Project(view);
+                        }
+                        else point = Vector3.Transform(mountedPoint - center, orbitRotation);
+                        positions[destination] = new(width * 0.5f + point.X * scale, height * 0.5f - point.Z * scale); coordinates[destination] = new(u, v); colors[destination] = tint;
+                    }
+                }
+            }
+
             IReadOnlyList<M2PreviewParticleSprite> particleSprites;
             string? particleFailure = null;
-            try { particleSprites = M2ParticlePreviewService.BuildSprites(geometry, pose); }
-            catch (Exception exception) when (exception is InvalidDataException or NotSupportedException)
+            var projectedParticles = new List<ProjectedParticle>(); var particleEmitterCount = sources.Sum(source => source.Geometry.ParticleEmitters.Count);
+            for (var effectSourceIndex = 0; effectSourceIndex < sources.Count; effectSourceIndex++)
             {
-                particleSprites = [];
-                particleFailure = exception.Message;
-                var key = geometry.ModelPath + "\0" + exception.Message;
-                if (LoggedParticleFailures.TryAdd(key, 0)) DesktopCrashLogger.Log($"M2 particle preview unavailable: {geometry.ModelPath}", exception);
-            }
-            var projectedParticles = new List<ProjectedParticle>(particleSprites.Count);
-            foreach (var particle in particleSprites)
-            {
-                Vector3 point;
-                if (useNativeCamera)
+                var effectSource = sources[effectSourceIndex];
+                try { particleSprites = M2ParticlePreviewService.BuildSprites(effectSource.Geometry, effectSourceIndex == 0 ? pose : null); }
+                catch (Exception exception) when (exception is InvalidDataException or NotSupportedException)
                 {
-                    var view = cameraProjection!.ToViewPoint(Vector3.Transform(particle.Position, sceneTransform));
-                    if (!cameraProjection.ContainsDepth(view.Y)) continue;
-                    point = cameraProjection.Project(view);
+                    particleSprites = []; particleFailure ??= exception.Message;
+                    var key = effectSource.Geometry.ModelPath + "\0" + exception.Message;
+                    if (LoggedParticleFailures.TryAdd(key, 0)) DesktopCrashLogger.Log($"M2 particle preview unavailable: {effectSource.Geometry.ModelPath}", exception);
                 }
-                else point = Vector3.Transform(particle.Position - center, orbitRotation);
-                var x = width * 0.5f + point.X * scale; var y = height * 0.5f - point.Z * scale;
-                var radius = Math.Clamp(particle.Size * scale, 0.5f, 256f);
-                if (x + radius < 0 || x - radius > width || y + radius < 0 || y - radius > height) continue;
-                projectedParticles.Add(new(point.Y, x, y, radius, particle));
+                foreach (var particle in particleSprites)
+                {
+                    var mountedPosition = Vector3.Transform(particle.Position, effectSource.Transform); Vector3 point;
+                    if (useNativeCamera) { var view = cameraProjection!.ToViewPoint(Vector3.Transform(mountedPosition, sceneTransform)); if (!cameraProjection.ContainsDepth(view.Y)) continue; point = cameraProjection.Project(view); }
+                    else point = Vector3.Transform(mountedPosition - center, orbitRotation);
+                    var x = width * 0.5f + point.X * scale; var y = height * 0.5f - point.Z * scale; var radius = Math.Clamp(particle.Size * scale, 0.5f, 256f);
+                    if (x + radius < 0 || x - radius > width || y + radius < 0 || y - radius > height) continue;
+                    projectedParticles.Add(new(point.Y, x, y, radius, effectSourceIndex, particle));
+                }
             }
             projectedParticles.Sort(static (left, right) => right.Depth.CompareTo(left.Depth));
-            foreach (var projected in projectedParticles)
+            for (var start = 0; start < projectedParticles.Count;)
             {
-                var particle = projected.Sprite;
-                var tint = new SKColor(Channel(particle.Color.X * 255), Channel(particle.Color.Y * 255), Channel(particle.Color.Z * 255), Channel(particle.Color.W * 255));
-                var blend = particle.BlendMode switch { 3 or 4 => SKBlendMode.Plus, 5 or 6 => SKBlendMode.Modulate, _ => SKBlendMode.SrcOver };
-                using var particlePaint = new SKPaint { IsAntialias = true, BlendMode = blend, Color = tint };
-                particlePaint.ColorFilter = SKColorFilter.CreateBlendMode(tint, SKBlendMode.Modulate);
-                canvas.Save();
-                if (Math.Abs(particle.Rotation) > 0.0001f) canvas.RotateRadians(particle.Rotation, projected.X, projected.Y);
-                var destination = new SKRect(projected.X - projected.Radius, projected.Y - projected.Radius, projected.X + projected.Radius, projected.Y + projected.Radius);
-                if (materialTextures.TryGetValue(particle.TextureDefinitionIndex, out var particleTexture))
+                var keySource = projectedParticles[start].SourceIndex; var keyTexture = projectedParticles[start].Sprite.TextureDefinitionIndex; var keyBlend = projectedParticles[start].Sprite.BlendMode; var end = start + 1;
+                while (end < projectedParticles.Count && projectedParticles[end].SourceIndex == keySource && projectedParticles[end].Sprite.TextureDefinitionIndex == keyTexture && projectedParticles[end].Sprite.BlendMode == keyBlend) end++;
+                var blend = keyBlend switch { 3 or 4 => SKBlendMode.Plus, 5 or 6 => SKBlendMode.Modulate, _ => SKBlendMode.SrcOver };
+                using var particlePaint = new SKPaint { IsAntialias = true, BlendMode = blend };
+                var particleSource = sources[keySource]; var particleTexture = particleSource.ManualTexture;
+                if (particleTexture is null) particleSource.MaterialTextures?.TryGetValue(keyTexture, out particleTexture);
+                if (particleTexture is not null)
                 {
-                    var columns = Math.Max(1, (int)particle.Columns); var rows = Math.Max(1, (int)particle.Rows);
-                    var tileWidth = particleTexture.Width / (float)columns; var tileHeight = particleTexture.Height / (float)rows;
-                    var column = particle.TileIndex % columns; var row = particle.TileIndex / columns;
-                    var source = new SKRect(column * tileWidth, row * tileHeight, (column + 1) * tileWidth, (row + 1) * tileHeight);
-                    canvas.DrawBitmap(particleTexture, source, destination, particlePaint);
+                    var count = end - start; var positions = new SKPoint[count * 6]; var coordinates = new SKPoint[count * 6]; var colors = new SKColor[count * 6];
+                    for (var runIndex = 0; runIndex < count; runIndex++)
+                    {
+                        var projected = projectedParticles[start + runIndex]; var particle = projected.Sprite; var offset = runIndex * 6;
+                        var cosine = MathF.Cos(particle.Rotation); var sine = MathF.Sin(particle.Rotation); var radius = projected.Radius;
+                        var a = Rotate(-radius, -radius); var b = Rotate(radius, -radius); var c = Rotate(radius, radius); var d = Rotate(-radius, radius);
+                        positions[offset] = a; positions[offset + 1] = b; positions[offset + 2] = c; positions[offset + 3] = a; positions[offset + 4] = c; positions[offset + 5] = d;
+                        var columns = Math.Max(1, (int)particle.Columns); var rows = Math.Max(1, (int)particle.Rows); var tileWidth = particleTexture.Width / (float)columns; var tileHeight = particleTexture.Height / (float)rows;
+                        var column = particle.TileIndex % columns; var row = particle.TileIndex / columns; var left = column * tileWidth; var top = row * tileHeight; var right = left + tileWidth; var bottom = top + tileHeight;
+                        coordinates[offset] = new(left, top); coordinates[offset + 1] = new(right, top); coordinates[offset + 2] = new(right, bottom); coordinates[offset + 3] = new(left, top); coordinates[offset + 4] = new(right, bottom); coordinates[offset + 5] = new(left, bottom);
+                        var tint = new SKColor(Channel(particle.Color.X * 255), Channel(particle.Color.Y * 255), Channel(particle.Color.Z * 255), Channel(particle.Color.W * 255));
+                        for (var vertex = 0; vertex < 6; vertex++) colors[offset + vertex] = tint;
+                        SKPoint Rotate(float x, float y) => new(projected.X + x * cosine - y * sine, projected.Y + x * sine + y * cosine);
+                    }
+                    using var mesh = SKVertices.CreateCopy(SKVertexMode.Triangles, positions, coordinates, colors); using var shader = SKShader.CreateBitmap(particleTexture, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
+                    particlePaint.Shader = shader; canvas.DrawVertices(mesh, SKBlendMode.Modulate, particlePaint);
                 }
-                else canvas.DrawCircle(projected.X, projected.Y, projected.Radius, particlePaint);
-                canvas.Restore();
+                else for (var index = start; index < end; index++) { var projected = projectedParticles[index]; var particle = projected.Sprite; particlePaint.Color = new(Channel(particle.Color.X * 255), Channel(particle.Color.Y * 255), Channel(particle.Color.Z * 255), Channel(particle.Color.W * 255)); canvas.DrawCircle(projected.X, projected.Y, projected.Radius, particlePaint); }
+                start = end;
             }
 
             if (showAttachments && geometry.Attachments.Count > 0)
@@ -593,15 +651,17 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             var environment = environmentUnits == 0 ? string.Empty : $" · {environmentUnits:N0} sphere-map unit(s)";
             var camera = useNativeCamera ? $" · {nativeCamera!.Name}" : string.Empty;
             var embeddedLights = geometry.Lights.Count == 0 ? string.Empty : $" · {geometry.Lights.Count:N0} embedded light(s)";
-            var particles = geometry.ParticleEmitters.Count == 0 ? string.Empty : $" · {projectedParticles.Count:N0}/{geometry.ParticleEmitters.Count:N0} particle sprites/emitters";
+            var particles = particleEmitterCount == 0 ? string.Empty : $" · {projectedParticles.Count:N0}/{particleEmitterCount:N0} particle sprites/emitters";
             var particleFallback = particleFailure is null ? string.Empty : " · particle fallback";
+            var ribbons = ribbonEmitterCount == 0 ? string.Empty : $" · {displayedRibbonSections:N0}/{ribbonEmitterCount:N0} ribbon sections/emitters";
+            var ribbonFallback = ribbonFailure is null ? string.Empty : " · ribbon fallback";
             var fallbackUnits = geometry.Batches.Count(batch => batch.TextureStages.Count > 1 && (!batch.Combiner.Supported || batch.TextureStages.Any(stage => stage.CoordinateSource == M2PreviewTextureCoordinateSource.Unsupported)));
             var fallback = fallbackUnits == 0 ? string.Empty : $" · {fallbackUnits:N0} first-stage fallback(s)";
             var attachments = showAttachments ? $" · {geometry.Attachments.Count:N0} attachment point(s)" : string.Empty;
             var mounted = mountedModels.Count == 0 ? string.Empty : $" · {mountedModels.Count:N0} mounted model(s)";
             var animation = pose is null ? string.Empty : $" · animation {geometry.Sequences[pose.SequenceIndex].AnimationId:N0}:{geometry.Sequences[pose.SequenceIndex].SubAnimationId:N0}";
             var scene = sceneTransformLabel is null ? string.Empty : $" · {sceneTransformLabel}";
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount}{multiTexture}{environment}{camera}{embeddedLights}{particles}{particleFallback}{approximate}{fallback} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount}{multiTexture}{environment}{camera}{embeddedLights}{ribbons}{ribbonFallback}{particles}{particleFallback}{approximate}{fallback} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }
@@ -666,7 +726,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
 
         private sealed record ResolvedTextureStage(SKBitmap Texture, M2PreviewTextureCoordinateSource CoordinateSource, M2PreviewTextureStageBlend Blend);
         private sealed record SceneLight(short Type, M2PreviewLightPose Pose);
-        private readonly record struct ProjectedParticle(float Depth, float X, float Y, float Radius, M2PreviewParticleSprite Sprite);
+        private readonly record struct ProjectedParticle(float Depth, float X, float Y, float Radius, int SourceIndex, M2PreviewParticleSprite Sprite);
         private readonly record struct TextureGroup(int PassOrder, int SourceIndex, int MaterialKey, ushort BlendMode);
         private readonly record struct Face(float Depth, int PassOrder, int SourceIndex, int MaterialKey, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy,
             Vector2 EnvironmentA, Vector2 EnvironmentB, Vector2 EnvironmentC, Vector3 Lighting, IReadOnlyList<ResolvedTextureStage> TextureStages, ushort BlendMode);

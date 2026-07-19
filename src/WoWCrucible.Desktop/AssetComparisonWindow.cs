@@ -569,8 +569,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             _appearanceComposed = false;
             if (_selectedTexture is null)
             {
-                var usedTextureDefinitions = geometry.Batches.SelectMany(batch => batch.TextureStages).Where(stage => stage.TextureDefinitionIndex >= 0).Select(stage => stage.TextureDefinitionIndex)
-                    .Concat(geometry.Batches.Where(batch => batch.TextureStages.Count == 0 && batch.TextureDefinitionIndex is not null).Select(batch => batch.TextureDefinitionIndex!.Value)).Distinct().ToHashSet();
+                var usedTextureDefinitions = geometry.UsedTextureDefinitionIndices.ToHashSet();
                 foreach (var slot in geometry.TextureSlots.Where(slot => usedTextureDefinitions.Contains(slot.Index) && slot.Type == 0 && !string.IsNullOrWhiteSpace(slot.EmbeddedPath)))
                 {
                     var clientPath = PatchInputMapper.NormalizeArchivePath(slot.EmbeddedPath!);

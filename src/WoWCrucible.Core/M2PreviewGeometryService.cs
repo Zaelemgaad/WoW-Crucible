@@ -39,6 +39,11 @@ public sealed record M2PreviewParticleEmitter(int Index, uint Flags, Vector3 Pos
     public string EmitterName => EmitterType switch { 1 => "Plane", 2 => "Sphere", 3 => "Spline", _ => $"Unknown {EmitterType:N0}" };
     public override string ToString() => $"{EmitterName} particle · bone {(BoneIndex < 0 ? "none" : BoneIndex.ToString("N0"))} · texture {TextureDefinitionIndex:N0}";
 }
+public sealed record M2PreviewRibbonEmitter(int Index, int BoneIndex, Vector3 Position, int TextureDefinitionIndex, int RenderFlagsIndex,
+    ushort BlendMode, float EdgesPerSecond, float EdgeLifetimeSeconds, float EmissionAngle)
+{
+    public override string ToString() => $"Ribbon · bone {BoneIndex:N0} · texture {TextureDefinitionIndex:N0} · {EdgesPerSecond:0.##} edges/s for {EdgeLifetimeSeconds:0.###} s";
+}
 public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
 public enum M2PreviewTextureCoordinateSource { Primary, Secondary, Environment, Unsupported }
 public enum M2PreviewTextureStageBlend { Source, Modulate, Modulate2X, Add, AddNoAlpha, Unsupported }
@@ -80,6 +85,8 @@ public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadO
     public IReadOnlyList<M2PreviewCamera> Cameras { get; init; } = [];
     public IReadOnlyList<M2PreviewLight> Lights { get; init; } = [];
     public IReadOnlyList<M2PreviewParticleEmitter> ParticleEmitters { get; init; } = [];
+    public IReadOnlyList<M2PreviewRibbonEmitter> RibbonEmitters { get; init; } = [];
+    public IReadOnlyList<int> UsedTextureDefinitionIndices { get; init; } = [];
     public IReadOnlyList<M2PreviewSequence> Sequences { get; init; } = [];
     public IReadOnlyList<Vector2> SecondaryTextureCoordinates { get; init; } = [];
     public int TotalTriangleIndices { get; init; } = TriangleIndices.Count;
@@ -87,6 +94,7 @@ public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadO
     public M2GeosetSelection? GeosetSelection { get; init; }
     internal M2AnimationRig? AnimationRig { get; init; }
     internal M2ParticleRig? ParticleRig { get; init; }
+    internal M2RibbonRig? RibbonRig { get; init; }
 }
 
 public static class M2PreviewGeometryService
@@ -125,6 +133,7 @@ public static class M2PreviewGeometryService
         var textureSlots = ReadTextureSlots(model);
         var particleRig = M2ParticlePreviewService.Parse(model, animationRig, bones.Count, textureSlots.Count);
         var renderFlags = ReadRenderFlags(model);
+        var ribbonRig = M2RibbonPreviewService.Parse(model, animationRig, bones.Count, textureSlots.Count, renderFlags);
         var textureLookup = ReadTextureLookup(model, textureSlots.Count);
         var textureCoordinateLookup = ReadSignedLookup(model, 0x88, 0x8C, "M2 texture-coordinate lookup");
         var transparencyLookup = ReadUnsignedLookup(model, 0x90, 0x94, "M2 transparency lookup");
@@ -164,13 +173,18 @@ public static class M2PreviewGeometryService
             Cameras = animationRig.PreviewCameras,
             Lights = animationRig.PreviewLights,
             ParticleEmitters = particleRig.Emitters,
+            RibbonEmitters = ribbonRig.Emitters,
+            UsedTextureDefinitionIndices = batches.SelectMany(batch => batch.TextureStages).Where(stage => stage.TextureDefinitionIndex >= 0).Select(stage => stage.TextureDefinitionIndex)
+                .Concat(batches.Where(batch => batch.TextureStages.Count == 0 && batch.TextureDefinitionIndex is not null).Select(batch => batch.TextureDefinitionIndex!.Value))
+                .Concat(particleRig.Emitters.Select(emitter => emitter.TextureDefinitionIndex)).Concat(ribbonRig.Emitters.Where(emitter => emitter.TextureDefinitionIndex >= 0).Select(emitter => emitter.TextureDefinitionIndex)).Distinct().Order().ToArray(),
             Sequences = animationRig.Sequences,
             SecondaryTextureCoordinates = secondaryTextureCoordinates,
             TotalTriangleIndices = allTriangles.Length,
             VisibilityMode = visibilityMode,
             GeosetSelection = geosetSelection,
             AnimationRig = animationRig,
-            ParticleRig = particleRig
+            ParticleRig = particleRig,
+            RibbonRig = ribbonRig
         };
     }
 

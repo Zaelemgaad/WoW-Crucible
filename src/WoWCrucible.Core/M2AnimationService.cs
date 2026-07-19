@@ -165,27 +165,7 @@ public static class M2AnimationService
         var clip = GetClip(geometry.ModelPath, rig, resolved);
         var duration = Math.Max(1u, sequence.DurationMilliseconds);
         var sequenceTime = sequence.Loops ? PositiveModulo(elapsedMilliseconds, duration) : Math.Clamp(elapsedMilliseconds, 0, duration);
-        Array.Clear(pose.BoneTransformState);
-        for (var index = 0; index < geometry.Bones.Count; index++)
-        {
-            var bone = geometry.Bones[index]; var tracks = clip.Bones[index];
-            var translation = Sample(tracks.Translation, sequenceTime, elapsedMilliseconds, Vector3.Zero);
-            var rotation = Sample(tracks.Rotation, sequenceTime, elapsedMilliseconds, Quaternion.Identity);
-            var scale = Sample(tracks.Scale, sequenceTime, elapsedMilliseconds, Vector3.One);
-            pose.LocalBoneTransforms[index] = Matrix4x4.CreateTranslation(-bone.Pivot) * Matrix4x4.CreateScale(scale) * Matrix4x4.CreateFromQuaternion(rotation) * Matrix4x4.CreateTranslation(translation + bone.Pivot);
-        }
-        for (var index = 0; index < geometry.Bones.Count; index++) BuildWorldTransform(index);
-
-        Matrix4x4 BuildWorldTransform(int index)
-        {
-            if (pose.BoneTransformState[index] == 2) return pose.BoneTransforms[index];
-            if (pose.BoneTransformState[index] == 1) throw new InvalidDataException($"M2 bone hierarchy contains a cycle at bone {index:N0}.");
-            pose.BoneTransformState[index] = 1;
-            var parent = geometry.Bones[index].ParentIndex;
-            var world = parent >= 0 ? pose.LocalBoneTransforms[index] * BuildWorldTransform(parent) : pose.LocalBoneTransforms[index];
-            if (!Finite(world)) throw new InvalidDataException($"Animation produced a non-finite transform for bone {index:N0}.");
-            pose.BoneTransforms[index] = world; pose.BoneTransformState[index] = 2; return world;
-        }
+        SampleBones(geometry, clip, sequenceTime, elapsedMilliseconds, pose.BoneTransforms, pose.LocalBoneTransforms, pose.BoneTransformState);
 
         for (var index = 0; index < geometry.Vertices.Count; index++)
         {
@@ -239,6 +219,47 @@ public static class M2AnimationService
             pose.Lights[index] = new(position, direction, ambientColor, ambientIntensity, diffuseColor, diffuseIntensity, attenuationStart, attenuationEnd, useAttenuation);
         }
         pose.Minimum = minimum; pose.Maximum = maximum; pose.SequenceIndex = sequenceIndex; pose.TimeMilliseconds = sequenceTime;
+    }
+
+    internal static double SampleBoneTransforms(M2PreviewGeometry geometry, int sequenceIndex, double elapsedMilliseconds,
+        Matrix4x4[] worldTransforms, Matrix4x4[] localTransforms, byte[] transformState)
+    {
+        ArgumentNullException.ThrowIfNull(geometry);
+        var rig = geometry.AnimationRig ?? throw new InvalidOperationException("This model does not contain a parsed Wrath animation rig.");
+        if ((uint)sequenceIndex >= (uint)rig.Sequences.Count) throw new ArgumentOutOfRangeException(nameof(sequenceIndex));
+        if (worldTransforms.Length != geometry.Bones.Count || localTransforms.Length != geometry.Bones.Count || transformState.Length != geometry.Bones.Count)
+            throw new ArgumentException("The reusable bone-transform buffers do not match this model.");
+        if (!double.IsFinite(elapsedMilliseconds)) throw new ArgumentOutOfRangeException(nameof(elapsedMilliseconds));
+        var resolved = ResolveAlias(rig.Sequences, sequenceIndex); var sequence = rig.Sequences[resolved]; var duration = Math.Max(1u, sequence.DurationMilliseconds);
+        var sequenceTime = sequence.Loops ? PositiveModulo(elapsedMilliseconds, duration) : Math.Clamp(elapsedMilliseconds, 0, duration);
+        SampleBones(geometry, GetClip(geometry.ModelPath, rig, resolved), sequenceTime, elapsedMilliseconds, worldTransforms, localTransforms, transformState);
+        return sequenceTime;
+    }
+
+    private static void SampleBones(M2PreviewGeometry geometry, M2AnimationClip clip, double sequenceTime, double elapsedMilliseconds,
+        Matrix4x4[] worldTransforms, Matrix4x4[] localTransforms, byte[] transformState)
+    {
+        Array.Clear(transformState);
+        for (var index = 0; index < geometry.Bones.Count; index++)
+        {
+            var bone = geometry.Bones[index]; var tracks = clip.Bones[index];
+            var translation = Sample(tracks.Translation, sequenceTime, elapsedMilliseconds, Vector3.Zero);
+            var rotation = Sample(tracks.Rotation, sequenceTime, elapsedMilliseconds, Quaternion.Identity);
+            var scale = Sample(tracks.Scale, sequenceTime, elapsedMilliseconds, Vector3.One);
+            localTransforms[index] = Matrix4x4.CreateTranslation(-bone.Pivot) * Matrix4x4.CreateScale(scale) * Matrix4x4.CreateFromQuaternion(rotation) * Matrix4x4.CreateTranslation(translation + bone.Pivot);
+        }
+        for (var index = 0; index < geometry.Bones.Count; index++) BuildWorldTransform(index);
+
+        Matrix4x4 BuildWorldTransform(int index)
+        {
+            if (transformState[index] == 2) return worldTransforms[index];
+            if (transformState[index] == 1) throw new InvalidDataException($"M2 bone hierarchy contains a cycle at bone {index:N0}.");
+            transformState[index] = 1;
+            var parent = geometry.Bones[index].ParentIndex;
+            var world = parent >= 0 ? localTransforms[index] * BuildWorldTransform(parent) : localTransforms[index];
+            if (!Finite(world)) throw new InvalidDataException($"Animation produced a non-finite transform for bone {index:N0}.");
+            worldTransforms[index] = world; transformState[index] = 2; return world;
+        }
     }
 
     private static M2AnimationClip GetClip(string modelPath, M2AnimationRig rig, int sequenceIndex)
@@ -316,7 +337,7 @@ public static class M2AnimationService
         return (animations, preview);
     }
 
-    private static M2VectorTrack ParseVectorTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
+    internal static M2VectorTrack ParseVectorTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
     {
         var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 12);
         Require(data, valueOffset, valueCount, 12, label + " values");
@@ -359,6 +380,14 @@ public static class M2AnimationService
         MatchCounts(times, values.Length, label); return new(header.Interpolation, times, values, globalDuration);
     }
 
+    internal static M2ScalarTrack ParseUnsignedShortScalarTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
+    {
+        var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 2);
+        Require(data, valueOffset, valueCount, 2, label + " values"); var values = new float[valueCount];
+        for (var index = 0; index < values.Length; index++) values[index] = UShort(data, valueOffset + index * 2);
+        MatchCounts(times, values.Length, label); return new(header.Interpolation, times, values, globalDuration);
+    }
+
     private static (uint[] Times, int ValueCount, int ValueOffset, uint? GlobalDuration, byte[] Data) ReadSeries(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
     {
         if (header.Interpolation > 1) throw new NotSupportedException($"M2 {label} uses interpolation {header.Interpolation}; the safe Wrath preview currently supports none and linear tracks.");
@@ -377,7 +406,7 @@ public static class M2AnimationService
         uint? GlobalDuration() => header.GlobalSequence >= 0 ? rig.GlobalSequenceDurations[header.GlobalSequence] : null;
     }
 
-    private static Vector3 Sample(M2VectorTrack track, double sequenceTime, double elapsedTime, Vector3 fallback)
+    internal static Vector3 Sample(M2VectorTrack track, double sequenceTime, double elapsedTime, Vector3 fallback)
     {
         if (track.Values.Length == 0) return fallback;
         var time = TrackTime(track.GlobalDuration, sequenceTime, elapsedTime); var (left, right, amount) = Keys(track.Times, time, track.Interpolation);
@@ -398,7 +427,7 @@ public static class M2AnimationService
         return left == right ? track.Values[left] : track.Values[left] + (track.Values[right] - track.Values[left]) * amount;
     }
 
-    private static int Sample(M2IntegerTrack track, double sequenceTime, double elapsedTime, int fallback)
+    internal static int Sample(M2IntegerTrack track, double sequenceTime, double elapsedTime, int fallback)
     {
         if (track.Values.Length == 0) return fallback;
         var time = TrackTime(track.GlobalDuration, sequenceTime, elapsedTime); var (left, _, _) = Keys(track.Times, time, 0); return track.Values[left];
