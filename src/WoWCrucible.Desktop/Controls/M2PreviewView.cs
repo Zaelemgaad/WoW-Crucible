@@ -712,6 +712,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             M2TextureRenderPassBlend.Modulate => SKBlendMode.Modulate,
             M2TextureRenderPassBlend.Add or M2TextureRenderPassBlend.AddNoAlpha => SKBlendMode.Plus,
             M2TextureRenderPassBlend.DestinationOut => SKBlendMode.DstOut,
+            M2TextureRenderPassBlend.DestinationOver => SKBlendMode.DstOver,
             _ => SKBlendMode.SrcOver
         };
 
