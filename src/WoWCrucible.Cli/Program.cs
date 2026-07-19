@@ -25,7 +25,7 @@ try
         "project" => Project(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "tools" => Tooling(commandArguments[1..]),
         "knowledge" => Knowledge(commandArguments[1..]),
-        "cache" => Cache(commandArguments[1..]),
+        "cache" => Cache(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "mpq" => Mpq(commandArguments[1..]),
         "casc" => Casc(commandArguments[1..], cancellation.Token),
         "manifest" => Manifest(commandArguments[1..]),
@@ -51,10 +51,11 @@ finally
 devbug?.Complete(exitCode);
 return exitCode;
 
-static int Cache(string[] args)
+static async Task<int> Cache(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return CacheHelp();
     var operation = args[0].ToLowerInvariant(); var options = args[1..];
+    if (operation == "server-plan") return await CacheServerPlan(options, cancellationToken);
     var operands = options.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray();
     var definitionPaths = options.Where(option => option.StartsWith("--definitions=", StringComparison.OrdinalIgnoreCase)).Select(option => option[(option.IndexOf('=') + 1)..]).ToArray();
     var definitionName = Option(options, "--definition="); var json = options.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
@@ -103,6 +104,52 @@ static int Cache(string[] args)
         Console.Error.WriteLine($"Exported {table.Records.Count:N0} cache record(s) to {Path.GetFullPath(operands[1])}"); return 0;
     }
     return Fail($"Unknown cache operation: {operation}");
+}
+
+static async Task<int> CacheServerPlan(string[] args, CancellationToken cancellationToken)
+{
+    var operands = args.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    if (operands.Length != 5) return Fail("cache server-plan requires <file.wdb> <host> <port> <user> <database>.");
+    if (!Path.GetExtension(operands[0]).Equals(".wdb", StringComparison.OrdinalIgnoreCase)) return Fail("cache server-plan currently requires a decoded WDB cache. WCH2 ADB rows remain inspect/export-only until their server semantics are proven.");
+    if (!uint.TryParse(operands[2], out var port) || port is 0 or > 65535) return Fail("Database port must be from 1 to 65535.");
+    var allowed = new[] { "--definitions=", "--definition=", "--ids=", "--output=", "--sql=", "--password-env=", "--ssl=", "--format=", "--overwrite" };
+    var unknown = args.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !allowed.Any(prefix => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))).ToArray();
+    if (unknown.Length > 0) return Fail($"Unknown cache server-plan option: {unknown[0]}");
+    var passwordEnvironment = Option(args, "--password-env=") ?? "WOW_CRUCIBLE_DB_PASSWORD";
+    var password = Environment.GetEnvironmentVariable(passwordEnvironment); if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
+    var sslText = Option(args, "--ssl=") ?? "Preferred"; if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
+    var cachePath = Path.GetFullPath(operands[0]); var definitionName = Option(args, "--definition=");
+    var definitionPaths = args.Where(option => option.StartsWith("--definitions=", StringComparison.OrdinalIgnoreCase)).Select(option => option[(option.IndexOf('=') + 1)..]).ToArray();
+    WowCacheTableDefinition? definition = null;
+    if (definitionPaths.Length > 0) definition = WowCacheDefinitionCatalog.Load(definitionPaths).Resolve(cachePath, WowCacheDefinitionKind.Wdb, definitionName);
+    else
+    {
+        var discovered = WowCacheDefinitionCatalog.Discover(cachePath).FirstOrDefault(path => Path.GetFileName(path).Equals("WDB.xml", StringComparison.OrdinalIgnoreCase));
+        if (discovered is not null) definition = WowCacheDefinitionCatalog.Load(discovered).Resolve(cachePath, WowCacheDefinitionKind.Wdb, definitionName);
+    }
+    if (definition is null) return Fail($"No WDB definition named '{definitionName ?? Path.GetFileNameWithoutExtension(cachePath)}' was resolved. Supply --definitions=WDB.xml explicitly.");
+    IReadOnlyCollection<uint>? ids = null; var idsText = Option(args, "--ids=");
+    if (!string.IsNullOrWhiteSpace(idsText)) { ids = ItemIdQueryParser.Parse(idsText); if (ids.Count == 0) return Fail("--ids must contain one or more unsigned record IDs."); }
+    var table = WowCacheTableService.LoadWdb(cachePath, definition);
+    var profile = new DatabaseConnectionProfile(operands[1], port, operands[3], password, operands[4], ssl);
+    var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, cancellationToken);
+    var plan = CacheServerPlanService.Create(table, capabilities, ids); var overwrite = args.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
+    var output = Option(args, "--output="); if (output is not null) CacheServerPlanService.Save(plan, output, overwrite);
+    var sqlPath = Option(args, "--sql="); if (sqlPath is not null)
+    {
+        sqlPath = Path.GetFullPath(sqlPath); if (File.Exists(sqlPath) && !overwrite) return Fail($"SQL preview already exists: {sqlPath}");
+        Directory.CreateDirectory(Path.GetDirectoryName(sqlPath)!); var temporary = sqlPath + $".{Guid.NewGuid():N}.tmp";
+        try { File.WriteAllText(temporary, plan.PreviewSql(), new System.Text.UTF8Encoding(false)); File.Move(temporary, sqlPath, overwrite); }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+    if (args.Contains("--format=json", StringComparer.OrdinalIgnoreCase)) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+    else
+    {
+        Console.WriteLine(plan.PreviewSql());
+        Console.Error.WriteLine($"Cache server review plan: {plan.Records.Count:N0} record(s), {plan.Records.Sum(record => record.Fields.Count):N0} proven field mapping(s), {plan.Records.Sum(record => record.UnmappedSourceFields.Count):N0} unmapped source field(s). No SQL was executed.");
+        if (output is not null) Console.Error.WriteLine($"Plan: {Path.GetFullPath(output)}"); if (sqlPath is not null) Console.Error.WriteLine($"SQL preview: {sqlPath}");
+    }
+    return plan.Records.Any(record => record.Warnings.Count > 0) ? 3 : 0;
 }
 
 static int CacheAdb(string operation, string[] options, string[] operands, string[] definitionPaths, string? definitionName, bool json, string cachePath)
@@ -2162,7 +2209,7 @@ static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <f
 static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]", code);
 static int CascHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible casc list <storage-folder> [filter] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc tree <storage-folder> [folder] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc extract <storage-folder> <destination> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible casc extract-folder <storage-folder> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n\nCASC operations are read-only and local-only. Crucible never mutates the storage and never downloads missing CDN payloads implicitly.", code);
 static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools commands [search words...] [--format=text|json]\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n\nThe command catalog is shared with the desktop Ctrl+K palette, so scripts and the UI use the same searchable vocabulary. A command search with no matches returns exit code 3.\n\nWithout an inventory path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage.", code);
-static int CacheHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible cache info <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--format=text|json]\n  wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]\n  wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]\n\nWDB and Cataclysm WCH2 ADB reads are bounded and read-only. Version-aware headers and record framing are always inspected; when no matching schema is available, Crucible reports raw record metadata instead of guessing field types. Selected WDBX or Adb_Wdb_Parser schema XML is parsed as data by Crucible's own provider. Later WCH5/WCH7/WCH8 ADB is rejected rather than guessed because it requires matching DB2 layout metadata. Export is atomic and never overwrites without --overwrite.", code);
+static int CacheHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible cache info <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--format=text|json]\n  wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]\n  wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]\n  wowcrucible cache server-plan <file.wdb> <host> <port> <user> <database> [--definitions=WDB.xml] [--ids=1,2] [--output=plan.json] [--sql=preview.sql] [--overwrite]\n\nWDB and Cataclysm WCH2 ADB reads are bounded and read-only. Version-aware headers and record framing are always inspected; when no matching schema is available, Crucible reports raw record metadata instead of guessing field types. Selected WDBX or Adb_Wdb_Parser schema XML is parsed as data by Crucible's own provider. Later WCH5/WCH7/WCH8 ADB is rejected rather than guessed because it requires matching DB2 layout metadata. Export is atomic and never overwrites without --overwrite. server-plan binds selected decoded WDB rows to the live modern item_template, creature_template, gameobject_template, or quest_template schema, produces UPDATE-existing review SQL only, and never executes it or falls back to obsolete ArcEmu table names. Database passwords come from WOW_CRUCIBLE_DB_PASSWORD by default.", code);
 static int KnowledgeHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible knowledge search <terms...> [--root=wiki-folder] [--locale=en] [--limit=100] [--format=text|json]\n  wowcrucible knowledge show <relative-markdown-path> [--root=wiki-folder] [--section=N]\n\nSearch builds a local in-memory index over Markdown only; it never executes the wiki site generator, scripts, HTML, or remote links. Without --root, Crucible searches upward from the executable for the shared wiki folder. The desktop exposes the same provider under Offline knowledge & field reference, and F1 opens it using the selected DBC table and field as context.", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
 {

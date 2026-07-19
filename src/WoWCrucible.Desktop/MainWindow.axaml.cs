@@ -820,8 +820,9 @@ public partial class MainWindow : Window
     {
         if (_cacheTableWorkspaceView is null)
         {
-            _cacheTableWorkspaceView = new CacheTableWorkspaceView();
+            _cacheTableWorkspaceView = new CacheTableWorkspaceView(_workspaceSession);
             _cacheTableWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _cacheTableWorkspaceView.SqlStudioRequested += (_, _) => OpenSqlWorkspace();
         }
         OpenFeatureWorkspace(_cacheTableWorkspaceView, "Client Cache Tables");
     }

@@ -42,6 +42,7 @@ The same-window **Offline knowledge & field reference** route exposes the identi
 
 ```text
 wowcrucible cache info <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--format=text|json]
+wowcrucible cache server-plan <file.wdb> <host> <port> <user> <database> [--definitions=WDB.xml] [--ids=17,17802] [--output=plan.json] [--sql=preview.sql] [--overwrite]
 wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]
 wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]
 ```
@@ -49,6 +50,8 @@ wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=d
 Cache reads are bounded and source files are always read-only. Crucible validates WDB's version-aware 16/20/24-byte header (24 bytes at build 12340), record ID/length framing, declared payload boundaries, and a two-million-record/64-MiB-per-record safety ceiling. For Cataclysm WCH2 ADB it independently validates the 48-byte header, fixed rows, optional range indexes, string-offset block, copy-table extent, and every checked size multiplication. WCH5/WCH7/WCH8 are rejected rather than guessed because those formats require matching DB2 layout metadata. Crucible natively loads WDBX `Definition/Table/Field` XML plus the older `wdbDef` and `adbDef` dialects, including variable WDB ItemCache stats and ADB string offsets. A build-tagged schema must match the cache header. Without a matching schema it still lists exact record IDs/rows, sizes, offsets, and raw bytes instead of predicting types. CSV and streaming JSON Lines exports are atomic and require `--overwrite` when the destination exists.
 
 The desktop **Client cache tables** workspace is the same provider in the main window: open or drag a `.wdb`/`.adb`, search all decoded values, inspect field/payload offsets and raw remainders, and export without changing the cache. When the shared tool corpus is available, Crucible prefers its exact build-12340 `WDB.xml` for WDB and 4.3.x `adb-definitions.xml` for ADB; a different schema can be selected explicitly.
+
+`cache server-plan` and the desktop **Plan selected → server** action require a verified live SQL profile and a decoded WDB definition. They bind the source SHA-256 and the target table schema fingerprint into a portable review artifact, map only fields proven for modern `item_template`, `creature_template`, `gameobject_template`, or `quest_template`, and emit `UPDATE ... WHERE <primary key>` review SQL. Unmapped/client-only fields stay explicit. The command never applies SQL, never creates incomplete rows, and never reproduces the obsolete ArcEmu table targets from old WDB converters. The password comes from `WOW_CRUCIBLE_DB_PASSWORD` unless another environment variable is selected.
 
 ## Portable content projects and ID reservations
 

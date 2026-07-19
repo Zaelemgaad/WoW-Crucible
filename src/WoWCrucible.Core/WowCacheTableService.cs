@@ -154,6 +154,21 @@ public sealed class WowCacheDefinitionCatalog
                     new WowCacheFieldDefinition("stat_value", "integer", false, 0, [])
                 ]));
             }
+            var factualNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Unique"] = "MaxCount", ["maxcount"] = "Stackable",
+                ["ScaledStatsDistributionId"] = "ScalingStatDistribution", ["ScaledStatsDistributionFlags"] = "ScalingStatValue",
+                ["ammo_Type"] = "ammo_type", ["range"] = "RangedModRange", ["page_id"] = "PageText",
+                ["page_language"] = "LanguageID", ["page_material"] = "PageMaterial", ["quest_id"] = "startquest",
+                ["lock_id"] = "lockid", ["lock_material"] = "Material", ["sheathID"] = "sheath",
+                ["randomprop"] = "RandomProperty", ["randomsuffix"] = "RandomSuffix", ["ZoneNameID"] = "area",
+                ["mapid"] = "Map", ["bagfamily"] = "BagFamily", ["socket_color_1"] = "socketColor_1",
+                ["unk201_3"] = "socketContent_1", ["socket_color_2"] = "socketColor_2", ["unk201_5"] = "socketContent_2",
+                ["socket_color_3"] = "socketColor_3", ["unk201_7"] = "socketContent_3", ["socket_bonus"] = "socketBonus",
+                ["ReqDisenchantSkill"] = "RequiredDisenchantSkill", ["existingduration"] = "duration", ["ItemLimitCategoryId"] = "ItemLimitCategory"
+            };
+            for (var index = 0; index < normalized.Count; index++)
+                if (factualNames.TryGetValue(normalized[index].Name, out var factual)) normalized[index] = normalized[index] with { Name = factual };
         }
         return normalized.ToArray();
     }

@@ -56,6 +56,25 @@ try
         throw new InvalidOperationException("Bounded WDB header, record framing, WDBX schema decoding, or four-character reversal regressed.");
     var csv = Path.Combine(cacheFixtureRoot, "records.csv"); var jsonl = Path.Combine(cacheFixtureRoot, "records.jsonl"); WowCacheTableService.Export(table, csv, "csv", false); WowCacheTableService.Export(table, jsonl, "jsonl", false);
     if (!File.ReadAllText(csv).Contains("Marshal McBride", StringComparison.Ordinal) || File.ReadLines(jsonl).Count() != 1 || !File.ReadAllText(jsonl).Contains("\"Id\":197", StringComparison.Ordinal)) throw new InvalidOperationException("Atomic WDB CSV/JSONL export regressed.");
+    var cacheTargetTable = new DatabaseTableCapability("creature_template",
+    [
+        new("entry", "int", "int unsigned", false, "0", "PRI", string.Empty, 1),
+        new("name", "varchar", "varchar(100)", false, string.Empty, string.Empty, string.Empty, 2),
+        new("type_flags", "int", "int unsigned", false, "0", string.Empty, string.Empty, 3)
+    ]);
+    var cacheCapabilities = new DatabaseCapabilities("fixture-current-core", "acore_world", new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [cacheTargetTable.Name] = cacheTargetTable });
+    var serverPlan = CacheServerPlanService.Create(table, cacheCapabilities, [197]); var serverSql = serverPlan.PreviewSql();
+    if (serverPlan.Records.Count != 1 || serverPlan.Records[0].Fields.Count != 2 || !serverPlan.Records[0].UnmappedSourceFields.Contains("Scale") ||
+        !serverSql.Contains("UPDATE `creature_template` SET", StringComparison.Ordinal) || !serverSql.Contains("WHERE `entry`=197", StringComparison.Ordinal) ||
+        serverSql.Contains("REPLACE", StringComparison.OrdinalIgnoreCase) || serverSql.Contains("creature_names", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Schema-bound cache-to-server planning lost mapped fields, unmapped review evidence, or update-existing-only safety.");
+    var planPath = Path.Combine(cacheFixtureRoot, "server-plan.json"); CacheServerPlanService.Save(serverPlan, planPath);
+    if (!File.ReadAllText(planPath).Contains(table.Sha256, StringComparison.Ordinal) || serverPlan.TargetSchemaSha256 != CacheServerPlanService.SchemaFingerprint(cacheTargetTable))
+        throw new InvalidOperationException("Cache server plan persistence lost its source or target-schema binding.");
+    try { _ = CacheServerPlanService.Create(table, cacheCapabilities, [999]); throw new InvalidOperationException("Cache server planning accepted a missing selected record."); }
+    catch (KeyNotFoundException) { }
+    try { _ = CacheServerPlanService.Create(table, new("fixture", "world", new Dictionary<string, DatabaseTableCapability>())); throw new InvalidOperationException("Cache server planning fell back to an obsolete table."); }
+    catch (NotSupportedException) { }
     var legacyPath = Path.Combine(cacheFixtureRoot, "itemcache-schema.xml");
     File.WriteAllText(legacyPath, """
 <wdbDef><wdbId name="itemcache"><wdbElement name="Entry" type="uinteger" key="yes"/><wdbElement type="size"/><wdbElement name="Name" type="varChar"/><wdbElement name="Stats" type="struct" maxcount="10"><structElement name="Type" type="integer"/><structElement name="Value" type="integer"/></wdbElement></wdbId></wdbDef>
