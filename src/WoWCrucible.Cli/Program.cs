@@ -726,6 +726,41 @@ static int Asset(string[] args)
         foreach (var texture in result.TexturePaths) Console.WriteLine($"TEXTURE\t{texture}");
         return 0;
     }
+    if (args is ["creature-appearance-port-plan", var portSourceDbc, var portTargetDbc, var portDisplayText, .. var portPlanOptions])
+    {
+        var schema = Option(portPlanOptions, "--schema="); var output = Option(portPlanOptions, "--output="); var overwrite = portPlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var json = portPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = portPlanOptions.Where(option => !option.StartsWith("--schema=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown creature-appearance-port-plan option: {unknown[0]}");
+        if (string.IsNullOrWhiteSpace(schema)) return Fail("creature-appearance-port-plan requires --schema=<WotLK-12340.xml>.");
+        if (!uint.TryParse(portDisplayText, out var displayId) || displayId == 0) return Fail("Creature display ID must be a positive unsigned integer.");
+        if (output is not null && File.Exists(output) && !overwrite) return Fail($"Plan already exists; use --overwrite to replace it: {Path.GetFullPath(output)}");
+        var plan = CreatureAppearancePortService.CreatePlan(portSourceDbc, portTargetDbc, schema, displayId, CancellationToken.None);
+        if (output is not null) CreatureAppearancePortService.SavePlan(output, plan);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"SOURCE_DBC\t{plan.SourceDbcRoot}\nTARGET_DBC\t{plan.TargetDbcRoot}\nSOURCE_DISPLAY\t{plan.SourceDisplayId}\nTARGET_DISPLAY\t{plan.TargetDisplayId}\nADD_ROWS\t{plan.AddedRows:N0}\nREUSE_ROWS\t{plan.ReusedRows:N0}\nCHANGED_TABLES\t{string.Join(',', plan.ChangedTables)}\nREQUIRED_ASSETS\t{plan.RequiredAssets.Count:N0}");
+            foreach (var row in plan.Rows) Console.WriteLine($"ROW\t{row.Action}\t{row.Table}\t{row.SourceId}->{row.TargetId}\t{string.Join(',', row.ReferenceRewrites.Select(pair => $"{pair.Key}={pair.Value}"))}");
+            foreach (var asset in plan.RequiredAssets) Console.WriteLine($"ASSET\t{asset.Kind}\t{asset.ClientPath}\t{asset.SourceTable}:{asset.SourceId}");
+            foreach (var finding in plan.Findings) Console.WriteLine($"FINDING\t{finding}");
+            if (output is not null) Console.WriteLine($"PLAN\t{Path.GetFullPath(output)}");
+        }
+        return 0;
+    }
+    if (args is ["creature-appearance-port-apply", var portPlanPath, var portOutputDirectory, .. var portApplyOptions])
+    {
+        var json = portApplyOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = portApplyOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown creature-appearance-port-apply option: {unknown[0]}");
+        var plan = CreatureAppearancePortService.LoadPlan(portPlanPath); var result = CreatureAppearancePortService.Apply(plan, portOutputDirectory, CancellationToken.None);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"OUTPUT\t{result.OutputDirectory}\nTARGET_DISPLAY\t{result.TargetDisplayId}\nRECEIPT\t{result.ReceiptPath}");
+            foreach (var pair in result.OutputFiles.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)) Console.WriteLine($"DBC\t{pair.Key}\t{pair.Value}\t{result.OutputSha256[pair.Key]}");
+        }
+        return 0;
+    }
     if (args is ["creature-display-catalog", var creatureCatalogDbc, .. var creatureCatalogOptions])
     {
         var schema = Option(creatureCatalogOptions, "--schema="); var search = Option(creatureCatalogOptions, "--search="); var limitText = Option(creatureCatalogOptions, "--limit="); var json = creatureCatalogOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
@@ -902,6 +937,8 @@ Usage:
   wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin] [--listfile=id-path.csv]
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
   wowcrucible asset creature-display-catalog <dbc-folder> [--schema=file] [--search=terms] [--limit=N] [--format=text|json]
+  wowcrucible asset creature-appearance-port-plan <source-dbc-folder> <target-dbc-folder> <display-id> --schema=file [--output=plan.json] [--format=text|json] [--overwrite]
+  wowcrucible asset creature-appearance-port-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
   wowcrucible asset creature-appearances <model-client-path> [--dbc=folder] [--schema=file] [--library=folder --provenance=name] [--format=text|json]
   wowcrucible asset preview-info <wrath-model.m2> [--skin=file.skin] [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
   wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--naked|--groups=group:variant,...|--all-geosets] [--overwrite]

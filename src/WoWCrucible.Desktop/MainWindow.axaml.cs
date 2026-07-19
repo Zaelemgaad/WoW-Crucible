@@ -703,6 +703,7 @@ public partial class MainWindow : Window
             _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession);
             _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
             _creatureWorkspaceView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace();
+            _creatureWorkspaceView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace();
             _creatureWorkspaceView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         }
         OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
@@ -967,7 +968,7 @@ public partial class MainWindow : Window
         }
         else if (request.Table.Equals("creature_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_creatureWorkspaceView is null) { _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession); _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _creatureWorkspaceView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _creatureWorkspaceView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
+            if (_creatureWorkspaceView is null) { _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession); _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _creatureWorkspaceView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _creatureWorkspaceView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace(); _creatureWorkspaceView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
             _creatureWorkspaceView.OpenCreatureRow(request.Row); OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
         }
         else if (request.Table.Equals("gameobject_template", StringComparison.OrdinalIgnoreCase))

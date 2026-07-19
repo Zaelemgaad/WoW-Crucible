@@ -1511,6 +1511,60 @@ var invalidTargetModel = File.ReadAllBytes(invalidTargetModelPath); BitConverter
 var invalidTargetLookup = creatureDisplayService.ResolveModelDisplaysForProvenance(invalidTargetDbcRoot, args[0], creatureDisplay.ModelClientPath, creatureLibrary, creatureProvenance);
 if (!invalidTargetLookup.FromProcessedProvenance || invalidTargetLookup.Displays.All(display => display.DisplayId != creatureDisplayId) || !invalidTargetLookup.Finding.Contains("not compatible", StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException("An incompatible target creature DBC prevented safe exact-provenance source fallback or lost its diagnostic.");
+
+var appearancePortRoot = Path.Combine(creatureLibrary, "appearance-port");
+var appearancePortSource = Path.Combine(appearancePortRoot, "source"); var appearancePortTarget = Path.Combine(appearancePortRoot, "target");
+Directory.CreateDirectory(appearancePortSource); Directory.CreateDirectory(appearancePortTarget);
+foreach (var table in new[] { "CreatureDisplayInfo", "CreatureModelData", "CreatureDisplayInfoExtra", "ItemDisplayInfo" })
+{
+    File.Copy(Path.Combine(args[1], table + ".dbc"), Path.Combine(appearancePortSource, table + ".dbc"));
+    File.Copy(Path.Combine(args[1], table + ".dbc"), Path.Combine(appearancePortTarget, table + ".dbc"));
+}
+var identicalAppearancePlan = CreatureAppearancePortService.CreatePlan(appearancePortSource, appearancePortTarget, args[0], 115);
+if (identicalAppearancePlan.TargetDisplayId != 115 || identicalAppearancePlan.Rows.Count != 9 || identicalAppearancePlan.Rows.Any(row => row.Action != CreatureAppearancePortAction.ReuseSameId) || identicalAppearancePlan.RequiredAssets.Count == 0 || identicalAppearancePlan.ChangedTables.Count != 0)
+    throw new InvalidOperationException("Identical creature appearance DBC chains were not reused without producing duplicate rows.");
+
+var targetItemDisplayPath = Path.Combine(appearancePortTarget, "ItemDisplayInfo.dbc");
+var targetItemDisplay = WdbcFile.Load(targetItemDisplayPath); var targetItemDisplayColumns = creatureSchemas.ResolveColumns("ItemDisplayInfo", targetItemDisplay.FieldCount).Columns;
+var targetItemDisplayIdColumn = targetItemDisplayColumns.First(column => column.Name.Equals("ID", StringComparison.OrdinalIgnoreCase));
+var targetItemDisplayModelColumn = targetItemDisplayColumns.First(column => column.Name.Equals("ModelName[0]", StringComparison.OrdinalIgnoreCase));
+var targetItemDisplayRow = Enumerable.Range(0, targetItemDisplay.RowCount).Single(row => targetItemDisplay.GetRaw(row, targetItemDisplayIdColumn) == 8815);
+targetItemDisplay.SetDisplayValue(targetItemDisplayRow, targetItemDisplayModelColumn, Convert.ToString(targetItemDisplay.GetDisplayValue(targetItemDisplayRow, targetItemDisplayModelColumn)) + "_CrucibleConflict");
+targetItemDisplay.Save(targetItemDisplayPath, createBackup: false);
+
+var remappedAppearancePlan = CreatureAppearancePortService.CreatePlan(appearancePortSource, appearancePortTarget, args[0], 115);
+var remappedItemDisplay = remappedAppearancePlan.Rows.Single(row => row.Table.Equals("ItemDisplayInfo", StringComparison.OrdinalIgnoreCase) && row.SourceId == 8815);
+var remappedExtra = remappedAppearancePlan.Rows.Single(row => row.Table.Equals("CreatureDisplayInfoExtra", StringComparison.OrdinalIgnoreCase));
+var remappedDisplay = remappedAppearancePlan.Rows.Single(row => row.Table.Equals("CreatureDisplayInfo", StringComparison.OrdinalIgnoreCase));
+if (remappedItemDisplay.Action != CreatureAppearancePortAction.ReuseEquivalent || remappedItemDisplay.TargetId == 8815 || remappedExtra.TargetId == 23 || remappedDisplay.TargetId == 115 || remappedAppearancePlan.TargetDisplayId != remappedDisplay.TargetId || remappedAppearancePlan.Rows.Single(row => row.Table.Equals("CreatureModelData", StringComparison.OrdinalIgnoreCase)).Action != CreatureAppearancePortAction.ReuseSameId)
+    throw new InvalidOperationException($"A genuinely different target ItemDisplayInfo conflict was not additively remapped through the extra and parent display chain. Item={remappedItemDisplay.Action}:{remappedItemDisplay.SourceId}->{remappedItemDisplay.TargetId}; Extra={remappedExtra.Action}:{remappedExtra.SourceId}->{remappedExtra.TargetId}; Display={remappedDisplay.Action}:{remappedDisplay.SourceId}->{remappedDisplay.TargetId}.");
+if (remappedExtra.ReferenceRewrites.Values.All(value => value != remappedItemDisplay.TargetId) || remappedDisplay.ReferenceRewrites.GetValueOrDefault("ExtendedDisplayInfoID") != remappedExtra.TargetId)
+    throw new InvalidOperationException("Creature appearance remapping did not carry item-display and extended-display references through the dependency chain.");
+
+var appearancePlanPath = Path.Combine(appearancePortRoot, "appearance-plan.json"); CreatureAppearancePortService.SavePlan(appearancePlanPath, remappedAppearancePlan);
+var loadedAppearancePlan = CreatureAppearancePortService.LoadPlan(appearancePlanPath);
+var appearanceOutput = Path.Combine(appearancePortRoot, "output"); var appearanceResult = CreatureAppearancePortService.Apply(loadedAppearancePlan, appearanceOutput);
+if (appearanceResult.TargetDisplayId != remappedDisplay.TargetId || !File.Exists(appearanceResult.ReceiptPath) || !appearanceResult.OutputFiles.Keys.Order().SequenceEqual(remappedAppearancePlan.ChangedTables.Order()) || appearanceResult.OutputFiles.ContainsKey("CreatureModelData") || appearanceResult.OutputFiles.ContainsKey("ItemDisplayInfo"))
+    throw new InvalidOperationException("Creature appearance port output did not contain exactly the target-based DBCs that received additive rows.");
+var appearanceReceiptText = File.ReadAllText(appearanceResult.ReceiptPath);
+if (appearanceReceiptText.Contains(".crucible-", StringComparison.OrdinalIgnoreCase) || appearanceResult.OutputFiles.Values.Any(path => !path.StartsWith(appearanceOutput, StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("Creature appearance receipt retained temporary staging paths instead of final output paths.");
+var outputDisplay = WdbcFile.Load(appearanceResult.OutputFiles["CreatureDisplayInfo"]); var outputDisplayColumns = creatureSchemas.ResolveColumns("CreatureDisplayInfo", outputDisplay.FieldCount).Columns;
+var outputDisplayIdColumn = outputDisplayColumns.First(column => column.Name.Equals("ID", StringComparison.OrdinalIgnoreCase)); var outputDisplayExtraColumn = outputDisplayColumns.First(column => column.Name.Equals("ExtendedDisplayInfoID", StringComparison.OrdinalIgnoreCase));
+var outputDisplayRow = Enumerable.Range(0, outputDisplay.RowCount).Single(row => outputDisplay.GetRaw(row, outputDisplayIdColumn) == remappedDisplay.TargetId);
+if (outputDisplay.GetRaw(outputDisplayRow, outputDisplayExtraColumn) != remappedExtra.TargetId)
+    throw new InvalidOperationException("Written CreatureDisplayInfo did not retain its planned remapped extra-display dependency.");
+var outputExtra = WdbcFile.Load(appearanceResult.OutputFiles["CreatureDisplayInfoExtra"]); var outputExtraColumns = creatureSchemas.ResolveColumns("CreatureDisplayInfoExtra", outputExtra.FieldCount).Columns;
+var outputExtraIdColumn = outputExtraColumns.First(column => column.Name.Equals("ID", StringComparison.OrdinalIgnoreCase)); var outputExtraItemColumns = outputExtraColumns.Where(column => column.Name.StartsWith("NPCItemDisplay[", StringComparison.OrdinalIgnoreCase)).ToArray();
+var outputExtraRow = Enumerable.Range(0, outputExtra.RowCount).Single(row => outputExtra.GetRaw(row, outputExtraIdColumn) == remappedExtra.TargetId);
+if (outputExtraItemColumns.All(column => outputExtra.GetRaw(outputExtraRow, column) != remappedItemDisplay.TargetId))
+    throw new InvalidOperationException("Written CreatureDisplayInfoExtra did not retain its planned remapped item-display dependency.");
+
+var targetDisplayPath = Path.Combine(appearancePortTarget, "CreatureDisplayInfo.dbc"); var staleTargetDisplay = WdbcFile.Load(targetDisplayPath);
+var staleDisplayColumns = creatureSchemas.ResolveColumns("CreatureDisplayInfo", staleTargetDisplay.FieldCount).Columns; var staleDisplayId = staleDisplayColumns.First(column => column.Name.Equals("ID", StringComparison.OrdinalIgnoreCase)); var staleSound = staleDisplayColumns.First(column => column.Name.Equals("SoundID", StringComparison.OrdinalIgnoreCase));
+var staleDisplayRow = Enumerable.Range(0, staleTargetDisplay.RowCount).Single(row => staleTargetDisplay.GetRaw(row, staleDisplayId) == 115); staleTargetDisplay.SetRaw(staleDisplayRow, staleSound, staleTargetDisplay.GetRaw(staleDisplayRow, staleSound) + 1); staleTargetDisplay.Save(targetDisplayPath, createBackup: false);
+try { _ = CreatureAppearancePortService.Apply(remappedAppearancePlan, Path.Combine(appearancePortRoot, "stale-output")); throw new InvalidOperationException("A stale creature appearance plan was applied after its target DBC changed."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("changed after", StringComparison.OrdinalIgnoreCase)) { }
 Directory.Delete(creatureLibrary, true);
 if (ItemCatalogEntry.ClassifyReviewGroup("Martin Fury", false, 6) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||
     ItemCatalogEntry.ClassifyReviewGroup("Thunderfury, Blessed Blade of the Windseeker?", false, 7, ["Ignored · quest 7561 is disabled (Deprecated quest)."] ) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||
