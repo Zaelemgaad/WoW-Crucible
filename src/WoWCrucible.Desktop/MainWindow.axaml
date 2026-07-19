@@ -93,6 +93,7 @@
                             <Button Margin="0,0,4,0" Content="Clone ×…" Padding="8,4" Click="CloneMultipleClick" />
                             <Button Margin="0,0,4,0" Content="Delete" Padding="8,4" Click="DeleteRowClick" />
                             <Button Margin="0,0,4,0" Content="Spell workspace" Padding="8,4" Click="OpenSpellWorkspaceClick" />
+                            <Button Margin="0,0,4,0" Content="Staging database" Padding="8,4" Click="OpenDbcStagingClick" />
                             <ToggleSwitch x:Name="DecodedToggle" OnContent="Decoded" OffContent="Raw" IsChecked="True" Margin="4,0" IsCheckedChanged="DecodedChanged" />
                         </WrapPanel>
                     </ScrollViewer>

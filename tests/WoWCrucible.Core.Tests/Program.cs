@@ -16,6 +16,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("casc later client extract").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
     CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.items" ||
     CrucibleCommandCatalog.Search("project collision ids").FirstOrDefault()?.Command.Id != "workspace.projects" ||
+    CrucibleCommandCatalog.Search("sqlite spell staging").FirstOrDefault()?.Command.Id != "action.dbc-staging" ||
     CrucibleCommandCatalog.Search("pet companion level stats").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("pet level curve scale").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("pet family growth compare graph").FirstOrDefault()?.Command.Id != "workspace.pets" ||
@@ -2027,6 +2028,56 @@ var staleImportFile = WdbcFile.Load(Path.Combine(args[1], "Spell.dbc")); var sta
 staleImportFile.SetRaw(0, spellExportSchema.Columns[1], staleImportFile.GetRaw(0, spellExportSchema.Columns[1]) + 1);
 try { _ = DbcRowImportService.Apply(staleImportFile, stalePlan); throw new InvalidOperationException("DBC import applied a preview after the open table changed."); }
 catch (InvalidOperationException exception) when (exception.Message.Contains("changed after", StringComparison.OrdinalIgnoreCase)) { }
+
+var stagingFixtureRoot = Path.Combine(Path.GetTempPath(), $"crucible-dbc-staging-{Guid.NewGuid():N}");
+Directory.CreateDirectory(stagingFixtureRoot);
+try
+{
+    var stagingProjectRoot = Path.Combine(stagingFixtureRoot, "project"); CrucibleContentProjectService.Create(stagingProjectRoot, "DBC staging fixture");
+    var stagingSourceRoot = Path.Combine(stagingFixtureRoot, "source"); Directory.CreateDirectory(stagingSourceRoot); var stagingSourcePath = Path.Combine(stagingSourceRoot, "Spell.dbc");
+    var stagingSource = WdbcFile.Load(Path.Combine(args[1], "Spell.dbc"));
+    if (stagingSource.RowCount <= 150) throw new InvalidOperationException("Real Spell.dbc fixture is unexpectedly too small for bulk staging coverage.");
+    stagingSource.DeleteRows(Enumerable.Range(150, stagingSource.RowCount - 150)); stagingSource.SaveAs(stagingSourcePath, false);
+    var stagingInfo = DbcStagingWorkspaceService.Create(stagingProjectRoot, stagingSource, spellExportSchema);
+    var emptyStageDiff = DbcStagingWorkspaceService.Diff(stagingInfo.WorkspacePath);
+    if (stagingInfo.SourceRows != 150 || stagingInfo.Fields != 234 || emptyStageDiff.HasChanges || !emptyStageDiff.CanApply || !File.Exists(stagingInfo.WorkspacePath))
+        throw new InvalidOperationException("Schema-bound project-local DBC staging creation or empty-baseline diff regressed.");
+    var firstStageKey = DbcRecordIdentity.GetKey(stagingSource, 0, spellExportSchema.Columns, spellExportSchema.KeyStrategy);
+    var stageQuery = DbcStagingWorkspaceService.Query(stagingInfo.WorkspacePath, "SELECT \"ID\", \"Name_Lang[enUS]\" FROM working WHERE \"ID\"=$id", new Dictionary<string, object?> { ["id"] = firstStageKey });
+    if (stageQuery.Rows.Count != 1 || Convert.ToUInt32(stageQuery.Rows[0][0], CultureInfo.InvariantCulture) != firstStageKey)
+        throw new InvalidOperationException("Named-bound read-only staging query did not return the exact source record.");
+    var bulkStageSql = "UPDATE working SET \"Name_Lang[enUS]\"=\"Name_Lang[enUS]\" || ' [Staged]' WHERE \"__crucible_stage_id\" <= 100";
+    var dryStageMutation = DbcStagingWorkspaceService.Mutate(stagingInfo.WorkspacePath, bulkStageSql);
+    if (dryStageMutation.Applied || dryStageMutation.AffectedRows != 100 || dryStageMutation.Diff.UpdatedRows != 100 || DbcStagingWorkspaceService.Diff(stagingInfo.WorkspacePath).HasChanges)
+        throw new InvalidOperationException("Rollback-only staging mutation preview persisted data or lost its exact 100-row bulk diff.");
+    var appliedStageMutation = DbcStagingWorkspaceService.Mutate(stagingInfo.WorkspacePath, bulkStageSql, apply: true);
+    if (!appliedStageMutation.Applied || appliedStageMutation.Diff.UpdatedRows != 100 || appliedStageMutation.Diff.ChangedCells != 100)
+        throw new InvalidOperationException("Reviewed staging mutation did not commit its exact 100-row named-field update.");
+    var appendedStageId = DbcRecordIdentity.IndexRows(stagingSource, spellExportSchema.Columns, spellExportSchema.KeyStrategy).Keys.Max() + 1000;
+    var appendStageSql = $"INSERT INTO working (\"ID\",\"Name_Lang[enUS]\",\"Description_Lang[enUS]\") VALUES ({appendedStageId},'Crucible staged append','Project-local SQLite append')";
+    var appendedStageMutation = DbcStagingWorkspaceService.Mutate(stagingInfo.WorkspacePath, appendStageSql, apply: true);
+    var completeStageDiff = appendedStageMutation.Diff;
+    if (completeStageDiff.UpdatedRows != 100 || completeStageDiff.AppendedRows != 1 || completeStageDiff.DeletedRows != 0 || !completeStageDiff.CanApply)
+        throw new InvalidOperationException("Staging diff lost bulk updates, physical-key append, or applyability.");
+    try { _ = DbcStagingWorkspaceService.Mutate(stagingInfo.WorkspacePath, $"INSERT INTO working (\"ID\",\"Name_Lang[enUS]\") VALUES ({firstStageKey},'collision')", apply: true); throw new InvalidOperationException("Staging append reused an existing physical record key."); }
+    catch (InvalidDataException exception) when (exception.Message.Contains("collid", StringComparison.OrdinalIgnoreCase)) { }
+    try { _ = DbcStagingWorkspaceService.Mutate(stagingInfo.WorkspacePath, "UPDATE metadata SET value='tampered' WHERE key='table'", apply: true); throw new InvalidOperationException("Staging mutation modified protected metadata."); }
+    catch (InvalidOperationException exception) when (exception.Message.Contains("working table", StringComparison.OrdinalIgnoreCase)) { }
+    try { _ = DbcStagingWorkspaceService.Mutate(stagingInfo.WorkspacePath, "DELETE FROM working WHERE \"ID\"=1", apply: true); throw new InvalidOperationException("Staging mutation accepted DBC row deletion."); }
+    catch (InvalidOperationException exception) when (exception.Message.Contains("UPDATE or INSERT", StringComparison.OrdinalIgnoreCase)) { }
+    var publishSource = WdbcFile.Load(stagingSourcePath); var stageImportPlan = DbcStagingWorkspaceService.PreviewApply(stagingInfo.WorkspacePath, publishSource, spellExportSchema);
+    if (stageImportPlan.UpdatedRows != 100 || stageImportPlan.AppendedRows != 1 || publishSource.RowCount != 150)
+        throw new InvalidOperationException("Staging publication preview mutated its source or lost bulk/appended row counts.");
+    var stageImportResult = DbcRowImportService.Apply(publishSource, stageImportPlan); var publishedRows = DbcRecordIdentity.IndexRows(publishSource, spellExportSchema.Columns, spellExportSchema.KeyStrategy);
+    if (stageImportResult.UpdatedRows != 100 || stageImportResult.AppendedRows != 1 || publishSource.RowCount != 151 || !publishedRows.TryGetValue(appendedStageId, out var stagedAppendRow) ||
+        publishSource.GetDisplayValue(stagedAppendRow, spellName).ToString() != "Crucible staged append" || !publishSource.GetDisplayValue(0, spellName).ToString()!.EndsWith(" [Staged]", StringComparison.Ordinal))
+        throw new InvalidOperationException("Staging publication did not round-trip bulk decoded strings and an appended physical-key row through DbcRowImportService.");
+    var staleStageSource = WdbcFile.Load(stagingSourcePath); staleStageSource.SetRaw(0, spellExportSchema.Columns[1], staleStageSource.GetRaw(0, spellExportSchema.Columns[1]) + 1);
+    try { _ = DbcStagingWorkspaceService.PreviewApply(stagingInfo.WorkspacePath, staleStageSource, spellExportSchema); throw new InvalidOperationException("Staging publication accepted a source DBC changed after baseline capture."); }
+    catch (InvalidOperationException exception) when (exception.Message.Contains("no longer matches", StringComparison.OrdinalIgnoreCase)) { }
+}
+finally { if (Directory.Exists(stagingFixtureRoot)) Directory.Delete(stagingFixtureRoot, true); }
+
 File.Delete(generatedImportCsv); File.Delete(spellImportJson); File.Delete(quotedCsvImport); File.Delete(physicalAppendJson); File.Delete(unknownImport); File.Delete(duplicateImport);
 File.Delete(generatedBasePath); File.Delete(generatedOverridePath);
 

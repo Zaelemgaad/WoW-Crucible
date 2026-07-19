@@ -471,6 +471,21 @@ public partial class MainWindow : Window
         ShowSpellWorkspace(document, row);
     }
 
+    private void OpenDbcStagingClick(object? sender, RoutedEventArgs e)
+    {
+        var document = Current;
+        if (document is null) { StatusText.Text = "Open a schema-resolved DBC before opening its staging database."; return; }
+        var view = new DbcStagingWorkspaceView(document, _workspaceSession);
+        view.BackRequested += (_, _) => CloseFeatureWorkspace();
+        view.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace();
+        view.AppliedToDocument += (_, result) =>
+        {
+            document.History.Clear(); DbcView.RefreshDocument(Math.Max(0, DbcView.SelectedSourceRow)); RefreshTabs();
+            StatusText.Text = $"Applied staging database to the open {Path.GetFileName(document.File.SourcePath)}: {result.UpdatedRows:N0} updated, {result.AppendedRows:N0} appended, {result.ChangedCells:N0} cells. Save when reviewed.";
+        };
+        OpenFeatureWorkspace(view, $"{Path.GetFileNameWithoutExtension(document.File.SourcePath)} staging database");
+    }
+
     private SpellWorkspaceView ShowSpellWorkspace(DbcDocumentSession document, int row)
     {
         var view = new SpellWorkspaceView(document.File, row, document.Schema.Columns, _workspaceSession, changes => ApplySpellChanges(document, row, changes));
@@ -1180,6 +1195,7 @@ public partial class MainWindow : Window
             ["action.save-as"] = () => SaveCurrentAsync(true),
             ["action.export-rows"] = Done(() => OpenDbcExportClick(null, new RoutedEventArgs())),
             ["action.import-rows"] = Done(() => OpenDbcImportClick(null, new RoutedEventArgs())),
+            ["action.dbc-staging"] = Done(() => OpenDbcStagingClick(null, new RoutedEventArgs())),
             ["action.spell"] = Done(() => OpenSpellWorkspaceClick(null, new RoutedEventArgs())),
             ["action.logs"] = Done(DesktopCrashLogger.OpenDirectory),
             ["action.devbug"] = Done(() => DevbugModeToggle.IsChecked = DevbugModeToggle.IsChecked != true),

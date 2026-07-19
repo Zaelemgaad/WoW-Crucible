@@ -40,6 +40,7 @@ public static class CrucibleCommandCatalog
         Command("action.save-as", "Save current DBC as…", "File", "Atomically save the active table to a new path.", "copy rename output dbc"),
         Command("action.export-rows", "Export decoded DBC rows", "File", "Export selected columns and IDs as CSV, JSON, or JSON Lines.", "csv json jsonl rows columns data export"),
         Command("action.import-rows", "Import structured DBC rows", "File", "Preview and apply keyed CSV/JSON/JSONL changes without losing schema safety.", "csv json jsonl rows data import bulk"),
+        Command("action.dbc-staging", "Open DBC staging database", "Editor", "Bulk-query and edit the active schema-resolved DBC through its project-local SQLite workspace.", "sqlite spell database staging bulk named bindings update insert workbench"),
         Command("action.spell", "Open selected spell workspace", "Editor", "Open the effect-centric editor for the selected Spell.dbc row.", "spell effect ability tooltip clone"),
         Command("action.logs", "Open Crucible logs", "Diagnostics", "Reveal normal crash logs and Devbug diagnostic sessions beside the executable.", "debug devbug crash diagnostics terminal"),
         Command("action.devbug", "Toggle Devbug Mode", "Diagnostics", "Switch live detailed tracing and three-session debug retention on or off.", "debug verbose logging terminal trace"),
