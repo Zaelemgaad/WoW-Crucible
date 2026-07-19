@@ -128,9 +128,9 @@ public partial class MainWindow : Window
                     ? OpenTextureWorkspaceAsync(path)
                     : extension.Equals(".adt", StringComparison.OrdinalIgnoreCase) || extension.Equals(".wdt", StringComparison.OrdinalIgnoreCase) || extension.Equals(".wdl", StringComparison.OrdinalIgnoreCase)
                     ? OpenMapWorkspaceAsync(path)
-                    : extension.Equals(".wdb", StringComparison.OrdinalIgnoreCase)
+                    : extension.Equals(".wdb", StringComparison.OrdinalIgnoreCase) || extension.Equals(".adb", StringComparison.OrdinalIgnoreCase)
                         ? OpenCacheTableAsync(path)
-            : ShowErrorAsync("Unsupported file", "The desktop opens DBC, WDB2 DB2, WDB client caches, M2, BLP, ADT, WDT, and WDL files directly.");
+            : ShowErrorAsync("Unsupported file", "The desktop opens DBC, WDB2 DB2, WDB/ADB client caches, M2, BLP, ADT, WDT, and WDL files directly.");
     }
 
     private async void OpenDbcClick(object? sender, RoutedEventArgs e)

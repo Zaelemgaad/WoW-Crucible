@@ -191,6 +191,7 @@ public static class WowCacheTableService
 {
     private const int MaximumRecords = 2_000_000;
     private const int MaximumPayloadSize = 64 * 1024 * 1024;
+    private const long MaximumTotalPayloadSize = 2L * 1024 * 1024 * 1024;
     private static readonly Encoding StringEncoding = new UTF8Encoding(false, false);
 
     public static WowCacheTable LoadWdb(string path, WowCacheTableDefinition? definition = null)
@@ -205,7 +206,7 @@ public static class WowCacheTableService
         if (definition is not null && definition.Kind != WowCacheDefinitionKind.Wdb) throw new ArgumentException("A WDB file requires a WDB definition.", nameof(definition));
         if (definition?.Build is { } definitionBuild && definitionBuild != build) throw new InvalidDataException($"Definition {definition.Name} targets build {definitionBuild:N0}, but the cache header is build {build:N0}.");
         var header = new WowCacheHeader(rawMagic, Reverse(rawMagic), build, rawLocale, rawLocale.Length == 0 ? string.Empty : Reverse(rawLocale), maximumRecordSize, recordVersion, cacheVersion, headerSize);
-        var records = new List<WowCacheRecord>(); var hasTerminator = false;
+        var records = new List<WowCacheRecord>(); var hasTerminator = false; long totalPayload = 0;
         while (stream.Position < stream.Length)
         {
             if (records.Count >= MaximumRecords) throw new InvalidDataException($"WDB cache exceeds the {MaximumRecords:N0}-record safety limit.");
@@ -213,6 +214,7 @@ public static class WowCacheTableService
             var recordOffset = stream.Position; var id = reader.ReadUInt32(); var payloadSize = reader.ReadUInt32();
             if (id == 0 && payloadSize == 0) { hasTerminator = true; break; }
             if (payloadSize > MaximumPayloadSize) throw new InvalidDataException($"WDB record {id:N0} declares {payloadSize:N0} bytes, above the {MaximumPayloadSize:N0}-byte safety limit.");
+            totalPayload = checked(totalPayload + payloadSize); if (totalPayload > MaximumTotalPayloadSize) throw new InvalidDataException($"WDB cache payload exceeds the {MaximumTotalPayloadSize:N0}-byte in-memory safety limit.");
             if (payloadSize > stream.Length - stream.Position) throw new InvalidDataException($"WDB record {id:N0} declares {payloadSize:N0} bytes but only {stream.Length - stream.Position:N0} remain.");
             var payload = reader.ReadBytes(checked((int)payloadSize));
             records.Add(Decode(id, payloadSize, recordOffset, payload, definition));

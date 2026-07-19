@@ -69,6 +69,18 @@ try
     }
     var itemDefinition = WowCacheDefinitionCatalog.Load(legacyPath).Resolve(itemPath, WowCacheDefinitionKind.Wdb)!; var itemRecord = WowCacheTableService.LoadWdb(itemPath, itemDefinition).Records.Single();
     if (itemRecord.DecodeError is not null || itemRecord.UnconsumedBytes != 0 || itemRecord.Values.Single(value => value.Name == "Stats.Count").DisplayValue != "2" || itemRecord.Values.Single(value => value.Name == "Value[2]").DisplayValue != "20") throw new InvalidOperationException("Legacy Adb_Wdb_Parser schema or bounded variable struct decoding regressed.");
+    var adbDefinitionPath = Path.Combine(cacheFixtureRoot, "adb-definitions.xml"); File.WriteAllText(adbDefinitionPath, """
+<adbDef><adbId name="Item-sparse"><adbElement name="id" type="integer"/><adbElement name="quality" type="integer"/><adbElement name="name" type="varChar"/></adbId></adbDef>
+""");
+    var adbPath = Path.Combine(cacheFixtureRoot, "Item-sparse.adb"); var adbStrings = System.Text.Encoding.UTF8.GetBytes("\0Sword\0Shield\0");
+    using (var stream = File.Create(adbPath)) using (var writer = new BinaryWriter(stream))
+    {
+        writer.Write(System.Text.Encoding.ASCII.GetBytes("WCH2")); writer.Write(2u); writer.Write(3u); writer.Write(12u); writer.Write((uint)adbStrings.Length); writer.Write(0x12345678u); writer.Write(15595); writer.Write(1234567890); writer.Write(0); writer.Write(0); writer.Write(0); writer.Write(0);
+        writer.Write(100); writer.Write(4); writer.Write(1u); writer.Write(101); writer.Write(3); writer.Write(7u); writer.Write(adbStrings);
+    }
+    var adbDefinition = WowCacheDefinitionCatalog.Load(adbDefinitionPath).Resolve(adbPath, WowCacheDefinitionKind.Adb)!; var adb = WowAdbTableService.LoadWch2(adbPath, adbDefinition);
+    if (adb.Header.Signature != "WCH2" || adb.Header.Build != 15595 || adb.Header.RecordCount != 2 || adb.Records[0].Id != 100 || adb.Records[0].Values.Single(value => value.Name == "name").DisplayValue != "Sword" || adb.Records[1].Values.Single(value => value.Name == "name").DisplayValue != "Shield" || adb.Records.Any(record => record.DecodeError is not null || record.UnconsumedBytes != 0)) throw new InvalidOperationException("Bounded Cataclysm WCH2 ADB header, fixed rows, or string-offset decoding regressed.");
+    var adbCsv = Path.Combine(cacheFixtureRoot, "adb.csv"); WowAdbTableService.Export(adb, adbCsv, "csv", false); if (!File.ReadAllText(adbCsv).Contains("Shield", StringComparison.Ordinal)) throw new InvalidOperationException("Atomic ADB export regressed.");
     var corrupt = File.ReadAllBytes(wdbPath); BitConverter.GetBytes(uint.MaxValue).CopyTo(corrupt, 28); var corruptPath = Path.Combine(cacheFixtureRoot, "corrupt.wdb"); File.WriteAllBytes(corruptPath, corrupt);
     try { _ = WowCacheTableService.LoadWdb(corruptPath); throw new InvalidOperationException("WDB reader accepted an oversized record declaration."); }
     catch (InvalidDataException) { }
