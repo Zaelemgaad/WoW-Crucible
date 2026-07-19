@@ -233,7 +233,7 @@ wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--confli
 
 Filters accept text or `*`, `?`, and `**` globs. `--content-only` excludes `(listfile)`, `(attributes)`, and `(signature)` metadata. JSON output separates entry properties for scripts.
 
-If an archive opens but only exposes StormLib `File000...` placeholders, Crucible reports those entries as unresolved names rather than calling the MPQ incompatible. Supply a compatible external path corpus with `--listfile=paths.txt` to recover known client paths before filtering or extraction.
+If StormLib's first enumeration exposes `File000...` placeholders while the archive contains `(listfile)`, Crucible automatically extracts that metadata to a unique temporary file and retries it as an explicit listfile. Recovered names are accepted only when entry count and the complete multiset of block index, locale, size, compressed size, and flags still match while the anonymous count decreases. The temporary file is removed and never enters the portable cache. Entries still anonymous after that proof are reported as unresolved names rather than calling the MPQ incompatible; supply a compatible external path corpus with `--listfile=paths.txt` to attempt further recovery before filtering or extraction.
 
 `tree` lists only the direct files and subfolders at the requested internal folder while reporting recursive counts and bytes. `extract-folder` resolves that exact folder to its recursive files before extraction. The desktop provides the same lazy breadcrumb browser beside the global flat search and displays non-default locale variants explicitly.
 

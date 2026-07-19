@@ -9,7 +9,7 @@ public sealed record MpqArchiveIndexCacheResult(IReadOnlyList<MpqFileEntry> Entr
 
 public static class MpqArchiveIndexCache
 {
-    private const string Format = "wow-crucible-mpq-index-v2";
+    private const string Format = "wow-crucible-mpq-index-v3";
     private const int MaximumFiles = 64;
     private const long MaximumBytes = 512L * 1024 * 1024;
     private sealed record Identity(string ArchivePath, long ArchiveBytes, long ArchiveWriteTicks, string? ListfilePath, long? ListfileBytes, long? ListfileWriteTicks);

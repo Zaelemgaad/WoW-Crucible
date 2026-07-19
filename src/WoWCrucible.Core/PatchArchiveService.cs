@@ -157,25 +157,69 @@ public sealed class PatchArchiveService
         externalListFile = string.IsNullOrWhiteSpace(externalListFile) ? null : Path.GetFullPath(externalListFile);
         if (externalListFile is not null && !File.Exists(externalListFile)) throw new FileNotFoundException("The external MPQ listfile was not found.", externalListFile);
         var archive = OpenArchiveWithRetry(archivePath, "open the MPQ archive");
-        var result = new List<MpqFileEntry>();
+        string? embeddedListFile = null;
         try
         {
-            var data = new Native.SFileFindData();
-            var find = Native.SFileFindFirstFile(archive, mask, ref data, externalListFile);
-            if (find == IntPtr.Zero) return result;
-            try
+            var result = EnumerateFiles(archive, mask, externalListFile);
+            if (externalListFile is null && mask == "*" && result.Any(entry => ClientArchiveIndexService.IsAnonymous(entry.ArchivePath)) && result.Any(entry => entry.ArchivePath.Equals("(listfile)", StringComparison.OrdinalIgnoreCase)))
             {
-                do
+                try
                 {
-                    if (!string.IsNullOrWhiteSpace(data.FileName))
-                        result.Add(new(data.FileName, data.FileSize, data.CompressedSize, data.FileFlags, data.Locale, data.BlockIndex));
-                    data = new Native.SFileFindData();
-                } while (Native.SFileFindNextFile(find, ref data));
+                    embeddedListFile = Path.Combine(Path.GetTempPath(), $"wow-crucible-embedded-listfile-{Environment.ProcessId}-{Guid.NewGuid():N}.txt");
+                    bool extracted;
+                    lock (LegacyLocaleExtractionLock) { Native.SFileSetLocale(0); extracted = Native.SFileExtractFile(archive, "(listfile)", embeddedListFile, 0); }
+                    if (extracted && File.Exists(embeddedListFile) && new FileInfo(embeddedListFile).Length > 0)
+                    {
+                        var recovered = EnumerateFiles(archive, mask, embeddedListFile);
+                        var anonymousBefore = result.Count(entry => ClientArchiveIndexService.IsAnonymous(entry.ArchivePath));
+                        var anonymousAfter = recovered.Count(entry => ClientArchiveIndexService.IsAnonymous(entry.ArchivePath));
+                        if (anonymousAfter < anonymousBefore && HasSamePhysicalEntries(result, recovered)) result = recovered;
+                    }
+                }
+                catch (Exception) { /* Embedded metadata recovery is best-effort; retain the complete anonymous physical index. */ }
             }
-            finally { Native.SFileFindClose(find); }
+            return result.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
         }
-        finally { Native.SFileCloseArchive(archive); }
-        return result.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
+        finally
+        {
+            Native.SFileCloseArchive(archive);
+            if (embeddedListFile is not null) try { File.Delete(embeddedListFile); } catch { }
+        }
+    }
+
+    private static List<MpqFileEntry> EnumerateFiles(IntPtr archive, string mask, string? listFile)
+    {
+        var result = new List<MpqFileEntry>();
+        var data = new Native.SFileFindData();
+        var find = Native.SFileFindFirstFile(archive, mask, ref data, listFile);
+        if (find == IntPtr.Zero) return result;
+        try
+        {
+            do
+            {
+                if (!string.IsNullOrWhiteSpace(data.FileName)) result.Add(new(data.FileName, data.FileSize, data.CompressedSize, data.FileFlags, data.Locale, data.BlockIndex));
+                data = new Native.SFileFindData();
+            } while (Native.SFileFindNextFile(find, ref data));
+        }
+        finally { Native.SFileFindClose(find); }
+        return result;
+    }
+
+    private static bool HasSamePhysicalEntries(IReadOnlyList<MpqFileEntry> left, IReadOnlyList<MpqFileEntry> right)
+    {
+        if (left.Count != right.Count) return false;
+        static Dictionary<(uint Block, uint Locale, long Size, long CompressedSize, uint Flags), int> Counts(IReadOnlyList<MpqFileEntry> entries)
+        {
+            var counts = new Dictionary<(uint, uint, long, long, uint), int>();
+            foreach (var entry in entries)
+            {
+                var identity = (entry.BlockIndex, entry.Locale, entry.Size, entry.CompressedSize, entry.Flags);
+                counts.TryGetValue(identity, out var count); counts[identity] = count + 1;
+            }
+            return counts;
+        }
+        var expected = Counts(left); var actual = Counts(right);
+        return expected.Count == actual.Count && expected.All(pair => actual.TryGetValue(pair.Key, out var count) && count == pair.Value);
     }
 
     public void Extract(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default,
