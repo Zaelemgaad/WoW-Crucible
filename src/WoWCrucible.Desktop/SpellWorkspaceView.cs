@@ -8,6 +8,7 @@ using WoWCrucible.Core;
 namespace WoWCrucible.Desktop;
 
 internal sealed record SpellFieldChange(DbcColumn Column, string Value);
+internal sealed class SpellProjectCloneRequest(ContentIdDomain domain) : EventArgs { public ContentIdDomain Domain { get; } = domain; }
 
 internal sealed class SpellWorkspaceView : UserControl
 {
@@ -32,6 +33,7 @@ internal sealed class SpellWorkspaceView : UserControl
     private readonly Button _refreshSql = AccentButton("Inspect live SQL precedence");
 
     public event EventHandler? BackRequested;
+    public event EventHandler<SpellProjectCloneRequest>? ProjectCloneRequested;
     public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
@@ -48,6 +50,8 @@ internal sealed class SpellWorkspaceView : UserControl
         back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var applyButton = AccentButton("Apply changes to staged Spell.dbc");
         applyButton.Click += (_, _) => ApplyChanges();
+        var cloneSpell = AccentButton("Clone with project spell ID"); cloneSpell.Click += (_, _) => RequestProjectClone(ContentIdDomain.Spell);
+        var cloneMount = new Button { Content = "Clone as mount-spell draft" }; cloneMount.Click += (_, _) => RequestProjectClone(ContentIdDomain.Mount);
         var header = new Grid
         {
             ColumnDefinitions = new("Auto,*,Auto"),
@@ -70,7 +74,7 @@ internal sealed class SpellWorkspaceView : UserControl
                         }
                     }
                 }, 1),
-                WithColumn(applyButton, 2)
+                WithColumn(new WrapPanel { Children = { cloneSpell, cloneMount, applyButton } }, 2)
             }
         };
 
@@ -106,6 +110,20 @@ internal sealed class SpellWorkspaceView : UserControl
         _sqlSummary.Text = _session.DatabaseTested
             ? "Ready to inspect the connected world database. This is read-only until you explicitly open a complete row in SQL Studio."
             : "Connect Server & SQL first, then return here to inspect spell_dbc replacement and related spell rows.";
+    }
+
+    public void ReportProjectClone(string message, bool success)
+    {
+        _status.Text = message; _status.Foreground = Brush.Parse(success ? "#79B58A" : "#D96C68");
+    }
+
+    private void RequestProjectClone(ContentIdDomain domain)
+    {
+        _status.Foreground = Brush.Parse("#99A5B8");
+        _status.Text = domain == ContentIdDomain.Mount
+            ? "Reserving the shared Spell/Mount namespace and cloning this row as a mount-spell draft…"
+            : "Scanning staged Spell.dbc and live spell_dbc identities before cloning…";
+        ProjectCloneRequested?.Invoke(this, new(domain));
     }
 
     private Control SqlAuditPage()

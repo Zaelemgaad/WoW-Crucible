@@ -25,7 +25,8 @@ public sealed class ContentIdOccupancyService
         string? dbcFolder,
         string? schemaPath,
         IEnumerable<uint>? additionalOccupied = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, IReadOnlyCollection<uint>>? inMemoryDbcIds = null)
     {
         var policy = ContentIdDomainCatalog.Get(domain);
         var occupied = additionalOccupied?.ToHashSet() ?? [];
@@ -66,6 +67,12 @@ public sealed class ContentIdOccupancyService
                     continue;
                 }
 
+                if (inMemoryDbcIds?.FirstOrDefault(pair => pair.Key.Equals(source.Name, StringComparison.OrdinalIgnoreCase)).Value is { } stagedIds)
+                {
+                    var ids = stagedIds.Where(id => id != 0).Distinct().ToArray(); occupied.UnionWith(ids);
+                    sources.Add(new("DBC", source.Name, "currently staged in memory", ids.Length, true, "Read every stable record key from the active staged client table, including unsaved structural edits."));
+                    continue;
+                }
                 if (!Directory.Exists(dbcFolder) || !File.Exists(schemaPath))
                 {
                     sources.Add(new("DBC", source.Name, dbcFolder ?? "not configured", 0, false, "A DBC folder and matching schema definition are required."));

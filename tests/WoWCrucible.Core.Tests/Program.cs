@@ -1515,6 +1515,16 @@ if (spellPath is not null)
         var lookup = ReferenceLookupService.SearchDbc(ReferenceDomain.Spell, dbc, resolution.Columns, 0, layout.NameColumn, referenceId.ToString(), 5, layout.Details);
         if (!lookup.Entries.Any(entry => entry.Id == referenceId)) throw new InvalidOperationException($"Shared reference searching did not resolve numeric {layout.Table}.dbc ID {referenceId}.");
     }
+    var stagedSpellIds = DbcRecordIdentity.IndexRows(spell, spellColumns, new(DbcRecordKeyKind.PhysicalColumn, 0)).Keys.ToArray();
+    var stagedSpellOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Spell, null, null, null, null,
+        inMemoryDbcIds: new Dictionary<string, IReadOnlyCollection<uint>>(StringComparer.OrdinalIgnoreCase) { ["Spell"] = stagedSpellIds });
+    if (stagedSpellOccupancy.Complete || stagedSpellOccupancy.Sources.Single(source => source.Kind == "DBC") is not { Available: true } stagedSpellSource || stagedSpellSource.Ids != spell.RowCount)
+        throw new InvalidOperationException("Staged in-memory Spell.dbc identities were not accepted while the missing SQL source remained correctly blocking.");
+    var exactCloneTarget = checked(spell.NextId(spellColumns[0]) + 1_000u); var exactCloneRow = spell.CloneRowWithId(0, spellColumns[0], exactCloneTarget);
+    if (spell.GetRaw(exactCloneRow, spellColumns[0]) != exactCloneTarget || spell.GetRaw(exactCloneRow, spellColumns[136]) != spell.GetRaw(0, spellColumns[136]))
+        throw new InvalidOperationException("Exact project-reserved Spell.dbc cloning did not preserve the source row under the requested identity.");
+    try { _ = spell.CloneRowWithId(0, spellColumns[0], exactCloneTarget); throw new InvalidOperationException("Exact Spell.dbc cloning accepted a duplicate project ID."); }
+    catch (InvalidOperationException exception) when (exception.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase)) { }
     var spellRowsBefore = spell.RowCount;
     var timer = Stopwatch.StartNew();
     spell.CloneRows(0, 100, spellColumns[0]);

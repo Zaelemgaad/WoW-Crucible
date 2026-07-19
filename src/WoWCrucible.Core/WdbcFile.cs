@@ -214,6 +214,19 @@ public sealed class WdbcFile
         return CloneRows(sourceRow, 1, idColumn);
     }
 
+    public int CloneRowWithId(int sourceRow, DbcColumn idColumn, uint targetId)
+    {
+        RequireStructuralMutation();
+        ArgumentOutOfRangeException.ThrowIfNegative(sourceRow);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(sourceRow, RowCount);
+        if (targetId == 0) throw new ArgumentOutOfRangeException(nameof(targetId), "A physical DBC identity must be positive.");
+        for (var row = 0; row < RowCount; row++)
+            if (GetRaw(row, idColumn) == targetId) throw new InvalidOperationException($"DBC identity {targetId:N0} already exists at row {row + 1:N0}.");
+        var targetRow = RowCount; EnsureRowCapacity(1);
+        _records.AsSpan(sourceRow * RecordSize, RecordSize).CopyTo(_records.AsSpan(targetRow * RecordSize, RecordSize));
+        RowCount++; SetRaw(targetRow, idColumn, targetId); IsDirty = true; return targetRow;
+    }
+
     public int AddBlankRows(int count, DbcColumn? idColumn = null)
     {
         RequireStructuralMutation();

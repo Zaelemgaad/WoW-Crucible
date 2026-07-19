@@ -460,11 +460,44 @@ public partial class MainWindow : Window
             _ = ShowErrorAsync("Spell schema mismatch", "The guided WotLK spell workspace requires the 3.3.5a Spell.dbc layout. Select the matching build-12340 schema first.");
             return;
         }
+        ShowSpellWorkspace(document, row);
+    }
+
+    private SpellWorkspaceView ShowSpellWorkspace(DbcDocumentSession document, int row)
+    {
         var view = new SpellWorkspaceView(document.File, row, document.Schema.Columns, _workspaceSession, changes => ApplySpellChanges(document, row, changes));
         view.BackRequested += (_, _) => CloseFeatureWorkspace();
         view.FullSqlEditRequested += async (_, request) => await OpenCompleteSqlRowAsync(request);
         view.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
+        view.ProjectCloneRequested += async (_, request) => await CloneSpellIntoProjectAsync(document, row, view, request.Domain);
         OpenFeatureWorkspace(view, $"Spell {document.File.GetDisplayValue(row, document.Schema.Columns[0])}");
+        return view;
+    }
+
+    private async Task CloneSpellIntoProjectAsync(DbcDocumentSession document, int sourceRow, SpellWorkspaceView sourceView, ContentIdDomain domain)
+    {
+        if (string.IsNullOrWhiteSpace(_workspaceSession.Settings.ActiveProjectPath))
+        {
+            sourceView.ReportProjectClone("Create or open a project first. Opening Projects & shared IDs…", false); OpenProjectWorkspace(); return;
+        }
+        try
+        {
+            RequireStructuralKey(document); var idColumn = document.IdColumn ?? throw new InvalidOperationException("Spell.dbc has no physical ID column.");
+            if (!document.File.AllowsStructuralMutation) throw new InvalidOperationException("This client table has dependent DB2 side structures and cannot be cloned safely.");
+            var stagedIds = DbcRecordIdentity.IndexRows(document.File, document.Schema.Columns, document.Schema.KeyStrategy).Keys.ToArray();
+            var name = Convert.ToString(document.File.GetDisplayValue(sourceRow, document.Schema.Columns[136]), CultureInfo.InvariantCulture) ?? "unnamed spell";
+            var sourceId = document.File.GetRaw(sourceRow, idColumn); var purpose = domain == ContentIdDomain.Mount ? $"Mount-spell draft cloned from {sourceId}: {name}" : $"Spell clone of {sourceId}: {name}";
+            var reserved = await ProjectIdReservationBridge.ReserveNextAsync(_workspaceSession, domain, purpose, stagedDbcIds: new Dictionary<string, IReadOnlyCollection<uint>>(StringComparer.OrdinalIgnoreCase) { ["Spell"] = stagedIds });
+            var newRow = document.File.CloneRowWithId(sourceRow, idColumn, reserved.SingleId); document.History.Clear(); ClearFilter(); DbcView.RefreshDocument(newRow); RefreshTabs();
+            var clonedView = ShowSpellWorkspace(document, newRow); var kind = domain == ContentIdDomain.Mount ? "mount-spell draft" : "spell";
+            clonedView.ReportProjectClone($"Reserved and cloned {kind} ID {reserved.SingleId:N0} in {reserved.ProjectName}. The new row is staged only; review effects/text/visuals, then save Spell.dbc and build the client patch. No SQL row was created.", true);
+            StatusText.Text = $"Cloned Spell.dbc row {sourceId:N0} to project-reserved ID {reserved.SingleId:N0}";
+            DesktopCrashLogger.Debug("SPELL", "project-clone", ("source_id", sourceId), ("target_id", reserved.SingleId), ("domain", domain), ("project", reserved.ProjectPath), ("new_row", newRow));
+        }
+        catch (Exception exception)
+        {
+            sourceView.ReportProjectClone($"Project spell clone failed: {exception.Message}", false); DesktopCrashLogger.Log("Project spell clone failed", exception);
+        }
     }
 
     private async Task OpenReferencePickerAsync(ReferencePickerRequest request)
