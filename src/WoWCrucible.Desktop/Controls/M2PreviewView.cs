@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -137,6 +138,7 @@ public sealed class M2PreviewView : UserControl, IDisposable
 
 internal sealed class M2PreviewCanvas : Control, IDisposable
 {
+    private static readonly ConcurrentDictionary<string, byte> LoggedParticleFailures = new(StringComparer.Ordinal);
     private sealed record MountedModel(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? Texture, string Label, int? ParentAttachmentIndex);
     private M2PreviewGeometry? _geometry;
     private SKBitmap? _texture;
@@ -501,6 +503,55 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                 }
             }
 
+            IReadOnlyList<M2PreviewParticleSprite> particleSprites;
+            string? particleFailure = null;
+            try { particleSprites = M2ParticlePreviewService.BuildSprites(geometry, pose); }
+            catch (Exception exception) when (exception is InvalidDataException or NotSupportedException)
+            {
+                particleSprites = [];
+                particleFailure = exception.Message;
+                var key = geometry.ModelPath + "\0" + exception.Message;
+                if (LoggedParticleFailures.TryAdd(key, 0)) DesktopCrashLogger.Log($"M2 particle preview unavailable: {geometry.ModelPath}", exception);
+            }
+            var projectedParticles = new List<ProjectedParticle>(particleSprites.Count);
+            foreach (var particle in particleSprites)
+            {
+                Vector3 point;
+                if (useNativeCamera)
+                {
+                    var view = cameraProjection!.ToViewPoint(Vector3.Transform(particle.Position, sceneTransform));
+                    if (!cameraProjection.ContainsDepth(view.Y)) continue;
+                    point = cameraProjection.Project(view);
+                }
+                else point = Vector3.Transform(particle.Position - center, orbitRotation);
+                var x = width * 0.5f + point.X * scale; var y = height * 0.5f - point.Z * scale;
+                var radius = Math.Clamp(particle.Size * scale, 0.5f, 256f);
+                if (x + radius < 0 || x - radius > width || y + radius < 0 || y - radius > height) continue;
+                projectedParticles.Add(new(point.Y, x, y, radius, particle));
+            }
+            projectedParticles.Sort(static (left, right) => right.Depth.CompareTo(left.Depth));
+            foreach (var projected in projectedParticles)
+            {
+                var particle = projected.Sprite;
+                var tint = new SKColor(Channel(particle.Color.X * 255), Channel(particle.Color.Y * 255), Channel(particle.Color.Z * 255), Channel(particle.Color.W * 255));
+                var blend = particle.BlendMode switch { 3 or 4 => SKBlendMode.Plus, 5 or 6 => SKBlendMode.Modulate, _ => SKBlendMode.SrcOver };
+                using var particlePaint = new SKPaint { IsAntialias = true, BlendMode = blend, Color = tint };
+                particlePaint.ColorFilter = SKColorFilter.CreateBlendMode(tint, SKBlendMode.Modulate);
+                canvas.Save();
+                if (Math.Abs(particle.Rotation) > 0.0001f) canvas.RotateRadians(particle.Rotation, projected.X, projected.Y);
+                var destination = new SKRect(projected.X - projected.Radius, projected.Y - projected.Radius, projected.X + projected.Radius, projected.Y + projected.Radius);
+                if (materialTextures.TryGetValue(particle.TextureDefinitionIndex, out var particleTexture))
+                {
+                    var columns = Math.Max(1, (int)particle.Columns); var rows = Math.Max(1, (int)particle.Rows);
+                    var tileWidth = particleTexture.Width / (float)columns; var tileHeight = particleTexture.Height / (float)rows;
+                    var column = particle.TileIndex % columns; var row = particle.TileIndex / columns;
+                    var source = new SKRect(column * tileWidth, row * tileHeight, (column + 1) * tileWidth, (row + 1) * tileHeight);
+                    canvas.DrawBitmap(particleTexture, source, destination, particlePaint);
+                }
+                else canvas.DrawCircle(projected.X, projected.Y, projected.Radius, particlePaint);
+                canvas.Restore();
+            }
+
             if (showAttachments && geometry.Attachments.Count > 0)
             {
                 using var marker = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(69, 211, 255, 210) };
@@ -542,13 +593,15 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             var environment = environmentUnits == 0 ? string.Empty : $" · {environmentUnits:N0} sphere-map unit(s)";
             var camera = useNativeCamera ? $" · {nativeCamera!.Name}" : string.Empty;
             var embeddedLights = geometry.Lights.Count == 0 ? string.Empty : $" · {geometry.Lights.Count:N0} embedded light(s)";
+            var particles = geometry.ParticleEmitters.Count == 0 ? string.Empty : $" · {projectedParticles.Count:N0}/{geometry.ParticleEmitters.Count:N0} particle sprites/emitters";
+            var particleFallback = particleFailure is null ? string.Empty : " · particle fallback";
             var fallbackUnits = geometry.Batches.Count(batch => batch.TextureStages.Count > 1 && (!batch.Combiner.Supported || batch.TextureStages.Any(stage => stage.CoordinateSource == M2PreviewTextureCoordinateSource.Unsupported)));
             var fallback = fallbackUnits == 0 ? string.Empty : $" · {fallbackUnits:N0} first-stage fallback(s)";
             var attachments = showAttachments ? $" · {geometry.Attachments.Count:N0} attachment point(s)" : string.Empty;
             var mounted = mountedModels.Count == 0 ? string.Empty : $" · {mountedModels.Count:N0} mounted model(s)";
             var animation = pose is null ? string.Empty : $" · animation {geometry.Sequences[pose.SequenceIndex].AnimationId:N0}:{geometry.Sequences[pose.SequenceIndex].SubAnimationId:N0}";
             var scene = sceneTransformLabel is null ? string.Empty : $" · {sceneTransformLabel}";
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount}{multiTexture}{environment}{camera}{embeddedLights}{approximate}{fallback} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount}{multiTexture}{environment}{camera}{embeddedLights}{particles}{particleFallback}{approximate}{fallback} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }
@@ -613,6 +666,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
 
         private sealed record ResolvedTextureStage(SKBitmap Texture, M2PreviewTextureCoordinateSource CoordinateSource, M2PreviewTextureStageBlend Blend);
         private sealed record SceneLight(short Type, M2PreviewLightPose Pose);
+        private readonly record struct ProjectedParticle(float Depth, float X, float Y, float Radius, M2PreviewParticleSprite Sprite);
         private readonly record struct TextureGroup(int PassOrder, int SourceIndex, int MaterialKey, ushort BlendMode);
         private readonly record struct Face(float Depth, int PassOrder, int SourceIndex, int MaterialKey, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy,
             Vector2 EnvironmentA, Vector2 EnvironmentB, Vector2 EnvironmentC, Vector3 Lighting, IReadOnlyList<ResolvedTextureStage> TextureStages, ushort BlendMode);

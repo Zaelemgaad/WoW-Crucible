@@ -33,6 +33,12 @@ public sealed record M2PreviewLight(int Index, short Type, short BoneIndex, Vect
     public string Name => Type switch { 0 => "Directional light", 1 => "Point light", _ => $"Light type {Type:N0}" };
     public override string ToString() => $"{Name} · bone {(BoneIndex < 0 ? "none" : BoneIndex.ToString("N0"))}";
 }
+public sealed record M2PreviewParticleEmitter(int Index, uint Flags, Vector3 Position, short BoneIndex, int TextureDefinitionIndex,
+    byte BlendMode, byte EmitterType, ushort Rows, ushort Columns, IReadOnlyList<Vector4> LifeColors, IReadOnlyList<float> LifeSizes, float Rotation)
+{
+    public string EmitterName => EmitterType switch { 1 => "Plane", 2 => "Sphere", 3 => "Spline", _ => $"Unknown {EmitterType:N0}" };
+    public override string ToString() => $"{EmitterName} particle · bone {(BoneIndex < 0 ? "none" : BoneIndex.ToString("N0"))} · texture {TextureDefinitionIndex:N0}";
+}
 public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
 public enum M2PreviewTextureCoordinateSource { Primary, Secondary, Environment, Unsupported }
 public enum M2PreviewTextureStageBlend { Source, Modulate, Modulate2X, Add, AddNoAlpha, Unsupported }
@@ -73,12 +79,14 @@ public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadO
     public IReadOnlyList<M2PreviewAttachment> Attachments { get; init; } = [];
     public IReadOnlyList<M2PreviewCamera> Cameras { get; init; } = [];
     public IReadOnlyList<M2PreviewLight> Lights { get; init; } = [];
+    public IReadOnlyList<M2PreviewParticleEmitter> ParticleEmitters { get; init; } = [];
     public IReadOnlyList<M2PreviewSequence> Sequences { get; init; } = [];
     public IReadOnlyList<Vector2> SecondaryTextureCoordinates { get; init; } = [];
     public int TotalTriangleIndices { get; init; } = TriangleIndices.Count;
     public M2PreviewVisibilityMode VisibilityMode { get; init; } = M2PreviewVisibilityMode.BaseAppearance;
     public M2GeosetSelection? GeosetSelection { get; init; }
     internal M2AnimationRig? AnimationRig { get; init; }
+    internal M2ParticleRig? ParticleRig { get; init; }
 }
 
 public static class M2PreviewGeometryService
@@ -115,6 +123,7 @@ public static class M2PreviewGeometryService
         var animationRig = M2AnimationService.ParseRig(modelPath, model, vertexOffset, vertexCount, bones);
         var attachments = ReadAttachments(model, bones.Count);
         var textureSlots = ReadTextureSlots(model);
+        var particleRig = M2ParticlePreviewService.Parse(model, animationRig, bones.Count, textureSlots.Count);
         var renderFlags = ReadRenderFlags(model);
         var textureLookup = ReadTextureLookup(model, textureSlots.Count);
         var textureCoordinateLookup = ReadSignedLookup(model, 0x88, 0x8C, "M2 texture-coordinate lookup");
@@ -154,12 +163,14 @@ public static class M2PreviewGeometryService
             Attachments = attachments,
             Cameras = animationRig.PreviewCameras,
             Lights = animationRig.PreviewLights,
+            ParticleEmitters = particleRig.Emitters,
             Sequences = animationRig.Sequences,
             SecondaryTextureCoordinates = secondaryTextureCoordinates,
             TotalTriangleIndices = allTriangles.Length,
             VisibilityMode = visibilityMode,
             GeosetSelection = geosetSelection,
-            AnimationRig = animationRig
+            AnimationRig = animationRig,
+            ParticleRig = particleRig
         };
     }
 

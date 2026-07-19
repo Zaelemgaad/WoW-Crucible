@@ -245,8 +245,7 @@ public static class M2AnimationService
     {
         if (rig.ClipCache.TryGetValue(sequenceIndex, out var cached)) return cached;
         var sequence = rig.Sequences[sequenceIndex];
-        var externalPath = Path.Combine(Path.GetDirectoryName(modelPath)!, $"{Path.GetFileNameWithoutExtension(modelPath)}{sequence.AnimationId:D4}-{sequence.SubAnimationId:D2}.anim");
-        var sequenceData = File.Exists(externalPath) ? File.ReadAllBytes(externalPath) : rig.ModelData;
+        var sequenceData = ResolveSequenceData(modelPath, rig, sequence);
         var bones = new M2BoneClip[rig.Bones.Length];
         for (var index = 0; index < bones.Length; index++)
         {
@@ -269,6 +268,12 @@ public static class M2AnimationService
         if (rig.ClipCache.Count >= MaximumCachedClips) rig.ClipCache.Remove(rig.ClipCache.Keys.First());
         rig.ClipCache[sequenceIndex] = clip;
         return clip;
+    }
+
+    internal static byte[] ResolveSequenceData(string modelPath, M2AnimationRig rig, M2PreviewSequence sequence)
+    {
+        var externalPath = Path.Combine(Path.GetDirectoryName(modelPath)!, $"{Path.GetFileNameWithoutExtension(modelPath)}{sequence.AnimationId:D4}-{sequence.SubAnimationId:D2}.anim");
+        return File.Exists(externalPath) ? File.ReadAllBytes(externalPath) : rig.ModelData;
     }
 
     private static (M2CameraAnimation[] Animations, IReadOnlyList<M2PreviewCamera> Preview) ParseCameras(byte[] model, int globalCount)
@@ -338,7 +343,7 @@ public static class M2AnimationService
         MatchCounts(times, values.Length, label); return new(header.Interpolation, times, values, globalDuration);
     }
 
-    private static M2ScalarTrack ParseScalarTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
+    internal static M2ScalarTrack ParseScalarTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
     {
         var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 4);
         Require(data, valueOffset, valueCount, 4, label + " values"); var values = new float[valueCount];
@@ -386,7 +391,7 @@ public static class M2AnimationService
         return left == right ? track.Values[left] : Quaternion.Normalize(Quaternion.Slerp(track.Values[left], track.Values[right], amount));
     }
 
-    private static float Sample(M2ScalarTrack track, double sequenceTime, double elapsedTime, float fallback)
+    internal static float Sample(M2ScalarTrack track, double sequenceTime, double elapsedTime, float fallback)
     {
         if (track.Values.Length == 0) return fallback;
         var time = TrackTime(track.GlobalDuration, sequenceTime, elapsedTime); var (left, right, amount) = Keys(track.Times, time, track.Interpolation);
@@ -415,7 +420,7 @@ public static class M2AnimationService
         return (left, right, Math.Clamp((float)((time - times[left]) / (times[right] - times[left])), 0, 1));
     }
 
-    private static int ResolveAlias(IReadOnlyList<M2PreviewSequence> sequences, int index)
+    internal static int ResolveAlias(IReadOnlyList<M2PreviewSequence> sequences, int index)
     {
         var visited = new HashSet<int>();
         while (sequences[index].IsAlias)
@@ -428,7 +433,7 @@ public static class M2AnimationService
         return index;
     }
 
-    private static M2TrackHeader ReadTrack(byte[] model, int offset, int globalCount, string label)
+    internal static M2TrackHeader ReadTrack(byte[] model, int offset, int globalCount, string label)
     {
         Require(model, offset, 1, 20, "M2 " + label);
         var header = new M2TrackHeader(UShort(model, offset), Short(model, offset + 2), UInt(model, offset + 4), UInt(model, offset + 8), UInt(model, offset + 12), UInt(model, offset + 16));
