@@ -52,7 +52,9 @@ public static class StaticM2DownportService
     private const int ReceiptFormatVersion = 1;
     private const uint ModernVersion = 274;
     private const uint WotlkVersion = 264;
-    private const uint SupportedModernFlags = 0x2080;
+    private const uint RequiredModernFlags = 0x2080;
+    private const uint NewExporterLayoutFlag = 0x200000;
+    private const uint SupportedModernFlagMask = RequiredModernFlags | NewExporterLayoutFlag;
     private const int MaximumArrayCount = 20_000_000;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -89,7 +91,8 @@ public static class StaticM2DownportService
                 {
                     version = U32(payload, 4); flags = U32(payload, 0x10);
                     if (version != ModernVersion) blockers.Add($"Static downport currently requires modern M2 version {ModernVersion}; found {version}.");
-                    if (flags != SupportedModernFlags) blockers.Add($"Static downport currently requires verified global flags 0x{SupportedModernFlags:X}; found 0x{flags:X}.");
+                    if ((flags & RequiredModernFlags) != RequiredModernFlags || (flags & ~SupportedModernFlagMask) != 0)
+                        blockers.Add($"Static downport requires flags 0x{RequiredModernFlags:X} with only the optional verified newer-exporter bit 0x{NewExporterLayoutFlag:X}; found 0x{flags:X}.");
                     vertices = Count(payload, 0x3C, "vertex", blockers);
                     ValidateArray(payload, 0x3C, 0x40, 48, "vertices", blockers);
                     var viewCount = Count(payload, 0x44, "skin profile", blockers);
@@ -159,11 +162,12 @@ public static class StaticM2DownportService
         transformations.Add("Unwrap the MD21 container into its embedded MD20 payload.");
         transformations.Add($"Translate M2 version {ModernVersion} to Wrath version {WotlkVersion} after structural validation.");
         transformations.Add("Clear verified modern FileDataID/LOD flags only after proving TXID values are zero and exactly one SKIN is present.");
+        if ((flags & NewExporterLayoutFlag) != 0) transformations.Add("Clear the newer-exporter layout flag after validating every translated array by its absolute offset; physical record order is not copied into Wrath semantics.");
         transformations.Add("Append the missing primary-UV texture-coordinate lookup used by the verified single-stage SKIN batches.");
         transformations.Add("Repack modern SKIN v3 common arrays into the Wrath SKIN v2 header without changing their contents.");
         if (omittedEmptyTxac) transformations.Add("Omit the proven zero-filled TXAC extension chunk; it contains no texture-animation values to translate.");
         return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, version, flags,
-            flags & ~SupportedModernFlags, vertices, triangles, submeshes, materials, shadows, transformations, losses, blockers.Distinct().ToArray());
+            flags & ~SupportedModernFlagMask, vertices, triangles, submeshes, materials, shadows, transformations, losses, blockers.Distinct().ToArray());
     }
 
     public static StaticM2DownportResult Convert(StaticM2DownportPlan plan, string outputDirectory, CancellationToken cancellationToken = default)
