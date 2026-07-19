@@ -36,8 +36,10 @@ public sealed record M2PreviewLight(int Index, short Type, short BoneIndex, Vect
 public sealed record M2PreviewParticleEmitter(int Index, uint Flags, Vector3 Position, short BoneIndex, int TextureDefinitionIndex,
     byte BlendMode, byte EmitterType, ushort Rows, ushort Columns, IReadOnlyList<Vector4> LifeColors, IReadOnlyList<float> LifeSizes, float Rotation)
 {
+    public IReadOnlyList<int> TextureDefinitionIndices { get; init; } = [TextureDefinitionIndex];
+    public bool UsesMultipleTextures => TextureDefinitionIndices.Count > 1;
     public string EmitterName => EmitterType switch { 1 => "Plane", 2 => "Sphere", 3 => "Spline", _ => $"Unknown {EmitterType:N0}" };
-    public override string ToString() => $"{EmitterName} particle · bone {(BoneIndex < 0 ? "none" : BoneIndex.ToString("N0"))} · texture {TextureDefinitionIndex:N0}";
+    public override string ToString() => $"{EmitterName} particle · bone {(BoneIndex < 0 ? "none" : BoneIndex.ToString("N0"))} · texture{(UsesMultipleTextures ? "s" : string.Empty)} {string.Join(',', TextureDefinitionIndices)}";
 }
 public sealed record M2PreviewRibbonEmitter(int Index, int BoneIndex, Vector3 Position, int TextureDefinitionIndex, int RenderFlagsIndex,
     ushort BlendMode, float EdgesPerSecond, float EdgeLifetimeSeconds, float EmissionAngle)
@@ -176,7 +178,7 @@ public static class M2PreviewGeometryService
             RibbonEmitters = ribbonRig.Emitters,
             UsedTextureDefinitionIndices = batches.SelectMany(batch => batch.TextureStages).Where(stage => stage.TextureDefinitionIndex >= 0).Select(stage => stage.TextureDefinitionIndex)
                 .Concat(batches.Where(batch => batch.TextureStages.Count == 0 && batch.TextureDefinitionIndex is not null).Select(batch => batch.TextureDefinitionIndex!.Value))
-                .Concat(particleRig.Emitters.Select(emitter => emitter.TextureDefinitionIndex)).Concat(ribbonRig.Emitters.Where(emitter => emitter.TextureDefinitionIndex >= 0).Select(emitter => emitter.TextureDefinitionIndex)).Distinct().Order().ToArray(),
+                .Concat(particleRig.Emitters.SelectMany(emitter => emitter.TextureDefinitionIndices)).Concat(ribbonRig.Emitters.Where(emitter => emitter.TextureDefinitionIndex >= 0).Select(emitter => emitter.TextureDefinitionIndex)).Distinct().Order().ToArray(),
             Sequences = animationRig.Sequences,
             SecondaryTextureCoordinates = secondaryTextureCoordinates,
             TotalTriangleIndices = allTriangles.Length,

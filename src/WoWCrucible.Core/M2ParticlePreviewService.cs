@@ -21,7 +21,10 @@ internal sealed class M2ParticleRig(IReadOnlyList<M2PreviewParticleEmitter> emit
 }
 
 public sealed record M2PreviewParticleSprite(Vector3 Position, Vector4 Color, float Size, float Rotation,
-    int TextureDefinitionIndex, byte BlendMode, int TileIndex, ushort Rows, ushort Columns, int EmitterIndex);
+    int TextureDefinitionIndex, byte BlendMode, int TileIndex, ushort Rows, ushort Columns, int EmitterIndex)
+{
+    public IReadOnlyList<int> TextureDefinitionIndices { get; init; } = [TextureDefinitionIndex];
+}
 
 public static class M2ParticlePreviewService
 {
@@ -45,14 +48,18 @@ public static class M2ParticlePreviewService
             var position = ReadVector(model, item + 8);
             var bone = ReadShort(model, item + 20);
             var packedTexture = ReadUShort(model, item + 22);
-            var texture = (flags & MultiTextureFlag) != 0 ? packedTexture & 0x1F : packedTexture;
+            var textures = (flags & MultiTextureFlag) != 0
+                ? new[] { packedTexture & 0x1F, (packedTexture >> 5) & 0x1F, (packedTexture >> 10) & 0x1F }
+                : [packedTexture];
+            var texture = textures[0];
             var blend = model[item + 40];
             var type = model[item + 41];
             var rows = ReadUShort(model, item + 48); if (rows == 0) rows = 1;
             var columns = ReadUShort(model, item + 50); if (columns == 0) columns = 1;
             if (!Finite(position)) throw new InvalidDataException($"M2 particle emitter {index:N0} contains a non-finite position.");
             if (bone < -1 || bone >= boneCount) throw new InvalidDataException($"M2 particle emitter {index:N0} references bone {bone:N0}, but only {boneCount:N0} bones exist.");
-            if (texture >= textureCount) throw new InvalidDataException($"M2 particle emitter {index:N0} references texture definition {texture:N0}, but only {textureCount:N0} textures exist.");
+            var invalidTexture = textures.FirstOrDefault(value => value >= textureCount, -1);
+            if (invalidTexture >= 0) throw new InvalidDataException($"M2 particle emitter {index:N0} references texture definition {invalidTexture:N0} in its {(textures.Length == 1 ? "texture field" : "packed multi-texture field")}, but only {textureCount:N0} textures exist.");
             if (blend > 7) throw new InvalidDataException($"M2 particle emitter {index:N0} uses invalid blend mode {blend:N0}.");
             if ((long)rows * columns > 65_536) throw new InvalidDataException($"M2 particle emitter {index:N0} declares an excessive {rows:N0} x {columns:N0} sprite sheet.");
 
@@ -65,7 +72,7 @@ public static class M2ParticlePreviewService
             for (var key = 0; key < 3; key++) lifeColors[key] = new(colors[key], opacity[key]);
             var rotation = ReadSingle(model, item + 384);
             if (!float.IsFinite(rotation)) throw new InvalidDataException($"M2 particle emitter {index:N0} contains a non-finite sprite rotation.");
-            emitters[index] = new(index, flags, position, bone, texture, blend, type, rows, columns, lifeColors, sizes, rotation);
+            emitters[index] = new(index, flags, position, bone, texture, blend, type, rows, columns, lifeColors, sizes, rotation) { TextureDefinitionIndices = textures };
             animations[index] = new(
                 Track(item + 52, "speed"), Track(item + 72, "variation"), Track(item + 92, "vertical range"), Track(item + 112, "horizontal range"),
                 Track(item + 132, "gravity"), Track(item + 152, "lifespan"), Track(item + 176, "emission rate"),
@@ -150,7 +157,10 @@ public static class M2ParticlePreviewService
                 if (!Finite(color) || !float.IsFinite(size) || size <= 0.000001f || color.W <= 0.00001f) continue;
                 var tileCount = emitter.Rows * emitter.Columns;
                 var tile = tileCount <= 1 ? 0 : (int)(seed % tileCount);
-                result.Add(new(position, Vector4.Clamp(color, Vector4.Zero, Vector4.One), size, emitter.Rotation, emitter.TextureDefinitionIndex, emitter.BlendMode, tile, emitter.Rows, emitter.Columns, emitterIndex));
+                result.Add(new(position, Vector4.Clamp(color, Vector4.Zero, Vector4.One), size, emitter.Rotation, emitter.TextureDefinitionIndex, emitter.BlendMode, tile, emitter.Rows, emitter.Columns, emitterIndex)
+                {
+                    TextureDefinitionIndices = emitter.TextureDefinitionIndices
+                });
             }
         }
         return result;

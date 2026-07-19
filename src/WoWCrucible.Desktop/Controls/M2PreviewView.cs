@@ -144,6 +144,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
     private M2PreviewGeometry? _geometry;
     private SKBitmap? _texture;
     private readonly Dictionary<int, SKBitmap> _materialTextures = [];
+    private readonly Dictionary<string, SKBitmap> _particleCompositeTextures = new(StringComparer.Ordinal);
     private readonly List<MountedModel> _mountedModels = [];
     private float _yaw = -0.65f;
     private float _pitch = 0.35f;
@@ -207,6 +208,16 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         _texture?.Dispose(); _texture = null;
         ClearMaterialTextures();
         foreach (var (textureDefinitionIndex, texture) in textures) _materialTextures[textureDefinitionIndex] = CreateBitmap(texture);
+        if (_geometry is not null)
+            foreach (var indices in _geometry.ParticleEmitters.Where(emitter => emitter.UsesMultipleTextures).Select(emitter => emitter.TextureDefinitionIndices).DistinctBy(ParticleTextureKey))
+            {
+                if (indices.Any(index => !textures.ContainsKey(index))) continue;
+                try { _particleCompositeTextures[ParticleTextureKey(indices)] = CreateBitmap(M2ParticleTextureCompositionService.Compose(indices.Select(index => textures[index]).ToArray())); }
+                catch (Exception exception) when (exception is InvalidDataException or ArgumentException or OverflowException)
+                {
+                    DesktopCrashLogger.Log($"M2 multi-texture particle composition unavailable: {_geometry.ModelPath} [{ParticleTextureKey(indices)}]", exception);
+                }
+            }
         InvalidateVisual();
     }
 
@@ -265,7 +276,11 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
     {
         foreach (var texture in _materialTextures.Values) texture.Dispose();
         _materialTextures.Clear();
+        foreach (var texture in _particleCompositeTextures.Values) texture.Dispose();
+        _particleCompositeTextures.Clear();
     }
+
+    private static string ParticleTextureKey(IReadOnlyList<int> indices) => string.Join(',', indices);
 
     private static bool Finite(Matrix4x4 value) =>
         float.IsFinite(value.M11) && float.IsFinite(value.M12) && float.IsFinite(value.M13) && float.IsFinite(value.M14) &&
@@ -286,7 +301,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         base.Render(context);
         context.FillRectangle(new SolidColorBrush(Color.Parse("#090D14")), Bounds);
         if (_geometry is null) return;
-        context.Custom(new M2DrawOperation(Bounds, _geometry, _pose, _texture, _materialTextures, _mountedModels, _sceneTransform, _sceneTransformLabel, _yaw, _pitch, _zoom, _showAttachments, _highlightedAttachmentIndex, _nativeCameraIndex));
+        context.Custom(new M2DrawOperation(Bounds, _geometry, _pose, _texture, _materialTextures, _particleCompositeTextures, _mountedModels, _sceneTransform, _sceneTransformLabel, _yaw, _pitch, _zoom, _showAttachments, _highlightedAttachmentIndex, _nativeCameraIndex));
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
@@ -324,7 +339,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         e.Handled = true;
     }
 
-    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, M2AnimationPose? pose, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, IReadOnlyList<MountedModel> mountedModels, Matrix4x4 sceneTransform, string? sceneTransformLabel, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex, int? nativeCameraIndex) : ICustomDrawOperation
+    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, M2AnimationPose? pose, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, IReadOnlyDictionary<string, SKBitmap> particleCompositeTextures, IReadOnlyList<MountedModel> mountedModels, Matrix4x4 sceneTransform, string? sceneTransformLabel, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex, int? nativeCameraIndex) : ICustomDrawOperation
     {
         private sealed record SceneSource(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? ManualTexture, IReadOnlyDictionary<int, SKBitmap>? MaterialTextures, string Label, IReadOnlyList<Vector3>? PosedVertices, IReadOnlyList<Vector3>? PosedNormals, Vector3 Minimum, Vector3 Maximum);
         public Rect Bounds => bounds;
@@ -581,11 +596,16 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             projectedParticles.Sort(static (left, right) => right.Depth.CompareTo(left.Depth));
             for (var start = 0; start < projectedParticles.Count;)
             {
-                var keySource = projectedParticles[start].SourceIndex; var keyTexture = projectedParticles[start].Sprite.TextureDefinitionIndex; var keyBlend = projectedParticles[start].Sprite.BlendMode; var end = start + 1;
-                while (end < projectedParticles.Count && projectedParticles[end].SourceIndex == keySource && projectedParticles[end].Sprite.TextureDefinitionIndex == keyTexture && projectedParticles[end].Sprite.BlendMode == keyBlend) end++;
+                var keySource = projectedParticles[start].SourceIndex; var keyTextures = ParticleTextureKey(projectedParticles[start].Sprite.TextureDefinitionIndices); var keyTexture = projectedParticles[start].Sprite.TextureDefinitionIndex; var keyBlend = projectedParticles[start].Sprite.BlendMode; var end = start + 1;
+                while (end < projectedParticles.Count && projectedParticles[end].SourceIndex == keySource && ParticleTextureKey(projectedParticles[end].Sprite.TextureDefinitionIndices) == keyTextures && projectedParticles[end].Sprite.BlendMode == keyBlend) end++;
                 var blend = keyBlend switch { 3 or 4 => SKBlendMode.Plus, 5 or 6 => SKBlendMode.Modulate, _ => SKBlendMode.SrcOver };
                 using var particlePaint = new SKPaint { IsAntialias = true, BlendMode = blend };
                 var particleSource = sources[keySource]; var particleTexture = particleSource.ManualTexture;
+                if (particleTexture is null && projectedParticles[start].Sprite.TextureDefinitionIndices.Count > 1)
+                {
+                    if (keySource == 0) particleCompositeTextures.TryGetValue(keyTextures, out particleTexture);
+                    if (particleTexture is null) particleFailure ??= $"Multi-texture particle {projectedParticles[start].Sprite.EmitterIndex:N0} requires texture definitions {keyTextures}; at least one decoded layer is unavailable.";
+                }
                 if (particleTexture is null) particleSource.MaterialTextures?.TryGetValue(keyTexture, out particleTexture);
                 if (particleTexture is not null)
                 {
@@ -653,6 +673,8 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             var embeddedLights = geometry.Lights.Count == 0 ? string.Empty : $" · {geometry.Lights.Count:N0} embedded light(s)";
             var particles = particleEmitterCount == 0 ? string.Empty : $" · {projectedParticles.Count:N0}/{particleEmitterCount:N0} particle sprites/emitters";
             var particleFallback = particleFailure is null ? string.Empty : " · particle fallback";
+            var multiTextureParticles = sources.Sum(source => source.Geometry.ParticleEmitters.Count(emitter => emitter.UsesMultipleTextures));
+            var particleLayers = multiTextureParticles == 0 ? string.Empty : $" · {multiTextureParticles:N0} multi-texture particle emitter(s)";
             var ribbons = ribbonEmitterCount == 0 ? string.Empty : $" · {displayedRibbonSections:N0}/{ribbonEmitterCount:N0} ribbon sections/emitters";
             var ribbonFallback = ribbonFailure is null ? string.Empty : " · ribbon fallback";
             var fallbackUnits = geometry.Batches.Count(batch => batch.TextureStages.Count > 1 && (!batch.Combiner.Supported || batch.TextureStages.Any(stage => stage.CoordinateSource == M2PreviewTextureCoordinateSource.Unsupported)));
@@ -661,7 +683,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             var mounted = mountedModels.Count == 0 ? string.Empty : $" · {mountedModels.Count:N0} mounted model(s)";
             var animation = pose is null ? string.Empty : $" · animation {geometry.Sequences[pose.SequenceIndex].AnimationId:N0}:{geometry.Sequences[pose.SequenceIndex].SubAnimationId:N0}";
             var scene = sceneTransformLabel is null ? string.Empty : $" · {sceneTransformLabel}";
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount}{multiTexture}{environment}{camera}{embeddedLights}{ribbons}{ribbonFallback}{particles}{particleFallback}{approximate}{fallback} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount}{multiTexture}{environment}{camera}{embeddedLights}{ribbons}{ribbonFallback}{particles}{particleLayers}{particleFallback}{approximate}{fallback} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }
