@@ -629,10 +629,10 @@ static int Asset(string[] args)
         if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(scan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         else
         {
-            Console.WriteLine($"FILES\t{scan.Entries.Count:N0}\nREADY\t{scan.Ready:N0}\nBLOCKED\t{scan.Blocked:N0}\nFAILED\t{scan.Failed:N0}");
+            Console.WriteLine($"FILES\t{scan.Entries.Count:N0}\nCONVERSION_READY\t{scan.Ready:N0}\nALREADY_WOTLK_335\t{scan.AlreadyWotlk335:N0}\nBLOCKED\t{scan.Blocked:N0}\nFAILED\t{scan.Failed:N0}");
             foreach (var entry in scan.Entries)
             {
-                Console.WriteLine($"{(entry.Ready ? "READY" : entry.Error is not null ? "FAILED" : "BLOCKED")}\t{entry.Path}");
+                Console.WriteLine($"{entry.Status.ToString().ToUpperInvariant()}\t{entry.Path}");
                 if (entry.Error is not null) Console.WriteLine($"  ERROR\t{entry.Error}");
                 else if (entry.Plan is not null) foreach (var blocker in entry.Plan.Blockers) Console.WriteLine($"  BLOCKER\t{blocker}");
             }

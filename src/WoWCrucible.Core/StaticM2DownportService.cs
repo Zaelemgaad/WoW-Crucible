@@ -42,9 +42,11 @@ public sealed record StaticM2DownportResult(
     int ValidatedSubmeshes,
     int ValidatedMaterials);
 
-public sealed record StaticM2DownportScanEntry(string Path, StaticM2DownportPlan? Plan, string? Error)
+public enum StaticM2DownportScanStatus { ConversionReady, AlreadyWotlk335, Blocked, Failed }
+
+public sealed record StaticM2DownportScanEntry(string Path, StaticM2DownportScanStatus Status, StaticM2DownportPlan? Plan, string? Error)
 {
-    public bool Ready => Plan?.Ready == true && Error is null;
+    public bool Ready => Status == StaticM2DownportScanStatus.ConversionReady;
 }
 
 public sealed record StaticM2DownportScanResult(
@@ -53,6 +55,7 @@ public sealed record StaticM2DownportScanResult(
     IReadOnlyList<string> Inputs,
     IReadOnlyList<StaticM2DownportScanEntry> Entries,
     int Ready,
+    int AlreadyWotlk335,
     int Blocked,
     int Failed);
 
@@ -208,10 +211,15 @@ public static class StaticM2DownportService
         foreach (var file in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            try { entries.Add(new(file, Plan(file), null)); }
-            catch (Exception exception) { entries.Add(new(file, null, exception.Message)); }
+            try
+            {
+                if (IsWotlkM2(file)) { entries.Add(new(file, StaticM2DownportScanStatus.AlreadyWotlk335, null, null)); continue; }
+                var plan = Plan(file); entries.Add(new(file, plan.Ready ? StaticM2DownportScanStatus.ConversionReady : StaticM2DownportScanStatus.Blocked, plan, null));
+            }
+            catch (Exception exception) { entries.Add(new(file, StaticM2DownportScanStatus.Failed, null, exception.Message)); }
         }
-        return new(1, DateTimeOffset.UtcNow, normalizedInputs, entries, entries.Count(value => value.Ready), entries.Count(value => value.Plan is { Ready: false }), entries.Count(value => value.Error is not null));
+        return new(1, DateTimeOffset.UtcNow, normalizedInputs, entries, entries.Count(value => value.Status == StaticM2DownportScanStatus.ConversionReady),
+            entries.Count(value => value.Status == StaticM2DownportScanStatus.AlreadyWotlk335), entries.Count(value => value.Status == StaticM2DownportScanStatus.Blocked), entries.Count(value => value.Status == StaticM2DownportScanStatus.Failed));
     }
 
     public static StaticM2DownportResult Convert(StaticM2DownportPlan plan, string outputDirectory, CancellationToken cancellationToken = default)
@@ -349,6 +357,12 @@ public static class StaticM2DownportService
         }
         var expected = Path.GetFileNameWithoutExtension(modelPath) + "00.skin";
         return Directory.EnumerateFiles(Path.GetDirectoryName(modelPath)!, "*.skin", SearchOption.TopDirectoryOnly).FirstOrDefault(path => Path.GetFileName(path).Equals(expected, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsWotlkM2(string path)
+    {
+        Span<byte> header = stackalloc byte[8]; using var stream = File.OpenRead(path); if (stream.Length < header.Length) return false; stream.ReadExactly(header);
+        return header[..4].SequenceEqual("MD20"u8) && BinaryPrimitives.ReadUInt32LittleEndian(header[4..]) == WotlkVersion;
     }
 
     private static void RequireZero(byte[] data, int countOffset, string label, List<string> blockers) { var count = Count(data, countOffset, label, blockers); if (count != 0) blockers.Add($"Static profile requires zero {label}; found {count:N0}."); }
