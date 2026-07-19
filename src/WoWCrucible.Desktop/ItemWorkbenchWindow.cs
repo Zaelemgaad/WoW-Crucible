@@ -89,7 +89,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
-        var sqlStudio = AccentButton("Full SQL Studio / Favorites"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
+        var sqlStudio = AccentButton("Full SQL database / Favorites"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
         var mpqMerge = new Button { Content = "MPQ patches / merge" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
         var titleActions = new WrapPanel { Children = { sqlStudio, mpqMerge } };
         root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, titleActions } } });

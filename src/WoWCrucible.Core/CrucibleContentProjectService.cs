@@ -35,17 +35,28 @@ public static class CrucibleContentProjectService
 
     public static (ContentIdRegistry Registry, ContentIdReservation Reservation) ReserveIds(string projectOrRoot, ContentIdDomain domain, int count, uint start, IEnumerable<uint> occupiedIds, string purpose)
     {
-        if (count is < 1 or > 1_000_000) throw new ArgumentOutOfRangeException(nameof(count), "Reserve from 1 to 1,000,000 IDs at once."); if (start == 0) start = 1;
+        if (count is < 1 or > 1_000_000) throw new ArgumentOutOfRangeException(nameof(count), "Reserve from 1 to 1,000,000 IDs at once.");
+        var policy = ContentIdDomainCatalog.Get(domain); if (start == 0) start = policy.RecommendedStart;
+        if (start > policy.Maximum) throw new ArgumentOutOfRangeException(nameof(start), $"{domain} IDs cannot begin at {start:N0}; the verified range ends at {policy.Maximum:N0}. {policy.Guidance}");
         var projectPath = ResolveProjectPath(projectOrRoot); var project = Load(projectPath); var registryPath = Path.Combine(Path.GetDirectoryName(projectPath)!, project.IdRegistryFile); var registry = LoadRegistry(projectPath);
-        var occupied = occupiedIds.ToHashSet(); foreach (var existing in registry.Reservations.Where(reservation => reservation.Domain == domain)) occupied.UnionWith(existing.Values);
+        var occupied = occupiedIds.ToHashSet(); foreach (var existing in registry.Reservations.Where(reservation => ContentIdDomainCatalog.RegistryNamespace(reservation.Domain) == policy.RegistryNamespace)) occupied.UnionWith(existing.Values);
         var values = new uint[count]; var candidate = start;
         for (var index = 0; index < values.Length;)
         {
             if (!occupied.Contains(candidate)) { values[index++] = candidate; occupied.Add(candidate); }
-            if (candidate == uint.MaxValue && index < values.Length) throw new OverflowException($"No room remains to reserve {count:N0} IDs in {domain} from {start:N0}."); candidate++;
+            if (index < values.Length) { if (candidate == policy.Maximum) throw new OverflowException($"No room remains to reserve {count:N0} IDs in {domain} from {start:N0} through {policy.Maximum:N0}. {policy.Guidance}"); candidate++; }
         }
         var reservation = new ContentIdReservation(Guid.NewGuid().ToString("N"), domain, values, string.IsNullOrWhiteSpace(purpose) ? "Unspecified content" : purpose.Trim(), DateTimeOffset.UtcNow);
         var updated = registry with { UpdatedUtc = DateTimeOffset.UtcNow, Reservations = registry.Reservations.Append(reservation).ToArray() }; WriteAtomic(registryPath, updated); return (updated, reservation);
+    }
+
+    public static (ContentIdRegistry Registry, ContentIdReservation Reservation) ReserveVerifiedIds(string projectOrRoot, ContentIdOccupancyReport occupancy, int count, uint? start, string purpose)
+    {
+        ArgumentNullException.ThrowIfNull(occupancy);
+        if (!occupancy.Complete) throw new InvalidOperationException($"The {occupancy.Domain} occupancy scan is incomplete; refusing to reserve potentially colliding IDs. {string.Join(" ", occupancy.Warnings)}");
+        var policy = ContentIdDomainCatalog.Get(occupancy.Domain);
+        if (occupancy.RegistryNamespace != policy.RegistryNamespace) throw new InvalidDataException($"The occupancy report namespace {occupancy.RegistryNamespace} does not match {policy.RegistryNamespace}.");
+        return ReserveIds(projectOrRoot, occupancy.Domain, count, start ?? policy.RecommendedStart, occupancy.OccupiedIds, purpose);
     }
 
     public static IReadOnlyList<uint> ReadOccupiedIds(string path)

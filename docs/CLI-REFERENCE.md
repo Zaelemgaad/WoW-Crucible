@@ -33,9 +33,11 @@ Without a path, the CLI searches upward from its executable for the shared `wow 
 wowcrucible project create <folder> <name> [--target=wotlk-12340] [--asset-library=folder]
 wowcrucible project status <project-folder>
 wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]
+wowcrucible project occupancy <domain> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--format=text|json]
+wowcrucible project reserve-live <project-folder> <domain> <count> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--start=N] [--purpose=text]
 ```
 
-A content project separates Assets, DBC, SQL, Manifests, Reports, and Staging outputs and keeps `ids.crucible.json` as its durable allocation registry. Domains such as `CreatureTemplate`, `CreatureModelData`, `CreatureDisplayInfo`, `CreatureDisplayInfoExtra`, `Spell`, `Item`, `Race`, and `Class` have independent ID spaces. Supply `--occupied` from a live DBC/SQL audit whenever IDs will be deployed; omitting it still reserves against the project registry but returns warning exit code `3` because absence from the project does not prove absence from the target server.
+A content project separates Assets, DBC, SQL, Manifests, Reports, and Staging outputs and keeps `ids.crucible.json` as its durable allocation registry. `occupancy` reports every required SQL/DBC identity source; `reserve-live` writes a reservation only when all mapped sources were read successfully. WotLK race/class allocation stops at ID 31, and mount/spell reservations share the Spell namespace because mount IDs are spell IDs. The password comes from `WOW_CRUCIBLE_DB_PASSWORD` by default. `reserve-ids --occupied` remains the explicit manual route for custom or not-yet-mapped domains; omitting the occupied list returns review exit code `3`.
 
 ## Asset inspection and libraries
 

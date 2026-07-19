@@ -871,9 +871,17 @@ if (targetProfiles.Count != 4 || TargetProfileCatalog.Find(targetProfiles, null)
 var contentProjectRoot = Path.Combine(Path.GetTempPath(), $"crucible-content-project-{Guid.NewGuid():N}"); var defaultContentProject = CrucibleContentProjectService.Create(contentProjectRoot, "Fixture project");
 var firstIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.CreatureDisplayInfo, 3, 100, [100u, 102u], "fixture displays").Reservation.Values;
 var secondIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.CreatureDisplayInfo, 2, 100, [100u, 102u], "more displays").Reservation.Values;
+var mountIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.Mount, 1, 100_000, [], "fixture mount").Reservation.Values;
+var spellIdsAfterMount = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.Spell, 1, 100_000, [], "fixture spell").Reservation.Values;
+var raceOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Race, null, null, args[1], args[0]);
+var reservedRace = CrucibleContentProjectService.ReserveVerifiedIds(contentProjectRoot, raceOccupancy, 1, null, "fixture race").Reservation.Values.Single();
 if (defaultContentProject.TargetProfile != TargetProfileCatalog.DefaultProfileId || TargetProfileCatalog.Find(targetProfiles, defaultContentProject.TargetProfile).Id != TargetProfileCatalog.DefaultProfileId ||
-    !firstIds.SequenceEqual([101u, 103u, 104u]) || !secondIds.SequenceEqual([105u, 106u]) || CrucibleContentProjectService.LoadRegistry(contentProjectRoot).Reservations.Count != 2 || !Directory.Exists(Path.Combine(contentProjectRoot, "Staging")))
+    !firstIds.SequenceEqual([101u, 103u, 104u]) || !secondIds.SequenceEqual([105u, 106u]) || !mountIds.SequenceEqual([100_000u]) || !spellIdsAfterMount.SequenceEqual([100_001u]) ||
+    !raceOccupancy.Complete || raceOccupancy.RegistryNamespace != ContentIdDomain.Race || raceOccupancy.OccupiedIds.Count < 10 || raceOccupancy.OccupiedIds.Contains(reservedRace) || reservedRace is < 1 or > 31 ||
+    CrucibleContentProjectService.LoadRegistry(contentProjectRoot).Reservations.Count != 5 || !Directory.Exists(Path.Combine(contentProjectRoot, "Staging")))
     throw new InvalidOperationException("Portable content-project ID reservations collided with occupied or previously reserved IDs.");
+try { _ = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.Class, 1, 32, [], "invalid class"); throw new InvalidOperationException("A WotLK class reservation exceeded the 32-bit class-mask range."); }
+catch (ArgumentOutOfRangeException) { }
 Directory.Delete(contentProjectRoot, true);
 var customProfileDirectory = Path.Combine(Path.GetTempPath(), $"crucible-custom-profile-{Guid.NewGuid():N}");
 TargetProfileCatalog.SaveTemplate(Path.Combine(customProfileDirectory, "custom.json"), new("custom-9999", "Custom Test Build", "Test", 9999, "custom.xml", ClientTableFormat.Wdbc, ArchiveFormat.Mpq, TargetSupportTier.Experimental, "Fixture"));

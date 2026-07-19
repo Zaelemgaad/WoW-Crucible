@@ -22,7 +22,7 @@ try
         "server" => Server(commandArguments[1..]).GetAwaiter().GetResult(),
         "client" => Client(commandArguments[1..]),
         "asset" => Asset(commandArguments[1..]),
-        "project" => Project(commandArguments[1..]),
+        "project" => Project(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "tools" => Tooling(commandArguments[1..]),
         "mpq" => Mpq(commandArguments[1..]),
         "manifest" => Manifest(commandArguments[1..]),
@@ -610,7 +610,7 @@ Usage:
 Full guide: docs/CLI-REFERENCE.md
 """, code);
 
-static int Project(string[] args)
+static async Task<int> Project(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ProjectHelp();
     if (args is ["create", var root, var name, .. var createOptions])
@@ -633,10 +633,44 @@ static int Project(string[] args)
         var result = CrucibleContentProjectService.ReserveIds(reserveRoot, domain, count, start, occupied, purpose); Console.WriteLine(string.Join(Environment.NewLine, result.Reservation.Values));
         Console.Error.WriteLine($"Reserved {result.Reservation.Values.Count:N0} {domain} ID(s), {result.Reservation.Values.First():N0}–{result.Reservation.Values.Last():N0}, for {result.Reservation.Purpose}.{(occupiedPath is null ? " WARNING: no live DBC/SQL occupied-ID list was supplied." : $" Checked occupied IDs from {Path.GetFullPath(occupiedPath)}.")}"); return occupiedPath is null ? 3 : 0;
     }
+    var liveOperation = args.FirstOrDefault()?.ToLowerInvariant();
+    var reserveLive = liveOperation == "reserve-live";
+    var connectionOffset = reserveLive ? 4 : 2;
+    if (liveOperation is "occupancy" or "reserve-live" && args.Length >= connectionOffset + 5 &&
+        Enum.TryParse<ContentIdDomain>(args[reserveLive ? 2 : 1], true, out var liveDomain))
+    {
+        var liveCount = 0;
+        if (reserveLive && (!int.TryParse(args[3], out liveCount) || liveCount < 1)) return Fail("reserve-live count must be a positive integer.");
+        var host = args[connectionOffset]; var portText = args[connectionOffset + 1]; var user = args[connectionOffset + 2]; var database = args[connectionOffset + 3];
+        if (!uint.TryParse(portText, out var port) || port is 0 or > 65535) return Fail("Database port must be from 1 to 65535.");
+        var options = args[(connectionOffset + 4)..]; var dbc = Option(options, "--dbc="); var schema = Option(options, "--schema="); var startText = Option(options, "--start="); var purpose = Option(options, "--purpose=") ?? "Unspecified content"; var json = options.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var passwordEnvironment = Option(options, "--password-env=") ?? "WOW_CRUCIBLE_DB_PASSWORD"; var sslText = Option(options, "--ssl=") ?? "Preferred";
+        var allowed = new[] { "--dbc=", "--schema=", "--start=", "--purpose=", "--password-env=", "--ssl=" };
+        var unknown = options.Where(option => !allowed.Any(prefix => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown project {liveOperation} option: {unknown[0]}");
+        if (string.IsNullOrWhiteSpace(passwordEnvironment)) return Fail("--password-env requires a non-empty environment-variable name.");
+        var password = Environment.GetEnvironmentVariable(passwordEnvironment); if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
+        if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
+        uint? start = null; if (startText is not null) { if (!uint.TryParse(startText, out var parsedStart)) return Fail("--start must be an unsigned integer."); start = parsedStart; }
+        var profile = new DatabaseConnectionProfile(host, port, user, password, database, ssl); var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, cancellationToken);
+        var report = await new ContentIdOccupancyService().InspectAsync(liveDomain, profile, capabilities, dbc, schema, cancellationToken: cancellationToken);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(report, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"Domain\t{report.Domain}\nRegistryNamespace\t{report.RegistryNamespace}\nComplete\t{report.Complete}\nOccupiedIDs\t{report.OccupiedIds.Count}\nMaximumOccupied\t{report.MaximumOccupied?.ToString() ?? "none"}");
+            foreach (var source in report.Sources) Console.WriteLine($"SOURCE\t{source.Kind}\t{source.Name}\t{(source.Available ? "AVAILABLE" : "MISSING")}\t{source.Ids}\t{source.Location}\t{source.Detail}");
+            foreach (var warning in report.Warnings) Console.Error.WriteLine($"WARNING\t{warning}");
+        }
+        if (!reserveLive) return report.Complete ? 0 : 3;
+        if (!report.Complete) { Console.Error.WriteLine("Refusing to reserve IDs because one or more authoritative occupancy sources could not be read."); return 3; }
+        var result = CrucibleContentProjectService.ReserveVerifiedIds(args[1], report, liveCount, start, purpose);
+        Console.WriteLine(string.Join(Environment.NewLine, result.Reservation.Values));
+        Console.Error.WriteLine($"Reserved {result.Reservation.Values.Count:N0} collision-checked {liveDomain} ID(s), {result.Reservation.Values.First():N0}–{result.Reservation.Values.Last():N0}, in namespace {report.RegistryNamespace} for {result.Reservation.Purpose}."); return 0;
+    }
     return ProjectHelp(2);
 }
 
-static int ProjectHelp(int code = 0) => GroupHelp($"Usage:\n  wowcrucible project create <folder> <name> [--target={TargetProfileCatalog.DefaultProfileId}] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, Race, Class, Faction, Mount, Quest, Custom", code);
+static int ProjectHelp(int code = 0) => GroupHelp($"Usage:\n  wowcrucible project create <folder> <name> [--target={TargetProfileCatalog.DefaultProfileId}] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n  wowcrucible project occupancy <domain> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--format=text|json]\n  wowcrucible project reserve-live <project-folder> <domain> <count> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--start=N] [--purpose=text]\n\nLive commands read passwords from WOW_CRUCIBLE_DB_PASSWORD by default and refuse reservation unless every mapped SQL/DBC identity source is available. Mount and Spell deliberately share the same registry namespace.\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, Race, Class, Faction, Mount, Quest, Custom", code);
 
 static int Client(string[] args)
 {
