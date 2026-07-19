@@ -23,6 +23,13 @@ public static class ClientAssetDependencyService
     private sealed record Reference(string Kind, string ClientPath, bool External = false, string? Message = null, bool Missing = false);
     private sealed record Chunk(string Id, byte[] Data);
 
+    public static AssetComparisonIndex OpenLibraryLayout(string libraryRoot)
+    {
+        libraryRoot = Path.GetFullPath(libraryRoot); var archiveContent = Path.Combine(libraryRoot, "Archives", "Content"); var looseContent = Path.Combine(libraryRoot, "Loose", "Content");
+        if (!Directory.Exists(archiveContent) && !Directory.Exists(looseContent)) throw new DirectoryNotFoundException($"No Archives\\Content or legacy Loose\\Content exists under {libraryRoot}.");
+        return new(libraryRoot, archiveContent, [], 0, Directory.Exists(looseContent) ? looseContent : null);
+    }
+
     public static ClientAssetLocation InferLocation(AssetComparisonIndex index, string sourcePath)
     {
         sourcePath = Path.GetFullPath(sourcePath); if (!File.Exists(sourcePath)) throw new FileNotFoundException("The dependency root does not exist.", sourcePath);
@@ -31,6 +38,26 @@ public static class ClientAssetDependencyService
         var relative = Path.GetRelativePath(index.ContentRoot, sourcePath); var parts = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         if (parts.Length < 2) throw new InvalidDataException("A content-first asset must be stored as <client directory>\\<provenance>\\<file>.");
         var provenance = parts[^2]; var clientParts = parts[..^2].Concat([parts[^1]]); return new(PatchInputMapper.NormalizeArchivePath(string.Join('\\', clientParts)), provenance, sourcePath);
+    }
+
+    public static IReadOnlyList<ClientAssetLocation> FindCandidates(AssetComparisonIndex index, string rawClientPath, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(index); var clientPath = NormalizeReference(rawClientPath); var directory = Path.GetDirectoryName(clientPath) ?? string.Empty; var name = Path.GetFileName(clientPath);
+        var result = new List<ClientAssetLocation>(); var archiveDirectory = Path.Combine(index.ContentRoot, directory);
+        if (Directory.Exists(archiveDirectory))
+        {
+            foreach (var source in Directory.EnumerateDirectories(archiveDirectory))
+            {
+                cancellationToken.ThrowIfCancellationRequested(); var candidate = Path.Combine(source, name);
+                if (File.Exists(candidate)) result.Add(new(clientPath, Path.GetFileName(source), Path.GetFullPath(candidate)));
+            }
+        }
+        if (index.LooseContentRoot is { } looseRoot)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); var candidate = Path.Combine(looseRoot, clientPath);
+            if (File.Exists(candidate)) result.Add(new(clientPath, "Loose", Path.GetFullPath(candidate)));
+        }
+        return result.DistinctBy(value => value.SourcePath, StringComparer.OrdinalIgnoreCase).OrderBy(value => value.Provenance, StringComparer.OrdinalIgnoreCase).ThenBy(value => value.SourcePath, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     public static ClientAssetDependencyGraph Analyze(AssetComparisonIndex index, ClientAssetLocation root, CancellationToken cancellationToken = default)
@@ -185,13 +212,10 @@ public static class ClientAssetDependencyService
         else sameSource = Path.Combine(index.ContentRoot, directory, provenance, name);
         if (File.Exists(sameSource)) return new(depth, parent, kind, clientPath, ClientAssetDependencyState.Resolved, provenance, sameSource, [sameSource], "Resolved from the root asset's provenance layer.");
 
-        var candidates = new List<string>(); var archiveDirectory = Path.Combine(index.ContentRoot, directory);
-        if (Directory.Exists(archiveDirectory)) foreach (var source in Directory.EnumerateDirectories(archiveDirectory)) { var candidate = Path.Combine(source, name); if (File.Exists(candidate)) candidates.Add(candidate); }
-        if (index.LooseContentRoot is { } looseRoot) { var looseCandidate = Path.Combine(looseRoot, clientPath); if (File.Exists(looseCandidate)) candidates.Add(looseCandidate); }
-        candidates = candidates.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToList();
-        return candidates.Count == 0
+        var candidates = FindCandidates(index, clientPath).Select(value => value.SourcePath).ToArray();
+        return candidates.Length == 0
             ? new(depth, parent, kind, clientPath, ClientAssetDependencyState.Missing, provenance, null, [], $"Required {kind} '{clientPath}' is absent from the processed library.")
-            : new(depth, parent, kind, clientPath, ClientAssetDependencyState.CrossSourceConflict, provenance, null, candidates, $"Required {kind} exists only in {candidates.Count:N0} other provenance layer(s); Crucible will not silently mix sources.");
+            : new(depth, parent, kind, clientPath, ClientAssetDependencyState.CrossSourceConflict, provenance, null, candidates, $"Required {kind} exists only in {candidates.Length:N0} other provenance layer(s); Crucible will not silently mix sources.");
     }
 
     private static IReadOnlyList<Reference> Inspect(string sourcePath, string clientPath)

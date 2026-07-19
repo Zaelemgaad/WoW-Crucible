@@ -748,7 +748,7 @@ public partial class MainWindow : Window
     private void OpenMapWorkspaceClick(object? sender, RoutedEventArgs e) => OpenMapWorkspace();
     public void OpenMapWorkspace(string? path = null)
     {
-        if (_mapWorkspaceView is null) { _mapWorkspaceView = new MapWorkspaceView(); _mapWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+        if (_mapWorkspaceView is null) { _mapWorkspaceView = new MapWorkspaceView(_workspaceSession); _mapWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
         OpenFeatureWorkspace(_mapWorkspaceView, "Maps & World"); if (!string.IsNullOrWhiteSpace(path)) _ = _mapWorkspaceView.OpenAsync(path);
     }
     private async Task OpenMapWorkspaceAsync(string path) { OpenMapWorkspace(); await _mapWorkspaceView!.OpenAsync(path); }

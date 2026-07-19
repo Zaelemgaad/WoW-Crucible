@@ -53,6 +53,7 @@ wowcrucible asset inspect <model.m2|building.wmo>...
 wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] ["--target-choice=client-path|archive"]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
 wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
 wowcrucible asset wmo-preview-info <root-or-group.wmo> [--groups] [--content-root=folder] [--format=text|json]
+wowcrucible asset path-candidates <processed-library> <client-path> [--preferred=provenance] [--format=text|json]
 wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>
 wowcrucible asset appearance-render <processed-library> <dbc-folder> <logical-path> <model-file> <body.png> [--skin=N] [--face=N] [--facial-hair=N] [--hair=N] [--source=name] [--hair-output=file.png] [--overwrite]
 wowcrucible asset appearance-compose <base.blp> <output.png> [--torso=BLP] [--pelvis=BLP] [--face-upper=BLP] [--face-lower=BLP] [--facial-upper=BLP] [--facial-lower=BLP] [--scalp-upper=BLP] [--scalp-lower=BLP] [--overwrite]
@@ -78,6 +79,8 @@ The same native inspection/workspace flow is available under **Modern asset conv
 `preview-info` reports every Wrath animation sequence. Add `--animation=N --time=MS` to resolve aliases and external `.anim` files, sample the weighted bone pose at an exact time, and report its resulting bounds. This is the command-line diagnostic for the same animation path used by the in-window model preview.
 
 `wmo-preview-info` loads a WotLK WMO root (or infers the root from a selected `_###.wmo` group), validates root/group chunk bounds and render indices, and reports groups, vertices, triangles, material bindings, bounds, missing/collision-only groups, and resolved BLP paths. `--groups` includes per-group geometry details. `--content-root` supplies an extracted client root for texture resolution; processed libraries otherwise prefer the WMO's exact provenance and use another provenance only when exactly one candidate exists. The same bounded loader drives the embedded WMO views in Modern asset conversion, GameObjects, and Maps & World.
+
+`path-candidates` resolves one exact client-relative path against the content-first processed library without scanning or loading its full visual catalog. A single physical candidate is selected automatically. Multiple provenance candidates remain unresolved and return exit code `3` until `--preferred` names one exact provenance; their bytes are not assumed equivalent. Maps & World uses the same operation for the WMO paths extracted from an ADT/WDT.
 
 `map-info` validates a WotLK ADT, WDT, or WDL without loading the complete file into memory. The normal report summarizes chunks, terrain/world-grid occupancy, height range, coordinates, and referenced assets; `--cells` emits every present cell and `--format=json` returns the complete inspection model used by the same-window Maps & World grid.
 

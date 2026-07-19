@@ -11,7 +11,12 @@ namespace WoWCrucible.Desktop;
 
 internal sealed class MapWorkspaceView : UserControl, IDisposable
 {
+    private sealed record WmoCandidateChoice(ClientAssetLocation Location)
+    {
+        public override string ToString() => $"{Location.Provenance} · {Path.GetFileName(Location.SourcePath)}";
+    }
     private static readonly MapBrushModeChoice[] BrushModes = [new("Raise / lower", AdtTerrainBrushMode.RaiseLower), new("Flatten toward height", AdtTerrainBrushMode.Flatten), new("Smooth terrain", AdtTerrainBrushMode.Smooth), new("Seeded noise", AdtTerrainBrushMode.Noise)];
+    private readonly DesktopWorkspaceSession _session;
     private readonly TextBox _path = new() { PlaceholderText = "Open or drop a WotLK ADT, WDT, or WDL file…" };
     private readonly TextBlock _summary = Info("No map file loaded.");
     private readonly TextBlock _selected = Info("Select a present grid cell for exact terrain metadata.");
@@ -22,6 +27,9 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly WmoPreviewView _wmoPreview = new();
     private readonly TextBlock _wmoStatus = Info("Open an extracted root WMO referenced by this map to inspect its real grouped geometry.");
     private readonly TabControl _visualTabs = new();
+    private readonly TextBox _wmoLibrary = new() { PlaceholderText = "Processed asset library root…" };
+    private readonly ComboBox _wmoReferences = new() { PlaceholderText = "No WMO references loaded from this map" };
+    private readonly ComboBox _wmoCandidates = new() { PlaceholderText = "Select an explicit provenance candidate" };
     private readonly TextBox _heightDelta = new() { Text = "0", PlaceholderText = "Signed terrain height delta" };
     private readonly TextBox _brushCenterX = new() { Text = "8", PlaceholderText = "Center X (0–16)" };
     private readonly TextBox _brushCenterY = new() { Text = "8", PlaceholderText = "Center Y (0–16)" };
@@ -43,6 +51,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly CheckBox _alphaRestrict = new() { Content = "Restrict paint to selected cells" };
     private CancellationTokenSource? _operation;
     private CancellationTokenSource? _wmoOperation;
+    private AssetComparisonIndex? _wmoLibraryIndex;
     private MapAssetInspection? _inspection;
     private AdtTextureLayerInspection? _textureSourceInspection;
     private AdtTextureLayerInspection? _textureInspection;
@@ -56,12 +65,17 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
 
     public event EventHandler? BackRequested;
 
-    public MapWorkspaceView()
+    public MapWorkspaceView(DesktopWorkspaceSession session)
     {
+        _session = session; _wmoLibrary.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
         var inspect = new Button { Content = "Inspect / reload" }; inspect.Click += async (_, _) => await OpenAsync(_path.Text);
         var openWmo = new Button { Content = "Preview extracted WMO…" }; openWmo.Click += async (_, _) => await PickWmoAsync();
+        var chooseWmoLibrary = new Button { Content = "Choose processed library…" }; chooseWmoLibrary.Click += async (_, _) => await PickWmoLibraryAsync();
+        var previewReference = new Button { Content = "Preview selected reference" }; previewReference.Click += async (_, _) => await PreviewSelectedWmoAsync();
+        _wmoReferences.SelectionChanged += async (_, _) => await ResolveSelectedWmoAsync();
+        _wmoCandidates.SelectionChanged += (_, _) => DescribeSelectedWmoCandidate();
         _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
         var selectAll = new Button { Content = "Select all present" }; selectAll.Click += (_, _) => _grid.SelectAllPresent();
         var clear = new Button { Content = "Clear selection" }; clear.Click += (_, _) => _grid.ClearSelection();
@@ -88,7 +102,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         heading.Children.Add(title); Grid.SetColumn(title, 1);
 
         open.Margin = new Thickness(0, 0, 6, 0);
-        var controls = new StackPanel { Margin = new Thickness(12, 8), Spacing = 8, Children = { _path, new WrapPanel { Children = { open, inspect, openWmo } } } };
+        var controls = new StackPanel { Margin = new Thickness(12, 8), Spacing = 8, Children = { _path, new WrapPanel { Children = { open, inspect } } } };
         var drop = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Background = Brush.Parse("#090D14"), Child = _grid };
         DragDrop.SetAllowDrop(drop, true);
         DragDrop.AddDragOverHandler(drop, (_, args) => { args.DragEffects = args.DataTransfer.TryGetFiles()?.Any(file => IsMap(file.TryGetLocalPath())) == true ? DragDropEffects.Copy : DragDropEffects.None; args.Handled = true; });
@@ -104,8 +118,9 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
                 Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable."), Label("ADT TEXTURE LAYER"), TextureFields(), new WrapPanel { Children = { previewTexture, saveTexture } }, Info("Reassigns an existing MCLY layer slot to one of this ADT's existing MTEX textures."), Label("ADD MTEX + MCLY LAYER"), NewTextureFields(), new WrapPanel { Children = { previewNewTexture, saveNewTexture } }, Info("Appends one client-relative BLP to MTEX and adds a matching MCLY/MCAL layer to every selected cell. Wrath's four-layer limit is enforced. Auto preserves the tile's existing packed-versus-8-bit alpha family; mixed or evidence-free tiles require an explicit encoding."), Label("ADT ALPHA TEXTURE BRUSH"), AlphaFields(), _alphaRestrict, new WrapPanel { Children = { previewAlpha, saveAlpha } }, Info("Uses the click-positioned center and radius above to paint an existing additional layer toward alpha 0–255. Packed, big, and RLE maps preserve their current fixed-width encoding; an RLE stroke that cannot fit is refused instead of shifting MCNK offsets."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
             }
         };
-        var wmoFooter = new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _wmoStatus }; Grid.SetRow(wmoFooter, 1);
-        var wmoPage = new Grid { RowDefinitions = new("*,Auto"), Children = { _wmoPreview, wmoFooter } };
+        var wmoResolver = new StackPanel { Margin = new Thickness(7), Spacing = 5, Children = { _wmoLibrary, new WrapPanel { Children = { chooseWmoLibrary, previewReference, openWmo } }, _wmoReferences, _wmoCandidates } };
+        var wmoFooter = new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _wmoStatus }; Grid.SetRow(wmoFooter, 2);
+        Grid.SetRow(_wmoPreview, 1); var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, _wmoPreview, wmoFooter } };
         _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Referenced WMO preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
         var body = new Grid { ColumnDefinitions = new("3*,Auto,2*") };
         body.Children.Add(_visualTabs);
@@ -122,7 +137,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     public async Task OpenAsync(string? path)
     {
         if (!IsMap(path)) { _status.Text = "Choose an existing .adt, .wdt, or .wdl file."; return; }
-        _operation?.Cancel(); _operation?.Dispose(); _operation = new CancellationTokenSource(); var token = _operation.Token;
+        _operation?.Cancel(); _operation?.Dispose(); _wmoOperation?.Cancel(); _operation = new CancellationTokenSource(); var token = _operation.Token;
         try
         {
             _path.Text = Path.GetFullPath(path!); _status.Text = $"Inspecting {Path.GetFileName(path)}…";
@@ -131,6 +146,8 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             _inspection = inspection; _textureSourceInspection = _textureInspection = loaded.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = loaded.alphaResult.Inspection; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; SetTextureChoices(_textureInspection); _grid.SetInspection(inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(inspection); _selected.Text = "Select a present grid cell for exact terrain, texture-layer, and alpha-map metadata.";
             _chunks.ItemsSource = inspection.Chunks.Select(chunk => $"{chunk.Id} · {chunk.Occurrences:N0} chunk(s) · {chunk.PayloadBytes:N0} bytes").ToArray();
             _dependencies.ItemsSource = inspection.TexturePaths.Select(value => "Texture · " + value).Concat(inspection.ModelPaths.Select(value => "Model · " + value)).Concat(inspection.WmoPaths.Select(value => "WMO · " + value)).DefaultIfEmpty("No path-list dependencies in this file.").ToArray();
+            _wmoCandidates.ItemsSource = null; _wmoReferences.ItemsSource = inspection.WmoPaths; _wmoReferences.SelectedIndex = inspection.WmoPaths.Count > 0 ? 0 : -1;
+            if (inspection.WmoPaths.Count == 0) _wmoStatus.Text = "This map contains no path-listed WMO references.";
             _status.Text = $"Loaded {inspection.Kind} · {inspection.PresentCells:N0}/{inspection.Cells.Count:N0} present cells · click a cell for details · drop another map file anywhere on the grid" + (loaded.textureResult.Error is null ? string.Empty : $" · texture layers unavailable: {loaded.textureResult.Error}") + (loaded.alphaResult.Error is null ? string.Empty : $" · alpha maps unavailable: {loaded.alphaResult.Error}");
         }
         catch (OperationCanceledException) { }
@@ -370,7 +387,66 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     {
         var top = TopLevel.GetTopLevel(this); if (top is null) return;
         var files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Open an extracted WotLK root or group WMO", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WoW WMO") { Patterns = ["*.wmo"] }] });
-        var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = new CancellationTokenSource(); var token = _wmoOperation.Token; _wmoStatus.Text = "Loading WMO root, groups, and available BLP materials…";
+        var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) await LoadWmoAsync(path);
+    }
+
+    private async Task PickWmoLibraryAsync()
+    {
+        var top = TopLevel.GetTopLevel(this); if (top is null) return;
+        var folders = await top.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Select Crucible processed asset library", AllowMultiple = false });
+        var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return;
+        _wmoLibrary.Text = Path.GetFullPath(path); _wmoLibraryIndex = null; _session.Settings.ProcessedAssetLibraryPath = _wmoLibrary.Text; _session.Settings.Save(); await ResolveSelectedWmoAsync();
+    }
+
+    private async Task ResolveSelectedWmoAsync()
+    {
+        _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = new CancellationTokenSource(); var token = _wmoOperation.Token; _wmoCandidates.ItemsSource = null;
+        if (_wmoReferences.SelectedItem is not string clientPath) return;
+        var library = _wmoLibrary.Text?.Trim(); if (string.IsNullOrWhiteSpace(library)) { _wmoStatus.Text = $"Referenced WMO: {clientPath} · choose the processed asset library to resolve it."; return; }
+        _wmoStatus.Text = $"Resolving every provenance candidate for {clientPath}…";
+        try
+        {
+            var resolved = await Task.Run(() =>
+            {
+                var root = Path.GetFullPath(library);
+                var index = _wmoLibraryIndex is { } cached && cached.LibraryRoot.Equals(root, StringComparison.OrdinalIgnoreCase)
+                    ? cached : ClientAssetDependencyService.OpenLibraryLayout(root);
+                var candidates = ClientAssetDependencyService.FindCandidates(index, clientPath, token);
+                string? provenance = null;
+                if (_inspection is not null) try { provenance = ClientAssetDependencyService.InferLocation(index, _inspection.Path).Provenance; } catch (Exception exception) when (exception is InvalidOperationException or InvalidDataException) { }
+                return (index, candidates, provenance);
+            }, token);
+            token.ThrowIfCancellationRequested(); _wmoLibraryIndex = resolved.index;
+            var choices = resolved.candidates.Select(value => new WmoCandidateChoice(value)).ToArray(); _wmoCandidates.ItemsSource = choices;
+            var preferred = resolved.provenance is null ? null : choices.FirstOrDefault(value => value.Location.Provenance.Equals(resolved.provenance, StringComparison.OrdinalIgnoreCase));
+            _wmoCandidates.SelectedItem = preferred ?? (choices.Length == 1 ? choices[0] : null);
+            _wmoStatus.Text = choices.Length switch
+            {
+                0 => $"Referenced WMO is absent from the processed library: {clientPath}",
+                1 => $"Resolved one source for {clientPath}: {choices[0].Location.Provenance}. Ready to preview.",
+                _ when preferred is not null => $"Resolved {choices.Length:N0} sources; selected the map's exact provenance '{preferred.Location.Provenance}'.",
+                _ => $"Resolved {choices.Length:N0} provenance candidates. Choose one explicitly; Crucible has not compared their bytes and will not guess a layer."
+            };
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { _wmoStatus.Text = $"WMO reference resolution failed: {exception.Message}"; DesktopCrashLogger.Log("Map WMO reference resolution failed", exception); }
+    }
+
+    private void DescribeSelectedWmoCandidate()
+    {
+        if (_wmoCandidates.SelectedItem is not WmoCandidateChoice choice) return;
+        _wmoStatus.Text = $"Selected {choice.Location.Provenance} for {choice.Location.ClientPath}. Preview uses this exact file and resolves its groups/materials from the same source where available.";
+    }
+
+    private async Task PreviewSelectedWmoAsync()
+    {
+        if (_wmoCandidates.SelectedItem is not WmoCandidateChoice choice) { _wmoStatus.Text = "Select an explicit WMO provenance candidate first."; return; }
+        await LoadWmoAsync(choice.Location.SourcePath);
+    }
+
+    private async Task LoadWmoAsync(string path)
+    {
+        _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = new CancellationTokenSource(); var token = _wmoOperation.Token; _wmoStatus.Text = "Loading WMO root, groups, and available BLP materials…";
         try
         {
             var loaded = await Task.Run(() => { var geometry = WmoPreviewGeometryService.Load(path, cancellationToken: token); var textures = WmoPreviewGeometryService.LoadTextures(geometry, cancellationToken: token); return (geometry, textures); }, token); token.ThrowIfCancellationRequested();

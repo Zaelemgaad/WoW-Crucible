@@ -399,6 +399,25 @@ static int Asset(string[] args)
         }
         return geometry.Findings.Count == 0 ? 0 : 3;
     }
+    if (args is ["path-candidates", var libraryPath, var clientPath, .. var candidateOptions])
+    {
+        var json = candidateOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var preferred = Option(candidateOptions, "--preferred=");
+        var unknown = candidateOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--preferred=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown path-candidates option: {unknown[0]}");
+        var index = ClientAssetDependencyService.OpenLibraryLayout(libraryPath); var candidates = ClientAssetDependencyService.FindCandidates(index, clientPath);
+        var selected = !string.IsNullOrWhiteSpace(preferred)
+            ? candidates.SingleOrDefault(value => value.Provenance.Equals(preferred, StringComparison.OrdinalIgnoreCase))
+            : candidates.Count == 1 ? candidates[0] : null;
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Library = index.LibraryRoot, ClientPath = PatchInputMapper.NormalizeArchivePath(clientPath), Preferred = preferred, Selected = selected, Candidates = candidates, RequiresExplicitChoice = selected is null && candidates.Count > 1 }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"ClientPath\t{PatchInputMapper.NormalizeArchivePath(clientPath)}\nCandidates\t{candidates.Count:N0}\nSelected\t{selected?.Provenance ?? "<none>"}");
+            foreach (var candidate in candidates) Console.WriteLine($"CANDIDATE\t{candidate.Provenance}\t{candidate.SourcePath}");
+            if (candidates.Count > 1 && selected is null) Console.WriteLine("FINDING\tMultiple provenance layers exist; use --preferred=<exact provenance> to select one explicitly.");
+            else if (!string.IsNullOrWhiteSpace(preferred) && selected is null) Console.WriteLine($"FINDING\tPreferred provenance was not found: {preferred}");
+        }
+        return selected is not null ? 0 : 3;
+    }
     if (args is ["preview-info", var previewModelPath, .. var previewOptions])
     {
         var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.Equals("--naked", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -516,6 +535,7 @@ Usage:
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
   wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
   wowcrucible asset wmo-preview-info <root-or-group.wmo> [--groups] [--content-root=folder] [--format=text|json]
+  wowcrucible asset path-candidates <processed-library> <client-path> [--preferred=provenance] [--format=text|json]
   wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>
   wowcrucible asset appearance-render <library> <dbc-folder> <logical-path> <model-file> <body.png> [--skin=N --face=N --facial-hair=N --hair=N --source=name --hair-output=file] [--overwrite]
   wowcrucible asset appearance-compose <base.blp> <output.png> [component options] [--overwrite]
