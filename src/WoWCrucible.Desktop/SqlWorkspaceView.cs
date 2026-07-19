@@ -130,6 +130,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     public event EventHandler<SqlGuidedEditRequest>? GuidedEditRequested;
     public event EventHandler<string>? OpenDbcRequested;
     public event EventHandler<string>? OpenMpqRequested;
+    public event EventHandler<string>? KnowledgeRequested;
 
     public SqlWorkspaceView(DesktopWorkspaceSession session)
     {
@@ -137,7 +138,8 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var connection = new Button { Content = "Connect / change server SQL" }; connection.Click += (_, _) => ConnectionRequested?.Invoke(this, EventArgs.Empty);
         var refreshSchemas = new Button { Content = "↻ Schemas" }; refreshSchemas.Click += async (_, _) => await LoadSchemasAsync();
-        var heading = new Grid { ColumnDefinitions = new("Auto,*"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "SQL STUDIO", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1), WithRow(new WrapPanel { Children = { _connectionStatus, connection, _schemas, refreshSchemas } }, 1) } };
+        var fieldHelp = new Button { Content = "? Table / field help" }; fieldHelp.Click += (_, _) => KnowledgeRequested?.Invoke(this, KnowledgeContext());
+        var heading = new Grid { ColumnDefinitions = new("Auto,*"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "SQL STUDIO", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1), WithRow(new WrapPanel { Children = { _connectionStatus, connection, _schemas, refreshSchemas, fieldHelp } }, 1) } };
         Grid.SetColumnSpan(heading.Children[^1], 2);
         _tabs = new TabControl { Margin = new Thickness(10), Items = { new TabItem { Header = "Tables & rows", Content = BrowsePage() }, new TabItem { Header = "SQL query", Content = QueryPage() }, new TabItem { Header = "Favorites", Content = FavoritesPage() }, new TabItem { Header = "Dependency graph", Content = DependencyPage() }, new TabItem { Header = "Schema & server", Content = AdministrationPage() } } };
         Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(_tabs, 1), WithRow(_confirmation, 2), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 6), Child = _status }, 3) } };
@@ -162,6 +164,15 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     }
 
     public void Activate() { PopulateTables(); if (_tables.SelectedItem is null && _tables.ItemCount > 0) _tables.SelectedIndex = 0; _ = LoadSchemasAsync(); }
+
+    private string KnowledgeContext()
+    {
+        var table = (_tables.SelectedItem as TableChoice)?.Table.Name ?? _page?.Table ?? string.Empty;
+        var focused = TopLevel.GetTopLevel(this)?.FocusManager?.GetFocusedElement();
+        var field = _editors.FirstOrDefault(pair => ReferenceEquals(pair.Value.Text, focused) || ReferenceEquals(pair.Value.Null, focused) || ReferenceEquals(pair.Value.InsertMode, focused)).Key;
+        field ??= (_structureColumns.SelectedItem as SqlTableColumnDefinition)?.Name ?? _filterColumn.SelectedItem as string ?? _sortColumn.SelectedItem as string;
+        return string.Join(' ', new[] { table, field }.Where(value => !string.IsNullOrWhiteSpace(value)));
+    }
 
     public async Task OpenExactRowAsync(string tableName, IReadOnlyDictionary<string, object?> values)
     {

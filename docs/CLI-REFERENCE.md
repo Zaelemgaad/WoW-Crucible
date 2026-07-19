@@ -27,6 +27,17 @@ wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-
 
 Without a path, the CLI searches upward from its executable for the shared `wow edits` workspace. It inventories every top-level workspace root, every direct `Tools` package, and the explicitly audited AmarothTools/Models/Map children. Tracked, missing, and newly unassigned paths are distinct states. A new unassigned directory is printed first and returns review exit code `3`; it is never silently folded into a generic category. The desktop exposes the same catalog in the single-window **Tool inventory** workspace with search and state filters.
 
+## Offline knowledge and field reference
+
+```text
+wowcrucible knowledge search <terms...> [--root=wiki-folder] [--locale=en] [--limit=100] [--format=text|json]
+wowcrucible knowledge show <relative-markdown-path> [--root=wiki-folder] [--section=N]
+```
+
+The provider indexes local Markdown headings and text only. It does not run Jekyll, shell scripts, JavaScript, HTML, or remote links from the wiki. Search is multi-term, identifier-fragment-aware, language-filterable, and returns the exact source document and matching section. `show` prints one exact indexed article or section as readable text. Without `--root`, Crucible discovers the shared `wiki` folder by walking upward from the executable.
+
+The same-window **Offline knowledge & field reference** route exposes the identical index with responsive result/article splitters and source reveal/copy. Press F1 while a DBC cell is selected to search its table and field automatically; SQL Studio's help action passes the selected table plus whichever complete-row field currently has focus. Use `--knowledge` for direct desktop launch, or find it through `Ctrl+K` with terms such as `wiki field help`.
+
 ## Portable content projects and ID reservations
 
 ```text

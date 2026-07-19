@@ -24,6 +24,7 @@ try
         "asset" => Asset(commandArguments[1..]),
         "project" => Project(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "tools" => Tooling(commandArguments[1..]),
+        "knowledge" => Knowledge(commandArguments[1..]),
         "mpq" => Mpq(commandArguments[1..]),
         "manifest" => Manifest(commandArguments[1..]),
         _ => Fail($"Unknown command: {commandArguments[0]}")
@@ -72,6 +73,43 @@ static int Tooling(string[] args)
         Console.Error.WriteLine($"Tool inventory: {report.Tracked:N0} tracked · {report.Unassigned:N0} NEW UNASSIGNED · {report.Missing:N0} expected root(s) absent.\nWorkspace: {report.WorkspaceRoot}");
     }
     return report.Unassigned == 0 ? 0 : 3;
+}
+
+static int Knowledge(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return KnowledgeHelp();
+    var operation = args[0]; var options = args[1..];
+    var root = Option(options, "--root=") ?? KnowledgeReferenceService.FindWikiRoot(CruciblePaths.ApplicationDirectory)
+        ?? throw new DirectoryNotFoundException("Could not discover the local wiki. Supply --root=<wiki-folder>.");
+    var service = new KnowledgeReferenceService(); var index = service.Build(root);
+    if (operation.Equals("search", StringComparison.OrdinalIgnoreCase))
+    {
+        var json = options.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var locale = Option(options, "--locale=");
+        var limitText = Option(options, "--limit="); var limit = limitText is null ? 100 : int.TryParse(limitText, out var parsed) ? parsed : throw new FormatException("--limit must be an integer.");
+        var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.StartsWith("--root=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--locale=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--limit=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown knowledge search option: {unknown[0]}");
+        var query = string.Join(' ', options.Where(option => !option.StartsWith("--", StringComparison.Ordinal))); if (string.IsNullOrWhiteSpace(query)) return Fail("knowledge search requires one or more search terms.");
+        var hits = service.Search(query, locale, limit);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Query = query, index.RootPath, Documents = index.Articles.Count, Sections = index.SectionCount, Hits = hits }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            foreach (var hit in hits) Console.WriteLine($"{hit.Score}\t{hit.Locale}\t{hit.Title}\t{hit.Heading}\t{hit.RelativePath}\t{hit.Excerpt.ReplaceLineEndings(" ")}");
+            Console.Error.WriteLine($"Knowledge search: {hits.Count:N0} result(s) across {index.Articles.Count:N0} document(s) and {index.SectionCount:N0} section(s). Root: {index.RootPath}");
+        }
+        return hits.Count > 0 ? 0 : 3;
+    }
+    if (operation.Equals("show", StringComparison.OrdinalIgnoreCase))
+    {
+        var operands = options.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray(); if (operands.Length != 1) return Fail("knowledge show requires one exact relative Markdown path.");
+        var sectionText = Option(options, "--section="); var section = sectionText is null ? (int?)null : int.TryParse(sectionText, out var parsed) ? parsed : throw new FormatException("--section must be an integer.");
+        var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.StartsWith("--root=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--section=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown knowledge show option: {unknown[0]}");
+        var article = index.Articles.FirstOrDefault(candidate => candidate.RelativePath.Equals(operands[0].Replace('\\','/'), StringComparison.OrdinalIgnoreCase));
+        if (article is null) { Console.Error.WriteLine($"Knowledge article not found: {operands[0]}"); return 3; }
+        var sections = section is null ? article.Sections : article.Sections.Where(candidate => candidate.Index == section).ToArray();
+        if (sections.Count == 0) { Console.Error.WriteLine($"Section {section} does not exist in {article.RelativePath}."); return 3; }
+        Console.WriteLine($"{article.Title}\n{article.Locale} · {article.RelativePath}"); foreach (var value in sections) Console.WriteLine($"\n{new string('#', Math.Clamp(value.Level, 1, 6))} {value.Heading}\n\n{value.PlainText}"); return 0;
+    }
+    return Fail($"Unknown knowledge operation: {operation}");
 }
 
 static int Asset(string[] args)
@@ -1942,6 +1980,7 @@ static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manife
 static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc|file.db2>\n  wowcrucible dbc dbd-info <file.dbd> <build> [--format=text|json]\n  wowcrucible dbc schema-audit <definitions-root> <table-folder> <build> [--xml=schema.xml] [--only-problems] [--format=text|json]\n  wowcrucible dbc rows <file.dbc|file.db2> <schema.xml|file.dbd|definitions-folder> <id>...\n  wowcrucible dbc export <file.dbc|file.db2> <schema> <output.csv|json|jsonl> [--format=csv|json|jsonl] [--columns=A,B|--column=Name] [--ids=1,2|--id=N] [--raw-string-offsets] [--overwrite]\n  wowcrucible dbc import <file.dbc|file.db2> <schema> <input.csv|json|jsonl> [--format=csv|json|jsonl] [--append] [--raw-string-offsets] [--output=changed.dbc|db2] [--overwrite] [--report=text|json]\n  wowcrucible dbc find <file.dbc|file.db2> <schema> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base> <override> <schema> [--summary]\n  wowcrucible dbc promote apply <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc promote additions <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc clone-remap where <base> <source> <schema> <column> <value>... --manifest=map.json --output=merged.dbc|db2 [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source> <parent-merged> <parent-schema> <parent-map.json> <foreign-column> <child-base> <child-source> <child-schema> --child-map=map.json --child-output=child --parent-output=parent\n  wowcrucible dbc copy-row <base> <source> <schema> <source-id> <target-id> <output> [--set=Column=Value]...\n  wowcrucible dbc set-row <input> <schema> <id> <output> --set=Column=Value [...]\n  wowcrucible dbc spell-tooltip <Spell.dbc> <spell-id>... [--format=text|json]\n  wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [--assets=processed-library]\n  wowcrucible dbc item-equipped <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> <base-skin> <output.png> --inventory=N --assets=processed-library [--source=name]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]\n\nFor WDB2, <schema> is the matching .dbd file or WoWDBDefs definitions folder. WDB5/WDB6/WDC are not yet supported.", code);
 static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]", code);
 static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools commands [search words...] [--format=text|json]\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n\nThe command catalog is shared with the desktop Ctrl+K palette, so scripts and the UI use the same searchable vocabulary. A command search with no matches returns exit code 3.\n\nWithout an inventory path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage.", code);
+static int KnowledgeHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible knowledge search <terms...> [--root=wiki-folder] [--locale=en] [--limit=100] [--format=text|json]\n  wowcrucible knowledge show <relative-markdown-path> [--root=wiki-folder] [--section=N]\n\nSearch builds a local in-memory index over Markdown only; it never executes the wiki site generator, scripts, HTML, or remote links. Without --root, Crucible searches upward from the executable for the shared wiki folder. The desktop exposes the same provider under Offline knowledge & field reference, and F1 opens it using the selected DBC table and field as context.", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
 {
     var anonymous = files.Count(file => ClientArchiveIndexService.IsAnonymous(file.ArchivePath));
@@ -1964,7 +2003,7 @@ static int GroupHelp(string message, int code)
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  tools     search native commands and inventory the local legacy-tool corpus\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible tools commands \"cut items\"\n  wowcrucible tools inventory --unassigned-only\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
+    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  tools     search native commands and inventory the local legacy-tool corpus\n  knowledge search the local wiki for fields, flags, commands, and systems\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible tools commands \"cut items\"\n  wowcrucible knowledge search item_template flags\n  wowcrucible tools inventory --unassigned-only\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 

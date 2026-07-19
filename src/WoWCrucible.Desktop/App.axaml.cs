@@ -43,6 +43,7 @@ public partial class App : Application
             else if (arguments.Any(argument => IsOption(argument, "--pets"))) window.Opened += (_, _) => window.OpenPetWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--behaviors"))) window.Opened += (_, _) => window.OpenBehaviorWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--tool-inventory"))) window.Opened += async (_, _) => await window.OpenToolInventoryAsync();
+            else if (arguments.Any(argument => IsOption(argument, "--knowledge"))) window.Opened += async (_, _) => await window.OpenKnowledgeAsync();
             else if (arguments.Any(argument => IsOption(argument, "--dbd-schemas"))) window.Opened += (_, _) => window.OpenDbdSchemaAudit();
             else if (arguments.Any(argument => IsOption(argument, "--mpq"))) window.Opened += (_, _) => window.OpenMpqWorkspace();
             var paletteIndex = Array.FindIndex(arguments, argument => IsOption(argument, "--command-palette"));

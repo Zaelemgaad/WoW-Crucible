@@ -18,6 +18,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("pet family growth compare graph").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("pet talent ability evidence graph").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.assets" ||
+    CrucibleCommandCatalog.Search("wiki field help").FirstOrDefault()?.Command.Id != "workspace.knowledge" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
 
@@ -307,6 +308,34 @@ if (toolInventory.Unassigned != 2 || toolInventory.Missing == 0 || !toolInventor
     !toolInventory.Entries.Any(entry => entry.RelativePath == "MysteryTool" && entry.Status == ToolInventoryStatus.Unassigned) || !toolInventory.Entries.Any(entry => entry.RelativePath == "Tools/NewNestedTool" && entry.Status == ToolInventoryStatus.Unassigned) || !discoveredToolRoot.Equals(toolInventoryFixture, StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException("Tool consolidation inventory did not distinguish assigned, missing, and newly unassigned workspace/tool roots.");
 Directory.Delete(toolInventoryFixture, true);
+
+var knowledgeFixture = Path.Combine(Path.GetTempPath(), $"crucible-knowledge-{Guid.NewGuid():N}");
+Directory.CreateDirectory(Path.Combine(knowledgeFixture, "docs", "es")); File.WriteAllText(Path.Combine(knowledgeFixture, "_config.yml"), "title: fixture");
+File.WriteAllText(Path.Combine(knowledgeFixture, "docs", "item_template.md"), """
+---
+title: item\_template
+---
+# item_template
+## Flags
+The Flags field is a bitmask. Add ITEM_FLAG_BIND_TO_ACCOUNT to make a bound account item.
+## RequiredLevel
+Minimum player level required to equip the item.
+""");
+File.WriteAllText(Path.Combine(knowledgeFixture, "docs", "es", "item_template.md"), """
+---
+title: objeto
+---
+# objeto
+## Flags
+Referencia localizada para banderas.
+""");
+var knowledge = new KnowledgeReferenceService(); var knowledgeIndex = knowledge.Build(knowledgeFixture);
+var flagHits = knowledge.Search("item_template flags", "en", 20); var prefixHits = knowledge.Search("bind_to_acc", null, 20); var localizedHits = knowledge.Search("banderas", "es", 20);
+if (knowledgeIndex.Articles.Count != 2 || knowledgeIndex.SectionCount < 4 || !knowledgeIndex.Locales.SequenceEqual(["en", "es"]) ||
+    flagHits.FirstOrDefault()?.Heading != "Flags" || flagHits[0].Title != "item_template" || !flagHits[0].PlainText.Contains("bitmask", StringComparison.OrdinalIgnoreCase) ||
+    prefixHits.Count != 1 || localizedHits.Count != 1 || localizedHits[0].Locale != "es" || KnowledgeReferenceService.FindWikiRoot(Path.Combine(knowledgeFixture, "docs", "es")) != knowledgeFixture)
+    throw new InvalidOperationException("Offline knowledge indexing, Markdown decoding, prefix search, locale filtering, or root discovery regressed.");
+Directory.Delete(knowledgeFixture, true);
 
 var browserEntries = new MpqFileEntry[]
 {

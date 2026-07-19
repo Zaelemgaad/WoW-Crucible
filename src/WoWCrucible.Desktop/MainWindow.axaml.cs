@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     private readonly DesktopWorkspaceSession _workspaceSession = new(DesktopSettings.Load());
     private AssetComparisonView? _assetComparisonView;
     private NativeConversionWorkspaceView? _nativeConversionWorkspaceView;
+    private KnowledgeWorkspaceView? _knowledgeWorkspaceView;
     private ToolInventoryView? _toolInventoryView;
     private ItemWorkbenchView? _itemWorkbenchView;
     private MpqWorkspaceView? _mpqWorkspaceView;
@@ -53,6 +54,7 @@ public partial class MainWindow : Window
     private string _featureTitle = string.Empty;
     private readonly Dictionary<string, (WdbcFile File, IReadOnlyList<DbcColumn> Columns)> _referenceDbcCache = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<CrucibleCommandMatch> _commandMatches = [];
+    private string _knowledgeContext = string.Empty;
     private readonly IReadOnlyDictionary<string, Func<Task>> _commandRoutes;
 
     private DbcDocumentSession? Current => _activeDocument >= 0 && _activeDocument < _documents.Count ? _documents[_activeDocument] : null;
@@ -331,6 +333,7 @@ public partial class MainWindow : Window
         InspectorSummary.Text = selection.Value.Length == 0 ? "(empty)" : selection.Value;
         var choices = semantic is null ? string.Empty : $"\nKnown     {semantic.Options.Count:N0} {semantic.Kind.ToString().ToLowerInvariant()} option(s)\nEdit      Double-click the cell";
         InspectorDetail.Text = $"Row       {selection.Row + 1:N0}\nColumn    {selection.ColumnIndex:N0}\nField     {selection.Column.Name}\nType      {selection.Column.Type}\nOffset    {selection.Column.Offset:N0} bytes\nSize      {selection.Column.Size:N0} bytes{choices}";
+        _knowledgeContext = $"{Path.GetFileNameWithoutExtension(document.File.SourcePath)} {selection.Column.Name}";
     }
 
     private async Task EditCellAsync(Controls.DbcSelectionEventArgs selection)
@@ -781,6 +784,12 @@ public partial class MainWindow : Window
         if (_toolInventoryView is null) { _toolInventoryView = new ToolInventoryView(); _toolInventoryView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
         OpenFeatureWorkspace(_toolInventoryView, "Tool Inventory"); await _toolInventoryView.ActivateAsync();
     }
+    private async void OpenKnowledgeClick(object? sender, RoutedEventArgs e) => await OpenKnowledgeAsync(_knowledgeContext);
+    public async Task OpenKnowledgeAsync(string? query = null)
+    {
+        if (_knowledgeWorkspaceView is null) { _knowledgeWorkspaceView = new KnowledgeWorkspaceView(); _knowledgeWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+        OpenFeatureWorkspace(_knowledgeWorkspaceView, "Offline Knowledge & Field Reference"); await _knowledgeWorkspaceView.ActivateAsync(query);
+    }
     private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e) => CloseFeatureWorkspace();
     private void OpenLayeredDbcsClick(object? sender, RoutedEventArgs e)
     {
@@ -904,6 +913,7 @@ public partial class MainWindow : Window
             _sqlWorkspaceView.GuidedEditRequested += (_, request) => OpenGuidedSqlRow(request);
             _sqlWorkspaceView.OpenDbcRequested += async (_, path) => { CloseAllFeatureWorkspaces(); await LoadDbcAsync(path); };
             _sqlWorkspaceView.OpenMpqRequested += async (_, path) => await OpenIndexedArchiveAsync(path);
+            _sqlWorkspaceView.KnowledgeRequested += async (_, query) => await OpenKnowledgeAsync(query);
         }
         OpenFeatureWorkspace(_sqlWorkspaceView, "SQL Studio"); _sqlWorkspaceView.Activate();
     }
@@ -1120,6 +1130,7 @@ public partial class MainWindow : Window
             ["workspace.textures"] = Done(() => OpenTextureWorkspace()),
             ["workspace.assets"] = Done(() => OpenAssetComparison()),
             ["workspace.conversion"] = Done(OpenNativeConversionWorkspace),
+            ["workspace.knowledge"] = () => OpenKnowledgeAsync(_knowledgeContext),
             ["workspace.tools"] = OpenToolInventoryAsync,
             ["workspace.server"] = Done(OpenServerSqlWorkspace),
             ["workspace.sql"] = Done(OpenSqlWorkspace),
@@ -1162,6 +1173,7 @@ public partial class MainWindow : Window
             if (CommandPaletteHost.IsVisible) CloseCommandPalette(); else OpenCommandPalette();
             e.Handled = true; return;
         }
+        if (e.Key == Key.F1) { _ = OpenKnowledgeAsync(_knowledgeContext); e.Handled = true; return; }
         if (CommandPaletteHost.IsVisible)
         {
             if (e.Key == Key.Escape) CloseCommandPalette();

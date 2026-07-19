@@ -31,6 +31,7 @@
                         <Button Margin="0,0,8,0" Content="Close" Click="CloseDocumentClick" />
                         <Button Margin="0,0,8,0" Content="Logs" Click="OpenLogsClick" />
                         <Button Margin="0,0,8,0" Content="CLI Guide" Click="OpenCliGuideClick" />
+                        <Button Margin="0,0,8,0" Content="Field Help · F1" Click="OpenKnowledgeClick" />
                         <Button Margin="0,0,8,0" Content="Commands · Ctrl+K" Click="OpenCommandPaletteClick" />
                         <TextBox x:Name="SearchBox" PlaceholderText="Search loaded table…" TextChanged="SearchChanged" />
                     </WrapPanel>
@@ -59,6 +60,7 @@
                         <Button HorizontalContentAlignment="Left" Click="OpenTextureWorkspaceClick"><TextBlock Text="▧  Texture lab" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenAssetComparisonClick"><TextBlock Text="⬡  Assets &amp; compare" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenNativeConversionClick"><TextBlock Text="⇄  Modern asset conversion" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenKnowledgeClick"><TextBlock Text="?  Offline knowledge &amp; field reference" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenToolInventoryClick"><TextBlock Text="⌂  Tool inventory" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenServerSqlClick"><TextBlock Text="⚙  Server &amp; SQL" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenSqlWorkspaceClick"><TextBlock Text="▤  Full SQL database · tables, queries &amp; favorites" TextWrapping="Wrap" /></Button>
