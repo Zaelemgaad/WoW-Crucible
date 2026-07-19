@@ -21,6 +21,18 @@ public sealed record M2PreviewAttachment(int Index, uint Id, string Name, int Bo
 {
     public override string ToString() => $"{Id:N0} · {Name} · bone {BoneIndex:N0}";
 }
+public sealed record M2PreviewCamera(int Index, int Type, float FieldOfViewRaw, float FarClip, float NearClip, Vector3 BasePosition, Vector3 BaseTarget, IReadOnlyList<int> LookupSlots)
+{
+    public float FieldOfViewDegrees => FieldOfViewRaw * 35f;
+    public float FieldOfViewRadians => FieldOfViewDegrees * MathF.PI / 180f;
+    public string Name => Type switch { 0 => "Portrait camera", 1 => "Character-info camera", _ => $"Camera type {Type:N0}" };
+    public override string ToString() => $"{Name} · {FieldOfViewDegrees:0.#}°";
+}
+public sealed record M2PreviewLight(int Index, short Type, short BoneIndex, Vector3 Position)
+{
+    public string Name => Type switch { 0 => "Directional light", 1 => "Point light", _ => $"Light type {Type:N0}" };
+    public override string ToString() => $"{Name} · bone {(BoneIndex < 0 ? "none" : BoneIndex.ToString("N0"))}";
+}
 public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
 public enum M2PreviewTextureCoordinateSource { Primary, Secondary, Environment, Unsupported }
 public enum M2PreviewTextureStageBlend { Source, Modulate, Modulate2X, Add, AddNoAlpha, Unsupported }
@@ -59,6 +71,8 @@ public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadO
     public IReadOnlyList<M2PreviewBatch> Batches { get; init; } = [];
     public IReadOnlyList<M2PreviewBone> Bones { get; init; } = [];
     public IReadOnlyList<M2PreviewAttachment> Attachments { get; init; } = [];
+    public IReadOnlyList<M2PreviewCamera> Cameras { get; init; } = [];
+    public IReadOnlyList<M2PreviewLight> Lights { get; init; } = [];
     public IReadOnlyList<M2PreviewSequence> Sequences { get; init; } = [];
     public IReadOnlyList<Vector2> SecondaryTextureCoordinates { get; init; } = [];
     public int TotalTriangleIndices { get; init; } = TriangleIndices.Count;
@@ -79,7 +93,7 @@ public static class M2PreviewGeometryService
         modelPath = Path.GetFullPath(modelPath);
         if (!File.Exists(modelPath)) throw new FileNotFoundException("The M2 model does not exist.", modelPath);
         var model = File.ReadAllBytes(modelPath);
-        if (model.Length < 0x44 || FourCc(model, 0) != "MD20") throw new InvalidDataException("Embedded preview currently requires an unwrapped MD20 model.");
+        if (model.Length < 0x130 || FourCc(model, 0) != "MD20") throw new InvalidDataException("Embedded preview currently requires a complete unwrapped MD20 model header.");
         var version = ReadUInt(model, 4);
         if (version != 264) throw new NotSupportedException($"Embedded preview currently supports Wrath M2 version 264; this model is version {version}.");
         var vertexCount = CheckedCount(ReadUInt(model, 0x3C), MaximumVertices, "M2 vertex");
@@ -138,6 +152,8 @@ public static class M2PreviewGeometryService
             Batches = batches,
             Bones = bones,
             Attachments = attachments,
+            Cameras = animationRig.PreviewCameras,
+            Lights = animationRig.PreviewLights,
             Sequences = animationRig.Sequences,
             SecondaryTextureCoordinates = secondaryTextureCoordinates,
             TotalTriangleIndices = allTriangles.Length,

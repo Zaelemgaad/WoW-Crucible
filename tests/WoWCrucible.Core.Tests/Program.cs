@@ -594,8 +594,9 @@ if (previewGeometry.Vertices.Count != 3 || previewGeometry.TriangleIndices.Count
     previewGeometry.Bones.Count != 1 || previewGeometry.Bones[0].ParentIndex != -1 || previewGeometry.Bones[0].Pivot.Z != 1.25f ||
     previewGeometry.Attachments.Count != 1 || previewGeometry.Attachments[0].Id != 11 || previewGeometry.Attachments[0].Name != "Helmet" || previewGeometry.Attachments[0].BoneIndex != 0 || previewGeometry.Attachments[0].Position.Y != -0.5f || !previewGeometry.Attachments[0].LookupSlots.SequenceEqual([11]))
     throw new InvalidOperationException("Native M2/SKIN preview geometry parsing failed.");
-var animatedModel = Path.Combine(assetFixture, "geometry-animated.m2"); var animatedBytes = new byte[0x500]; geometryBytes.CopyTo(animatedBytes, 0);
+var animatedModel = Path.Combine(assetFixture, "geometry-animated.m2"); var animatedBytes = new byte[0x900]; geometryBytes.CopyTo(animatedBytes, 0);
 const int fixtureSequenceOffset = 0x300, fixtureTimeSeriesOffset = 0x340, fixtureValueSeriesOffset = 0x348, fixtureTimesOffset = 0x350, fixtureValuesOffset = 0x358;
+const int fixtureCameraOffset = 0x500, fixtureCameraLookupOffset = 0x564, fixtureLightOffset = 0x568, fixtureScalarSeriesOffset = 0x610, fixtureScalarValuesOffset = 0x620, fixtureRollSeriesOffset = 0x630, fixtureRollValuesOffset = 0x638, fixtureIntegerSeriesOffset = 0x640, fixtureIntegerValuesOffset = 0x648;
 BitConverter.GetBytes((uint)1).CopyTo(animatedBytes, 0x1C); BitConverter.GetBytes((uint)fixtureSequenceOffset).CopyTo(animatedBytes, 0x20);
 BitConverter.GetBytes((ushort)4).CopyTo(animatedBytes, fixtureSequenceOffset); BitConverter.GetBytes((uint)1000).CopyTo(animatedBytes, fixtureSequenceOffset + 4); BitConverter.GetBytes((uint)0x20).CopyTo(animatedBytes, fixtureSequenceOffset + 12);
 BitConverter.GetBytes((ushort)1).CopyTo(animatedBytes, fixtureBoneOffset + 16); BitConverter.GetBytes((short)-1).CopyTo(animatedBytes, fixtureBoneOffset + 18);
@@ -605,6 +606,14 @@ BitConverter.GetBytes((uint)2).CopyTo(animatedBytes, fixtureTimeSeriesOffset); B
 BitConverter.GetBytes((uint)2).CopyTo(animatedBytes, fixtureValueSeriesOffset); BitConverter.GetBytes((uint)fixtureValuesOffset).CopyTo(animatedBytes, fixtureValueSeriesOffset + 4);
 BitConverter.GetBytes((uint)0).CopyTo(animatedBytes, fixtureTimesOffset); BitConverter.GetBytes((uint)1000).CopyTo(animatedBytes, fixtureTimesOffset + 4);
 BitConverter.GetBytes(0f).CopyTo(animatedBytes, fixtureValuesOffset); BitConverter.GetBytes(2f).CopyTo(animatedBytes, fixtureValuesOffset + 12);
+BitConverter.GetBytes((uint)2).CopyTo(animatedBytes, fixtureScalarSeriesOffset); BitConverter.GetBytes((uint)fixtureScalarValuesOffset).CopyTo(animatedBytes, fixtureScalarSeriesOffset + 4); BitConverter.GetBytes(1f).CopyTo(animatedBytes, fixtureScalarValuesOffset); BitConverter.GetBytes(1f).CopyTo(animatedBytes, fixtureScalarValuesOffset + 4);
+BitConverter.GetBytes((uint)2).CopyTo(animatedBytes, fixtureRollSeriesOffset); BitConverter.GetBytes((uint)fixtureRollValuesOffset).CopyTo(animatedBytes, fixtureRollSeriesOffset + 4); BitConverter.GetBytes(0f).CopyTo(animatedBytes, fixtureRollValuesOffset); BitConverter.GetBytes(0.5f).CopyTo(animatedBytes, fixtureRollValuesOffset + 4);
+BitConverter.GetBytes((uint)2).CopyTo(animatedBytes, fixtureIntegerSeriesOffset); BitConverter.GetBytes((uint)fixtureIntegerValuesOffset).CopyTo(animatedBytes, fixtureIntegerSeriesOffset + 4); BitConverter.GetBytes(1).CopyTo(animatedBytes, fixtureIntegerValuesOffset); BitConverter.GetBytes(1).CopyTo(animatedBytes, fixtureIntegerValuesOffset + 4);
+BitConverter.GetBytes((uint)1).CopyTo(animatedBytes, 0x110); BitConverter.GetBytes((uint)fixtureCameraOffset).CopyTo(animatedBytes, 0x114); BitConverter.GetBytes((uint)1).CopyTo(animatedBytes, 0x118); BitConverter.GetBytes((uint)fixtureCameraLookupOffset).CopyTo(animatedBytes, 0x11C); BitConverter.GetBytes((short)0).CopyTo(animatedBytes, fixtureCameraLookupOffset);
+BitConverter.GetBytes(0).CopyTo(animatedBytes, fixtureCameraOffset); BitConverter.GetBytes(MathF.PI / 4).CopyTo(animatedBytes, fixtureCameraOffset + 4); BitConverter.GetBytes(100f).CopyTo(animatedBytes, fixtureCameraOffset + 8); BitConverter.GetBytes(0.1f).CopyTo(animatedBytes, fixtureCameraOffset + 12); BitConverter.GetBytes(-5f).CopyTo(animatedBytes, fixtureCameraOffset + 40); BitConverter.GetBytes(1f).CopyTo(animatedBytes, fixtureCameraOffset + 44); BitConverter.GetBytes(1f).CopyTo(animatedBytes, fixtureCameraOffset + 76);
+WriteM2Track(animatedBytes, fixtureCameraOffset + 16, fixtureTimeSeriesOffset, fixtureValueSeriesOffset); WriteM2Track(animatedBytes, fixtureCameraOffset + 48, fixtureTimeSeriesOffset, fixtureValueSeriesOffset); WriteM2Track(animatedBytes, fixtureCameraOffset + 80, fixtureTimeSeriesOffset, fixtureRollSeriesOffset);
+BitConverter.GetBytes((uint)1).CopyTo(animatedBytes, 0x108); BitConverter.GetBytes((uint)fixtureLightOffset).CopyTo(animatedBytes, 0x10C); BitConverter.GetBytes((short)1).CopyTo(animatedBytes, fixtureLightOffset); BitConverter.GetBytes((short)0).CopyTo(animatedBytes, fixtureLightOffset + 2); BitConverter.GetBytes(0.5f).CopyTo(animatedBytes, fixtureLightOffset + 4);
+WriteM2Track(animatedBytes, fixtureLightOffset + 16, fixtureTimeSeriesOffset, fixtureValueSeriesOffset); WriteM2Track(animatedBytes, fixtureLightOffset + 36, fixtureTimeSeriesOffset, fixtureScalarSeriesOffset); WriteM2Track(animatedBytes, fixtureLightOffset + 56, fixtureTimeSeriesOffset, fixtureValueSeriesOffset); WriteM2Track(animatedBytes, fixtureLightOffset + 76, fixtureTimeSeriesOffset, fixtureScalarSeriesOffset); WriteM2Track(animatedBytes, fixtureLightOffset + 96, fixtureTimeSeriesOffset, fixtureScalarSeriesOffset); WriteM2Track(animatedBytes, fixtureLightOffset + 116, fixtureTimeSeriesOffset, fixtureScalarSeriesOffset); WriteM2Track(animatedBytes, fixtureLightOffset + 136, fixtureTimeSeriesOffset, fixtureIntegerSeriesOffset);
 for (var index = 0; index < fixtureVertices.Length; index++) { var vertex = 0x130 + index * 48; animatedBytes[vertex + 12] = 255; animatedBytes[vertex + 16] = 0; }
 File.WriteAllBytes(animatedModel, animatedBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-animated00.skin"));
 var animatedGeometry = M2PreviewGeometryService.Load(animatedModel); var animatedPose = M2AnimationService.CreatePose(animatedGeometry);
@@ -614,8 +623,16 @@ var animatedMountedOrigin = Vector3.Transform(Vector3.Zero, animatedMount);
 if (animatedGeometry.Sequences.Count != 1 || animatedGeometry.Sequences[0].AnimationId != 4 || animatedGeometry.Sequences[0].DurationMilliseconds != 1000 ||
     Math.Abs(animatedPose.Vertices[0].X - 0f) > 0.0001f || Math.Abs(animatedPose.Vertices[1].X - 2f) > 0.0001f || Math.Abs(animatedPose.AttachmentPositions[0].X - 1.25f) > 0.0001f ||
     Math.Abs(animatedMountedOrigin.X - animatedPose.AttachmentPositions[0].X) > 0.0001f || Math.Abs(animatedMountedOrigin.Y - animatedPose.AttachmentPositions[0].Y) > 0.0001f || Math.Abs(animatedMountedOrigin.Z - animatedPose.AttachmentPositions[0].Z) > 0.0001f ||
+    animatedGeometry.Cameras.Count != 1 || animatedGeometry.Cameras[0].Type != 0 || !animatedGeometry.Cameras[0].LookupSlots.SequenceEqual([0]) || animatedGeometry.Lights.Count != 1 || animatedGeometry.Lights[0].Type != 1 || animatedGeometry.Lights[0].BoneIndex != 0 ||
+    Math.Abs(animatedPose.Cameras[0].Position.X - 1f) > 0.0001f || Math.Abs(animatedPose.Cameras[0].Position.Y + 5f) > 0.0001f || Math.Abs(animatedPose.Cameras[0].Target.X - 1f) > 0.0001f || Math.Abs(animatedPose.Cameras[0].RollRadians - 0.25f) > 0.0001f ||
+    Math.Abs(animatedPose.Lights[0].Position.X - 1.5f) > 0.0001f || Math.Abs(animatedPose.Lights[0].AmbientColor.X - 1f) > 0.0001f || Math.Abs(animatedPose.Lights[0].DiffuseIntensity - 1f) > 0.0001f || !animatedPose.Lights[0].UseAttenuation ||
     animatedPose.SequenceIndex != 0 || Math.Abs(animatedPose.TimeMilliseconds - 500) > 0.0001)
-    throw new InvalidOperationException("Wrath M2 linear bone animation sampling, weighted skinning, or attachment transformation failed.");
+    throw new InvalidOperationException("Wrath M2 bone/camera/light animation sampling, weighted skinning, or attachment transformation failed.");
+var nativeCamera = animatedGeometry.Cameras[0]; var projection = M2CameraProjectionService.TryCreate(nativeCamera, new(nativeCamera.BasePosition, nativeCamera.BaseTarget, 0), Matrix4x4.Identity) ?? throw new InvalidOperationException("A valid native M2 camera did not produce a projection basis.");
+var projectedTarget = projection.Project(projection.ToViewPoint(nativeCamera.BaseTarget)); var projectedRight = projection.Project(projection.ToViewPoint(nativeCamera.BaseTarget + Vector3.UnitX));
+if (nativeCamera.FieldOfViewDegrees is < 27f or > 28f || Math.Abs(projectedTarget.X) > 0.0001f || Math.Abs(projectedTarget.Z) > 0.0001f || projectedRight.X <= 0 || !projection.ContainsDepth(5f) || projection.ContainsDepth(nativeCamera.NearClip) ||
+    M2CameraProjectionService.TryCreate(nativeCamera, new(nativeCamera.BasePosition, nativeCamera.BasePosition, 0), Matrix4x4.Identity) is not null)
+    throw new InvalidOperationException("Native M2 perspective camera basis, FOV conversion, clipping, or degeneracy checks regressed.");
 var modelExportPath = Path.Combine(assetFixture, "exports", "animated-visible.obj");
 var modelExport = M2ObjExportService.Export(animatedGeometry, modelExportPath, animatedPose, new Dictionary<int, RgbaTexture> { [0] = new(1, 1, [12, 34, 56, 255]) });
 var exportedObj = File.ReadAllText(modelExport.ObjPath); var exportedMtl = File.ReadAllText(modelExport.MaterialPath);
@@ -632,6 +649,12 @@ catch (IOException) { }
 var invalidAttachmentModel = Path.Combine(assetFixture, "geometry-invalid.m2"); var invalidAttachmentBytes = geometryBytes.ToArray(); BitConverter.GetBytes((uint)2).CopyTo(invalidAttachmentBytes, fixtureAttachmentOffset + 4); File.WriteAllBytes(invalidAttachmentModel, invalidAttachmentBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-invalid00.skin"));
 try { _ = M2PreviewGeometryService.Load(invalidAttachmentModel); throw new InvalidOperationException("An M2 attachment pointing beyond the bone table was accepted."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("references bone", StringComparison.Ordinal)) { }
+var invalidCameraModel = Path.Combine(assetFixture, "geometry-invalid-camera.m2"); var invalidCameraBytes = animatedBytes.ToArray(); BitConverter.GetBytes((short)2).CopyTo(invalidCameraBytes, fixtureCameraLookupOffset); File.WriteAllBytes(invalidCameraModel, invalidCameraBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-invalid-camera00.skin"));
+try { _ = M2PreviewGeometryService.Load(invalidCameraModel); throw new InvalidOperationException("An M2 camera lookup pointing beyond the camera table was accepted."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("camera lookup", StringComparison.Ordinal)) { }
+var invalidLightModel = Path.Combine(assetFixture, "geometry-invalid-light.m2"); var invalidLightBytes = animatedBytes.ToArray(); BitConverter.GetBytes((short)2).CopyTo(invalidLightBytes, fixtureLightOffset + 2); File.WriteAllBytes(invalidLightModel, invalidLightBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-invalid-light00.skin"));
+try { _ = M2PreviewGeometryService.Load(invalidLightModel); throw new InvalidOperationException("An M2 light pointing beyond the bone table was accepted."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("light", StringComparison.Ordinal) && exception.Message.Contains("references bone", StringComparison.Ordinal)) { }
 var bloodElfFemale = CharacterAppearanceService.Infer(@"Character\BloodElf\Female", "BloodElfFemale.M2");
 if (bloodElfFemale is null || bloodElfFemale.RaceId != 10 || bloodElfFemale.SexId != 1) throw new InvalidOperationException("Character appearance inference did not distinguish Blood Elf female from male.");
 var bloodElfSkins = CharacterAppearanceService.LoadBaseSkins(Path.Combine(args[1], "CharSections.dbc"), bloodElfFemale);
@@ -2362,4 +2385,11 @@ static void WriteMapChunk(BinaryWriter writer, string id, byte[] payload)
 {
     if (id.Length != 4) throw new ArgumentException("A map chunk ID must contain four characters.", nameof(id));
     writer.Write(System.Text.Encoding.ASCII.GetBytes(new string(id.Reverse().ToArray()))); writer.Write((uint)payload.Length); writer.Write(payload);
+}
+
+static void WriteM2Track(byte[] target, int offset, int timestampSeriesOffset, int valueSeriesOffset)
+{
+    BitConverter.GetBytes((ushort)1).CopyTo(target, offset); BitConverter.GetBytes((short)-1).CopyTo(target, offset + 2);
+    BitConverter.GetBytes((uint)1).CopyTo(target, offset + 4); BitConverter.GetBytes((uint)timestampSeriesOffset).CopyTo(target, offset + 8);
+    BitConverter.GetBytes((uint)1).CopyTo(target, offset + 12); BitConverter.GetBytes((uint)valueSeriesOffset).CopyTo(target, offset + 16);
 }

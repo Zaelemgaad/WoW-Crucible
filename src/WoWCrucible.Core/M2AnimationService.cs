@@ -5,24 +5,38 @@ namespace WoWCrucible.Core;
 internal readonly record struct M2VertexSkin(byte Weight0, byte Weight1, byte Weight2, byte Weight3, byte Bone0, byte Bone1, byte Bone2, byte Bone3);
 internal readonly record struct M2TrackHeader(ushort Interpolation, short GlobalSequence, uint TimestampSeriesCount, uint TimestampSeriesOffset, uint ValueSeriesCount, uint ValueSeriesOffset);
 internal sealed record M2BoneAnimation(M2TrackHeader Translation, M2TrackHeader Rotation, M2TrackHeader Scale);
-internal sealed class M2AnimationRig(byte[] modelData, IReadOnlyList<M2PreviewSequence> sequences, uint[] globalSequenceDurations, M2BoneAnimation[] bones, M2VertexSkin[] vertexSkin)
+internal sealed record M2CameraAnimation(M2TrackHeader PositionTranslation, M2TrackHeader TargetTranslation, M2TrackHeader Roll);
+internal sealed record M2LightAnimation(M2TrackHeader AmbientColor, M2TrackHeader AmbientIntensity, M2TrackHeader DiffuseColor, M2TrackHeader DiffuseIntensity, M2TrackHeader AttenuationStart, M2TrackHeader AttenuationEnd, M2TrackHeader UseAttenuation);
+internal sealed class M2AnimationRig(byte[] modelData, IReadOnlyList<M2PreviewSequence> sequences, uint[] globalSequenceDurations, M2BoneAnimation[] bones, M2VertexSkin[] vertexSkin,
+    M2CameraAnimation[] cameras, M2LightAnimation[] lights, IReadOnlyList<M2PreviewCamera> previewCameras, IReadOnlyList<M2PreviewLight> previewLights)
 {
     public byte[] ModelData { get; } = modelData;
     public IReadOnlyList<M2PreviewSequence> Sequences { get; } = sequences;
     public uint[] GlobalSequenceDurations { get; } = globalSequenceDurations;
     public M2BoneAnimation[] Bones { get; } = bones;
     public M2VertexSkin[] VertexSkin { get; } = vertexSkin;
+    public M2CameraAnimation[] Cameras { get; } = cameras;
+    public M2LightAnimation[] Lights { get; } = lights;
+    public IReadOnlyList<M2PreviewCamera> PreviewCameras { get; } = previewCameras;
+    public IReadOnlyList<M2PreviewLight> PreviewLights { get; } = previewLights;
     public Dictionary<int, M2AnimationClip> ClipCache { get; } = [];
 }
 
-internal sealed record M2AnimationClip(int SequenceIndex, M2BoneClip[] Bones);
+internal sealed record M2AnimationClip(int SequenceIndex, M2BoneClip[] Bones, M2CameraClip[] Cameras, M2LightClip[] Lights);
 internal sealed record M2BoneClip(M2VectorTrack Translation, M2QuaternionTrack Rotation, M2VectorTrack Scale);
+internal sealed record M2CameraClip(M2VectorTrack PositionTranslation, M2VectorTrack TargetTranslation, M2ScalarTrack Roll);
+internal sealed record M2LightClip(M2VectorTrack AmbientColor, M2ScalarTrack AmbientIntensity, M2VectorTrack DiffuseColor, M2ScalarTrack DiffuseIntensity, M2ScalarTrack AttenuationStart, M2ScalarTrack AttenuationEnd, M2IntegerTrack UseAttenuation);
 internal sealed record M2VectorTrack(ushort Interpolation, uint[] Times, Vector3[] Values, uint? GlobalDuration);
 internal sealed record M2QuaternionTrack(ushort Interpolation, uint[] Times, Quaternion[] Values, uint? GlobalDuration);
+internal sealed record M2ScalarTrack(ushort Interpolation, uint[] Times, float[] Values, uint? GlobalDuration);
+internal sealed record M2IntegerTrack(ushort Interpolation, uint[] Times, int[] Values, uint? GlobalDuration);
+
+public sealed record M2PreviewCameraPose(Vector3 Position, Vector3 Target, float RollRadians);
+public sealed record M2PreviewLightPose(Vector3 Position, Vector3 Direction, Vector3 AmbientColor, float AmbientIntensity, Vector3 DiffuseColor, float DiffuseIntensity, float AttenuationStart, float AttenuationEnd, bool UseAttenuation);
 
 public sealed class M2AnimationPose
 {
-    internal M2AnimationPose(int vertexCount, int boneCount, int attachmentCount)
+    internal M2AnimationPose(int vertexCount, int boneCount, int attachmentCount, int cameraCount, int lightCount)
     {
         Vertices = new Vector3[vertexCount];
         Normals = new Vector3[vertexCount];
@@ -30,12 +44,16 @@ public sealed class M2AnimationPose
         LocalBoneTransforms = new Matrix4x4[boneCount];
         BoneTransformState = new byte[boneCount];
         AttachmentPositions = new Vector3[attachmentCount];
+        Cameras = new M2PreviewCameraPose[cameraCount];
+        Lights = new M2PreviewLightPose[lightCount];
     }
 
     public Vector3[] Vertices { get; }
     public Vector3[] Normals { get; }
     public Matrix4x4[] BoneTransforms { get; }
     public Vector3[] AttachmentPositions { get; }
+    public M2PreviewCameraPose[] Cameras { get; }
+    public M2PreviewLightPose[] Lights { get; }
     public Vector3 Minimum { get; internal set; }
     public Vector3 Maximum { get; internal set; }
     public int SequenceIndex { get; internal set; } = -1;
@@ -51,6 +69,8 @@ public static class M2AnimationService
     private const int VertexStride = 48;
     private const int MaximumSequences = 65_536;
     private const int MaximumGlobalSequences = 65_536;
+    private const int MaximumCameras = 4_096;
+    private const int MaximumLights = 4_096;
     private const int MaximumKeysPerTrack = 5_000_000;
     private const int MaximumCachedClips = 8;
 
@@ -99,7 +119,9 @@ public static class M2AnimationService
             ValidateInfluence(index, value.Weight2, value.Bone2); ValidateInfluence(index, value.Weight3, value.Bone3);
             skin[index] = value;
         }
-        return new(model, sequences, globals, bones, skin);
+        var (cameras, previewCameras) = ParseCameras(model, globals.Length);
+        var (lights, previewLights) = ParseLights(model, globals.Length, boneCount);
+        return new(model, sequences, globals, bones, skin, cameras, lights, previewCameras, previewLights);
 
         void ValidateInfluence(int vertex, byte weight, byte bone)
         {
@@ -110,22 +132,22 @@ public static class M2AnimationService
     public static M2AnimationPose CreatePose(M2PreviewGeometry geometry)
     {
         ArgumentNullException.ThrowIfNull(geometry);
-        return new(geometry.Vertices.Count, geometry.Bones.Count, geometry.Attachments.Count);
+        return new(geometry.Vertices.Count, geometry.Bones.Count, geometry.Attachments.Count, geometry.Cameras.Count, geometry.Lights.Count);
     }
 
     public static M2AnimationPose SnapshotPose(M2PreviewGeometry geometry, M2AnimationPose pose)
     {
         ArgumentNullException.ThrowIfNull(geometry); ArgumentNullException.ThrowIfNull(pose);
-        if (pose.Vertices.Length != geometry.Vertices.Count || pose.Normals.Length != geometry.Vertices.Count || pose.BoneTransforms.Length != geometry.Bones.Count || pose.AttachmentPositions.Length != geometry.Attachments.Count || pose.SequenceIndex < 0)
+        if (pose.Vertices.Length != geometry.Vertices.Count || pose.Normals.Length != geometry.Vertices.Count || pose.BoneTransforms.Length != geometry.Bones.Count || pose.AttachmentPositions.Length != geometry.Attachments.Count || pose.Cameras.Length != geometry.Cameras.Count || pose.Lights.Length != geometry.Lights.Count || pose.SequenceIndex < 0)
             throw new ArgumentException("The sampled animation pose does not belong to this geometry or has not been sampled.", nameof(pose));
-        var snapshot = new M2AnimationPose(pose.Vertices.Length, pose.BoneTransforms.Length, pose.AttachmentPositions.Length)
+        var snapshot = new M2AnimationPose(pose.Vertices.Length, pose.BoneTransforms.Length, pose.AttachmentPositions.Length, pose.Cameras.Length, pose.Lights.Length)
         {
             Minimum = pose.Minimum,
             Maximum = pose.Maximum,
             SequenceIndex = pose.SequenceIndex,
             TimeMilliseconds = pose.TimeMilliseconds
         };
-        pose.Vertices.CopyTo(snapshot.Vertices, 0); pose.Normals.CopyTo(snapshot.Normals, 0); pose.BoneTransforms.CopyTo(snapshot.BoneTransforms, 0); pose.AttachmentPositions.CopyTo(snapshot.AttachmentPositions, 0);
+        pose.Vertices.CopyTo(snapshot.Vertices, 0); pose.Normals.CopyTo(snapshot.Normals, 0); pose.BoneTransforms.CopyTo(snapshot.BoneTransforms, 0); pose.AttachmentPositions.CopyTo(snapshot.AttachmentPositions, 0); pose.Cameras.CopyTo(snapshot.Cameras, 0); pose.Lights.CopyTo(snapshot.Lights, 0);
         return snapshot;
     }
 
@@ -134,7 +156,7 @@ public static class M2AnimationService
         ArgumentNullException.ThrowIfNull(geometry); ArgumentNullException.ThrowIfNull(pose);
         var rig = geometry.AnimationRig ?? throw new InvalidOperationException("This model does not contain a parsed Wrath animation rig.");
         if ((uint)sequenceIndex >= (uint)rig.Sequences.Count) throw new ArgumentOutOfRangeException(nameof(sequenceIndex));
-        if (pose.Vertices.Length != geometry.Vertices.Count || pose.BoneTransforms.Length != geometry.Bones.Count || pose.AttachmentPositions.Length != geometry.Attachments.Count)
+        if (pose.Vertices.Length != geometry.Vertices.Count || pose.BoneTransforms.Length != geometry.Bones.Count || pose.AttachmentPositions.Length != geometry.Attachments.Count || pose.Cameras.Length != geometry.Cameras.Count || pose.Lights.Length != geometry.Lights.Count)
             throw new ArgumentException("The reusable pose belongs to a different model.", nameof(pose));
         if (!double.IsFinite(elapsedMilliseconds)) throw new ArgumentOutOfRangeException(nameof(elapsedMilliseconds));
 
@@ -190,6 +212,32 @@ public static class M2AnimationService
         {
             var attachment = geometry.Attachments[index]; pose.AttachmentPositions[index] = Vector3.Transform(attachment.Position, pose.BoneTransforms[attachment.BoneIndex]);
         }
+        for (var index = 0; index < geometry.Cameras.Count; index++)
+        {
+            var camera = geometry.Cameras[index]; var tracks = clip.Cameras[index];
+            var position = camera.BasePosition + Sample(tracks.PositionTranslation, sequenceTime, elapsedMilliseconds, Vector3.Zero);
+            var target = camera.BaseTarget + Sample(tracks.TargetTranslation, sequenceTime, elapsedMilliseconds, Vector3.Zero);
+            var roll = Sample(tracks.Roll, sequenceTime, elapsedMilliseconds, 0f);
+            if (!Finite(position) || !Finite(target) || !float.IsFinite(roll)) throw new InvalidDataException($"Animation produced a non-finite camera {index:N0} pose.");
+            pose.Cameras[index] = new(position, target, roll);
+        }
+        for (var index = 0; index < geometry.Lights.Count; index++)
+        {
+            var light = geometry.Lights[index]; var tracks = clip.Lights[index];
+            var position = light.BoneIndex >= 0 ? Vector3.Transform(light.Position, pose.BoneTransforms[light.BoneIndex]) : light.Position;
+            var direction = light.BoneIndex >= 0 ? Vector3.TransformNormal(Vector3.UnitY, pose.BoneTransforms[light.BoneIndex]) : Vector3.UnitY;
+            if (direction.LengthSquared() > 0.0000001f) direction = Vector3.Normalize(direction); else direction = Vector3.UnitY;
+            var ambientColor = Sample(tracks.AmbientColor, sequenceTime, elapsedMilliseconds, Vector3.Zero);
+            var ambientIntensity = Sample(tracks.AmbientIntensity, sequenceTime, elapsedMilliseconds, 0f);
+            var diffuseColor = Sample(tracks.DiffuseColor, sequenceTime, elapsedMilliseconds, Vector3.One);
+            var diffuseIntensity = Sample(tracks.DiffuseIntensity, sequenceTime, elapsedMilliseconds, 0f);
+            var attenuationStart = Sample(tracks.AttenuationStart, sequenceTime, elapsedMilliseconds, 0f);
+            var attenuationEnd = Sample(tracks.AttenuationEnd, sequenceTime, elapsedMilliseconds, 0f);
+            var useAttenuation = Sample(tracks.UseAttenuation, sequenceTime, elapsedMilliseconds, 0) != 0;
+            if (!Finite(position) || !Finite(direction) || !Finite(ambientColor) || !Finite(diffuseColor) || !float.IsFinite(ambientIntensity) || !float.IsFinite(diffuseIntensity) || !float.IsFinite(attenuationStart) || !float.IsFinite(attenuationEnd))
+                throw new InvalidDataException($"Animation produced a non-finite light {index:N0} pose.");
+            pose.Lights[index] = new(position, direction, ambientColor, ambientIntensity, diffuseColor, diffuseIntensity, attenuationStart, attenuationEnd, useAttenuation);
+        }
         pose.Minimum = minimum; pose.Maximum = maximum; pose.SequenceIndex = sequenceIndex; pose.TimeMilliseconds = sequenceTime;
     }
 
@@ -207,15 +255,65 @@ public static class M2AnimationService
                 ParseQuaternionTrack(rig, bone.Rotation, sequenceIndex, sequenceData, $"bone {index:N0} rotation"),
                 ParseVectorTrack(rig, bone.Scale, sequenceIndex, sequenceData, $"bone {index:N0} scale"));
         }
-        var clip = new M2AnimationClip(sequenceIndex, bones);
+        var cameras = new M2CameraClip[rig.Cameras.Length];
+        for (var index = 0; index < cameras.Length; index++)
+        {
+            var camera = rig.Cameras[index]; cameras[index] = new(ParseVectorTrack(rig, camera.PositionTranslation, sequenceIndex, sequenceData, $"camera {index:N0} position"), ParseVectorTrack(rig, camera.TargetTranslation, sequenceIndex, sequenceData, $"camera {index:N0} target"), ParseScalarTrack(rig, camera.Roll, sequenceIndex, sequenceData, $"camera {index:N0} roll"));
+        }
+        var lights = new M2LightClip[rig.Lights.Length];
+        for (var index = 0; index < lights.Length; index++)
+        {
+            var light = rig.Lights[index]; lights[index] = new(ParseVectorTrack(rig, light.AmbientColor, sequenceIndex, sequenceData, $"light {index:N0} ambient color"), ParseScalarTrack(rig, light.AmbientIntensity, sequenceIndex, sequenceData, $"light {index:N0} ambient intensity"), ParseVectorTrack(rig, light.DiffuseColor, sequenceIndex, sequenceData, $"light {index:N0} diffuse color"), ParseScalarTrack(rig, light.DiffuseIntensity, sequenceIndex, sequenceData, $"light {index:N0} diffuse intensity"), ParseScalarTrack(rig, light.AttenuationStart, sequenceIndex, sequenceData, $"light {index:N0} attenuation start"), ParseScalarTrack(rig, light.AttenuationEnd, sequenceIndex, sequenceData, $"light {index:N0} attenuation end"), ParseIntegerTrack(rig, light.UseAttenuation, sequenceIndex, sequenceData, $"light {index:N0} attenuation flag"));
+        }
+        var clip = new M2AnimationClip(sequenceIndex, bones, cameras, lights);
         if (rig.ClipCache.Count >= MaximumCachedClips) rig.ClipCache.Remove(rig.ClipCache.Keys.First());
         rig.ClipCache[sequenceIndex] = clip;
         return clip;
     }
 
+    private static (M2CameraAnimation[] Animations, IReadOnlyList<M2PreviewCamera> Preview) ParseCameras(byte[] model, int globalCount)
+    {
+        var count = Count(model, 0x110, MaximumCameras, "M2 camera"); var offset = Offset(model, 0x114, "M2 camera");
+        Require(model, offset, count, 100, "M2 cameras");
+        var lookupCount = Count(model, 0x118, MaximumCameras * 16, "M2 camera lookup"); var lookupOffset = Offset(model, 0x11C, "M2 camera lookup");
+        Require(model, lookupOffset, lookupCount, 2, "M2 camera lookup");
+        var slots = Enumerable.Range(0, count).Select(_ => new List<int>()).ToArray();
+        for (var index = 0; index < lookupCount; index++)
+        {
+            var camera = Short(model, lookupOffset + index * 2); if (camera == -1) continue;
+            if (camera < 0 || camera >= count) throw new InvalidDataException($"M2 camera lookup slot {index:N0} references camera {camera:N0}, but only {count:N0} records exist.");
+            slots[camera].Add(index);
+        }
+        var animations = new M2CameraAnimation[count]; var preview = new M2PreviewCamera[count];
+        for (var index = 0; index < count; index++)
+        {
+            var item = offset + index * 100; var fov = Single(model, item + 4); var far = Single(model, item + 8); var near = Single(model, item + 12); var position = Vector(model, item + 36); var target = Vector(model, item + 68);
+            if (!float.IsFinite(fov) || !float.IsFinite(far) || !float.IsFinite(near) || fov <= 0 || fov >= MathF.PI || near <= 0 || far <= near || !Finite(position) || !Finite(target))
+                throw new InvalidDataException($"M2 camera {index:N0} has an invalid field of view, clipping range, position, or target.");
+            animations[index] = new(ReadTrack(model, item + 16, globalCount, $"camera {index:N0} position"), ReadTrack(model, item + 48, globalCount, $"camera {index:N0} target"), ReadTrack(model, item + 80, globalCount, $"camera {index:N0} roll"));
+            preview[index] = new(index, BitConverter.ToInt32(model, item), fov, far, near, position, target, slots[index].ToArray());
+        }
+        return (animations, preview);
+    }
+
+    private static (M2LightAnimation[] Animations, IReadOnlyList<M2PreviewLight> Preview) ParseLights(byte[] model, int globalCount, int boneCount)
+    {
+        var count = Count(model, 0x108, MaximumLights, "M2 light"); var offset = Offset(model, 0x10C, "M2 light");
+        Require(model, offset, count, 156, "M2 lights"); var animations = new M2LightAnimation[count]; var preview = new M2PreviewLight[count];
+        for (var index = 0; index < count; index++)
+        {
+            var item = offset + index * 156; var type = Short(model, item); var bone = Short(model, item + 2); var position = Vector(model, item + 4);
+            if (bone < -1 || bone >= boneCount) throw new InvalidDataException($"M2 light {index:N0} references bone {bone:N0}, but only {boneCount:N0} bones exist.");
+            if (!Finite(position)) throw new InvalidDataException($"M2 light {index:N0} contains a non-finite position.");
+            animations[index] = new(ReadTrack(model, item + 16, globalCount, $"light {index:N0} ambient color"), ReadTrack(model, item + 36, globalCount, $"light {index:N0} ambient intensity"), ReadTrack(model, item + 56, globalCount, $"light {index:N0} diffuse color"), ReadTrack(model, item + 76, globalCount, $"light {index:N0} diffuse intensity"), ReadTrack(model, item + 96, globalCount, $"light {index:N0} attenuation start"), ReadTrack(model, item + 116, globalCount, $"light {index:N0} attenuation end"), ReadTrack(model, item + 136, globalCount, $"light {index:N0} attenuation flag"));
+            preview[index] = new(index, type, bone, position);
+        }
+        return (animations, preview);
+    }
+
     private static M2VectorTrack ParseVectorTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
     {
-        var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label);
+        var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 12);
         Require(data, valueOffset, valueCount, 12, label + " values");
         var values = new Vector3[valueCount];
         for (var index = 0; index < values.Length; index++)
@@ -228,7 +326,7 @@ public static class M2AnimationService
 
     private static M2QuaternionTrack ParseQuaternionTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
     {
-        var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label);
+        var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 8);
         Require(data, valueOffset, valueCount, 8, label + " values");
         var values = new Quaternion[valueCount];
         for (var index = 0; index < values.Length; index++)
@@ -237,6 +335,22 @@ public static class M2AnimationService
             var value = new Quaternion(Unpack(UShort(data, offset)), Unpack(UShort(data, offset + 2)), Unpack(UShort(data, offset + 4)), Unpack(UShort(data, offset + 6)));
             values[index] = value.LengthSquared() > 0.0000001f ? Quaternion.Normalize(value) : Quaternion.Identity;
         }
+        MatchCounts(times, values.Length, label); return new(header.Interpolation, times, values, globalDuration);
+    }
+
+    private static M2ScalarTrack ParseScalarTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
+    {
+        var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 4);
+        Require(data, valueOffset, valueCount, 4, label + " values"); var values = new float[valueCount];
+        for (var index = 0; index < values.Length; index++) { values[index] = Single(data, valueOffset + index * 4); if (!float.IsFinite(values[index])) throw new InvalidDataException($"M2 {label} key {index:N0} is non-finite."); }
+        MatchCounts(times, values.Length, label); return new(header.Interpolation, times, values, globalDuration);
+    }
+
+    private static M2IntegerTrack ParseIntegerTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
+    {
+        var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 4);
+        Require(data, valueOffset, valueCount, 4, label + " values"); var values = new int[valueCount];
+        for (var index = 0; index < values.Length; index++) values[index] = BitConverter.ToInt32(data, valueOffset + index * 4);
         MatchCounts(times, values.Length, label); return new(header.Interpolation, times, values, globalDuration);
     }
 
@@ -250,6 +364,7 @@ public static class M2AnimationService
         Require(rig.ModelData, timeEntry, 1, 8, label + " timestamp series"); Require(rig.ModelData, valueEntry, 1, 8, label + " value series");
         var timeCount = CheckedKeyCount(UInt(rig.ModelData, timeEntry), label + " timestamps"); var timeOffset = checked((int)UInt(rig.ModelData, timeEntry + 4));
         var valueCount = CheckedKeyCount(UInt(rig.ModelData, valueEntry), label + " values"); var valueOffset = checked((int)UInt(rig.ModelData, valueEntry + 4));
+        if (!HasRange(data, timeOffset, timeCount, 4) && !ReferenceEquals(data, rig.ModelData) && HasRange(rig.ModelData, timeOffset, timeCount, 4)) data = rig.ModelData;
         Require(data, timeOffset, timeCount, 4, label + " timestamps");
         var times = new uint[timeCount]; for (var index = 0; index < times.Length; index++) times[index] = UInt(data, timeOffset + index * 4);
         for (var index = 1; index < times.Length; index++) if (times[index] < times[index - 1]) throw new InvalidDataException($"M2 {label} timestamps are not sorted.");
@@ -270,6 +385,24 @@ public static class M2AnimationService
         var time = TrackTime(track.GlobalDuration, sequenceTime, elapsedTime); var (left, right, amount) = Keys(track.Times, time, track.Interpolation);
         return left == right ? track.Values[left] : Quaternion.Normalize(Quaternion.Slerp(track.Values[left], track.Values[right], amount));
     }
+
+    private static float Sample(M2ScalarTrack track, double sequenceTime, double elapsedTime, float fallback)
+    {
+        if (track.Values.Length == 0) return fallback;
+        var time = TrackTime(track.GlobalDuration, sequenceTime, elapsedTime); var (left, right, amount) = Keys(track.Times, time, track.Interpolation);
+        return left == right ? track.Values[left] : track.Values[left] + (track.Values[right] - track.Values[left]) * amount;
+    }
+
+    private static int Sample(M2IntegerTrack track, double sequenceTime, double elapsedTime, int fallback)
+    {
+        if (track.Values.Length == 0) return fallback;
+        var time = TrackTime(track.GlobalDuration, sequenceTime, elapsedTime); var (left, _, _) = Keys(track.Times, time, 0); return track.Values[left];
+    }
+
+    private static byte[] ValueData(M2AnimationRig rig, byte[] selected, int offset, int count, int stride)
+        => !HasRange(selected, offset, count, stride) && !ReferenceEquals(selected, rig.ModelData) && HasRange(rig.ModelData, offset, count, stride) ? rig.ModelData : selected;
+
+    private static bool HasRange(byte[] data, int offset, int count, int stride) => offset >= 0 && count >= 0 && (long)offset + (long)count * stride <= data.LongLength;
 
     private static double TrackTime(uint? globalDuration, double sequenceTime, double elapsedTime) => globalDuration is { } duration && duration > 0 ? PositiveModulo(elapsedTime, duration) : sequenceTime;
     private static (int Left, int Right, float Amount) Keys(uint[] times, double time, ushort interpolation)
@@ -327,6 +460,7 @@ public static class M2AnimationService
     private static ushort UShort(byte[] data, int offset) => BitConverter.ToUInt16(data, offset);
     private static short Short(byte[] data, int offset) => BitConverter.ToInt16(data, offset);
     private static float Single(byte[] data, int offset) => BitConverter.ToSingle(data, offset);
+    private static Vector3 Vector(byte[] data, int offset) => new(Single(data, offset), Single(data, offset + 4), Single(data, offset + 8));
     private static bool Finite(Vector3 value) => float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
     private static bool Finite(Matrix4x4 value) => float.IsFinite(value.M11) && float.IsFinite(value.M12) && float.IsFinite(value.M13) && float.IsFinite(value.M14) && float.IsFinite(value.M21) && float.IsFinite(value.M22) && float.IsFinite(value.M23) && float.IsFinite(value.M24) && float.IsFinite(value.M31) && float.IsFinite(value.M32) && float.IsFinite(value.M33) && float.IsFinite(value.M34) && float.IsFinite(value.M41) && float.IsFinite(value.M42) && float.IsFinite(value.M43) && float.IsFinite(value.M44);
 }
