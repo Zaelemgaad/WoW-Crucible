@@ -52,6 +52,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     public event EventHandler? BackRequested;
     public event EventHandler? SqlStudioRequested;
     public event EventHandler? MpqWorkspaceRequested;
+    public event EventHandler? ProjectWorkspaceRequested;
     public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
@@ -153,8 +154,10 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private Control ClonePage()
     {
         var clone = AccentButton("Create full copy in database"); clone.Click += async (_, _) => await CloneAsync();
+        var reserve = AccentButton("Reserve verified item ID"); reserve.Click += async (_, _) => await ReserveItemIdAsync();
+        var projects = new Button { Content = "Projects & shared IDs" }; projects.Click += (_, _) => ProjectWorkspaceRequested?.Invoke(this, EventArgs.Empty);
         var form = Form(("Source item ID", _cloneSource), ("New item ID", _cloneDestination), ("Name suffix", _cloneSuffix), ("New item-set ID (optional)", _cloneSet));
-        return new ScrollViewer { Content = new StackPanel { Spacing = 14, Margin = new Thickness(20), HorizontalAlignment = HorizontalAlignment.Stretch, Children = { new TextBlock { Text = "Full item copying", FontSize = 22, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = "Copies every writable item_template column exposed by the current core—including unknown/custom columns—and matching locale rows. Existing destination IDs are refused rather than replaced.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) }, form, clone, new Border { Padding = new Thickness(14), CornerRadius = new CornerRadius(6), BorderBrush = new SolidColorBrush(Color.Parse("#2B3548")), BorderThickness = new Thickness(1), Child = _cloneResult } } } };
+        return new ScrollViewer { Content = new StackPanel { Spacing = 14, Margin = new Thickness(20), HorizontalAlignment = HorizontalAlignment.Stretch, Children = { new TextBlock { Text = "Full item copying", FontSize = 22, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = "Copies every writable item_template column exposed by the current core—including unknown/custom columns—and matching locale rows. Existing destination IDs are refused rather than replaced. An active Crucible project can allocate the destination against both live item_template and Item.dbc before the copy.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) }, form, new WrapPanel { Children = { reserve, projects, clone } }, new Border { Padding = new Thickness(14), CornerRadius = new CornerRadius(6), BorderBrush = new SolidColorBrush(Color.Parse("#2B3548")), BorderThickness = new Thickness(1), Child = _cloneResult } } } };
     }
 
     private Control ItemSetPage()
@@ -336,6 +339,26 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         uint? set = string.IsNullOrWhiteSpace(_cloneSet.Text) ? null : uint.TryParse(_cloneSet.Text, out var parsed) ? parsed : throw new FormatException("Item-set ID must be numeric.");
         SetBusy("Copying the complete item transactionally…"); DesktopCrashLogger.Debug("ITEM", "clone-start", ("source_id", source), ("destination_id", destination), ("item_set", set), ("database", _database.Text)); try { var result = await new ItemCatalogService().CloneAsync(Profile(), source, destination, _cloneSuffix.Text ?? string.Empty, set); _cloneResult.Text = $"Created {result.NewEntry:N0} — {result.NewName}\nCopied {result.CopiedColumns:N0} live-schema columns and {result.CopiedLocaleRows:N0} locale row(s).\nItem set: {(result.ItemSetId == 0 ? "none" : result.ItemSetId)}"; _status.Text = "Full item copy committed. Existing IDs were not replaced."; DesktopCrashLogger.Debug("ITEM", "clone-success", ("new_id", result.NewEntry), ("name", result.NewName), ("copied_columns", result.CopiedColumns), ("locale_rows", result.CopiedLocaleRows), ("item_set", result.ItemSetId)); }
         catch (Exception exception) { await ErrorAsync("Item copy failed", exception); }
+    }
+
+    private async Task ReserveItemIdAsync()
+    {
+        var project = _session.Settings.ActiveProjectPath;
+        if (string.IsNullOrWhiteSpace(project)) { _status.Text = "Create or open a project first. Opening Projects & shared IDs…"; ProjectWorkspaceRequested?.Invoke(this, EventArgs.Empty); return; }
+        try
+        {
+            if (!_session.DatabaseTested) await ConnectDatabaseAsync(false);
+            if (!_session.DatabaseTested || _session.DatabaseProfile is null || _session.DatabaseCapabilities is null) return;
+            SetBusy("Checking every live item_template and Item.dbc ID before reservation…");
+            var dbc = EmptyNull(_acquisitionDbc.Text) ?? _session.Settings.CoreDbcPath; var schema = EmptyNull(_schemaPath.Text) ?? _session.Settings.SchemaDefinitionPath;
+            var occupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Item, _session.DatabaseProfile, _session.DatabaseCapabilities, dbc, schema);
+            _session.Settings.CoreDbcPath = dbc; _session.Settings.SchemaDefinitionPath = schema; _session.Settings.Save();
+            var purpose = uint.TryParse(_cloneSource.Text, out var source) ? $"Full copy of item {source}" : "New item from Items & Sets";
+            var result = CrucibleContentProjectService.ReserveVerifiedIds(project, occupancy, 1, null, purpose); var id = result.Reservation.Values.Single();
+            _cloneDestination.Text = id.ToString(); _cloneResult.Text = $"Reserved item ID {id:N0} in {Path.GetFileName(project)}.\nThe ID was checked against live item_template, Item.dbc, and every earlier Item reservation. Review the fields, then create the copy.";
+            _status.Text = $"Reserved collision-checked item ID {id:N0}; no SQL row has been written yet.";
+        }
+        catch (Exception exception) { await ErrorAsync("Item ID reservation failed", exception); }
     }
 
     private async Task InspectSetAsync()

@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private MapWorkspaceView? _mapWorkspaceView;
     private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
     private DbdSchemaAuditView? _dbdSchemaAuditView;
+    private ProjectWorkspaceView? _projectWorkspaceView;
     private DbcExportWorkspaceView? _dbcExportWorkspaceView;
     private DbcImportWorkspaceView? _dbcImportWorkspaceView;
     private CreatureWorkspaceView? _creatureWorkspaceView;
@@ -85,7 +86,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
+        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -646,6 +647,7 @@ public partial class MainWindow : Window
             _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace();
             _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace();
             _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace();
+            _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace();
             _itemWorkbenchView.FullSqlEditRequested += async (_, request) => await OpenCompleteSqlRowAsync(request);
             _itemWorkbenchView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         }
@@ -731,6 +733,17 @@ public partial class MainWindow : Window
             _dbdSchemaAuditView.BackRequested += (_, _) => CloseFeatureWorkspace();
         }
         OpenFeatureWorkspace(_dbdSchemaAuditView, "DBD Schemas & Audit");
+    }
+    private void OpenProjectWorkspaceClick(object? sender, RoutedEventArgs e) => OpenProjectWorkspace();
+    public void OpenProjectWorkspace()
+    {
+        if (_projectWorkspaceView is null)
+        {
+            _projectWorkspaceView = new ProjectWorkspaceView(_workspaceSession);
+            _projectWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _projectWorkspaceView.ServerSqlRequested += (_, _) => OpenServerSqlWorkspace();
+        }
+        OpenFeatureWorkspace(_projectWorkspaceView, "Projects & Shared IDs"); _projectWorkspaceView.Activate();
     }
     private void OpenMpqWorkspaceClick(object? sender, RoutedEventArgs e)
         => OpenMpqWorkspace();
@@ -844,7 +857,7 @@ public partial class MainWindow : Window
     {
         if (request.Table.Equals("item_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace(); _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); _itemWorkbenchView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
+            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace(); _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace(); _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); _itemWorkbenchView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
             _itemWorkbenchView.OpenItemRow(request.Row); OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
         }
         else if (request.Table.Equals("creature_template", StringComparison.OrdinalIgnoreCase))
@@ -1024,6 +1037,7 @@ public partial class MainWindow : Window
             ["workspace.dbc"] = Done(CloseAllFeatureWorkspaces),
             ["workspace.dbc-layers"] = Done(() => OpenLayeredDbcsClick(null, new RoutedEventArgs())),
             ["workspace.dbd"] = Done(OpenDbdSchemaAudit),
+            ["workspace.projects"] = Done(OpenProjectWorkspace),
             ["workspace.items"] = Done(OpenItemWorkbench),
             ["workspace.creatures"] = Done(() => OpenCreatureWorkspaceClick(null, new RoutedEventArgs())),
             ["workspace.gameobjects"] = Done(OpenGameObjectWorkspace),

@@ -97,7 +97,9 @@ public sealed class ContentIdOccupancyService
         if (additionalOccupied is not null) sources.Add(new("Manual", "Additional occupied IDs", "caller supplied", additionalOccupied.Distinct().Count(), true, "Merged explicit occupied IDs with live sources."));
         if (policy.Sources.Count == 0 && additionalOccupied is null) warnings.Add(policy.Guidance);
         foreach (var missing in sources.Where(source => !source.Available)) warnings.Add($"{missing.Kind} {missing.Name}: {missing.Detail}");
-        var complete = policy.Sources.Count > 0 && sources.Where(source => source.Kind is "SQL" or "DBC").All(source => source.Available);
+        var complete = policy.Sources.Count == 0
+            ? additionalOccupied is not null
+            : sources.Where(source => source.Kind is "SQL" or "DBC").All(source => source.Available);
         return new(domain, policy.RegistryNamespace, DateTimeOffset.UtcNow, occupied.Order().ToArray(), sources, complete, warnings);
     }
 

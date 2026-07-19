@@ -11,6 +11,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("heidi favorites").FirstOrDefault()?.Command.Id != "workspace.sql" ||
     CrucibleCommandCatalog.Search("mpq merge").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
     CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.items" ||
+    CrucibleCommandCatalog.Search("project collision ids").FirstOrDefault()?.Command.Id != "workspace.projects" ||
     CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.assets" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
@@ -874,10 +875,13 @@ var secondIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, Con
 var mountIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.Mount, 1, 100_000, [], "fixture mount").Reservation.Values;
 var spellIdsAfterMount = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.Spell, 1, 100_000, [], "fixture spell").Reservation.Values;
 var raceOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Race, null, null, args[1], args[0]);
+var customOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Custom, null, null, null, null, [7u, 9u]);
+var incompleteItemOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Item, null, null, null, null);
 var reservedRace = CrucibleContentProjectService.ReserveVerifiedIds(contentProjectRoot, raceOccupancy, 1, null, "fixture race").Reservation.Values.Single();
 if (defaultContentProject.TargetProfile != TargetProfileCatalog.DefaultProfileId || TargetProfileCatalog.Find(targetProfiles, defaultContentProject.TargetProfile).Id != TargetProfileCatalog.DefaultProfileId ||
     !firstIds.SequenceEqual([101u, 103u, 104u]) || !secondIds.SequenceEqual([105u, 106u]) || !mountIds.SequenceEqual([100_000u]) || !spellIdsAfterMount.SequenceEqual([100_001u]) ||
     !raceOccupancy.Complete || raceOccupancy.RegistryNamespace != ContentIdDomain.Race || raceOccupancy.OccupiedIds.Count < 10 || raceOccupancy.OccupiedIds.Contains(reservedRace) || reservedRace is < 1 or > 31 ||
+    !customOccupancy.Complete || !customOccupancy.OccupiedIds.SequenceEqual([7u, 9u]) || incompleteItemOccupancy.Complete ||
     CrucibleContentProjectService.LoadRegistry(contentProjectRoot).Reservations.Count != 5 || !Directory.Exists(Path.Combine(contentProjectRoot, "Staging")))
     throw new InvalidOperationException("Portable content-project ID reservations collided with occupied or previously reserved IDs.");
 try { _ = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.Class, 1, 32, [], "invalid class"); throw new InvalidOperationException("A WotLK class reservation exceeded the 32-bit class-mask range."); }

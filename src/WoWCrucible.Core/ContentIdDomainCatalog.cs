@@ -7,7 +7,10 @@ public sealed record ContentIdDomainPolicy(
     uint RecommendedStart,
     uint Maximum,
     IReadOnlyList<ContentIdSourceDefinition> Sources,
-    string Guidance);
+    string Guidance)
+{
+    public override string ToString() => RegistryNamespace == Domain ? Domain.ToString() : $"{Domain} (shares {RegistryNamespace})";
+}
 
 public static class ContentIdDomainCatalog
 {

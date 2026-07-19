@@ -39,6 +39,8 @@ wowcrucible project reserve-live <project-folder> <domain> <count> <host> <port>
 
 A content project separates Assets, DBC, SQL, Manifests, Reports, and Staging outputs and keeps `ids.crucible.json` as its durable allocation registry. `occupancy` reports every required SQL/DBC identity source; `reserve-live` writes a reservation only when all mapped sources were read successfully. WotLK race/class allocation stops at ID 31, and mount/spell reservations share the Spell namespace because mount IDs are spell IDs. The password comes from `WOW_CRUCIBLE_DB_PASSWORD` by default. `reserve-ids --occupied` remains the explicit manual route for custom or not-yet-mapped domains; omitting the occupied list returns review exit code `3`.
 
+The desktop exposes the same engine under **Projects & shared IDs** without opening another window. It persists the active project, shows source-by-source readiness and reservation history, and can allocate the destination for **Items & Sets → Full item copy** before the transactional SQL copy is reviewed and applied. Launch directly with `WoWCrucible.Desktop-latest.exe --projects`.
+
 ## Asset inspection and libraries
 
 ```text
