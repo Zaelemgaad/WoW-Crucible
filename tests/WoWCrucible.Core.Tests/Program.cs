@@ -1056,6 +1056,13 @@ if (ItemCatalogService.IsDirectLootItem(17, 1_072_025) || !ItemCatalogService.Is
     ItemCatalogService.IsUsableQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }) ||
     !ItemCatalogService.IsUsableQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }, new HashSet<uint>()))
     throw new InvalidOperationException("Item acquisition evidence confused loot references or unlinked quest rewards with direct player acquisition.");
+var itemIdBatch = ItemIdQueryParser.Parse("17 17802");
+if (!itemIdBatch.SequenceEqual(new uint[] { 17, 17802 }) ||
+    !ItemIdQueryParser.Parse("#17 #17802").SequenceEqual(itemIdBatch) ||
+    !ItemIdQueryParser.Parse("17; 17802").SequenceEqual(itemIdBatch) ||
+    !ItemIdQueryParser.TryParseSingle("17,802", out var groupedItemId) || groupedItemId != 17802 ||
+    ItemIdQueryParser.TryParseSingle("17 17802", out _))
+    throw new InvalidOperationException("Item ID query parsing confused exact batches with grouped single IDs.");
 var lootGraph = new ItemCatalogService.LootReachabilityData(
     new Dictionary<string, IReadOnlyList<ItemCatalogService.LootRow>>(StringComparer.OrdinalIgnoreCase)
     {
