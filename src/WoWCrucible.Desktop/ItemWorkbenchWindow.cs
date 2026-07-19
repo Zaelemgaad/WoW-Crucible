@@ -58,6 +58,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     public event EventHandler? BackRequested;
     public event EventHandler? SqlStudioRequested;
+    public event EventHandler? SqlFavoritesRequested;
     public event EventHandler? MpqWorkspaceRequested;
     public event EventHandler? ProjectWorkspaceRequested;
     public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
@@ -71,7 +72,21 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             var panel = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), Margin = new Thickness(3, 3), ColumnSpacing = 8 };
             if (item is null) return panel;
             AddCell(panel, item.Entry.ToString("N0"), 0, FontWeight.SemiBold);
-            var identity = new StackPanel { Spacing = 2, Children = { new TextBlock { Text = item.Name, TextWrapping = TextWrapping.Wrap } } };
+            var identity = new StackPanel
+            {
+                Spacing = 2,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = item.HasKnownAcquisitionPath ? "KNOWN ACQUISITION PATH" : "NO KNOWN ACQUISITION PATH",
+                        FontSize = 10,
+                        FontWeight = FontWeight.Bold,
+                        Foreground = new SolidColorBrush(Color.Parse(item.HasKnownAcquisitionPath ? "#79B58A" : "#E0A55B"))
+                    },
+                    new TextBlock { Text = item.Name, TextWrapping = TextWrapping.Wrap }
+                }
+            };
             var explanation = item.HasKnownAcquisitionPath
                 ? $"Known path · {string.Join("; ", item.AcquisitionSources.Take(2))}"
                 : $"{ReviewGroupName(item.ReviewGroup)} · {item.NoPathReview.FirstOrDefault() ?? "No accepted acquisition evidence found."}";
@@ -108,9 +123,10 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
-        var sqlStudio = AccentButton("Full SQL database / Favorites"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
+        var sqlStudio = AccentButton("SQL Studio — full database"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
+        var sqlFavorites = new Button { Content = "★ SQL row favorites" }; sqlFavorites.Click += async (_, _) => await OpenSqlFavoritesAsync();
         var mpqMerge = new Button { Content = "MPQ patches / merge" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
-        var titleActions = new WrapPanel { Children = { sqlStudio, mpqMerge } };
+        var titleActions = new WrapPanel { Children = { sqlStudio, sqlFavorites, mpqMerge } };
         root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, titleActions } } });
         var connection = ConnectionBar(); Grid.SetRow(connection, 1); root.Children.Add(connection);
         _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Unobtainable / cut items", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() } } };
@@ -145,7 +161,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private Control AcquisitionPage()
     {
         var audit = AccentButton("Scan acquisition paths"); audit.Click += async (_, _) => await AuditAsync();
-        var findExact = new Button { Content = "Pin exact ID(s)" }; findExact.Click += async (_, _) => await InspectSearchExactAsync();
+        var findExact = new Button { Content = "Find exact ID(s) — bypass filters" }; findExact.Click += async (_, _) => await InspectSearchExactAsync();
         var inspect = AccentButton("Explain exact ID"); inspect.Click += async (_, _) => await InspectExactAsync();
         var edit = new Button { Content = "Open selected in decoded editor" }; edit.Click += async (_, _) => await OpenSelectedItemAsync(false);
         var fullSql = new Button { Content = "Open complete SQL row" }; fullSql.Click += async (_, _) => await OpenSelectedInSqlAsync();
@@ -493,12 +509,24 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     }
     private async Task OpenSqlStudioAsync()
     {
-        var profile = Profile(); var active = _session.DatabaseTested && _session.DatabaseProfile is { } connected &&
-            connected.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) && connected.Port == profile.Port &&
-            connected.User.Equals(profile.User, StringComparison.OrdinalIgnoreCase) && connected.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase);
-        if (active) SqlStudioRequested?.Invoke(this, EventArgs.Empty);
+        var profile = Profile();
+        if (IsActiveSession(profile)) SqlStudioRequested?.Invoke(this, EventArgs.Empty);
         else await ConnectDatabaseAsync(true);
     }
+    private async Task OpenSqlFavoritesAsync()
+    {
+        var profile = Profile();
+        if (!IsActiveSession(profile))
+        {
+            await ConnectDatabaseAsync(false);
+            if (!IsActiveSession(profile)) return;
+        }
+        SqlFavoritesRequested?.Invoke(this, EventArgs.Empty);
+    }
+    private bool IsActiveSession(DatabaseConnectionProfile profile)
+        => _session.DatabaseTested && _session.DatabaseProfile is { } connected &&
+           connected.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) && connected.Port == profile.Port &&
+           connected.User.Equals(profile.User, StringComparison.OrdinalIgnoreCase) && connected.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase);
     private void LoadDefaults() { try { var path = CruciblePaths.SettingsFileForRead; if (!File.Exists(path)) return; using var json = JsonDocument.Parse(File.ReadAllText(path)); var root = json.RootElement; if (root.TryGetProperty("DatabaseHost", out var host)) _host.Text = host.GetString(); if (root.TryGetProperty("DatabasePort", out var port)) _port.Value = port.GetUInt32(); if (root.TryGetProperty("DatabaseUser", out var user)) _user.Text = user.GetString(); if (root.TryGetProperty("WorldDatabase", out var db)) _database.Text = db.GetString(); if (root.TryGetProperty("SchemaDefinitionPath", out var schema)) _schemaPath.Text = schema.GetString(); if (root.TryGetProperty("CoreDbcPath", out var dbc)) { var directory = dbc.GetString(); _acquisitionDbc.Text = directory; if (Directory.Exists(directory)) { _itemSetPath.Text = Path.Combine(directory, "ItemSet.dbc"); _spellPath.Text = Path.Combine(directory, "Spell.dbc"); } } } catch (Exception exception) { DesktopCrashLogger.Debug("SETTINGS", "item-workbench-defaults-load-failed", ("error", exception.Message)); } }
     private async Task PickFileAsync(TextBox target, string title, string pattern) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(title) { Patterns = [pattern] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }
     private async Task PickFolderAsync(TextBox target, string title) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var folders = await storage.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = title, AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }

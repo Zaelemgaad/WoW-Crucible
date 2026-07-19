@@ -687,6 +687,7 @@ public partial class MainWindow : Window
             _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession);
             _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace();
             _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace();
+            _itemWorkbenchView.SqlFavoritesRequested += (_, _) => OpenSqlFavorites();
             _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace();
             _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace();
             _itemWorkbenchView.FullSqlEditRequested += async (_, request) => await OpenCompleteSqlRowAsync(request);
@@ -937,6 +938,12 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(_sqlWorkspaceView, "SQL Studio"); _sqlWorkspaceView.Activate();
     }
 
+    private void OpenSqlFavorites()
+    {
+        OpenSqlWorkspace();
+        _sqlWorkspaceView!.ActivateFavorites();
+    }
+
     private async Task OpenCompleteSqlRowAsync(SqlGuidedEditRequest request)
     {
         try
@@ -955,7 +962,7 @@ public partial class MainWindow : Window
     {
         if (request.Table.Equals("item_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace(); _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace(); _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); _itemWorkbenchView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
+            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace(); _itemWorkbenchView.SqlFavoritesRequested += (_, _) => OpenSqlFavorites(); _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace(); _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); _itemWorkbenchView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
             _itemWorkbenchView.OpenItemRow(request.Row); OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
         }
         else if (request.Table.Equals("creature_template", StringComparison.OrdinalIgnoreCase))

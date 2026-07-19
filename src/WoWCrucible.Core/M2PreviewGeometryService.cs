@@ -154,6 +154,9 @@ public static class M2PreviewGeometryService
         var textureCoordinateLookup = ReadSignedLookup(model, 0x88, 0x8C, "M2 texture-coordinate lookup");
         var transparencyLookup = ReadUnsignedLookup(model, 0x90, 0x94, "M2 transparency lookup");
         var textureAnimationLookup = ReadUnsignedLookup(model, 0x98, 0x9C, "M2 texture-animation lookup");
+        var usesBlendOverrides = (ReadUInt(model, 0x10) & 0x8) != 0;
+        if (usesBlendOverrides && model.Length < 0x138) throw new InvalidDataException("M2 declares blend overrides but its extended header is truncated.");
+        var blendOverrides = usesBlendOverrides ? ReadUnsignedLookup(model, 0x130, 0x134, "M2 blend override") : [];
         skinPath = ResolveSkin(modelPath, skinPath);
         var skin = File.ReadAllBytes(skinPath);
         if (skin.Length < 48 || FourCc(skin, 0) != "SKIN") throw new InvalidDataException("The companion file is not a valid SKIN container.");
@@ -171,7 +174,7 @@ public static class M2PreviewGeometryService
             if (vertexIndex >= vertices.Length) throw new InvalidDataException($"SKIN lookup {lookupIndex:N0} references M2 vertex {vertexIndex:N0}, but only {vertices.Length:N0} vertices exist.");
             allTriangles[index] = vertexIndex;
         }
-        var materialUnits = ReadMaterialUnits(skin, textureLookup, textureCoordinateLookup, transparencyLookup, textureAnimationLookup, textureSlots.Count, renderFlags.Count);
+        var materialUnits = ReadMaterialUnits(skin, textureLookup, textureCoordinateLookup, transparencyLookup, textureAnimationLookup, blendOverrides, usesBlendOverrides, textureSlots.Count, renderFlags.Count);
         var (submeshes, triangles, batches) = ReadVisibleSubmeshes(skin, allTriangles, materialUnits, renderFlags, visibilityMode, geosetSelection);
         if (triangles.Length > 0)
         {
@@ -341,7 +344,7 @@ public static class M2PreviewGeometryService
 
     private static IReadOnlyList<M2PreviewMaterialUnit> ReadMaterialUnits(byte[] skin, IReadOnlyList<ushort> textureLookup,
         IReadOnlyList<short> textureCoordinateLookup, IReadOnlyList<ushort> transparencyLookup,
-        IReadOnlyList<ushort> textureAnimationLookup, int textureCount, int renderFlagCount)
+        IReadOnlyList<ushort> textureAnimationLookup, IReadOnlyList<ushort> blendOverrides, bool usesBlendOverrides, int textureCount, int renderFlagCount)
     {
         const int CountOffset = 36; const int DataOffset = 40; const int MaterialStride = 24; const int MaximumMaterials = 131_072;
         if (skin.Length < DataOffset + 4) return [];
@@ -361,7 +364,7 @@ public static class M2PreviewGeometryService
             var transparencyLookupIndex = ReadUShort(skin, item + 20);
             var textureAnimationLookupIndex = ReadUShort(skin, item + 22);
             if (renderFlagCount > 0 && renderFlagsIndex >= renderFlagCount) throw new InvalidDataException($"SKIN material unit {index:N0} references render flag {renderFlagsIndex:N0}, but only {renderFlagCount:N0} records exist.");
-            var combiner = DescribeCombiner(shaderId, stageCount);
+            var combiner = usesBlendOverrides ? DescribeBlendOverride(blendOverrides, shaderId, stageCount) : DescribeCombiner(shaderId, stageCount);
             var stages = new M2PreviewTextureStage[stageCount];
             for (var stage = 0; stage < stages.Length; stage++)
             {
@@ -438,6 +441,22 @@ public static class M2PreviewGeometryService
         // the canvas operator's alpha result. Keep the public fidelity label conservative until
         // those per-combiner alpha equations are implemented as one runtime shader.
         return new($"{first}_{second}", true, false);
+    }
+
+    internal static M2PreviewTextureCombiner DescribeBlendOverride(IReadOnlyList<ushort> blendOverrides, ushort startIndex, int textureCount)
+    {
+        if (textureCount <= 0) return M2PreviewTextureCombiner.None;
+        if ((long)startIndex + textureCount > blendOverrides.Count) return new($"Blend override {startIndex:N0} + {textureCount:N0} stages exceeds {blendOverrides.Count:N0} entries", false, false) { Kind = M2PreviewTextureCombinerKind.Unsupported };
+        var names = new string[textureCount];
+        for (var stage = 0; stage < textureCount; stage++)
+        {
+            names[stage] = blendOverrides[startIndex + stage] switch
+            {
+                0 => "Opaque", 1 => "Mod", 3 => "Add", 4 => "Mod2x", 6 => "Mod2xNA", 7 => "AddAlpha", var value => $"Unsupported{value}"
+            };
+            if (names[stage].StartsWith("Unsupported", StringComparison.Ordinal)) return new(string.Join('_', names), false, false) { Kind = M2PreviewTextureCombinerKind.Unsupported };
+        }
+        return new(string.Join('_', names), true, textureCount == 1);
     }
 
     private static M2PreviewTextureCoordinateSource ExplicitCoordinateSource(M2PreviewTextureCombinerKind kind, int stage, M2PreviewTextureCoordinateSource fallback) => kind switch

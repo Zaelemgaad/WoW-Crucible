@@ -178,6 +178,15 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     public void Activate() { PopulateTables(); if (_tables.SelectedItem is null && _tables.ItemCount > 0) _tables.SelectedIndex = 0; _ = LoadSchemasAsync(); }
 
+    public void ActivateFavorites()
+    {
+        RefreshConnectionStatus();
+        RefreshFavorites();
+        _tabs.SelectedIndex = 2;
+        _favoriteSearch.Focus();
+        _status.Text = $"SQL row favorites · {_favoriteCache.Count:N0} saved row(s). Search by database, table, complete key, label, notes, DBC/DB2 path, or MPQ path.";
+    }
+
     private string KnowledgeContext()
     {
         var table = (_tables.SelectedItem as TableChoice)?.Table.Name ?? _page?.Table ?? string.Empty;
