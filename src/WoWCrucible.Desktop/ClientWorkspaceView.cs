@@ -36,6 +36,8 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private ClientFusionPlan? _fusionPlan;
     private ClientFusionDbcPlan? _fusionDbcPlan;
     private ClientFusionDbcResult? _fusionDbcResult;
+    private ClientFusionDbcRemapPlan? _fusionDbcRemapPlan;
+    private ClientFusionDbcRemapResult? _fusionDbcRemapResult;
     private CancellationTokenSource? _operation;
     private readonly List<Button> _operationButtons = [];
 
@@ -174,12 +176,14 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var chooseBase = Button("Base…", async () => { var path = await PickFolderAsync("Select the extracted stock/effective client base"); if (path is not null) _fusionBase.Text = path; });
         var addSource = Button("Add source…", async () => { var path = await PickFolderAsync("Add an extracted override source"); if (path is not null) _fusionSources.Text = string.Join(Environment.NewLine, Lines(_fusionSources.Text).Append(path).Distinct(StringComparer.OrdinalIgnoreCase)); });
         var analyze = AccentButton("Analyze additive fusion"); analyze.Click += async (_, _) => await AnalyzeFusionAsync(); Register(analyze);
-        var analyzeDbcs = AccentButton("Analyze DBC records"); analyzeDbcs.Click += async (_, _) => await AnalyzeFusionDbcsAsync(); Register(analyzeDbcs);
-        var writeDbcs = new Button { Content = "Prepare reviewed DBC result…" }; writeDbcs.Click += async (_, _) => await ApplyFusionDbcsAsync(); Register(writeDbcs);
+        var analyzeDbcs = new Button { Content = "Quick DBC equality / additions" }; analyzeDbcs.Click += async (_, _) => await AnalyzeFusionDbcsAsync(); Register(analyzeDbcs);
+        var writeDbcs = new Button { Content = "Write quick additive DBCs…" }; writeDbcs.Click += async (_, _) => await ApplyFusionDbcsAsync(); Register(writeDbcs);
+        var planRemap = AccentButton("Plan ID + reference remap"); planRemap.Click += async (_, _) => await AnalyzeFusionDbcRemapAsync(); Register(planRemap);
+        var writeRemap = AccentButton("Write dependency-safe DBCs…"); writeRemap.Click += async (_, _) => await ApplyFusionDbcRemapAsync(); Register(writeRemap);
         var stage = AccentButton("Stage reviewed patch…"); stage.Click += async (_, _) => await StageFusionAsync(); Register(stage);
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
         AddPath(paths, 0, "Effective base", _fusionBase, chooseBase, null); AddPath(paths, 1, "Override sources", _fusionSources, addSource, null);
-        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, analyzeDbcs, writeDbcs, stage } }, 1), WithRow(_fusionItems, 2), WithRow(Card(_fusionSummary), 3) } };
+        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, analyzeDbcs, writeDbcs, planRemap, writeRemap, stage } }, 1), WithRow(_fusionItems, 2), WithRow(Card(_fusionSummary), 3) } };
     }
 
     private async Task BuildIndexAsync()
@@ -302,7 +306,7 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
             var sources = Lines(_fusionSources.Text).Select((path, index) => new ClientFusionSource($"{index + 1}: {Path.GetFileName(Path.TrimEndingDirectorySeparator(path))}", path)).ToArray();
             var baseRoot = _fusionBase.Text ?? string.Empty;
             var progress = new Progress<(int Done, int Total, string Path)>(value => _operationStatus.Text = $"{value.Done:N0}/{value.Total:N0} · {value.Path}");
-            _fusionPlan = await Task.Run(() => ClientFusionPlanner.Analyze(baseRoot, sources, progress, _operation!.Token), _operation!.Token); _fusionDbcPlan = null; _fusionDbcResult = null;
+            _fusionPlan = await Task.Run(() => ClientFusionPlanner.Analyze(baseRoot, sources, progress, _operation!.Token), _operation!.Token); _fusionDbcPlan = null; _fusionDbcResult = null; _fusionDbcRemapPlan = null; _fusionDbcRemapResult = null;
             _fusionItems.ItemsSource = _fusionPlan.Entries;
             var grouped = _fusionPlan.Entries.GroupBy(entry => entry.Status).OrderBy(group => group.Key).Select(group => $"{group.Key}: {group.Count():N0}");
             _fusionSummary.Text = $"{_fusionPlan.Entries.Count:N0} logical paths analyzed.\n{string.Join(" · ", grouped)}\nConflicts are not silently resolved; DBC conflicts should be merged by record/ID instead of choosing a whole-file winner.";
@@ -320,13 +324,49 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         Begin("Comparing every colliding DBC by record ID and decoded field semantics…");
         try
         {
-            var plan = _fusionPlan; _fusionDbcPlan = await Task.Run(() => ClientFusionDbcService.CreatePlan(plan, schema, _operation!.Token), _operation!.Token); _fusionDbcResult = null;
+            var plan = _fusionPlan; _fusionDbcPlan = await Task.Run(() => ClientFusionDbcService.CreatePlan(plan, schema, _operation!.Token), _operation!.Token); _fusionDbcResult = null; _fusionDbcRemapPlan = null; _fusionDbcRemapResult = null;
             var details = _fusionDbcPlan.Tables.Select(table => $"{(table.Ready ? table.RequiresOutput ? "MERGE" : "OMIT EQUAL" : "BLOCKED")} {table.Table}: +{table.Additions.Count:N0}, reuse {table.ReusedRows:N0}, conflicts {table.Conflicts.Count:N0}{(table.Conflicts.Count == 0 ? string.Empty : $" [{string.Join(", ", table.Conflicts.Take(8).Select(conflict => $"ID {conflict.Id}: {string.Join('/', conflict.DifferingColumns.Take(4))}"))}]")}");
             _fusionSummary.Text = $"Semantic DBC review: {_fusionDbcPlan.ResolvableTables:N0} resolvable, {_fusionDbcPlan.BlockedTables:N0} blocked.\n{string.Join(Environment.NewLine, details)}\nDifferent content at an occupied ID remains blocked; Crucible will not discard it or guess cross-table reference rewrites.";
             _operationStatus.Text = _fusionDbcPlan.BlockedTables == 0 ? "Every colliding DBC is additive or semantically equal." : "DBC review complete with explicit same-ID/layout/schema blockers.";
         }
         catch (OperationCanceledException) { _operationStatus.Text = "Semantic DBC fusion analysis cancelled."; }
         catch (Exception exception) { Fail("Semantic DBC fusion analysis failed", exception); }
+        finally { End(); }
+    }
+
+    private async Task AnalyzeFusionDbcRemapAsync()
+    {
+        if (_fusionPlan is null) { _fusionSummary.Text = "Analyze the client fusion paths first."; return; }
+        var schema = _session.Settings.SchemaDefinitionPath; var definitions = _session.Settings.DbdDefinitionsPath;
+        if (string.IsNullOrWhiteSpace(schema) || !File.Exists(schema)) { _fusionSummary.Text = "Configure the exact WotLK schema XML in Server & SQL before dependency-aware DBC remapping."; return; }
+        if (string.IsNullOrWhiteSpace(definitions) || !Directory.Exists(definitions)) { _fusionSummary.Text = "Configure the WoWDBDefs definitions folder in Server & SQL. Reference remapping will not guess relationships from column names."; return; }
+        Begin("Allocating collision-free IDs and propagating DBD-declared DBC references to a fixed point…");
+        try
+        {
+            var fusion = _fusionPlan; _fusionDbcRemapPlan = await Task.Run(() => ClientFusionDbcRemapService.CreatePlan(fusion, schema, definitions, _operation!.Token), _operation!.Token); _fusionDbcRemapResult = null; _fusionDbcPlan = null; _fusionDbcResult = null;
+            var tables = _fusionDbcRemapPlan.Tables.Where(table => table.Operations.Count > 0).Select(table => $"{table.Table}: add {table.AddedRows:N0}, reuse {table.ReusedMappings:N0}, mappings {table.Operations.Count:N0}");
+            _fusionSummary.Text = $"Dependency-aware DBC plan: {_fusionDbcRemapPlan.Tables.Count:N0} table(s), {_fusionDbcRemapPlan.AddedRows:N0} additive row(s), {_fusionDbcRemapPlan.ReusedMappings:N0} semantic reuse(s), {_fusionDbcRemapPlan.Blockers.Count:N0} blocker(s).\n{string.Join(Environment.NewLine, tables)}\nOnly explicit WoWDBDefs DBC references are rewritten; matching SQL/script changes remain separately reviewable.";
+            _operationStatus.Text = _fusionDbcRemapPlan.Ready ? "Collision-safe DBC ID/reference plan is ready to write." : "DBC remap review found blockers; no output can be written.";
+        }
+        catch (OperationCanceledException) { _operationStatus.Text = "DBC ID/reference planning cancelled."; }
+        catch (Exception exception) { Fail("DBC ID/reference planning failed", exception); }
+        finally { End(); }
+    }
+
+    private async Task ApplyFusionDbcRemapAsync()
+    {
+        if (_fusionDbcRemapPlan is null) { _fusionSummary.Text = "Plan ID + reference remap first."; return; }
+        if (!_fusionDbcRemapPlan.Ready) { _fusionSummary.Text = $"The dependency-remap plan has {_fusionDbcRemapPlan.Blockers.Count:N0} blocker(s); no output will be written.\n{string.Join(Environment.NewLine, _fusionDbcRemapPlan.Blockers)}"; return; }
+        var parent = await PickFolderAsync("Choose a parent folder for dependency-safe DBC outputs"); if (parent is null) return; var output = Path.Combine(parent, "Crucible-Fusion-DBC-Remap"); for (var suffix = 2; Directory.Exists(output) || File.Exists(output); suffix++) output = Path.Combine(parent, $"Crucible-Fusion-DBC-Remap-{suffix}");
+        Begin("Writing hash-bound DBC additions and propagated references…");
+        try
+        {
+            var plan = _fusionDbcRemapPlan; _fusionDbcRemapResult = await Task.Run(() => ClientFusionDbcRemapService.Apply(plan, output, _operation!.Token), _operation!.Token);
+            _fusionSummary.Text = $"Wrote {_fusionDbcRemapResult.OutputFiles.Count:N0} dependency-safe DBC(s), adding {_fusionDbcRemapResult.Plan.AddedRows:N0} row(s) and reusing {_fusionDbcRemapResult.Plan.ReusedMappings:N0} semantically equal mapping(s).\nReceipt: {_fusionDbcRemapResult.ReceiptPath}\nStage reviewed patch will substitute these exact verified outputs.";
+            _operationStatus.Text = "Dependency-safe DBC outputs are ready for fusion staging.";
+        }
+        catch (OperationCanceledException) { _operationStatus.Text = "DBC remap output cancelled safely."; }
+        catch (Exception exception) { Fail("DBC remap output failed", exception); }
         finally { End(); }
     }
 
@@ -350,10 +390,10 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     {
         if (_fusionPlan is null) { _fusionSummary.Text = "Analyze a fusion plan first."; return; }
         var unresolvedDbcPaths = _fusionPlan.Entries.Where(entry => entry.BaseFilePath is not null && entry.ArchivePath.StartsWith("DBFilesClient\\", StringComparison.OrdinalIgnoreCase) && Path.GetExtension(entry.ArchivePath).Equals(".dbc", StringComparison.OrdinalIgnoreCase) && entry.Status != ClientFusionStatus.IdenticalToBase).ToArray();
-        if (unresolvedDbcPaths.Length > 0 && _fusionDbcResult is null) { _fusionSummary.Text = $"{unresolvedDbcPaths.Length:N0} byte-different DBC path(s) require Analyze DBC records before staging. Crucible will not copy a whole source DBC over the effective base without record-level review."; return; }
+        if (unresolvedDbcPaths.Length > 0 && _fusionDbcResult is null && _fusionDbcRemapResult is null) { _fusionSummary.Text = $"{unresolvedDbcPaths.Length:N0} byte-different DBC path(s) require either quick additive review or the preferred ID + reference remap before staging. Crucible will not copy a whole source DBC over the effective base without record-level review."; return; }
         var root = await PickFolderAsync("Select a staging folder for the small fusion patch"); if (root is null) return;
         var plan = _fusionPlan;
-        try { var result = await Task.Run(() => ClientFusionPlanner.Stage(root, plan, dbcResult: _fusionDbcResult)); _fusionSummary.Text = $"Staged {result.StagedFiles:N0} resolved changes; skipped {result.SkippedBaseFiles:N0} base-identical/semantically-equal files; left {result.UnresolvedConflicts:N0} conflicts unresolved.\nManifest: {result.ManifestPath}"; }
+        try { var result = await Task.Run(() => ClientFusionPlanner.Stage(root, plan, dbcResult: _fusionDbcResult, dbcRemapResult: _fusionDbcRemapResult)); _fusionSummary.Text = $"Staged {result.StagedFiles:N0} resolved changes; skipped {result.SkippedBaseFiles:N0} base-identical/semantically-equal files; left {result.UnresolvedConflicts:N0} conflicts unresolved.\nManifest: {result.ManifestPath}"; }
         catch (Exception exception) { Fail("Fusion staging failed", exception); }
     }
 

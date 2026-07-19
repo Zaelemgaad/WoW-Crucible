@@ -35,12 +35,11 @@ public static class ClientFusionPlanner
             var rawCandidates = group.Select(item => new ClientFusionCandidate(
                 repeatedSources.Contains(item.Source.Name) ? $"{item.Source.Name} · {Path.GetRelativePath(item.Source.RootPath, item.Entry.SourcePath)}" : item.Source.Name,
                 item.Source.RootPath, item.Entry.SourcePath, new FileInfo(item.Entry.SourcePath).Length, null)).ToArray();
-            var candidates = rawCandidates.Length == 1 ? rawCandidates : rawCandidates
-                .Select(candidate => candidate with { Sha256 = Hash(candidate.FilePath) })
-                .GroupBy(candidate => candidate.Sha256!, StringComparer.OrdinalIgnoreCase).Select(hashGroup => hashGroup.First()).ToArray();
-            var matchesBase = baseFile is not null && candidates.Length == 1 && FilesMatch(baseFile, candidates[0]);
+            var candidates = rawCandidates.Length == 1 ? rawCandidates : rawCandidates.Select(candidate => candidate with { Sha256 = Hash(candidate.FilePath) }).ToArray();
+            var distinctBytes = candidates.Length == 1 ? 1 : candidates.Select(candidate => candidate.Sha256!).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            var matchesBase = baseFile is not null && distinctBytes == 1 && FilesMatch(baseFile, candidates[0]);
             var status = matchesBase ? ClientFusionStatus.IdenticalToBase
-                : candidates.Length > 1 ? ClientFusionStatus.Conflict
+                : distinctBytes > 1 ? ClientFusionStatus.Conflict
                 : group.Count() > 1 ? ClientFusionStatus.IdenticalCandidates
                 : baseFile is null ? ClientFusionStatus.Added : ClientFusionStatus.Override;
             result.Add(new(group.Key, status, baseFile, candidates, Guidance(group.Key, status)));
@@ -63,16 +62,29 @@ public static class ClientFusionPlanner
         if (plan.FormatVersion != 1) throw new InvalidDataException($"Unsupported client fusion plan version {plan.FormatVersion}."); return plan;
     }
 
-    public static ClientFusionStageResult Stage(string rootPath, ClientFusionPlan plan, IReadOnlyDictionary<string, string>? conflictSelections = null, ClientFusionDbcResult? dbcResult = null)
+    public static ClientFusionStageResult Stage(string rootPath, ClientFusionPlan plan, IReadOnlyDictionary<string, string>? conflictSelections = null,
+        ClientFusionDbcResult? dbcResult = null, ClientFusionDbcRemapResult? dbcRemapResult = null)
     {
+        if (dbcResult is not null && dbcRemapResult is not null)
+            throw new ArgumentException("Select either semantic DBC fusion or dependency-aware DBC remapping, not both.");
         if (dbcResult is not null)
         {
             ClientFusionDbcService.VerifyResult(dbcResult); if (JsonSerializer.Serialize(dbcResult.Plan.FusionPlan) != JsonSerializer.Serialize(plan)) throw new InvalidDataException("The merged DBC receipt belongs to a different client fusion plan.");
+        }
+        if (dbcRemapResult is not null)
+        {
+            ClientFusionDbcRemapService.VerifyResult(dbcRemapResult); if (JsonSerializer.Serialize(dbcRemapResult.Plan.FusionPlan) != JsonSerializer.Serialize(plan)) throw new InvalidDataException("The dependency-remapped DBC receipt belongs to a different client fusion plan.");
         }
         rootPath = Path.GetFullPath(rootPath); var filesRoot = Path.Combine(rootPath, "files"); Directory.CreateDirectory(filesRoot);
         var entries = new List<PatchEntry>(); var unresolved = 0; var skipped = 0;
         foreach (var entry in plan.Entries)
         {
+            if (dbcRemapResult is not null && dbcRemapResult.Plan.Tables.Any(table => table.ArchivePath.Equals(entry.ArchivePath, StringComparison.OrdinalIgnoreCase)))
+            {
+                if (dbcRemapResult.OmittedArchivePaths.Contains(entry.ArchivePath, StringComparer.OrdinalIgnoreCase)) { skipped++; continue; }
+                if (!dbcRemapResult.OutputFiles.TryGetValue(entry.ArchivePath, out var remapped)) throw new InvalidDataException($"DBC dependency-remap receipt has no resolved output for {entry.ArchivePath}.");
+                var remappedDestination = Path.Combine(filesRoot, entry.ArchivePath.Replace('\\', Path.DirectorySeparatorChar)); Directory.CreateDirectory(Path.GetDirectoryName(remappedDestination)!); File.Copy(remapped, remappedDestination, true); entries.Add(new(remappedDestination, entry.ArchivePath)); continue;
+            }
             if (entry.Status == ClientFusionStatus.IdenticalToBase) { skipped++; continue; }
             if (dbcResult is not null && dbcResult.Plan.Tables.Any(table => table.ArchivePath.Equals(entry.ArchivePath, StringComparison.OrdinalIgnoreCase)))
             {
@@ -88,7 +100,7 @@ public static class ClientFusionPlanner
                 candidate = entry.Candidates.FirstOrDefault(value => value.FilePath.Equals(selected, StringComparison.OrdinalIgnoreCase));
                 if (candidate is null) { unresolved++; continue; }
             }
-            else candidate = entry.Candidates.Single();
+            else candidate = entry.Candidates.OrderBy(value => value.SourceName, StringComparer.OrdinalIgnoreCase).ThenBy(value => value.FilePath, StringComparer.OrdinalIgnoreCase).First();
             var destination = Path.Combine(filesRoot, entry.ArchivePath.Replace('\\', Path.DirectorySeparatorChar));
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!); File.Copy(candidate.FilePath, destination, true);
             entries.Add(new(destination, entry.ArchivePath));

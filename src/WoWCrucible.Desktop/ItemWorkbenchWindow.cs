@@ -22,7 +22,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _password = new() { PasswordChar = '●', HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
-    private readonly TextBox _search = new() { PlaceholderText = "Filter scan or pin exact IDs (17802, 17,802, #17 #17802)…" };
+    private readonly TextBox _search = new() { PlaceholderText = "Search every item by name, or enter exact ID(s): 17802 / #17 #17802…" };
     private readonly ComboBox _classification = new()
     {
         ItemsSource = new[] { "No known acquisition path", "Known acquisition path", "All item_template rows" },
@@ -35,7 +35,6 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         SelectedIndex = 0,
         HorizontalAlignment = HorizontalAlignment.Stretch
     };
-    private readonly TextBox _inspectId = new() { PlaceholderText = "Inspect exact item ID…" };
     private readonly TextBox _acquisitionDbc = new() { PlaceholderText = "Optional server DBC folder for CharStartOutfit.dbc coverage…" };
     private readonly TextBox _favoriteMpq = new() { PlaceholderText = "Optional related MPQ path saved with favorites…" };
     private readonly ListBox _items = new();
@@ -97,7 +96,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         _items.SelectionChanged += (_, _) =>
         {
             if (_items.SelectedItem is not ItemCatalogEntry item) return;
-            _cloneSource.Text = item.Entry.ToString(); _inspectId.Text = item.Entry.ToString();
+            _cloneSource.Text = item.Entry.ToString();
             _cloneResult.Text = $"Selected {item.Entry:N0} — {item.Name}\nQuality: {QualityName(item.Quality)} · Item level: {item.ItemLevel} · Set: {(item.ItemSetId == 0 ? "none" : item.ItemSetId)}";
             ShowCatalogEvidence(item);
         };
@@ -161,8 +160,9 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private Control AcquisitionPage()
     {
         var audit = AccentButton("Scan acquisition paths"); audit.Click += async (_, _) => await AuditAsync();
-        var findExact = new Button { Content = "Find exact ID(s) — bypass filters" }; findExact.Click += async (_, _) => await InspectSearchExactAsync();
-        var inspect = AccentButton("Explain exact ID"); inspect.Click += async (_, _) => await InspectExactAsync();
+        var findExact = new Button { Content = "Find exact ID(s) — bypass every filter" }; findExact.Click += async (_, _) => await InspectSearchExactAsync();
+        var inspect = AccentButton("Explain selected / exact ID"); inspect.Click += async (_, _) => await InspectExactAsync();
+        var reset = new Button { Content = "Reset to every no-path item" }; reset.Click += (_, _) => { _search.Text = string.Empty; _classification.SelectedIndex = 0; _reviewGroup.SelectedIndex = 0; ApplyAuditFilter(); };
         var edit = new Button { Content = "Open selected in decoded editor" }; edit.Click += async (_, _) => await OpenSelectedItemAsync(false);
         var fullSql = new Button { Content = "Open complete SQL row" }; fullSql.Click += async (_, _) => await OpenSelectedInSqlAsync();
         var favorite = new Button { Content = "★ Favorite selected row" }; favorite.Click += async (_, _) => await OpenSelectedItemAsync(true);
@@ -171,12 +171,11 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var searchRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { _search, WithColumn(findExact, 1) } };
         var classificationRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Show", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_classification, 1) } };
         var groupRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Review group", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_reviewGroup, 1) } };
-        var header = new StackPanel { Spacing = 7, Margin = new Thickness(0,0,0,8), Children = { new WrapPanel { Children = { audit, _auditSummary } }, searchRow, classificationRow, groupRow } };
-        var rowActions = new WrapPanel { Children = { edit, fullSql, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
-        var exact = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _inspectId, WithColumn(inspect, 1), rowActions } };
+        var header = new StackPanel { Spacing = 7, Margin = new Thickness(0,0,0,8), Children = { new WrapPanel { Children = { audit, reset, _auditSummary } }, searchRow, classificationRow, groupRow } };
+        var rowActions = new WrapPanel { Children = { inspect, edit, fullSql, favorite } };
         var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
-        var note = new TextBlock { Text = "This tab scans automatically once a verified SQL profile is available. Every row shows why its path was accepted or rejected. “No known path” means no vendor, achievement, direct/reachable loot, usable quest reward/start item, character-start, profession/disenchant/fishing/spell-loot, or causally reachable Spell.dbc create-item source was found. The result deliberately includes NPC equipment, Monster entries, deprecated rows, tests, and developer items—not only polished cut player gear. Exact numeric search pins an existing row regardless of the current list filter. Custom scripts still require review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
-        return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(exact, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
+        var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, and developer cheats. Entering one or more exact numeric IDs in the single search box always bypasses classification and review filters; entering text searches the currently selected classification. Every row states which evidence was accepted or rejected. Custom scripts and core code still require manual review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(rowActions, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
     private Control ClonePage()
@@ -232,7 +231,9 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private async Task InspectExactAsync()
     {
-        if (!ItemIdQueryParser.TryParseSingle(_inspectId.Text, out var entry)) { _inspection.Text = "Enter one positive item ID. Plain, comma-grouped, and #prefixed forms are accepted (17802, 17,802, or #17802)."; return; }
+        var selectedEntry = (_items.SelectedItem as ItemCatalogEntry)?.Entry;
+        if (!ItemIdQueryParser.TryParseSingle(_search.Text, out var entry) && selectedEntry is null) { _inspection.Text = "Select a row, or enter one positive item ID in the main search box. Plain, comma-grouped, and #prefixed forms are accepted (17802, 17,802, or #17802)."; return; }
+        entry = ItemIdQueryParser.TryParseSingle(_search.Text, out var searchedEntry) ? searchedEntry : selectedEntry!.Value;
         SetBusy($"Locating exact item {entry:N0} in the complete acquisition catalog…");
         try
         {
@@ -386,7 +387,6 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         {
             _items.SelectedItem = rows[0];
             _items.ScrollIntoView(rows[0]);
-            _inspectId.Text = rows[0].Entry.ToString();
         }
         var noPath = rows.Count(item => !item.HasKnownAcquisitionPath);
         var known = rows.Length - noPath;

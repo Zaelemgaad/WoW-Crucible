@@ -1120,10 +1120,30 @@ static int Client(string[] args)
         var result = ClientFusionDbcService.Apply(ClientFusionDbcService.LoadPlan(fusionDbcPlanPath), fusionDbcOutput); Console.WriteLine($"OUTPUT\t{result.OutputDirectory}\nRECEIPT\t{result.ReceiptPath}\nMERGED\t{result.OutputFiles.Count:N0}\nOMITTED_EQUAL\t{result.OmittedArchivePaths.Count:N0}\nBLOCKED\t{result.BlockedArchivePaths.Count:N0}");
         foreach (var pair in result.OutputFiles) Console.WriteLine($"DBC\t{pair.Key}\t{pair.Value}\t{result.OutputSha256[pair.Key]}"); return result.BlockedArchivePaths.Count == 0 ? 0 : 3;
     }
+    if (args is ["fusion-dbc-remap-plan", var remapFusionPlanPath, var remapSchemaPath, var remapDefinitionsRoot, .. var remapPlanOptions])
+    {
+        var planOutput = Option(remapPlanOptions, "--output="); var overwrite = remapPlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var json = remapPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = remapPlanOptions.Where(option => !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown fusion-dbc-remap-plan option: {unknown[0]}"); if (planOutput is not null && File.Exists(planOutput) && !overwrite) return Fail($"DBC remap plan already exists; use --overwrite to replace it: {Path.GetFullPath(planOutput)}");
+        var plan = ClientFusionDbcRemapService.CreatePlan(ClientFusionPlanner.Load(remapFusionPlanPath), remapSchemaPath, remapDefinitionsRoot); if (planOutput is not null) ClientFusionDbcRemapService.SavePlan(planOutput, plan);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"TABLES\t{plan.Tables.Count:N0}\nOPERATIONS\t{plan.Tables.Sum(table => table.Operations.Count):N0}\nADD\t{plan.AddedRows:N0}\nREUSE\t{plan.ReusedMappings:N0}\nBLOCKERS\t{plan.Blockers.Count:N0}");
+            foreach (var table in plan.Tables) { Console.WriteLine($"DBC\t{table.Table}\tadd={table.AddedRows:N0}\treuse={table.ReusedMappings:N0}\toperations={table.Operations.Count:N0}"); foreach (var operation in table.Operations) Console.WriteLine($"MAP\t{table.Table}\t{operation.SourceName}\t{operation.SourceId}>{operation.TargetId}\t{(operation.AddsRow ? "ADD" : "REUSE")}\trefs={string.Join(',', operation.ReferenceRewrites.Select(pair => $"{pair.Key}:{pair.Value}"))}"); }
+            foreach (var blocker in plan.Blockers) Console.WriteLine($"BLOCKER\t{blocker}"); foreach (var finding in plan.Findings) Console.WriteLine($"FINDING\t{finding}"); if (planOutput is not null) Console.WriteLine($"PLAN\t{Path.GetFullPath(planOutput)}");
+        }
+        return plan.Ready ? 0 : 3;
+    }
+    if (args is ["fusion-dbc-remap-apply", var remapPlanPath, var remapOutput])
+    {
+        var result = ClientFusionDbcRemapService.Apply(ClientFusionDbcRemapService.LoadPlan(remapPlanPath), remapOutput); Console.WriteLine($"OUTPUT\t{result.OutputDirectory}\nRECEIPT\t{result.ReceiptPath}\nMERGED\t{result.OutputFiles.Count:N0}\nOMITTED_EQUAL\t{result.OmittedArchivePaths.Count:N0}\nADD\t{result.Plan.AddedRows:N0}\nREUSE\t{result.Plan.ReusedMappings:N0}");
+        foreach (var pair in result.OutputFiles) Console.WriteLine($"DBC\t{pair.Key}\t{pair.Value}\t{result.OutputSha256[pair.Key]}"); return 0;
+    }
     if (args is ["fusion-stage", var stagedFusionPlanPath, var stagedFusionRoot, .. var fusionStageOptions])
     {
-        var dbcReceipt = Option(fusionStageOptions, "--dbc-receipt="); var unknown = fusionStageOptions.Where(option => !option.StartsWith("--dbc-receipt=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown fusion-stage option: {unknown[0]}");
-        var plan = ClientFusionPlanner.Load(stagedFusionPlanPath); var dbcResult = dbcReceipt is null ? null : ClientFusionDbcService.LoadResult(dbcReceipt); var result = ClientFusionPlanner.Stage(stagedFusionRoot, plan, dbcResult: dbcResult);
+        var dbcReceipt = Option(fusionStageOptions, "--dbc-receipt="); var remapReceipt = Option(fusionStageOptions, "--dbc-remap-receipt="); var unknown = fusionStageOptions.Where(option => !option.StartsWith("--dbc-receipt=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--dbc-remap-receipt=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown fusion-stage option: {unknown[0]}"); if (dbcReceipt is not null && remapReceipt is not null) return Fail("Select either --dbc-receipt or --dbc-remap-receipt, not both.");
+        var plan = ClientFusionPlanner.Load(stagedFusionPlanPath); var dbcResult = dbcReceipt is null ? null : ClientFusionDbcService.LoadResult(dbcReceipt); var remapResult = remapReceipt is null ? null : ClientFusionDbcRemapService.LoadResult(remapReceipt); var result = ClientFusionPlanner.Stage(stagedFusionRoot, plan, dbcResult: dbcResult, dbcRemapResult: remapResult);
         Console.WriteLine($"ROOT\t{result.RootPath}\nMANIFEST\t{result.ManifestPath}\nSTAGED\t{result.StagedFiles:N0}\nBASE_IDENTICAL\t{result.SkippedBaseFiles:N0}\nUNRESOLVED\t{result.UnresolvedConflicts:N0}"); return result.UnresolvedConflicts == 0 ? 0 : 3;
     }
     if (args is ["index", var clientRoot, var outputDirectory, .. var options])
@@ -1170,7 +1190,7 @@ static int Client(string[] args)
     return ClientHelp(2);
 }
 
-static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  wowcrucible client clear-cache <client-root>\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]\n  wowcrucible client fusion-dbc-plan <fusion-plan.json> <schema.xml> [--output=dbc-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-apply <dbc-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-stage <fusion-plan.json> <stage-folder> [--dbc-receipt=client-fusion-dbc.crucible.json]", code);
+static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  wowcrucible client clear-cache <client-root>\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]\n  wowcrucible client fusion-dbc-plan <fusion-plan.json> <schema.xml> [--output=dbc-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-apply <dbc-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-dbc-remap-plan <fusion-plan.json> <schema.xml> <WoWDBDefs-definitions> [--output=remap-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-remap-apply <remap-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-stage <fusion-plan.json> <stage-folder> [--dbc-receipt=client-fusion-dbc.crucible.json|--dbc-remap-receipt=client-fusion-dbc-remap.crucible.json]", code);
 
 static async Task<int> Server(string[] args)
 {

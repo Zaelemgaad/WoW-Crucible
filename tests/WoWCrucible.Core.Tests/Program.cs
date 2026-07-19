@@ -1365,7 +1365,8 @@ if (Directory.Exists(desktopSourceRoot))
     var sqlWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("SqlWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
-        !itemWorkbenchSource.Contains("Find exact ID(s) — bypass filters", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("Find exact ID(s) — bypass every filter", StringComparison.Ordinal) ||
+        itemWorkbenchSource.Contains("Inspect exact item ID", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("SqlFavoritesRequested", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("ActivateFavorites", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related DBC / DB2 path", StringComparison.Ordinal) ||
@@ -2438,6 +2439,43 @@ var staleAdditivePath = Path.Combine(additiveFusionB, "SpellCastTimes.dbc"); var
 try { ClientFusionDbcService.Verify(additiveDbcPlan); throw new InvalidOperationException("DBC fusion accepted a source changed after planning."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("changed after planning", StringComparison.OrdinalIgnoreCase)) { }
 File.WriteAllBytes(staleAdditivePath, staleAdditiveBytes);
+
+var remapBaseDbc = Path.Combine(layerRoot, "fusion-remap-base", "DBFilesClient"); var remapSourceADbc = Path.Combine(layerRoot, "fusion-remap-a", "DBFilesClient"); var remapSourceBDbc = Path.Combine(layerRoot, "fusion-remap-b", "DBFilesClient");
+Directory.CreateDirectory(remapBaseDbc); Directory.CreateDirectory(remapSourceADbc); Directory.CreateDirectory(remapSourceBDbc);
+var modelSourcePath = Path.Combine(args[1], "CreatureModelData.dbc"); var displaySourcePath = Path.Combine(args[1], "CreatureDisplayInfo.dbc");
+foreach (var folder in new[] { remapBaseDbc, remapSourceADbc, remapSourceBDbc }) { File.Copy(modelSourcePath, Path.Combine(folder, "CreatureModelData.dbc")); File.Copy(displaySourcePath, Path.Combine(folder, "CreatureDisplayInfo.dbc")); }
+var remapModelColumns = schema.ResolveColumns("CreatureModelData", WdbcFile.Load(modelSourcePath).FieldCount).Columns; var remapDisplayColumns = schema.ResolveColumns("CreatureDisplayInfo", WdbcFile.Load(displaySourcePath).FieldCount).Columns;
+var remapModelIdColumn = remapModelColumns.Single(column => column.Name == "ID"); var remapModelFlagsColumn = remapModelColumns.Single(column => column.Name == "Flags"); var remapDisplayIdColumn = remapDisplayColumns.Single(column => column.Name == "ID"); var remapDisplayModelColumn = remapDisplayColumns.Single(column => column.Name == "ModelID");
+var baseModelsForRemap = WdbcFile.Load(modelSourcePath); var baseDisplaysForRemap = WdbcFile.Load(displaySourcePath); var remapModelIds = Enumerable.Range(0, baseModelsForRemap.RowCount).Select(row => baseModelsForRemap.GetRaw(row, remapModelIdColumn)).ToHashSet();
+var selectedModelId = Enumerable.Range(0, baseDisplaysForRemap.RowCount).Select(row => baseDisplaysForRemap.GetRaw(row, remapDisplayModelColumn)).Where(id => id != 0 && remapModelIds.Contains(id)).GroupBy(id => id).OrderBy(group => group.Count()).ThenBy(group => group.Key).First().Key;
+var selectedDisplayId = Enumerable.Range(0, baseDisplaysForRemap.RowCount).Where(row => baseDisplaysForRemap.GetRaw(row, remapDisplayModelColumn) == selectedModelId).Select(row => baseDisplaysForRemap.GetRaw(row, remapDisplayIdColumn)).First();
+foreach (var path in new[] { Path.Combine(remapSourceADbc, "CreatureModelData.dbc"), Path.Combine(remapSourceBDbc, "CreatureModelData.dbc") })
+{
+    var changed = WdbcFile.Load(path); var changedRow = Enumerable.Range(0, changed.RowCount).Single(row => changed.GetRaw(row, remapModelIdColumn) == selectedModelId); changed.SetRaw(changedRow, remapModelFlagsColumn, changed.GetRaw(changedRow, remapModelFlagsColumn) ^ 0x40000000u); changed.Save(path, false);
+}
+var remapDefinitions = Path.Combine(layerRoot, "fusion-remap-definitions"); Directory.CreateDirectory(remapDefinitions);
+File.WriteAllText(Path.Combine(remapDefinitions, "CreatureModelData.dbd"), "COLUMNS\nint ID\nint Flags\n\nBUILD 3.3.5.12340\n$id$ID<32>\nFlags<32>\n");
+File.WriteAllText(Path.Combine(remapDefinitions, "CreatureDisplayInfo.dbd"), "COLUMNS\nint ID\nint<CreatureModelData::ID> ModelID\n\nBUILD 3.3.5.12340\n$id$ID<32>\nModelID<32>\n");
+var remapFusionPlan = ClientFusionPlanner.Analyze(Path.GetDirectoryName(remapBaseDbc)!, [new("Remap A", Path.GetDirectoryName(remapSourceADbc)!), new("Remap B", Path.GetDirectoryName(remapSourceBDbc)!)]);
+if (remapFusionPlan.Entries.Single(entry => entry.ArchivePath.EndsWith("CreatureModelData.dbc", StringComparison.OrdinalIgnoreCase)).Candidates.Count != 2 || remapFusionPlan.Entries.Single(entry => entry.ArchivePath.EndsWith("CreatureDisplayInfo.dbc", StringComparison.OrdinalIgnoreCase)).Status != ClientFusionStatus.IdenticalToBase)
+    throw new InvalidOperationException("Client fusion collapsed source provenance needed for dependency propagation or misclassified the unchanged referencing table.");
+var remapPlan = ClientFusionDbcRemapService.CreatePlan(remapFusionPlan, args[0], remapDefinitions); var modelRemapTable = remapPlan.Tables.Single(table => table.Table == "CreatureModelData"); var displayRemapTable = remapPlan.Tables.Single(table => table.Table == "CreatureDisplayInfo");
+var addedModelMap = modelRemapTable.Operations.Single(operation => operation.SourceId == selectedModelId && operation.AddsRow); var reusedModelMap = modelRemapTable.Operations.Single(operation => operation.SourceId == selectedModelId && !operation.AddsRow);
+var addedDisplayMap = displayRemapTable.Operations.Single(operation => operation.SourceId == selectedDisplayId && operation.AddsRow); var reusedDisplayMap = displayRemapTable.Operations.Single(operation => operation.SourceId == selectedDisplayId && !operation.AddsRow);
+if (!remapPlan.Ready || addedModelMap.TargetId == selectedModelId || reusedModelMap.TargetId != addedModelMap.TargetId || addedDisplayMap.TargetId == selectedDisplayId || reusedDisplayMap.TargetId != addedDisplayMap.TargetId || addedDisplayMap.ReferenceRewrites.GetValueOrDefault("ModelID") != addedModelMap.TargetId)
+    throw new InvalidOperationException("Dependency-aware DBC planning did not allocate, propagate, and semantically deduplicate a same-ID collision across source layers.");
+var remapPlanPath = Path.Combine(layerRoot, "fusion-dbc-remap-plan.json"); ClientFusionDbcRemapService.SavePlan(remapPlanPath, remapPlan); var remapResult = ClientFusionDbcRemapService.Apply(ClientFusionDbcRemapService.LoadPlan(remapPlanPath), Path.Combine(layerRoot, "fusion-dbc-remap-output")); var loadedRemapResult = ClientFusionDbcRemapService.LoadResult(remapResult.ReceiptPath);
+var outputModels = WdbcFile.Load(loadedRemapResult.OutputFiles["DBFilesClient\\CreatureModelData.dbc"]); var outputDisplays = WdbcFile.Load(loadedRemapResult.OutputFiles["DBFilesClient\\CreatureDisplayInfo.dbc"]);
+var outputModelRows = DbcRecordIdentity.IndexRows(outputModels, remapModelColumns, DbcRecordKeyStrategy.Physical(remapModelIdColumn.Index)); var outputDisplayRows = DbcRecordIdentity.IndexRows(outputDisplays, remapDisplayColumns, DbcRecordKeyStrategy.Physical(remapDisplayIdColumn.Index));
+if (!outputModelRows.ContainsKey(addedModelMap.TargetId) || outputDisplays.GetRaw(outputDisplayRows[addedDisplayMap.TargetId], remapDisplayModelColumn) != addedModelMap.TargetId || outputDisplays.GetRaw(outputDisplayRows[selectedDisplayId], remapDisplayModelColumn) != selectedModelId)
+    throw new InvalidOperationException("Applied DBC dependency remap did not preserve the base row while publishing its cloned referencing closure.");
+var remapStage = ClientFusionPlanner.Stage(Path.Combine(layerRoot, "fusion-dbc-remap-stage"), remapFusionPlan, dbcRemapResult: loadedRemapResult);
+if (remapStage.StagedFiles != 2 || remapStage.UnresolvedConflicts != 0 || !PatchManifestService.Validate(PatchManifestService.Load(remapStage.ManifestPath)).Passed)
+    throw new InvalidOperationException("Dependency-remapped DBC outputs—including a source-byte-identical propagated table—did not stage into the tiny fusion manifest.");
+var staleRemapPath = Path.Combine(remapSourceBDbc, "CreatureModelData.dbc"); var staleRemapBytes = File.ReadAllBytes(staleRemapPath); File.WriteAllBytes(staleRemapPath, staleRemapBytes.Concat(new byte[] { 1 }).ToArray());
+try { ClientFusionDbcRemapService.Verify(remapPlan); throw new InvalidOperationException("DBC dependency remapping accepted a source changed after planning."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("changed after planning", StringComparison.OrdinalIgnoreCase)) { }
+File.WriteAllBytes(staleRemapPath, staleRemapBytes);
 
 var manifestPath = Path.Combine(layerRoot, "classless.crucible-patch.json");
 var manifestEntries = PatchInputMapper.Map([Path.Combine(overrideLayer, "SpellCastTimes.dbc")]);
