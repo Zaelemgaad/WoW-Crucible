@@ -383,6 +383,22 @@ static int Asset(string[] args)
         }
         return 0;
     }
+    if (args is ["wmo-preview-info", var wmoPath, .. var wmoOptions])
+    {
+        var json = wmoOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var includeGroups = wmoOptions.Contains("--groups", StringComparer.OrdinalIgnoreCase); var contentRoot = Option(wmoOptions, "--content-root=");
+        var unknown = wmoOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.Equals("--groups", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--content-root=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown wmo-preview-info option: {unknown[0]}");
+        var geometry = WmoPreviewGeometryService.Load(wmoPath); var textures = WmoPreviewGeometryService.ResolveTextureFiles(geometry, contentRoot);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Geometry = geometry, ResolvedTextureFiles = textures }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"Root\t{geometry.RootPath}\nVersion\t{geometry.Version}\nGroups\t{geometry.Groups.Count:N0}\nVertices\t{geometry.Vertices.Count:N0}\nTriangles\t{geometry.TriangleIndices.Count / 3:N0}\nMaterials\t{geometry.Materials.Count:N0}\nResolvedTextures\t{textures.Count:N0}\nMinimum\t{geometry.Minimum}\nMaximum\t{geometry.Maximum}");
+            foreach (var material in geometry.Materials) Console.WriteLine($"MATERIAL\t{material.Index}\tshader={material.Shader}\tblend={material.BlendMode}\tflags=0x{material.Flags:X}\ttexture={material.Texture1 ?? "<none>"}\tresolved={textures.GetValueOrDefault(material.Index, "<missing>")}");
+            foreach (var finding in geometry.Findings) Console.WriteLine($"FINDING\t{finding}");
+            if (includeGroups) foreach (var group in geometry.Groups) { Console.WriteLine($"GROUP\t{group.Index:000}\tvertices={group.VertexCount:N0}\ttriangles={group.TriangleIndexCount / 3:N0}\tbatches={group.BatchCount:N0}\tflags=0x{group.Flags:X}\t{group.Path}"); foreach (var finding in group.Findings) Console.WriteLine($"GROUP_FINDING\t{group.Index:000}\t{finding}"); }
+        }
+        return geometry.Findings.Count == 0 ? 0 : 3;
+    }
     if (args is ["preview-info", var previewModelPath, .. var previewOptions])
     {
         var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.Equals("--naked", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -490,7 +506,37 @@ static int Asset(string[] args)
     return AssetHelp(2);
 }
 
-static int AssetHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible asset texture-info <file.blp>\n  wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]\n  wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]\n  wowcrucible asset texture-validate <file-or-folder> [--recursive]\n  wowcrucible asset inspect <model.m2|building.wmo>...\n  wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]\n  wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]\n  wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>\n  wowcrucible asset appearance-render <library> <dbc-folder> <logical-path> <model-file> <body.png> [--skin=N --face=N --facial-hair=N --hair=N --source=name --hair-output=file] [--overwrite]\n  wowcrucible asset appearance-compose <base.blp> <output.png> [component options] [--overwrite]\n  wowcrucible asset models <library-folder> <logical-directory>\n  wowcrucible asset definitive-status <library-folder>\n  wowcrucible asset definitive-stage <library-folder> <output-folder>\n  wowcrucible asset workspace <new-output-folder> <files/folders...>\n  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]\n  wowcrucible asset library-run <library-folder> [--workers=6]\n  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]\n  wowcrucible asset library-repair <library-folder> [--workers=6]\n  wowcrucible asset library-artifacts <library-folder> [--source-root=folder]... [--apply]\n  wowcrucible asset library-layout <library-folder> [--apply]\n  wowcrucible asset library-consolidate <library-folder> [--apply]\n  wowcrucible asset library-catalog <library-folder>\n  wowcrucible asset library-status <library-folder>\n  wowcrucible asset compare-folders <library-folder> [path-filter]\n  wowcrucible asset compare-files <library-folder> <logical-directory>\n\nFull guide: docs/CLI-REFERENCE.md", code);
+static int AssetHelp(int code = 0) => GroupHelp("""
+Usage:
+  wowcrucible asset texture-info <file.blp>
+  wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]
+  wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
+  wowcrucible asset texture-validate <file-or-folder> [--recursive]
+  wowcrucible asset inspect <model.m2|building.wmo>...
+  wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
+  wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
+  wowcrucible asset wmo-preview-info <root-or-group.wmo> [--groups] [--content-root=folder] [--format=text|json]
+  wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>
+  wowcrucible asset appearance-render <library> <dbc-folder> <logical-path> <model-file> <body.png> [--skin=N --face=N --facial-hair=N --hair=N --source=name --hair-output=file] [--overwrite]
+  wowcrucible asset appearance-compose <base.blp> <output.png> [component options] [--overwrite]
+  wowcrucible asset models <library-folder> <logical-directory>
+  wowcrucible asset definitive-status <library-folder>
+  wowcrucible asset definitive-stage <library-folder> <output-folder>
+  wowcrucible asset workspace <new-output-folder> <files/folders...>
+  wowcrucible asset library-plan <source-folder> <library-folder> [--max-gb=2]
+  wowcrucible asset library-run <library-folder> [--workers=6]
+  wowcrucible asset library-import <extracted-folder> <library-folder> <provenance> [--workers=6]
+  wowcrucible asset library-repair <library-folder> [--workers=6]
+  wowcrucible asset library-artifacts <library-folder> [--source-root=folder]... [--apply]
+  wowcrucible asset library-layout <library-folder> [--apply]
+  wowcrucible asset library-consolidate <library-folder> [--apply]
+  wowcrucible asset library-catalog <library-folder>
+  wowcrucible asset library-status <library-folder>
+  wowcrucible asset compare-folders <library-folder> [path-filter]
+  wowcrucible asset compare-files <library-folder> <logical-directory>
+
+Full guide: docs/CLI-REFERENCE.md
+""", code);
 
 static int Project(string[] args)
 {

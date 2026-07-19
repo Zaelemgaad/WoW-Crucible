@@ -5,6 +5,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using WoWCrucible.Core;
+using WoWCrucible.Desktop.Controls;
 
 namespace WoWCrucible.Desktop;
 
@@ -18,6 +19,9 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly ListBox _dependencies = new();
     private readonly TextBlock _status = Info("Read-only native inspection · no legacy map executable required");
     private readonly MapGridControl _grid = new();
+    private readonly WmoPreviewView _wmoPreview = new();
+    private readonly TextBlock _wmoStatus = Info("Open an extracted root WMO referenced by this map to inspect its real grouped geometry.");
+    private readonly TabControl _visualTabs = new();
     private readonly TextBox _heightDelta = new() { Text = "0", PlaceholderText = "Signed terrain height delta" };
     private readonly TextBox _brushCenterX = new() { Text = "8", PlaceholderText = "Center X (0–16)" };
     private readonly TextBox _brushCenterY = new() { Text = "8", PlaceholderText = "Center Y (0–16)" };
@@ -38,6 +42,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly ComboBox _alphaFalloff = new() { ItemsSource = Enum.GetValues<AdtTerrainBrushFalloff>(), SelectedItem = AdtTerrainBrushFalloff.Smooth };
     private readonly CheckBox _alphaRestrict = new() { Content = "Restrict paint to selected cells" };
     private CancellationTokenSource? _operation;
+    private CancellationTokenSource? _wmoOperation;
     private MapAssetInspection? _inspection;
     private AdtTextureLayerInspection? _textureSourceInspection;
     private AdtTextureLayerInspection? _textureInspection;
@@ -56,6 +61,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
         var inspect = new Button { Content = "Inspect / reload" }; inspect.Click += async (_, _) => await OpenAsync(_path.Text);
+        var openWmo = new Button { Content = "Preview extracted WMO…" }; openWmo.Click += async (_, _) => await PickWmoAsync();
         _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
         var selectAll = new Button { Content = "Select all present" }; selectAll.Click += (_, _) => _grid.SelectAllPresent();
         var clear = new Button { Content = "Clear selection" }; clear.Click += (_, _) => _grid.ClearSelection();
@@ -82,7 +88,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         heading.Children.Add(title); Grid.SetColumn(title, 1);
 
         open.Margin = new Thickness(0, 0, 6, 0);
-        var controls = new StackPanel { Margin = new Thickness(12, 8), Spacing = 8, Children = { _path, new WrapPanel { Children = { open, inspect } } } };
+        var controls = new StackPanel { Margin = new Thickness(12, 8), Spacing = 8, Children = { _path, new WrapPanel { Children = { open, inspect, openWmo } } } };
         var drop = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Background = Brush.Parse("#090D14"), Child = _grid };
         DragDrop.SetAllowDrop(drop, true);
         DragDrop.AddDragOverHandler(drop, (_, args) => { args.DragEffects = args.DataTransfer.TryGetFiles()?.Any(file => IsMap(file.TryGetLocalPath())) == true ? DragDropEffects.Copy : DragDropEffects.None; args.Handled = true; });
@@ -98,8 +104,11 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
                 Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable."), Label("ADT TEXTURE LAYER"), TextureFields(), new WrapPanel { Children = { previewTexture, saveTexture } }, Info("Reassigns an existing MCLY layer slot to one of this ADT's existing MTEX textures."), Label("ADD MTEX + MCLY LAYER"), NewTextureFields(), new WrapPanel { Children = { previewNewTexture, saveNewTexture } }, Info("Appends one client-relative BLP to MTEX and adds a matching MCLY/MCAL layer to every selected cell. Wrath's four-layer limit is enforced. Auto preserves the tile's existing packed-versus-8-bit alpha family; mixed or evidence-free tiles require an explicit encoding."), Label("ADT ALPHA TEXTURE BRUSH"), AlphaFields(), _alphaRestrict, new WrapPanel { Children = { previewAlpha, saveAlpha } }, Info("Uses the click-positioned center and radius above to paint an existing additional layer toward alpha 0–255. Packed, big, and RLE maps preserve their current fixed-width encoding; an RLE stroke that cannot fit is refused instead of shifting MCNK offsets."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
             }
         };
+        var wmoFooter = new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _wmoStatus }; Grid.SetRow(wmoFooter, 1);
+        var wmoPage = new Grid { RowDefinitions = new("*,Auto"), Children = { _wmoPreview, wmoFooter } };
+        _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Referenced WMO preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
         var body = new Grid { ColumnDefinitions = new("3*,Auto,2*") };
-        body.Children.Add(drop);
+        body.Children.Add(_visualTabs);
         var splitter = new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }; body.Children.Add(splitter); Grid.SetColumn(splitter, 1);
         body.Children.Add(details); Grid.SetColumn(details, 2);
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
@@ -357,6 +366,21 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) await OpenAsync(path);
     }
 
+    private async Task PickWmoAsync()
+    {
+        var top = TopLevel.GetTopLevel(this); if (top is null) return;
+        var files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Open an extracted WotLK root or group WMO", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WoW WMO") { Patterns = ["*.wmo"] }] });
+        var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = new CancellationTokenSource(); var token = _wmoOperation.Token; _wmoStatus.Text = "Loading WMO root, groups, and available BLP materials…";
+        try
+        {
+            var loaded = await Task.Run(() => { var geometry = WmoPreviewGeometryService.Load(path, cancellationToken: token); var textures = WmoPreviewGeometryService.LoadTextures(geometry, cancellationToken: token); return (geometry, textures); }, token); token.ThrowIfCancellationRequested();
+            _wmoPreview.SetGeometry(loaded.geometry); _wmoPreview.SetDecodedTextures(loaded.textures.Textures); _visualTabs.SelectedIndex = 1;
+            _wmoStatus.Text = $"{Path.GetFileName(loaded.geometry.RootPath)} · {loaded.geometry.Groups.Count:N0} groups · {loaded.geometry.TriangleIndices.Count / 3:N0} triangles · {loaded.textures.Textures.Count:N0}/{loaded.geometry.Materials.Count:N0} textures" + (loaded.geometry.Findings.Count + loaded.textures.Findings.Count == 0 ? string.Empty : $" · {loaded.geometry.Findings.Count + loaded.textures.Findings.Count:N0} finding(s)");
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { _wmoStatus.Text = $"WMO preview unavailable: {exception.Message}"; DesktopCrashLogger.Log("Map WMO preview failed", exception); }
+    }
+
     private static string Summary(MapAssetInspection value) => $"{Path.GetFileName(value.Path)}\n{value.Kind} · MVER {value.Version:N0}\nGrid {value.GridWidth:N0}×{value.GridHeight:N0} · {value.PresentCells:N0}/{value.Cells.Count:N0} present\nWorld tile {(value.TileX is null ? "not encoded by filename" : $"{value.TileX:N0},{value.TileY:N0}")}\nHeight {value.MinimumHeight?.ToString("0.###") ?? "-"} .. {value.MaximumHeight?.ToString("0.###") ?? "-"}\nHeader flags 0x{value.HeaderFlags:X}\n{value.TexturePaths.Count:N0} textures · {value.ModelPaths.Count:N0} models · {value.WmoPaths.Count:N0} WMOs" + (value.Findings.Count == 0 ? "\nValidation: clean" : "\n" + string.Join("\n", value.Findings.Select(finding => "Review: " + finding)));
     private static string Describe(MapTileCell cell) => $"Grid {cell.X:N0},{cell.Y:N0}\nPresent: {cell.Present}\nFlags: 0x{cell.Flags:X}\nAsync ID: {cell.AsyncId:N0}\nArea ID: {cell.AreaId?.ToString("N0") ?? "-"}\nHoles: 0x{cell.Holes?.ToString("X") ?? "-"}\nHeight: {cell.MinimumHeight?.ToString("0.###") ?? "-"} .. {cell.MaximumHeight?.ToString("0.###") ?? "-"}";
     private static bool IsMap(string? path) => path is not null && File.Exists(path) && Path.GetExtension(path).ToLowerInvariant() is ".adt" or ".wdt" or ".wdl";
@@ -364,7 +388,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private static TextBlock Label(string text) => new() { Text = text, FontSize = 11, FontWeight = FontWeight.SemiBold, Foreground = Brush.Parse("#7F8A9F") };
     private static StackPanel Field(string label, Control control) => new() { Spacing = 3, Children = { Label(label), control } };
     private static Border Card(Control child) => new() { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Padding = new Thickness(9), Child = child };
-    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _operation = null; }
+    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _operation = null; _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = null; _wmoPreview.Dispose(); }
 }
 
 internal sealed class MapGridControl : Control

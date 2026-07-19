@@ -15,11 +15,14 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
     private static readonly EnumerationOptions RecursiveFiles = new() { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
     private readonly ListBox _assets = new();
     private readonly TextBlock _summary = Status("Drop M2/WMO files or folders here, or add them with the buttons above.");
-    private readonly TextBlock _previewStatus = Status("Select a compatible Wrath M2 for a live geometry preview.");
+    private readonly TextBlock _previewStatus = Status("Select a compatible Wrath M2 or version-17 WMO for a live geometry preview.");
     private readonly TextBox _details = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
     private readonly M2PreviewView _preview = new();
+    private readonly WmoPreviewView _wmoPreview = new() { IsVisible = false };
+    private readonly Grid _previewHost = new();
     private readonly List<AssetInspection> _inspections = [];
     private CancellationTokenSource? _operation;
+    private CancellationTokenSource? _previewOperation;
     private NativeConversionWorkspace? _workspace;
     private int _previewGeneration;
 
@@ -27,6 +30,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
 
     public NativeConversionWorkspaceView()
     {
+        _previewHost.Children.Add(_preview); _previewHost.Children.Add(_wmoPreview);
         _assets.ItemTemplate = new FuncDataTemplate<AssetInspection>((asset, _) =>
         {
             if (asset is null) return new TextBlock();
@@ -78,7 +82,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             RowDefinitions = new("*,Auto,*"), RowSpacing = 5,
             Children =
             {
-                new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = new Grid { RowDefinitions = new("*,Auto"), Children = { _preview, WithRow(new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _previewStatus }, 1) } } },
+                new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = new Grid { RowDefinitions = new("*,Auto"), Children = { _previewHost, WithRow(new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _previewStatus }, 1) } } },
                 WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 1),
                 WithRow(_details, 2)
             }
@@ -177,15 +181,27 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
 
     private async Task ShowSelectedAsync()
     {
-        var generation = ++_previewGeneration; _preview.ClearGeometry();
+        _previewOperation?.Cancel(); _previewOperation?.Dispose(); _previewOperation = new CancellationTokenSource(); var previewToken = _previewOperation.Token;
+        var generation = ++_previewGeneration; _preview.ClearGeometry(); _wmoPreview.ClearGeometry(); _preview.IsVisible = true; _wmoPreview.IsVisible = false;
         if (_assets.SelectedItem is not AssetInspection asset) { _details.Text = string.Empty; _previewStatus.Text = "Select an asset."; return; }
         var source = File.Exists(asset.Path) ? asset.Path : _workspace is not null ? NativeAssetConversionService.ResolveSnapshotPath(_workspace, asset) : asset.Path;
         _details.Text = $"{asset.Path}\n\nFormat: {asset.Format}\nCompatibility: {CompatibilityLabel(asset.Compatibility)}\nMagic: {asset.Magic}\nVersion: {asset.Version?.ToString() ?? "unknown"}\nBytes: {asset.Size:N0}\nSHA-256: {asset.Sha256}\nPreview source: {source}\n\nFINDINGS\n{Lines(asset.Findings)}\n\nCHUNKS\n{Lines(asset.Chunks.Select(chunk => $"{chunk.Id} · offset {chunk.Offset:N0} · {chunk.Size:N0} bytes"))}\n\nDEPENDENCIES\n{Lines(asset.Dependencies.Select(dependency => $"{dependency.Kind} · {(dependency.Exists ? "found" : "missing")} · {dependency.Path}"))}";
-        if (asset.Format != AssetFormat.M2 || asset.Compatibility != AssetCompatibility.AlreadyWotlk335)
+        if (asset.Format == AssetFormat.Wmo && asset.Version == 17)
         {
-            _previewStatus.Text = asset.Format == AssetFormat.Wmo ? "WMO inspection is available; a native WMO renderer is still pending." : "This model must be converted to Wrath MD20 version 264 before the Wrath preview can load it.";
+            _preview.IsVisible = false; _wmoPreview.IsVisible = true; _previewStatus.Text = "Loading bounded WMO root/group geometry and available materials…";
+            try
+            {
+                var groupFiles = WorkspaceGroupSnapshots(asset);
+                var loaded = await Task.Run(() => { var geometry = WmoPreviewGeometryService.Load(source, groupFiles, previewToken); var textures = WmoPreviewGeometryService.LoadTextures(geometry, cancellationToken: previewToken); return (geometry, textures); }, previewToken);
+                if (generation != _previewGeneration) return;
+                _wmoPreview.SetGeometry(loaded.geometry); _wmoPreview.SetDecodedTextures(loaded.textures.Textures);
+                _previewStatus.Text = $"{loaded.geometry.Groups.Count:N0} groups · {loaded.geometry.Vertices.Count:N0} vertices · {loaded.geometry.TriangleIndices.Count / 3:N0} triangles · {loaded.textures.Textures.Count:N0}/{loaded.geometry.Materials.Count:N0} textures" + (loaded.textures.Findings.Count == 0 ? string.Empty : $" · {loaded.textures.Findings.Count:N0} texture finding(s)");
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception exception) { if (generation == _previewGeneration) _previewStatus.Text = $"WMO preview unavailable: {exception.Message}"; }
             return;
         }
+        if (asset.Format != AssetFormat.M2 || asset.Compatibility != AssetCompatibility.AlreadyWotlk335) { _previewStatus.Text = "This asset must be converted to the verified Wrath layout before preview can load it."; return; }
         _previewStatus.Text = "Loading WotLK M2 + SKIN geometry…";
         try
         {
@@ -204,7 +220,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
 
     private void Clear()
     {
-        _operation?.Cancel(); _workspace = null; _inspections.Clear(); _assets.ItemsSource = null; _details.Text = string.Empty; _preview.ClearGeometry(); _summary.Text = "Asset list cleared."; _previewStatus.Text = "Select a compatible Wrath M2 for a live geometry preview.";
+        _operation?.Cancel(); _previewOperation?.Cancel(); _workspace = null; _inspections.Clear(); _assets.ItemsSource = null; _details.Text = string.Empty; _preview.ClearGeometry(); _wmoPreview.ClearGeometry(); _summary.Text = "Asset list cleared."; _previewStatus.Text = "Select a compatible Wrath M2 or version-17 WMO for a live geometry preview.";
     }
 
     private void RefreshList() { _assets.ItemsSource = null; _assets.ItemsSource = _inspections.ToArray(); }
@@ -223,6 +239,18 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
     }
     private static bool IsAsset(string path) => Path.GetExtension(path).Equals(".m2", StringComparison.OrdinalIgnoreCase) || Path.GetExtension(path).Equals(".wmo", StringComparison.OrdinalIgnoreCase);
     private static string Lines(IEnumerable<string> values) { var array = values.ToArray(); return array.Length == 0 ? "—" : string.Join("\n", array.Select(value => $"• {value}")); }
+    private IReadOnlyDictionary<int, string>? WorkspaceGroupSnapshots(AssetInspection asset)
+    {
+        if (File.Exists(asset.Path) || _workspace is null) return null;
+        var result = new Dictionary<int, string>();
+        foreach (var dependency in asset.Dependencies.Where(value => value.Exists && value.Kind.Equals("WMO group", StringComparison.OrdinalIgnoreCase)))
+        {
+            var name = Path.GetFileNameWithoutExtension(dependency.Path); var marker = name.LastIndexOf('_');
+            if (marker < 0 || !int.TryParse(name[(marker + 1)..], out var index)) continue;
+            result[index] = NativeAssetConversionService.ResolveDependencySnapshotPath(_workspace, asset, dependency);
+        }
+        return result;
+    }
     private static string CompatibilityLabel(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "Wrath 3.3.5 ready", AssetCompatibility.RequiresNativeConversion => "native conversion required", AssetCompatibility.Unsupported => "unsupported layout", _ => "invalid asset" };
     private static string CompatibilityColor(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "#79C793", AssetCompatibility.RequiresNativeConversion => "#E5B768", _ => "#E27B7B" };
     private static Button Accent(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
@@ -232,6 +260,6 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
 
     public void Dispose()
     {
-        _operation?.Cancel(); _operation?.Dispose(); _preview.Dispose();
+        _operation?.Cancel(); _operation?.Dispose(); _previewOperation?.Cancel(); _previewOperation?.Dispose(); _preview.Dispose(); _wmoPreview.Dispose();
     }
 }

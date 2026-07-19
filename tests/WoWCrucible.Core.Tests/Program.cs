@@ -576,6 +576,33 @@ using (var stream = File.Create(wmoFixture)) using (var writer = new BinaryWrite
 var wmoInspection = NativeAssetConversionService.Inspect(wmoFixture);
 if (wmoInspection.Version != 17 || wmoInspection.Chunks.Single().Id != "MVER")
     throw new InvalidOperationException("Native WMO inspection did not normalize reversed on-disk chunk identifiers.");
+var previewWmo = Path.Combine(assetFixture, "preview-building.wmo"); var previewWmoGroup = Path.Combine(assetFixture, "preview-building_000.wmo");
+var previewMohd = new byte[64]; BinaryPrimitives.WriteUInt32LittleEndian(previewMohd.AsSpan(4, 4), 1);
+var previewMotx = System.Text.Encoding.UTF8.GetBytes("Textures\\Fixture\\Stone.blp\0"); var previewMomt = new byte[64]; BinaryPrimitives.WriteUInt32LittleEndian(previewMomt.AsSpan(12, 4), 0);
+File.WriteAllBytes(previewWmo, GraphChunks(("MVER", BitConverter.GetBytes((uint)17)), ("MOHD", previewMohd), ("MOTX", previewMotx), ("MOMT", previewMomt)));
+var previewMopy = new byte[] { 0x20, 0 }; var previewMovi = new byte[6]; BinaryPrimitives.WriteUInt16LittleEndian(previewMovi.AsSpan(0, 2), 0); BinaryPrimitives.WriteUInt16LittleEndian(previewMovi.AsSpan(2, 2), 1); BinaryPrimitives.WriteUInt16LittleEndian(previewMovi.AsSpan(4, 2), 2);
+var previewMovt = new byte[36]; var previewMonr = new byte[36]; var previewMotv = new byte[24];
+var wmoFixtureVertices = new[] { new Vector3(0,0,0), new Vector3(2,0,0), new Vector3(0,0,3) }; var wmoFixtureUvs = new[] { Vector2.Zero, Vector2.UnitX, Vector2.UnitY };
+for (var index = 0; index < 3; index++)
+{
+    BinaryPrimitives.WriteSingleLittleEndian(previewMovt.AsSpan(index * 12, 4), wmoFixtureVertices[index].X); BinaryPrimitives.WriteSingleLittleEndian(previewMovt.AsSpan(index * 12 + 4, 4), wmoFixtureVertices[index].Y); BinaryPrimitives.WriteSingleLittleEndian(previewMovt.AsSpan(index * 12 + 8, 4), wmoFixtureVertices[index].Z);
+    BinaryPrimitives.WriteSingleLittleEndian(previewMonr.AsSpan(index * 12 + 4, 4), 1); BinaryPrimitives.WriteSingleLittleEndian(previewMotv.AsSpan(index * 8, 4), wmoFixtureUvs[index].X); BinaryPrimitives.WriteSingleLittleEndian(previewMotv.AsSpan(index * 8 + 4, 4), wmoFixtureUvs[index].Y);
+}
+var previewMogp = new byte[68 + GraphChunks(("MOPY", previewMopy), ("MOVI", previewMovi), ("MOVT", previewMovt), ("MONR", previewMonr), ("MOTV", previewMotv)).Length];
+GraphChunks(("MOPY", previewMopy), ("MOVI", previewMovi), ("MOVT", previewMovt), ("MONR", previewMonr), ("MOTV", previewMotv)).CopyTo(previewMogp, 68);
+File.WriteAllBytes(previewWmoGroup, GraphChunks(("MVER", BitConverter.GetBytes((uint)17)), ("MOGP", previewMogp)));
+var wmoGeometry = WmoPreviewGeometryService.Load(previewWmo); var groupSelectedGeometry = WmoPreviewGeometryService.Load(previewWmoGroup);
+if (wmoGeometry.Version != 17 || wmoGeometry.Groups.Count != 1 || wmoGeometry.Vertices.Count != 3 || wmoGeometry.TriangleIndices.Count != 3 || wmoGeometry.Batches.Count != 1 ||
+    wmoGeometry.Materials.Single().Texture1 != "Textures\\Fixture\\Stone.blp" || wmoGeometry.Minimum != Vector3.Zero || wmoGeometry.Maximum != new Vector3(2,0,3) || groupSelectedGeometry.RootPath != Path.GetFullPath(previewWmo))
+    throw new InvalidOperationException("Native WMO preview did not decode root materials, group geometry, bounds, or group-to-root selection.");
+var wmoWorkspacePath = Path.Combine(Path.GetTempPath(), $"crucible-wmo-workspace-{Guid.NewGuid():N}"); var wmoWorkspace = NativeAssetConversionService.CreateWorkspace([previewWmo], wmoWorkspacePath); var wmoAsset = wmoWorkspace.Assets.Single(); var wmoDependency = wmoAsset.Dependencies.Single();
+var snapshotWmoGeometry = WmoPreviewGeometryService.Load(NativeAssetConversionService.ResolveSnapshotPath(wmoWorkspace, wmoAsset), new Dictionary<int, string> { [0] = NativeAssetConversionService.ResolveDependencySnapshotPath(wmoWorkspace, wmoAsset, wmoDependency) });
+if (snapshotWmoGeometry.TriangleIndices.Count != 3) throw new InvalidOperationException("Portable native-conversion WMO snapshots could not resolve namespaced group geometry."); Directory.Delete(wmoWorkspacePath, true);
+var corruptGroup = File.ReadAllBytes(previewWmoGroup); var moviSignature = System.Text.Encoding.ASCII.GetBytes("IVOM"); var moviOffset = corruptGroup.AsSpan().IndexOf(moviSignature); BinaryPrimitives.WriteUInt16LittleEndian(corruptGroup.AsSpan(moviOffset + 8, 2), 9); File.WriteAllBytes(Path.Combine(assetFixture, "preview-building_001.wmo"), corruptGroup);
+BinaryPrimitives.WriteUInt32LittleEndian(previewMohd.AsSpan(4, 4), 2); File.WriteAllBytes(previewWmo, GraphChunks(("MVER", BitConverter.GetBytes((uint)17)), ("MOHD", previewMohd), ("MOTX", previewMotx), ("MOMT", previewMomt)));
+var partialWmoGeometry = WmoPreviewGeometryService.Load(previewWmo);
+if (partialWmoGeometry.Groups.Count != 1 || partialWmoGeometry.Vertices.Count != 3 || partialWmoGeometry.TriangleIndices.Count != 3 || !partialWmoGeometry.Findings.Any(value => value.Contains("beyond", StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("A rejected WMO group contaminated the geometry retained from an earlier valid group.");
 var conversionWorkspacePath = Path.Combine(Path.GetTempPath(), $"crucible-native-workspace-{Guid.NewGuid():N}");
 var nativeWorkspace = NativeAssetConversionService.CreateWorkspace([wotlkModel, modernModel], conversionWorkspacePath);
 if (nativeWorkspace.FormatVersion != 2 || nativeWorkspace.CompatibleAssets != 1 || nativeWorkspace.ConversionRequired != 1 || !File.Exists(Path.Combine(conversionWorkspacePath, "conversion-report.json")) ||

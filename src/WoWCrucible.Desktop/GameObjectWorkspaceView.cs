@@ -30,23 +30,24 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
     private readonly TextBox _spawnScript = new(); private readonly TextBox _comment = new();
     private readonly StackPanel _lootRows = new() { Spacing = 7 }; private readonly TextBox _startsQuests = new() { PlaceholderText = "Quest IDs separated by commas, spaces, or new lines" }; private readonly TextBox _endsQuests = new() { PlaceholderText = "Quest IDs separated by commas, spaces, or new lines" };
     private readonly TextBlock _summary = new() { TextWrapping = TextWrapping.Wrap }; private readonly TextBox _sql = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
-    private readonly M2PreviewView _model = new(); private readonly TextBlock _modelStatus = Status("Load an extracted WotLK M2/SKIN when this display uses an M2. WMO geometry support is a separate renderer stage.");
+    private readonly M2PreviewView _model = new(); private readonly WmoPreviewView _wmo = new() { IsVisible = false }; private readonly Grid _modelHost = new(); private readonly TextBlock _modelStatus = Status("Load an extracted WotLK M2/SKIN or version-17 root WMO for this display.");
     private readonly CheckBox _showAttachments = new() { Content = "Show attachment points" }; private readonly ComboBox _attachmentPicker = new() { PlaceholderText = "No attachment points loaded" };
     private readonly TextBlock _status = Status("Offline current-core gameobject schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _commit = AccentButton("Insert into connected world database"); private WorldContentWritePlan? _pendingPlan; private uint? _loadedEntry;
+    private CancellationTokenSource? _modelOperation;
 
     public event EventHandler? BackRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public GameObjectWorkspaceView(DesktopWorkspaceSession session)
     {
-        _session = session; _session.Changed += SessionChanged; _type.SelectedIndex = 3; HookEvents(); RefreshDataLabels();
+        _session = session; _session.Changed += SessionChanged; _type.SelectedIndex = 3; HookEvents(); RefreshDataLabels(); _modelHost.Children.Add(_model); _modelHost.Children.Add(_wmo);
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "GAMEOBJECTS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1) } };
         var editor = new TabControl { Items = { new TabItem { Header = "Template", Content = new ScrollViewer { Content = TemplateForm() } }, new TabItem { Header = "Type-aware Data0–23", Content = DataPage() }, new TabItem { Header = "World spawn", Content = new ScrollViewer { Content = SpawnForm() } }, new TabItem { Header = "Loot & quests", Content = LootQuestPage() } } };
-        var loadModel = new Button { Content = "Load extracted M2…" }; loadModel.Click += async (_, _) => await LoadModelAsync(); var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _attachmentPicker.ItemsSource = null; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
+        var loadModel = new Button { Content = "Load extracted M2 / WMO…" }; loadModel.Click += async (_, _) => await LoadModelAsync(); var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _modelOperation?.Cancel(); _model.ClearGeometry(); _wmo.ClearGeometry(); _attachmentPicker.ItemsSource = null; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
         _showAttachments.Click += (_, _) => ApplyAttachmentOverlay(); _attachmentPicker.SelectionChanged += (_, _) => ApplyAttachmentOverlay();
-        var modelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { loadModel, clearModel, _showAttachments, _attachmentPicker } }, WithRow(new Border { Background = Brush.Parse("#090D14"), Child = _model }, 1), WithRow(_modelStatus, 2) } };
+        var modelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { loadModel, clearModel, _showAttachments, _attachmentPicker } }, WithRow(new Border { Background = Brush.Parse("#090D14"), Child = _modelHost }, 1), WithRow(_modelStatus, 2) } };
         var preview = new TabControl { Items = { new TabItem { Header = "Decoded summary", Content = new ScrollViewer { Content = new Border { Padding = new Thickness(16), BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _summary } } }, new TabItem { Header = "3D model", Content = modelPage }, new TabItem { Header = "SQL change plan", Content = _sql } } };
         var workspace = new Grid { ColumnDefinitions = new("3*,Auto,2*"), Children = { editor, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(preview, 2) } };
         var export = new Button { Content = "Export SQL…" }; export.Click += async (_, _) => await ExportAsync(); var exportDraft = new Button { Content = "Export portable draft…" }; exportDraft.Click += async (_, _) => await ExportDraftAsync(); _commit.Click += (_, _) => PrepareCommit();
@@ -160,8 +161,22 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
 
     private async Task LoadModelAsync()
     {
-        try { var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose an extracted WotLK gameobject M2", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WotLK M2") { Patterns = ["*.m2"] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _modelStatus.Text = "Loading model…"; var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); _model.SetGeometry(geometry); RefreshAttachmentPoints(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} visible geosets · {geometry.TriangleIndices.Count / 3:N0} triangles · {geometry.Attachments.Count:N0} attachment points"; }
-        catch (Exception exception) { _modelStatus.Text = $"M2 preview failed: {exception.Message}"; }
+        try
+        {
+            var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose an extracted WotLK gameobject M2 or root WMO", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WotLK models") { Patterns = ["*.m2", "*.wmo"] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _modelOperation?.Cancel(); _modelOperation?.Dispose(); _modelOperation = new CancellationTokenSource(); var token = _modelOperation.Token; _modelStatus.Text = "Loading model geometry…";
+            if (Path.GetExtension(path).Equals(".wmo", StringComparison.OrdinalIgnoreCase))
+            {
+                var loaded = await Task.Run(() => { var geometry = WmoPreviewGeometryService.Load(path, cancellationToken: token); var textures = WmoPreviewGeometryService.LoadTextures(geometry, cancellationToken: token); return (geometry, textures); }, token); token.ThrowIfCancellationRequested();
+                _model.ClearGeometry(); _model.IsVisible = false; _wmo.IsVisible = true; _wmo.SetGeometry(loaded.geometry); _wmo.SetDecodedTextures(loaded.textures.Textures); _attachmentPicker.ItemsSource = null; _showAttachments.IsChecked = false; _showAttachments.IsEnabled = false; _attachmentPicker.IsEnabled = false;
+                _modelStatus.Text = $"{Path.GetFileName(loaded.geometry.RootPath)} · {loaded.geometry.Groups.Count:N0} groups · {loaded.geometry.TriangleIndices.Count / 3:N0} triangles · {loaded.textures.Textures.Count:N0}/{loaded.geometry.Materials.Count:N0} textures";
+            }
+            else
+            {
+                var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); token.ThrowIfCancellationRequested(); _wmo.ClearGeometry(); _wmo.IsVisible = false; _model.IsVisible = true; _model.SetGeometry(geometry); _showAttachments.IsEnabled = true; RefreshAttachmentPoints(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} visible geosets · {geometry.TriangleIndices.Count / 3:N0} triangles · {geometry.Attachments.Count:N0} attachment points";
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { _modelStatus.Text = $"Model preview failed: {exception.Message}"; }
     }
 
     private void RefreshAttachmentPoints(M2PreviewGeometry geometry)
@@ -174,7 +189,7 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
 
     private void SessionChanged(object? sender, EventArgs e) { RefreshSchemaStatus(); RefreshPreview(); }
     private void RefreshSchemaStatus() { var capabilities = _session.DatabaseCapabilities; _status.Text = capabilities?.FindTable("gameobject_template") is { } table ? $"Live schema ready · {capabilities.Database}.gameobject_template · {table.Columns.Count:N0} columns" : "Offline current-core gameobject schema ready · connect Server & SQL for live deployment."; }
-    public void Dispose() => _session.Changed -= SessionChanged;
+    public void Dispose() { _session.Changed -= SessionChanged; _modelOperation?.Cancel(); _modelOperation?.Dispose(); _model.Dispose(); _wmo.Dispose(); }
     private GameObjectTypeDefinition SelectedType() => _type.SelectedItem as GameObjectTypeDefinition ?? GameObjectTypeCatalog.Find(0);
     private void SetType(int id) => _type.SelectedItem = GameObjectTypeCatalog.All.FirstOrDefault(type => type.Id == id) ?? GameObjectTypeCatalog.All[0];
     private IEnumerable<NumericUpDown> AllNumbers() => new[] { _entry, _displayId, _size, _guid, _map, _zone, _area, _spawnMask, _phaseMask, _x, _y, _z, _orientation, _rotation0, _rotation1, _rotation2, _rotation3, _respawn, _animProgress, _state }.Concat(_data);

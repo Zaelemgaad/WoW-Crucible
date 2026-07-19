@@ -173,9 +173,7 @@ public static class NativeAssetConversionService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var hash = dependency.Sha256 ?? throw new InvalidDataException($"Dependency has no recorded hash: {dependency.Path}");
-                var dependencySnapshot = workspace.FormatVersion == 1
-                    ? Path.Combine(Path.GetDirectoryName(snapshot)!, Path.GetFileName(dependency.Path))
-                    : Path.Combine(Path.GetFullPath(workspace.RootPath), "source", HashPrefix(asset.Sha256), "dependencies", HashPrefix(hash), Path.GetFileName(dependency.Path));
+                var dependencySnapshot = ResolveDependencySnapshotPath(workspace, asset, dependency);
                 VerifyHash(dependencySnapshot, hash, "dependency snapshot");
             }
         }
@@ -186,6 +184,15 @@ public static class NativeAssetConversionService
         workspace.FormatVersion == 1
             ? Path.Combine(Path.GetFullPath(workspace.RootPath), "source", HashPrefix(asset.Sha256), Path.GetFileName(asset.Path))
             : Path.Combine(Path.GetFullPath(workspace.RootPath), "source", HashPrefix(asset.Sha256), "asset", Path.GetFileName(asset.Path));
+
+    public static string ResolveDependencySnapshotPath(NativeConversionWorkspace workspace, AssetInspection asset, AssetDependency dependency)
+    {
+        if (!dependency.Exists || string.IsNullOrWhiteSpace(dependency.Sha256)) throw new InvalidDataException($"Dependency has no recorded source hash: {dependency.Path}");
+        var assetSnapshot = ResolveSnapshotPath(workspace, asset);
+        return workspace.FormatVersion == 1
+            ? Path.Combine(Path.GetDirectoryName(assetSnapshot)!, Path.GetFileName(dependency.Path))
+            : Path.Combine(Path.GetFullPath(workspace.RootPath), "source", HashPrefix(asset.Sha256), "dependencies", HashPrefix(dependency.Sha256), Path.GetFileName(dependency.Path));
+    }
 
     private static void CopyVerified(string source, string destination, string expectedHash)
     {
