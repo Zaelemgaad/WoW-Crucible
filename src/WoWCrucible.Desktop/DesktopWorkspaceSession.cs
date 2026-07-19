@@ -56,6 +56,24 @@ internal sealed class DesktopWorkspaceSession
         finally { Changed?.Invoke(this, EventArgs.Empty); }
     }
 
+    public async Task RefreshDatabaseAsync(CancellationToken cancellationToken = default)
+    {
+        if (DatabaseProfile is null) throw new InvalidOperationException("No database profile is connected.");
+        LastError = null;
+        try
+        {
+            DatabaseCapabilities = await new DatabaseCapabilityService().InspectAsync(DatabaseProfile, cancellationToken);
+            DesktopCrashLogger.Debug("SQL", "database-capabilities-refreshed", ("database", DatabaseCapabilities.Database), ("tables", DatabaseCapabilities.Tables.Count));
+        }
+        catch (Exception exception)
+        {
+            LastError = exception.Message;
+            DesktopCrashLogger.Log($"Database capability refresh failed: {DatabaseProfile.Database}", exception);
+            throw;
+        }
+        finally { Changed?.Invoke(this, EventArgs.Empty); }
+    }
+
     public DatabaseConnectionProfile SuggestedProfile(string password = "") => DatabaseProfile is { } active
         ? active with { Password = string.IsNullOrEmpty(password) ? active.Password : password }
         : new(Settings.DatabaseHost, Settings.DatabasePort, Settings.DatabaseUser, password, Settings.WorldDatabase,

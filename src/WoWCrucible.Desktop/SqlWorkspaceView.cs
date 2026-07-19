@@ -51,6 +51,14 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _indexColumns = new() { PlaceholderText = "column1, column2" };
     private readonly CheckBox _indexUnique = new() { Content = "UNIQUE" };
     private readonly TextBlock _administrationStatus = Status("Select a table or refresh a server-administration view.");
+    private readonly ListBox _structureColumns = new();
+    private readonly TextBox _structureColumnName = new() { PlaceholderText = "Column name" };
+    private readonly TextBox _structureDefinition = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, PlaceholderText = "Complete definition after the name, for example: int unsigned NOT NULL DEFAULT '0'" };
+    private readonly ComboBox _structurePlacement = new() { ItemsSource = new[] { "Keep current / append new", "First column", "After column" }, SelectedIndex = 0 };
+    private readonly ComboBox _structureAfter = new() { PlaceholderText = "Existing column" };
+    private readonly TextBox _structureTableName = new() { PlaceholderText = "New table name" };
+    private readonly TextBlock _structureStatus = Status("Load the selected table to edit its exact server-normalized column definitions.");
+    private SqlTableDesignSnapshot? _structureSnapshot;
     private readonly ListBox _processes = new();
     private readonly TextBox _processDetail = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
     private readonly ListBox _databaseUsers = new();
@@ -145,6 +153,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _databaseObjectSearch.TextChanged += (_, _) => FilterDatabaseObjects();
         _databaseObjectType.SelectionChanged += (_, _) => FilterDatabaseObjects();
         _databaseObjects.SelectionChanged += async (_, _) => await LoadSelectedDatabaseObjectAsync();
+        _structureColumns.SelectionChanged += (_, _) => SelectStructureColumn();
         _favoriteSearch.TextChanged += (_, _) => ApplyFavoriteFilter();
         _favoriteState.SelectionChanged += (_, _) => ApplyFavoriteFilter();
         _favorites.SelectionChanged += (_, _) => SelectFavorite();
@@ -263,7 +272,8 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _processes.ItemTemplate = new FuncDataTemplate<SqlProcessInfo>((process, _) => new TextBlock { Text = process?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
         _databaseUsers.ItemTemplate = new FuncDataTemplate<SqlUserAccountInfo>((account, _) => new TextBlock { Text = account?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
         _databaseObjects.ItemTemplate = new FuncDataTemplate<SqlDatabaseObjectInfo>((item, _) => item is null ? new TextBlock() : new StackPanel { Margin = new Thickness(4, 3), Children = { new TextBlock { Text = item.Display, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap }, new TextBlock { Text = $"Definer {item.Definer}{(item.Modified is null ? string.Empty : $" · modified {item.Modified:yyyy-MM-dd HH:mm:ss}")}", Foreground = Brush.Parse("#8995A9"), TextWrapping = TextWrapping.Wrap } } });
-        var pages = new TabControl { Items = { new TabItem { Header = "Table DDL & indexes", Content = TableAdministrationPage() }, new TabItem { Header = "Database objects", Content = DatabaseObjectsPage() }, new TabItem { Header = "Processes", Content = ProcessAdministrationPage() }, new TabItem { Header = "Database users", Content = UserAdministrationPage() }, new TabItem { Header = "Visual joins", Content = JoinDesignerPage() } } };
+        _structureColumns.ItemTemplate = new FuncDataTemplate<SqlTableColumnDefinition>((column, _) => new TextBlock { Text = column?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
+        var pages = new TabControl { Items = { new TabItem { Header = "Table DDL & indexes", Content = TableAdministrationPage() }, new TabItem { Header = "Columns & table changes", Content = TableDesignerPage() }, new TabItem { Header = "Database objects", Content = DatabaseObjectsPage() }, new TabItem { Header = "Processes", Content = ProcessAdministrationPage() }, new TabItem { Header = "Database users", Content = UserAdministrationPage() }, new TabItem { Header = "Visual joins", Content = JoinDesignerPage() } } };
         return new Grid { RowDefinitions = new("*,Auto"), RowSpacing = 7, Children = { pages, WithRow(_administrationStatus, 1) } };
     }
 
@@ -276,6 +286,31 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var ddl = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Exact SHOW CREATE TABLE", FontWeight = FontWeight.SemiBold }, WithRow(_tableDdl, 1) } };
         var indexes = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Live indexes", FontWeight = FontWeight.SemiBold }, WithRow(_indexes, 1) } };
         return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { controls, WithRow(new Grid { ColumnDefinitions = new("2*,Auto,*"), ColumnSpacing = 7, Children = { ddl, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(indexes, 2) } }, 1) } };
+    }
+
+    private Control TableDesignerPage()
+    {
+        var load = AccentButton("Load selected table structure"); load.Click += async (_, _) => await LoadTableDesignerAsync(load);
+        var fresh = new Button { Content = "New column draft" }; fresh.Click += (_, _) => ResetStructureColumnDraft();
+        var add = new Button { Content = "Review ADD column" }; add.Click += (_, _) => PrepareTableDesign(SqlTableDesignOperation.AddColumn);
+        var modify = new Button { Content = "Review MODIFY selected" }; modify.Click += (_, _) => PrepareTableDesign(SqlTableDesignOperation.ModifyColumn);
+        var rename = new Button { Content = "Review RENAME selected" }; rename.Click += (_, _) => PrepareTableDesign(SqlTableDesignOperation.RenameColumn);
+        var drop = new Button { Content = "Review DROP selected" }; drop.Click += (_, _) => PrepareTableDesign(SqlTableDesignOperation.DropColumn);
+        var cloneTable = new Button { Content = "Review CLONE structure" }; cloneTable.Click += (_, _) => PrepareTableDesign(SqlTableDesignOperation.CloneStructure);
+        var renameTable = new Button { Content = "Review RENAME table" }; renameTable.Click += (_, _) => PrepareTableDesign(SqlTableDesignOperation.RenameTable);
+        var top = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = new WrapPanel { Children = { load, fresh, add, modify, rename, drop } } };
+        var placement = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 7, Children = { new StackPanel { Children = { new TextBlock { Text = "Column placement", Foreground = Brush.Parse("#9AA5B7") }, _structurePlacement } }, WithColumn(new StackPanel { Children = { new TextBlock { Text = "After which column", Foreground = Brush.Parse("#9AA5B7") }, _structureAfter } }, 1) } };
+        var editor = new StackPanel { Spacing = 7, Children =
+        {
+            new TextBlock { Text = "Exact column editor", FontWeight = FontWeight.SemiBold },
+            _structureColumnName,
+            _structureDefinition,
+            placement,
+            new TextBlock { Text = "The definition is the complete clause after the quoted column name. Crucible preserves server-normalized definitions when loading a column and blocks statement injection, but MySQL decides whether existing values can be converted.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") },
+            new StackPanel { Spacing = 5, Children = { new TextBlock { Text = "Table-level changes", FontWeight = FontWeight.SemiBold }, _structureTableName, new WrapPanel { Children = { cloneTable, renameTable } } } }
+        } };
+        var body = new Grid { ColumnDefinitions = new("*,Auto,2*"), ColumnSpacing = 7, Children = { _structureColumns, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(new ScrollViewer { Content = editor }, 2) } };
+        return new Grid { RowDefinitions = new("Auto,*,Auto"), RowSpacing = 7, Children = { top, WithRow(body, 1), WithRow(_structureStatus, 2) } };
     }
 
     private Control DatabaseObjectsPage()
@@ -579,6 +614,97 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         }
         catch (OperationCanceledException) { _administrationStatus.Text = "Table administration load cancelled."; }
         catch (Exception exception) { Fail("Table administration load failed", exception); _administrationStatus.Text = exception.Message; }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private async Task LoadTableDesignerAsync(Button button, string? tableName = null)
+    {
+        if (_profile is null) { _structureStatus.Text = "Connect Server & SQL first."; return; }
+        tableName ??= (_tables.SelectedItem as TableChoice)?.Table.Name;
+        if (string.IsNullOrWhiteSpace(tableName)) { _structureStatus.Text = "Select a table in Tables & rows first."; return; }
+        try
+        {
+            button.IsEnabled = false; Begin($"Reading exact structure for {tableName}…");
+            _structureSnapshot = await new SqlTableDesignerService().InspectAsync(_profile, tableName, _operation!.Token);
+            _structureColumns.ItemsSource = _structureSnapshot.Columns;
+            _structureAfter.ItemsSource = _structureSnapshot.Columns.Select(column => column.Name).ToArray();
+            _structureColumns.SelectedIndex = _structureSnapshot.Columns.Count > 0 ? 0 : -1;
+            _structureTableName.Text = $"{_structureSnapshot.Table}_copy";
+            _structureStatus.Text = $"{_structureSnapshot.Database}.{_structureSnapshot.Table} · {_structureSnapshot.Columns.Count:N0} exact column definition(s) · {_structureSnapshot.Indexes.Count:N0} index(es) · {_structureSnapshot.Relations.Count:N0} declared relationship(s).";
+        }
+        catch (OperationCanceledException) { _structureStatus.Text = "Table structure load cancelled."; }
+        catch (Exception exception) { Fail("Table structure load failed", exception); _structureStatus.Text = exception.Message; }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private void SelectStructureColumn()
+    {
+        if (_structureColumns.SelectedItem is not SqlTableColumnDefinition column) return;
+        _structureColumnName.Text = column.Name;
+        _structureDefinition.Text = column.Definition;
+        _structureStatus.Text = $"Loaded exact server definition for {column.Name}. MODIFY keeps the name; RENAME uses the edited name and this complete definition.";
+    }
+
+    private void ResetStructureColumnDraft()
+    {
+        _structureColumns.SelectedItem = null;
+        _structureColumnName.Text = string.Empty;
+        _structureDefinition.Text = "int unsigned NOT NULL DEFAULT '0'";
+        _structurePlacement.SelectedIndex = 0;
+        _structureAfter.SelectedItem = null;
+        _structureStatus.Text = "New column draft. Choose a name, complete definition, and placement, then review ADD column.";
+    }
+
+    private void PrepareTableDesign(SqlTableDesignOperation operation)
+    {
+        if (_profile is null || _structureSnapshot is null) { _structureStatus.Text = "Load the selected table structure first."; return; }
+        try
+        {
+            var selected = _structureColumns.SelectedItem as SqlTableColumnDefinition;
+            var placement = _structurePlacement.SelectedIndex switch { 1 => SqlColumnPlacement.First, 2 => SqlColumnPlacement.After, _ => SqlColumnPlacement.End };
+            SqlTableDesignRequest request = operation switch
+            {
+                SqlTableDesignOperation.AddColumn => new(operation, NewName: _structureColumnName.Text, Definition: _structureDefinition.Text, Placement: placement, AfterColumn: _structureAfter.SelectedItem as string),
+                SqlTableDesignOperation.ModifyColumn => new(operation, ColumnName: selected?.Name, Definition: _structureDefinition.Text, Placement: placement, AfterColumn: _structureAfter.SelectedItem as string),
+                SqlTableDesignOperation.RenameColumn => new(operation, ColumnName: selected?.Name, NewName: _structureColumnName.Text, Definition: _structureDefinition.Text, Placement: placement, AfterColumn: _structureAfter.SelectedItem as string),
+                SqlTableDesignOperation.DropColumn => new(operation, ColumnName: selected?.Name),
+                SqlTableDesignOperation.CloneStructure => new(operation, NewName: _structureTableName.Text),
+                SqlTableDesignOperation.RenameTable => new(operation, NewName: _structureTableName.Text),
+                _ => throw new ArgumentOutOfRangeException(nameof(operation))
+            };
+            var plan = new SqlTableDesignerService().Prepare(_profile, _structureSnapshot, request);
+            var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;
+            var confirm = operation is SqlTableDesignOperation.DropColumn or SqlTableDesignOperation.RenameTable ? new Button { Content = $"Execute {operation}" } : AccentButton($"Execute {operation}");
+            confirm.Click += async (_, _) => await ApplyTableDesignAsync(confirm, plan);
+            var warning = string.Join("\n", plan.Warnings.Select(value => $"• {value}"));
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"{(plan.Destructive ? "DESTRUCTIVE OR DATA-TRANSFORMING DDL" : "SCHEMA-CHANGING DDL")}\n{plan.Sql}\n\n{warning}\n\nThe plan is bound to the current SHOW CREATE TABLE hash. A changed table is refused. Successful apply writes an exact before/after receipt under {CruciblePaths.SqlSchemaBackupDirectory}.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } };
+            _confirmation.IsVisible = true;
+            _structureStatus.Text = $"Prepared {operation}; review the exact DDL and every warning below SQL Studio.";
+        }
+        catch (Exception exception) { _structureStatus.Text = $"Cannot prepare table change: {exception.Message}"; }
+    }
+
+    private async Task ApplyTableDesignAsync(Button button, SqlTableDesignPlan plan)
+    {
+        if (_profile is null) return;
+        try
+        {
+            button.IsEnabled = false; Begin($"Applying stale-bound {plan.Request.Operation}…");
+            var result = await new SqlTableDesignerService().ApplyAsync(_profile, plan, _operation!.Token);
+            _confirmation.IsVisible = false;
+            await _session.RefreshDatabaseAsync(CancellationToken.None);
+            _profile = _session.DatabaseProfile; _capabilities = _session.DatabaseCapabilities;
+            PopulateTables();
+            _structureStatus.Text = $"Applied {plan.Request.Operation}. Exact before/after receipt: {result.ReceiptPath}";
+            _status.Text = _structureStatus.Text;
+            if (_profile is not null) _structureSnapshot = await new SqlTableDesignerService().InspectAsync(_profile, plan.ResultTable, CancellationToken.None);
+            _structureColumns.ItemsSource = _structureSnapshot?.Columns;
+            _structureAfter.ItemsSource = _structureSnapshot?.Columns.Select(column => column.Name).ToArray();
+            _structureColumns.SelectedIndex = _structureSnapshot?.Columns.Count > 0 ? 0 : -1;
+            _tables.SelectedItem = (_tables.ItemsSource as IEnumerable<TableChoice>)?.FirstOrDefault(choice => choice.Table.Name.Equals(plan.ResultTable, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (OperationCanceledException) { _structureStatus.Text = "Table change cancelled before completion or refresh."; }
+        catch (Exception exception) { Fail("Table design apply failed", exception); _structureStatus.Text = exception.Message; }
         finally { button.IsEnabled = true; End(); }
     }
 

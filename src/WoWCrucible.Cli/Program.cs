@@ -871,7 +871,7 @@ static int ServerHelp(int code = 0)
 
 static async Task<int> Database(string[] args, CancellationToken cancellationToken)
 {
-    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db pet-preview <host> <port> <user> <database> <creature-entry> --dbc=folder [--schema=definitions.xml] [--library=processed-assets] [--format=text|json]\n  wowcrucible db pet-graph <host> <port> <user> <database> <creature-entry> --dbc=folder --schema=definitions.xml [--format=text|json]"); return DatabaseHelp(); }
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db pet-preview <host> <port> <user> <database> <creature-entry> --dbc=folder [--schema=definitions.xml] [--library=processed-assets] [--format=text|json]\n  wowcrucible db pet-graph <host> <port> <user> <database> <creature-entry> --dbc=folder --schema=definitions.xml [--format=text|json]\n  wowcrucible db table-design <host> <port> <user> <database> <table> <add|modify|rename|drop|clone|rename-table> [column] [--name=value] [--definition=clause] [--first|--after=column] [--apply] [--format=text|json]"); return DatabaseHelp(); }
     if (args[0].Equals("draft-template", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 3) return Fail("db draft-template requires a supported authoring domain and an output JSON path."); var options = args[3..]; var overwrite = options.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)); var unknown = options.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown draft-template option: {unknown[0]}");
@@ -978,6 +978,38 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
     if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
     if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
     var profile = new DatabaseConnectionProfile(host, port, user, password, database, ssl);
+    if (operation.Equals("table-design", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 7 || args[5].StartsWith("--", StringComparison.Ordinal) || args[6].StartsWith("--", StringComparison.Ordinal)) return Fail("db table-design requires <table> <operation> after the database name.");
+        var tableName = args[5]; var action = args[6].ToLowerInvariant();
+        var needsColumn = action is "add" or "modify" or "rename" or "drop";
+        var columnName = needsColumn && args.Length > 7 && !args[7].StartsWith("--", StringComparison.Ordinal) ? args[7] : null;
+        if (needsColumn && string.IsNullOrWhiteSpace(columnName)) return Fail($"db table-design {action} requires a column name.");
+        var optionStart = columnName is null ? 7 : 8; var options = args[optionStart..];
+        var name = Option(options, "--name="); var definition = Option(options, "--definition="); var after = Option(options, "--after=");
+        var first = options.Any(option => option.Equals("--first", StringComparison.OrdinalIgnoreCase)); var apply = options.Any(option => option.Equals("--apply", StringComparison.OrdinalIgnoreCase)); var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var unknown = options.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--name=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--definition=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--after=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--first", StringComparison.OrdinalIgnoreCase) && !option.Equals("--apply", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown table-design option: {unknown[0]}");
+        if (first && after is not null) return Fail("Choose either --first or --after, not both.");
+        var kind = action switch { "add" => SqlTableDesignOperation.AddColumn, "modify" => SqlTableDesignOperation.ModifyColumn, "rename" => SqlTableDesignOperation.RenameColumn, "drop" => SqlTableDesignOperation.DropColumn, "clone" => SqlTableDesignOperation.CloneStructure, "rename-table" => SqlTableDesignOperation.RenameTable, _ => throw new ArgumentException("table-design operation must be add, modify, rename, drop, clone, or rename-table.") };
+        var placement = first ? SqlColumnPlacement.First : after is not null ? SqlColumnPlacement.After : SqlColumnPlacement.End;
+        var request = kind switch
+        {
+            SqlTableDesignOperation.AddColumn => new SqlTableDesignRequest(kind, NewName: columnName, Definition: definition, Placement: placement, AfterColumn: after),
+            SqlTableDesignOperation.ModifyColumn => new SqlTableDesignRequest(kind, ColumnName: columnName, Definition: definition, Placement: placement, AfterColumn: after),
+            SqlTableDesignOperation.RenameColumn => new SqlTableDesignRequest(kind, ColumnName: columnName, NewName: name, Definition: definition, Placement: placement, AfterColumn: after),
+            SqlTableDesignOperation.DropColumn => new SqlTableDesignRequest(kind, ColumnName: columnName),
+            _ => new SqlTableDesignRequest(kind, NewName: name)
+        };
+        var service = new SqlTableDesignerService(); var plan = await service.PrepareAsync(profile, tableName, request, cancellationToken);
+        if (json && !apply) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else if (!apply) { Console.WriteLine(plan.Sql); foreach (var warning in plan.Warnings) Console.Error.WriteLine($"WARNING: {warning}"); Console.Error.WriteLine("Dry-run only. Re-run with --apply after reviewing the exact target, DDL, and warnings."); }
+        if (!apply) return 0;
+        var result = await service.ApplyAsync(profile, plan, cancellationToken);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else Console.WriteLine($"APPLIED\t{result.Receipt.Operation}\t{result.Receipt.Database}.{result.Receipt.SourceTable}\t{result.Receipt.ResultTable}\nRECEIPT\t{result.ReceiptPath}\nBEFORE_SHA256\t{result.Receipt.BeforeCreateSqlSha256}\nAFTER_SHA256\t{result.Receipt.AfterCreateSqlSha256}");
+        return 0;
+    }
     if (operation.Equals("pet-graph", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 6 || !uint.TryParse(args[5], out var creatureEntry) || creatureEntry == 0) return Fail("db pet-graph requires a positive creature entry after the database name.");

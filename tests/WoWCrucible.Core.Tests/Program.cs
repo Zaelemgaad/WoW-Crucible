@@ -21,6 +21,39 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
 
+var designTable = new DatabaseTableCapability("fixture_table",
+[
+    new("id", "int", "int unsigned", false, null, "PRI", "auto_increment", 1),
+    new("kind", "enum", "enum('a','b')", false, "a", "MUL", "", 2),
+    new("note", "varchar", "varchar(64)", true, null, "", "", 3)
+]);
+var designCreate = """
+CREATE TABLE `fixture_table` (
+  `id` int unsigned NOT NULL AUTO_INCREMENT,
+  `kind` enum('a','b') NOT NULL DEFAULT 'a',
+  `note` varchar(64) DEFAULT NULL COMMENT 'hello,world',
+  PRIMARY KEY (`id`),
+  KEY `ix_kind` (`kind`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+""";
+var designColumns = SqlTableDesignerService.ParseColumns(designCreate, designTable);
+if (designColumns.Count != 3 || designColumns[1].Definition != "enum('a','b') NOT NULL DEFAULT 'a'" || !designColumns[2].Definition.Contains("hello,world", StringComparison.Ordinal))
+    throw new InvalidOperationException("Exact SHOW CREATE TABLE column parsing lost enum members, defaults, comments, or ordering.");
+var designSnapshot = new SqlTableDesignSnapshot("fixture_db", "fixture_table", designCreate, "fixture-hash", designColumns,
+    [new("ix_kind", false, "BTREE", ["kind"], 2, "")], []);
+var designProfile = new DatabaseConnectionProfile("127.0.0.1", 3306, "tester", "", "fixture_db");
+var designService = new SqlTableDesignerService();
+var addColumnPlan = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.AddColumn, NewName: "flags", Definition: "int unsigned NOT NULL DEFAULT '0'", Placement: SqlColumnPlacement.After, AfterColumn: "kind"));
+var renameColumnPlan = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.RenameColumn, ColumnName: "kind", NewName: "category", Definition: designColumns[1].Definition));
+if (addColumnPlan.Sql != "ALTER TABLE `fixture_table` ADD COLUMN `flags` int unsigned NOT NULL DEFAULT '0' AFTER `kind`;" ||
+    !renameColumnPlan.Sql.StartsWith("ALTER TABLE `fixture_table` CHANGE COLUMN `kind` `category`", StringComparison.Ordinal) ||
+    !renameColumnPlan.Warnings.Any(warning => warning.Contains("ix_kind", StringComparison.Ordinal)))
+    throw new InvalidOperationException("Stale-bound table designer did not produce exact ADD/RENAME DDL or dependency warnings.");
+try { _ = SqlTableDesignerService.ValidateDefinition("int NOT NULL; DROP TABLE item_template"); throw new InvalidOperationException("Guided column definition accepted a second statement."); }
+catch (ArgumentException) { }
+try { _ = SqlTableDesignerService.ValidateDefinition("int NOT NULL, DROP COLUMN id"); throw new InvalidOperationException("Guided column definition accepted a second ALTER clause."); }
+catch (ArgumentException) { }
+
 var itemDisplayPath = Path.Combine(args[1], "ItemDisplayInfo.dbc");
 var dbdFixture=Path.Combine(Path.GetTempPath(),$"crucible-dbd-{Guid.NewGuid():N}.dbd");
 try
