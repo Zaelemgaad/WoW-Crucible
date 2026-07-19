@@ -23,6 +23,10 @@ jobs:
       - name: Configure MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Remove optional MFC resource dependency
+        shell: pwsh
+        run: git -C external/CascLib apply "$env:GITHUB_WORKSPACE/.github/patches/CascLib-no-mfc-resource.patch"
+
       - name: Build CascLib x64 Release DLL
         shell: pwsh
         run: msbuild external/CascLib/CascLib_dll.vcxproj /m /p:Configuration=Release /p:Platform=x64
@@ -37,6 +41,7 @@ jobs:
           Project: CascLib
           Upstream: https://github.com/ladislav-zezula/CascLib
           Commit: 9fb2d3894198d44dee2ec56c0d48b49727a124d8
+          Local patch: .github/patches/CascLib-no-mfc-resource.patch (resource-only afxres.h to windows.h substitution)
           Configuration: Release
           Platform: x64
           '@

@@ -1,0 +1,13 @@
+diff --git a/src/DllMain.rc b/src/DllMain.rc
+index f1c3b80..ac9d70f 100644
+--- a/src/DllMain.rc
++++ b/src/DllMain.rc
+@@ -7,7 +7,7 @@
+ //
+ // Generated from the TEXTINCLUDE 2 resource.
+ //
+-#include "afxres.h"
++#include <windows.h>
+ 
+ /////////////////////////////////////////////////////////////////////////////
+ #undef APSTUDIO_READONLY_SYMBOLS
