@@ -175,8 +175,11 @@ if (thunderfuryDisplay.ModelNames.FirstOrDefault() != "Sword_2H_Ashbringer02.mdx
 var translatedBounds = M2PreviewSceneService.TransformBounds(new Vector3(-1, -2, -3), new Vector3(1, 2, 3), Matrix4x4.CreateTranslation(10, 20, 30));
 if (translatedBounds.Minimum != new Vector3(9, 18, 27) || translatedBounds.Maximum != new Vector3(11, 22, 33))
     throw new InvalidOperationException("Multi-model preview framing did not include transformed child-model bounds.");
+var mapObjectTransform=M2PreviewSceneService.MapObjectTransform(new Vector3(0,0,90),0.5f,new Vector3(10,20,30));var transformedMapPoint=Vector3.Transform(new Vector3(2,0,0),mapObjectTransform);if(Vector3.Distance(transformedMapPoint,new Vector3(10,21,30))>0.0001f)throw new InvalidOperationException($"Map-object rotation/scale/translation transform was incorrect: {transformedMapPoint}.");
 try { _ = M2PreviewSceneService.TransformBounds(Vector3.Zero, Vector3.One, new Matrix4x4(float.NaN,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)); throw new InvalidOperationException("A non-finite preview-scene transform was accepted."); }
 catch (ArgumentException exception) when (exception.Message.Contains("finite", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = M2PreviewSceneService.MapObjectTransform(Vector3.Zero,-1); throw new InvalidOperationException("A negative map-object scale was accepted."); }
+catch (ArgumentException exception) when (exception.Message.Contains("scale", StringComparison.OrdinalIgnoreCase)) { }
 if (M2PreviewSceneService.RecommendedAttachmentId(1) != 11 || M2PreviewSceneService.RecommendedAttachmentId(17) != 1 ||
     M2PreviewSceneService.RecommendedAttachmentId(22) != 2 || M2PreviewSceneService.RecommendedAttachmentId(27) != 30 ||
     M2PreviewSceneService.RecommendedAttachmentId(3) is not null)

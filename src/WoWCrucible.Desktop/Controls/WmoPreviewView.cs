@@ -103,8 +103,7 @@ internal sealed class WmoPreviewCanvas : Control, IDisposable
             if (visibleGroups.Count == 0) return;
             var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity);
             foreach (var group in visibleGroups) { minimum = Vector3.Min(minimum, group.Minimum); maximum = Vector3.Max(maximum, group.Maximum); }
-            var center = (minimum + maximum) * 0.5f; var placementTransform = placement is null ? Matrix4x4.Identity :
-                Matrix4x4.CreateScale(placement.Scale) * Matrix4x4.CreateRotationX(Degrees(placement.Orientation.X)) * Matrix4x4.CreateRotationY(Degrees(placement.Orientation.Y)) * Matrix4x4.CreateRotationZ(Degrees(placement.Orientation.Z));
+            var center = (minimum + maximum) * 0.5f; var placementTransform = placement is null ? Matrix4x4.Identity : M2PreviewSceneService.MapObjectTransform(placement.Orientation, placement.Scale);
             var rotation = placementTransform * Matrix4x4.CreateRotationZ(yaw) * Matrix4x4.CreateRotationX(pitch);
             var transformed = new Vector3[geometry.Vertices.Count]; for (var index = 0; index < transformed.Length; index++) transformed[index] = Vector3.Transform(geometry.Vertices[index] - center, rotation);
             var transformedMinimum = new Vector3(float.PositiveInfinity); var transformedMaximum = new Vector3(float.NegativeInfinity);
@@ -151,6 +150,5 @@ internal sealed class WmoPreviewCanvas : Control, IDisposable
             var seed = unchecked((uint)(material + 1) * 2654435761u); var brightness = 0.42f + shade / 15f * 0.58f; return new((byte)(((seed >> 16 & 0x7F) + 80) * brightness), (byte)(((seed >> 8 & 0x7F) + 80) * brightness), (byte)(((seed & 0x7F) + 80) * brightness), 255);
         }
         private static SKBlendMode Blend(uint mode) => mode switch { 3 or 4 => SKBlendMode.Plus, 5 or 6 => SKBlendMode.Modulate, _ => SKBlendMode.SrcOver };
-        private static float Degrees(float value) => value * MathF.PI / 180f;
     }
 }

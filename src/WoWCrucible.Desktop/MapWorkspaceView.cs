@@ -494,7 +494,9 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         try
         {
             var geometry = await Task.Run(() => { token.ThrowIfCancellationRequested(); return M2PreviewGeometryService.Load(path); }, token); token.ThrowIfCancellationRequested();
-            _wmoPreview.ClearGeometry(); _wmoPreview.IsVisible = false; _m2Preview.IsVisible = true; _m2Preview.SetGeometry(geometry); _visualTabs.SelectedIndex = 1;
+            _wmoPreview.ClearGeometry(); _wmoPreview.IsVisible = false; _m2Preview.IsVisible = true; _m2Preview.SetGeometry(geometry);
+            if (placement is not null) _m2Preview.SetSceneTransform(M2PreviewSceneService.MapObjectTransform(placement.Orientation, placement.Scale), $"MDDF UID {placement.UniqueId:N0} · rot {placement.Orientation.X:0.#},{placement.Orientation.Y:0.#},{placement.Orientation.Z:0.#} · scale {placement.Scale:0.###}");
+            _visualTabs.SelectedIndex = 1;
             var placementText = placement is null ? string.Empty : $" · UID {placement.UniqueId:N0} · pos {placement.Position.X:0.##},{placement.Position.Y:0.##},{placement.Position.Z:0.##} · rot {placement.Orientation.X:0.##},{placement.Orientation.Y:0.##},{placement.Orientation.Z:0.##} · scale {placement.Scale:0.###}";
             _wmoStatus.Text = $"{Path.GetFileName(geometry.ModelPath)} · {geometry.Vertices.Count:N0} vertices · {geometry.TriangleIndices.Count / 3:N0} visible triangles · {geometry.TextureSlots.Count:N0} texture slots{placementText}";
         }

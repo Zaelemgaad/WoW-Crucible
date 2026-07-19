@@ -8,6 +8,19 @@ public sealed record ItemModelMountPlan(IReadOnlyList<ItemModelMountPlacement> P
 
 public static class M2PreviewSceneService
 {
+    public static Matrix4x4 MapObjectTransform(Vector3 orientationDegrees, float scale, Vector3? worldPosition = null)
+    {
+        if (!Finite(orientationDegrees) || !float.IsFinite(scale) || scale < 0 || worldPosition is { } position && !Finite(position))
+            throw new ArgumentException("Map-object orientation, scale, and optional position must be finite; scale cannot be negative.");
+        static float Radians(float degrees) => degrees * MathF.PI / 180f;
+        var result = Matrix4x4.CreateScale(scale) *
+            Matrix4x4.CreateRotationX(Radians(orientationDegrees.X)) *
+            Matrix4x4.CreateRotationY(Radians(orientationDegrees.Y)) *
+            Matrix4x4.CreateRotationZ(Radians(orientationDegrees.Z));
+        if (worldPosition is { } translation) result *= Matrix4x4.CreateTranslation(translation);
+        return Finite(result) ? result : throw new InvalidDataException("Map-object placement produced a non-finite preview transform.");
+    }
+
     public static Matrix4x4 AttachmentTransform(M2PreviewAttachment attachment, IReadOnlyList<Matrix4x4>? boneTransforms = null)
     {
         ArgumentNullException.ThrowIfNull(attachment);

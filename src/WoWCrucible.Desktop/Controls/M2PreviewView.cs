@@ -63,6 +63,7 @@ public sealed class M2PreviewView : UserControl, IDisposable
     public void SetTexture(string? previewPath) => _canvas.SetTexture(previewPath);
     public void SetDecodedTexture(RgbaTexture? texture) => _canvas.SetDecodedTexture(texture);
     public void SetDecodedTextures(IReadOnlyDictionary<int, RgbaTexture> textures) => _canvas.SetDecodedTextures(textures);
+    public void SetSceneTransform(Matrix4x4 transform, string? label = null) => _canvas.SetSceneTransform(transform, label);
     public void SetAttachmentOverlay(bool visible, int? highlightedAttachmentIndex = null) => _canvas.SetAttachmentOverlay(visible, highlightedAttachmentIndex);
     public void SetMountedModels(IEnumerable<M2PreviewMountedModel> models)
     {
@@ -138,6 +139,8 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
     private bool _showAttachments;
     private int? _highlightedAttachmentIndex;
     private M2AnimationPose? _pose;
+    private Matrix4x4 _sceneTransform = Matrix4x4.Identity;
+    private string? _sceneTransformLabel;
 
     public M2PreviewCanvas() => ClipToBounds = true;
 
@@ -150,6 +153,8 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         _yaw = -0.65f;
         _pitch = 0.35f;
         _zoom = 1;
+        _sceneTransform = Matrix4x4.Identity;
+        _sceneTransformLabel = null;
         InvalidateVisual();
     }
 
@@ -194,6 +199,14 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
     {
         _showAttachments = visible;
         _highlightedAttachmentIndex = highlightedAttachmentIndex;
+        InvalidateVisual();
+    }
+
+    public void SetSceneTransform(Matrix4x4 transform, string? label = null)
+    {
+        if (!Finite(transform)) throw new ArgumentException("The M2 scene transform must contain only finite values.", nameof(transform));
+        _sceneTransform = transform;
+        _sceneTransformLabel = string.IsNullOrWhiteSpace(label) ? null : label.Trim();
         InvalidateVisual();
     }
 
@@ -253,7 +266,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         base.Render(context);
         context.FillRectangle(new SolidColorBrush(Color.Parse("#090D14")), Bounds);
         if (_geometry is null) return;
-        context.Custom(new M2DrawOperation(Bounds, _geometry, _pose, _texture, _materialTextures, _mountedModels, _yaw, _pitch, _zoom, _showAttachments, _highlightedAttachmentIndex));
+        context.Custom(new M2DrawOperation(Bounds, _geometry, _pose, _texture, _materialTextures, _mountedModels, _sceneTransform, _sceneTransformLabel, _yaw, _pitch, _zoom, _showAttachments, _highlightedAttachmentIndex));
     }
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
@@ -291,7 +304,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         e.Handled = true;
     }
 
-    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, M2AnimationPose? pose, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, IReadOnlyList<MountedModel> mountedModels, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex) : ICustomDrawOperation
+    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, M2AnimationPose? pose, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, IReadOnlyList<MountedModel> mountedModels, Matrix4x4 sceneTransform, string? sceneTransformLabel, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex) : ICustomDrawOperation
     {
         private sealed record SceneSource(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? ManualTexture, IReadOnlyDictionary<int, SKBitmap>? MaterialTextures, string Label, IReadOnlyList<Vector3>? PosedVertices, Vector3 Minimum, Vector3 Maximum);
         public Rect Bounds => bounds;
@@ -330,7 +343,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             if (!float.IsFinite(largest) || largest <= 0.00001f) return;
 
             var scale = Math.Min(width, height) * 0.42f / largest * zoom;
-            var rotation = Matrix4x4.CreateRotationZ(yaw) * Matrix4x4.CreateRotationX(pitch);
+            var rotation = sceneTransform * Matrix4x4.CreateRotationZ(yaw) * Matrix4x4.CreateRotationX(pitch);
             var triangleCount = sources.Sum(source => (source.Geometry.Batches.Count == 0 ? source.Geometry.TriangleIndices.Count : source.Geometry.Batches.Sum(batch => batch.TriangleIndexCount)) / 3);
             var sampling = Math.Max(1, (int)Math.Ceiling(triangleCount / 30_000d));
             var faces = new List<Face>(Math.Min(triangleCount, 30_000));
@@ -438,7 +451,8 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             var attachments = showAttachments ? $" · {geometry.Attachments.Count:N0} attachment point(s)" : string.Empty;
             var mounted = mountedModels.Count == 0 ? string.Empty : $" · {mountedModels.Count:N0} mounted model(s)";
             var animation = pose is null ? string.Empty : $" · animation {geometry.Sequences[pose.SequenceIndex].AnimationId:N0}:{geometry.Sequences[pose.SequenceIndex].SubAnimationId:N0}";
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}", 12, 23, SKTextAlign.Left, titleFont, text);
+            var scene = sceneTransformLabel is null ? string.Empty : $" · {sceneTransformLabel}";
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }
