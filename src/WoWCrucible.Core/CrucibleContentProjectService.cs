@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace WoWCrucible.Core;
 
-public enum ContentIdDomain { Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, Race, Class, Faction, Mount, Quest, Custom }
+public enum ContentIdDomain { Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, GameObjectDisplayInfo, Race, Class, Faction, Mount, Quest, Custom }
 public sealed record ContentIdReservation(string Id, ContentIdDomain Domain, IReadOnlyList<uint> Values, string Purpose, DateTimeOffset CreatedUtc);
 public sealed record ContentIdRegistry(int FormatVersion, DateTimeOffset UpdatedUtc, IReadOnlyList<ContentIdReservation> Reservations);
 public sealed record CrucibleContentProject(int FormatVersion, string Name, string TargetProfile, DateTimeOffset CreatedUtc, DateTimeOffset UpdatedUtc, string IdRegistryFile, string? AssetLibrary);

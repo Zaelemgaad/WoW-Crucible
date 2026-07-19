@@ -34,7 +34,13 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
     private readonly CheckBox _showAttachments = new() { Content = "Show attachment points" }; private readonly ComboBox _attachmentPicker = new() { PlaceholderText = "No attachment points loaded" };
     private readonly TextBlock _status = Status("Offline current-core gameobject schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _commit = AccentButton("Insert into connected world database"); private WorldContentWritePlan? _pendingPlan; private uint? _loadedEntry;
-    private CancellationTokenSource? _modelOperation;
+    private readonly TextBox _bulkSources = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, PlaceholderText = "One extracted .m2, root .wmo, or folder per line" };
+    private readonly TextBox _bulkLibrary = new(); private readonly TextBox _bulkClientRoot = new() { PlaceholderText = "Optional root whose children use exact client paths" };
+    private readonly NumericUpDown _bulkDisplayStart = Number(1, uint.MaxValue, 100000); private readonly NumericUpDown _bulkTemplateStart = Number(1, uint.MaxValue, 100000);
+    private readonly TextBlock _bulkStatus = Status("Select models, then build a review plan. Nothing is written while planning.");
+    private readonly TextBox _bulkPreview = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
+    private readonly Button _bulkApply = AccentButton("Create DBC + SQL + tiny MPQ bundle…"); private GameObjectBulkPlan? _bulkPlan;
+    private CancellationTokenSource? _modelOperation; private CancellationTokenSource? _bulkOperation;
 
     public event EventHandler? BackRequested;
     public event EventHandler? ProjectWorkspaceRequested;
@@ -42,10 +48,11 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
 
     public GameObjectWorkspaceView(DesktopWorkspaceSession session)
     {
-        _session = session; _session.Changed += SessionChanged; _type.SelectedIndex = 3; HookEvents(); RefreshDataLabels(); _modelHost.Children.Add(_model); _modelHost.Children.Add(_wmo);
+        _session = session; _session.Changed += SessionChanged; _type.SelectedIndex = 3; _bulkApply.IsEnabled = false; HookEvents(); RefreshDataLabels(); _modelHost.Children.Add(_model); _modelHost.Children.Add(_wmo);
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "GAMEOBJECTS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1) } };
-        var editor = new TabControl { Items = { new TabItem { Header = "Template", Content = new ScrollViewer { Content = TemplateForm() } }, new TabItem { Header = "Type-aware Data0–23", Content = DataPage() }, new TabItem { Header = "World spawn", Content = new ScrollViewer { Content = SpawnForm() } }, new TabItem { Header = "Loot & quests", Content = LootQuestPage() } } };
+        _bulkLibrary.Text = session.Settings.ProcessedAssetLibraryPath;
+        var editor = new TabControl { Items = { new TabItem { Header = "Template", Content = new ScrollViewer { Content = TemplateForm() } }, new TabItem { Header = "Type-aware Data0–23", Content = DataPage() }, new TabItem { Header = "World spawn", Content = new ScrollViewer { Content = SpawnForm() } }, new TabItem { Header = "Loot & quests", Content = LootQuestPage() }, new TabItem { Header = "Bulk model import", Content = BulkPage() } } };
         var loadModel = new Button { Content = "Load extracted M2 / WMO…" }; loadModel.Click += async (_, _) => await LoadModelAsync(); var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _modelOperation?.Cancel(); _model.ClearGeometry(); _wmo.ClearGeometry(); _attachmentPicker.ItemsSource = null; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
         _showAttachments.Click += (_, _) => ApplyAttachmentOverlay(); _attachmentPicker.SelectionChanged += (_, _) => ApplyAttachmentOverlay();
         var modelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { loadModel, clearModel, _showAttachments, _attachmentPicker } }, WithRow(new Border { Background = Brush.Parse("#090D14"), Child = _modelHost }, 1), WithRow(_modelStatus, 2) } };
@@ -95,6 +102,91 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
         var findEnd = new Button { Content = "Find and add ending quest…" };
         findEnd.Click += (_, _) => RequestReference(ReferenceDomain.Quest, "Ending quest", _endsQuests);
         return new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(10), Children = { new StackPanel { Spacing = 7, Children = { add, new TextBlock { Text = "Loot is valid for chest [3] and fishing-hole [25] types. Quest links require quest-giver [2]. The editor blocks mismatched combinations instead of producing dead records.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, new TextBlock { Text = "Starts quests", FontWeight = FontWeight.SemiBold }, _startsQuests, findStart, new TextBlock { Text = "Ends quests", FontWeight = FontWeight.SemiBold }, _endsQuests, findEnd } }, WithRow(new ScrollViewer { Content = _lootRows }, 1) } };
+    }
+
+    private Control BulkPage()
+    {
+        var addFiles = new Button { Content = "Add M2 / WMO files…" }; addFiles.Click += async (_, _) => await AddBulkFilesAsync();
+        var addFolder = new Button { Content = "Add folder…" }; addFolder.Click += async (_, _) => await AddBulkFolderAsync();
+        var clear = new Button { Content = "Clear list" }; clear.Click += (_, _) => { _bulkSources.Text = string.Empty; _bulkPlan = null; _bulkApply.IsEnabled = false; _bulkPreview.Text = string.Empty; };
+        var plan = AccentButton("Build collision/dependency plan"); plan.Click += async (_, _) => await PlanBulkAsync(plan);
+        _bulkApply.Click += async (_, _) => await ApplyBulkAsync();
+        var fields = new StackPanel { Spacing = 9, Margin = new Thickness(12), Children =
+        {
+            new TextBlock { Text = "Bulk model → usable gameobjects", FontSize = 17, FontWeight = FontWeight.SemiBold },
+            new TextBlock { Text = "Adds only genuinely new GameObjectDisplayInfo rows, reuses matching model paths already in the DBC, generates complete Generic gameobject_template rows, resolves SKIN/WMO-group/texture dependencies, and builds a tiny MPQ. Ambiguous provenance or changed inputs block output instead of guessing.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") },
+            new WrapPanel { Children = { addFiles, addFolder, clear } },
+            _bulkSources,
+            Form(("Processed asset library", _bulkLibrary), ("Optional client-path root", _bulkClientRoot), ("First display ID", _bulkDisplayStart), ("First template ID", _bulkTemplateStart)),
+            new WrapPanel { Children = { plan, _bulkApply } },
+            _bulkStatus,
+            new TextBlock { Text = "Review", FontWeight = FontWeight.SemiBold },
+            _bulkPreview
+        } };
+        return new ScrollViewer { Content = fields };
+    }
+
+    private async Task AddBulkFilesAsync()
+    {
+        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Add extracted WotLK gameobject models", AllowMultiple = true, FileTypeFilter = [new FilePickerFileType("WotLK models") { Patterns = ["*.m2", "*.wmo"] }] });
+        AppendBulkSources(files.Select(file => file.TryGetLocalPath()).Where(path => path is not null)!);
+    }
+
+    private async Task AddBulkFolderAsync()
+    {
+        var folders = await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Add a folder containing M2 / WMO assets", AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) AppendBulkSources([path]);
+    }
+
+    private void AppendBulkSources(IEnumerable<string?> paths)
+    {
+        var values = ParseBulkSources().Concat(paths.Where(path => !string.IsNullOrWhiteSpace(path)).Select(path => Path.GetFullPath(path!))).Distinct(StringComparer.OrdinalIgnoreCase); _bulkSources.Text = string.Join(Environment.NewLine, values); _bulkPlan = null; _bulkApply.IsEnabled = false;
+    }
+
+    private async Task PlanBulkAsync(Button button)
+    {
+        _bulkOperation?.Cancel(); _bulkOperation?.Dispose(); var operation = _bulkOperation = new CancellationTokenSource();
+        try
+        {
+            button.IsEnabled = false; _bulkApply.IsEnabled = false; _bulkStatus.Text = "Scanning model geometry, DBC identities, and complete client dependencies…";
+            var dbc = Path.Combine(_session.Settings.CoreDbcPath, "GameObjectDisplayInfo.dbc"); var schema = _session.Settings.SchemaDefinitionPath; var sources = ParseBulkSources();
+            var library = Directory.Exists(_bulkLibrary.Text) ? Path.GetFullPath(_bulkLibrary.Text!) : null; var clientRoot = Directory.Exists(_bulkClientRoot.Text) ? Path.GetFullPath(_bulkClientRoot.Text!) : null;
+            IReadOnlyList<uint>? occupied = null;
+            if (_session.DatabaseTested && _session.DatabaseProfile is not null && _session.DatabaseCapabilities is not null)
+            {
+                var occupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.GameObject, _session.DatabaseProfile, _session.DatabaseCapabilities, null, null, cancellationToken: operation.Token);
+                if (!occupancy.Complete) throw new InvalidOperationException($"Live gameobject ID scan is incomplete: {string.Join(" ", occupancy.Warnings)}"); occupied = occupancy.OccupiedIds;
+            }
+            var capabilities = _session.DatabaseCapabilities; var displayStart = (uint)(_bulkDisplayStart.Value ?? 100000); var templateStart = (uint)(_bulkTemplateStart.Value ?? 100000);
+            _bulkPlan = await Task.Run(() => GameObjectBulkGeneratorService.CreatePlan(dbc, schema, sources, displayStart, templateStart, library, clientRoot, capabilities, occupied, operation.Token), operation.Token);
+            operation.Token.ThrowIfCancellationRequested(); _bulkPreview.Text = BulkPlanText(_bulkPlan); _bulkApply.IsEnabled = _bulkPlan.Ready;
+            _bulkStatus.Text = _bulkPlan.Ready ? $"Ready · {_bulkPlan.Rows.Count:N0} templates · {_bulkPlan.AddedDisplays:N0} new displays · {_bulkPlan.Assets.Count:N0} dependency files." : $"Blocked · {_bulkPlan.Blockers.Count:N0} issue(s) must be resolved before any output is written.";
+            if (library is not null) { _session.Settings.ProcessedAssetLibraryPath = library; _session.Settings.Save(); }
+        }
+        catch (OperationCanceledException) { _bulkStatus.Text = "Bulk planning cancelled."; }
+        catch (Exception exception) { _bulkPlan = null; _bulkPreview.Text = exception.ToString(); _bulkStatus.Text = $"Bulk planning failed: {exception.Message}"; DesktopCrashLogger.Log("Bulk gameobject planning failed", exception); }
+        finally { button.IsEnabled = true; }
+    }
+
+    private async Task ApplyBulkAsync()
+    {
+        if (_bulkPlan?.Ready != true) { _bulkStatus.Text = "Build a blocker-free plan first."; return; }
+        var folders = await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose a new or empty output folder", AllowMultiple = false }); var output = folders.FirstOrDefault()?.TryGetLocalPath(); if (output is null) return;
+        try
+        {
+            _bulkApply.IsEnabled = false; _bulkStatus.Text = "Verifying every source hash and building the DBC, SQL, manifest, and tiny MPQ…"; var plan = _bulkPlan;
+            var result = await Task.Run(() => GameObjectBulkGeneratorService.Apply(plan, output)); _bulkStatus.Text = $"Bundle complete · {result.PatchPath} · {result.AddedDisplays:N0} display rows · {result.Templates:N0} templates · {result.PatchEntries:N0} MPQ entries.";
+        }
+        catch (Exception exception) { _bulkStatus.Text = $"Bulk output failed: {exception.Message}"; DesktopCrashLogger.Log("Bulk gameobject output failed", exception); }
+        finally { _bulkApply.IsEnabled = _bulkPlan?.Ready == true; }
+    }
+
+    private IReadOnlyList<string> ParseBulkSources() => (_bulkSources.Text ?? string.Empty).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    private static string BulkPlanText(GameObjectBulkPlan plan)
+    {
+        var builder = new System.Text.StringBuilder(); builder.AppendLine($"Ready: {plan.Ready} · models {plan.Rows.Count:N0} · add displays {plan.AddedDisplays:N0} · reuse {plan.Rows.Count - plan.AddedDisplays:N0} · assets {plan.Assets.Count:N0}");
+        foreach (var blocker in plan.Blockers) builder.AppendLine($"BLOCKER · {blocker}"); foreach (var finding in plan.Findings) builder.AppendLine($"FINDING · {finding}");
+        foreach (var row in plan.Rows) builder.AppendLine($"{row.TemplateId} → display {row.DisplayId} [{(row.ReusesDisplay ? "reuse" : "add")}] · {row.ClientPath} · {row.DependencyPaths.Count:N0} files");
+        builder.AppendLine(); builder.Append(plan.Sql); return builder.ToString();
     }
 
     private void AddLootRow()
@@ -203,7 +295,7 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
 
     private void SessionChanged(object? sender, EventArgs e) { RefreshSchemaStatus(); RefreshPreview(); }
     private void RefreshSchemaStatus() { var capabilities = _session.DatabaseCapabilities; _status.Text = capabilities?.FindTable("gameobject_template") is { } table ? $"Live schema ready · {capabilities.Database}.gameobject_template · {table.Columns.Count:N0} columns" : "Offline current-core gameobject schema ready · connect Server & SQL for live deployment."; }
-    public void Dispose() { _session.Changed -= SessionChanged; _modelOperation?.Cancel(); _modelOperation?.Dispose(); _model.Dispose(); _wmo.Dispose(); }
+    public void Dispose() { _session.Changed -= SessionChanged; _modelOperation?.Cancel(); _modelOperation?.Dispose(); _bulkOperation?.Cancel(); _bulkOperation?.Dispose(); _model.Dispose(); _wmo.Dispose(); }
     private GameObjectTypeDefinition SelectedType() => _type.SelectedItem as GameObjectTypeDefinition ?? GameObjectTypeCatalog.Find(0);
     private void SetType(int id) => _type.SelectedItem = GameObjectTypeCatalog.All.FirstOrDefault(type => type.Id == id) ?? GameObjectTypeCatalog.All[0];
     private IEnumerable<NumericUpDown> AllNumbers() => new[] { _entry, _displayId, _size, _guid, _map, _zone, _area, _spawnMask, _phaseMask, _x, _y, _z, _orientation, _rotation0, _rotation1, _rotation2, _rotation3, _respawn, _animProgress, _state }.Concat(_data);

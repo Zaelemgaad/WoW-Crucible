@@ -24,6 +24,7 @@ public static class ContentIdDomainCatalog
         [ContentIdDomain.CreatureDisplayInfo] = Policy(ContentIdDomain.CreatureDisplayInfo, 100_000, uint.MaxValue, [Dbc("CreatureDisplayInfo")], "Creature display IDs are client DBC identities referenced by server templates."),
         [ContentIdDomain.CreatureDisplayInfoExtra] = Policy(ContentIdDomain.CreatureDisplayInfoExtra, 100_000, uint.MaxValue, [Dbc("CreatureDisplayInfoExtra")], "Creature display-extra IDs are client appearance identities."),
         [ContentIdDomain.GameObject] = Policy(ContentIdDomain.GameObject, 100_000, uint.MaxValue, [Sql("gameobject_template", "entry")], "Gameobject template IDs are server SQL identities."),
+        [ContentIdDomain.GameObjectDisplayInfo] = Policy(ContentIdDomain.GameObjectDisplayInfo, 100_000, uint.MaxValue, [Dbc("GameObjectDisplayInfo")], "Gameobject display IDs are client DBC identities referenced by gameobject templates."),
         [ContentIdDomain.Race] = Policy(ContentIdDomain.Race, 12, 31, [Dbc("ChrRaces")], "WotLK race IDs participate in 32-bit masks; only IDs 1 through 31 are allocatable."),
         [ContentIdDomain.Class] = Policy(ContentIdDomain.Class, 12, 31, [Dbc("ChrClasses")], "WotLK class IDs participate in 32-bit masks; only IDs 1 through 31 are allocatable."),
         [ContentIdDomain.Faction] = Policy(ContentIdDomain.Faction, 10_000, uint.MaxValue, [Dbc("Faction")], "Faction IDs are client DBC identities."),

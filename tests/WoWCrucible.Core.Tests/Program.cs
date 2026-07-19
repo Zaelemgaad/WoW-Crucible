@@ -1263,6 +1263,27 @@ try
 }
 finally { File.Move(heldTerrain, graphTerrain); }
 Directory.Delete(targetClientFixture, true);
+var bulkTexture = Path.Combine(assetFixture, "Character", "BloodElf", "Female", "fixture.blp"); Directory.CreateDirectory(Path.GetDirectoryName(bulkTexture)!); File.WriteAllBytes(bulkTexture, [1, 2, 3, 4]);
+var gameObjectDisplayDbc = Path.Combine(args[1], "GameObjectDisplayInfo.dbc");
+var bulkPlan = GameObjectBulkGeneratorService.CreatePlan(gameObjectDisplayDbc, args[0], [geometryModelPath], 900_000, 910_000,
+    clientRoot: assetFixture, occupiedTemplateIds: [910_000u, 910_002u]);
+if (!bulkPlan.Ready || bulkPlan.AddedDisplays != 1 || bulkPlan.Rows.Single().TemplateId != 910_001 || bulkPlan.Assets.Count != 3 ||
+    !bulkPlan.Assets.Any(asset => asset.ClientPath.Equals("geometry00.skin", StringComparison.OrdinalIgnoreCase)) ||
+    !bulkPlan.Assets.Any(asset => asset.ClientPath.Equals(@"Character\BloodElf\Female\fixture.blp", StringComparison.OrdinalIgnoreCase)) ||
+    bulkPlan.Sql.Contains("REPLACE", StringComparison.OrdinalIgnoreCase) || !bulkPlan.Sql.Contains("START TRANSACTION", StringComparison.Ordinal))
+    throw new InvalidOperationException($"Bulk gameobject planning lost collision checks, M2 dependency closure, or INSERT-only SQL: {string.Join("; ", bulkPlan.Blockers)}");
+var bulkPlanPath = Path.Combine(assetFixture, "bulk-gameobjects.plan.json"); GameObjectBulkGeneratorService.SavePlan(bulkPlanPath, bulkPlan);
+var loadedBulkPlan = GameObjectBulkGeneratorService.LoadPlan(bulkPlanPath); try { GameObjectBulkGeneratorService.SavePlan(Path.Combine(assetFixture, "tampered-bulk.json"), loadedBulkPlan with { Sql = loadedBulkPlan.Sql + "-- tampered" }); throw new InvalidOperationException("A content-tampered gameobject bulk plan was accepted."); } catch (InvalidDataException) { }
+var gobBulkOutput = Path.Combine(Path.GetTempPath(), $"crucible-bulk-gameobjects-{Guid.NewGuid():N}"); Directory.CreateDirectory(gobBulkOutput);
+var bulkResult = GameObjectBulkGeneratorService.Apply(loadedBulkPlan, gobBulkOutput); var generatedDisplay = WdbcFile.Load(bulkResult.DbcPath);
+var generatedResolution = DbcSchemaCatalog.Load(args[0]).ResolveColumns("GameObjectDisplayInfo", generatedDisplay.FieldCount); var generatedIds = DbcRecordIdentity.IndexRows(generatedDisplay, generatedResolution.Columns, generatedResolution.KeyStrategy);
+var generatedRow = generatedIds[bulkPlan.Rows.Single().DisplayId]; var generatedModelColumn = generatedResolution.Columns.Single(column => column.Name == "ModelName");
+var generatedManifest = PatchManifestService.Load(bulkResult.ManifestPath);
+if (generatedDisplay.RowCount != WdbcFile.Load(gameObjectDisplayDbc).RowCount + 1 || generatedDisplay.GetDisplayValue(generatedRow, generatedModelColumn)?.ToString() != "geometry.m2" ||
+    generatedManifest.Entries.Count != 4 || !generatedManifest.Entries.Any(entry => entry.ArchivePath.Equals(@"DBFilesClient\GameObjectDisplayInfo.dbc", StringComparison.OrdinalIgnoreCase)) ||
+    !File.Exists(bulkResult.PatchPath) || !PatchManifestService.Validate(generatedManifest, bulkResult.PatchPath).Passed || !File.ReadAllText(bulkResult.SqlPath).Contains("`entry`", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Bulk gameobject apply did not publish the exact DBC row, SQL, dependency assets, and tiny patch manifest.");
+Directory.Delete(gobBulkOutput, true);
 Directory.Delete(assetFixture, true);
 
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));
@@ -1275,6 +1296,7 @@ var secondIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, Con
 var mountIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.Mount, 1, 100_000, [], "fixture mount").Reservation.Values;
 var spellIdsAfterMount = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.Spell, 1, 100_000, [], "fixture spell").Reservation.Values;
 var raceOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Race, null, null, args[1], args[0]);
+var gameObjectDisplayOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.GameObjectDisplayInfo, null, null, args[1], args[0]);
 var customOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Custom, null, null, null, null, [7u, 9u]);
 var incompleteItemOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Item, null, null, null, null);
 var reservedRace = CrucibleContentProjectService.ReserveVerifiedIds(contentProjectRoot, raceOccupancy, 1, null, "fixture race").Reservation.Values.Single();
@@ -1285,6 +1307,7 @@ var reservedQuest = CrucibleContentProjectService.ReserveVerifiedIds(contentProj
 if (defaultContentProject.TargetProfile != TargetProfileCatalog.DefaultProfileId || TargetProfileCatalog.Find(targetProfiles, defaultContentProject.TargetProfile).Id != TargetProfileCatalog.DefaultProfileId ||
     !firstIds.SequenceEqual([101u, 103u, 104u]) || !secondIds.SequenceEqual([105u, 106u]) || !mountIds.SequenceEqual([100_000u]) || !spellIdsAfterMount.SequenceEqual([100_001u]) ||
     !raceOccupancy.Complete || raceOccupancy.RegistryNamespace != ContentIdDomain.Race || raceOccupancy.OccupiedIds.Count < 10 || raceOccupancy.OccupiedIds.Contains(reservedRace) || reservedRace is < 1 or > 31 ||
+    !gameObjectDisplayOccupancy.Complete || gameObjectDisplayOccupancy.RegistryNamespace != ContentIdDomain.GameObjectDisplayInfo || gameObjectDisplayOccupancy.OccupiedIds.Count < 1_000 ||
     !customOccupancy.Complete || !customOccupancy.OccupiedIds.SequenceEqual([7u, 9u]) || incompleteItemOccupancy.Complete ||
     reservedCreature != 100_001 || reservedGameObject != 100_001 || reservedQuest != 100_001 ||
     CrucibleContentProjectService.LoadRegistry(contentProjectRoot).Reservations.Count != 8 || !Directory.Exists(Path.Combine(contentProjectRoot, "Staging")))

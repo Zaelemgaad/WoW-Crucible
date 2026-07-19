@@ -286,6 +286,35 @@ static int Knowledge(string[] args)
 static int Asset(string[] args)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args[0].Equals("gameobject-bulk-plan", StringComparison.OrdinalIgnoreCase))
+    {
+        var options = args[1..]; var operands = options.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
+        if (operands.Length < 4) return Fail("asset gameobject-bulk-plan requires <GameObjectDisplayInfo.dbc> <schema.xml> <plan.json> <model-or-folder>... .");
+        var allowed = new[] { "--library=", "--client-root=", "--display-start=", "--template-start=", "--occupied=", "--format=", "--overwrite" };
+        var unknown = options.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !allowed.Any(prefix => value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))).ToArray(); if (unknown.Length > 0) return Fail($"Unknown asset gameobject-bulk-plan option: {unknown[0]}");
+        if (!uint.TryParse(Option(options, "--display-start=") ?? "100000", out var displayStart) || displayStart == 0) return Fail("--display-start must be a positive unsigned ID.");
+        if (!uint.TryParse(Option(options, "--template-start=") ?? "100000", out var templateStart) || templateStart == 0) return Fail("--template-start must be a positive unsigned ID.");
+        var occupiedPath = Option(options, "--occupied="); var occupied = occupiedPath is null ? null : CrucibleContentProjectService.ReadOccupiedIds(occupiedPath);
+        var plan = GameObjectBulkGeneratorService.CreatePlan(operands[0], operands[1], operands[3..], displayStart, templateStart, Option(options, "--library="), Option(options, "--client-root="), occupiedTemplateIds: occupied);
+        GameObjectBulkGeneratorService.SavePlan(operands[2], plan, options.Contains("--overwrite", StringComparer.OrdinalIgnoreCase));
+        if (options.Contains("--format=json", StringComparer.OrdinalIgnoreCase)) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"Plan\t{Path.GetFullPath(operands[2])}\nReady\t{plan.Ready}\nModels\t{plan.Rows.Count:N0}\nAddedDisplays\t{plan.AddedDisplays:N0}\nReusedDisplays\t{plan.Rows.Count - plan.AddedDisplays:N0}\nPatchAssets\t{plan.Assets.Count:N0}\nBlockers\t{plan.Blockers.Count:N0}");
+            foreach (var row in plan.Rows) Console.WriteLine($"ROW\t{row.TemplateId}\tdisplay={row.DisplayId}\t{(row.ReusesDisplay ? "REUSE" : "ADD")}\t{row.ClientPath}\t{row.Name}");
+            foreach (var blocker in plan.Blockers) Console.WriteLine($"BLOCKER\t{blocker}"); foreach (var finding in plan.Findings) Console.WriteLine($"FINDING\t{finding}");
+        }
+        return plan.Ready ? 0 : 3;
+    }
+    if (args[0].Equals("gameobject-bulk-apply", StringComparison.OrdinalIgnoreCase))
+    {
+        var options = args[1..]; var operands = options.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray(); if (operands.Length != 2) return Fail("asset gameobject-bulk-apply requires <plan.json> <new-or-empty-output-folder>.");
+        var unknown = options.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !value.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown asset gameobject-bulk-apply option: {unknown[0]}");
+        var result = GameObjectBulkGeneratorService.Apply(GameObjectBulkGeneratorService.LoadPlan(operands[0]), operands[1]);
+        if (options.Contains("--format=json", StringComparer.OrdinalIgnoreCase)) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else Console.WriteLine($"Output\t{result.OutputRoot}\nDBC\t{result.DbcPath}\nDBC_SHA256\t{result.DbcSha256}\nSQL\t{result.SqlPath}\nManifest\t{result.ManifestPath}\nPatch\t{result.PatchPath}\nReceipt\t{result.ReceiptPath}\nAddedDisplays\t{result.AddedDisplays:N0}\nTemplates\t{result.Templates:N0}\nPatchEntries\t{result.PatchEntries:N0}");
+        return 0;
+    }
     if (args is ["adt-texture-add-plan", var addTextureAdtPath, var newTexturePath, var addTextureCellText, var addTexturePlanPath, .. var addTextureOptions])
     {
         var overwrite = addTextureOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var encodingText = (Option(addTextureOptions, "--encoding=") ?? "auto").Replace("-", string.Empty, StringComparison.Ordinal); var initialText = Option(addTextureOptions, "--initial-alpha=") ?? "0"; var unknown = addTextureOptions.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--encoding=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--initial-alpha=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown asset adt-texture-add-plan option: {unknown[0]}");
@@ -965,6 +994,8 @@ Usage:
   wowcrucible asset m2-downport-scan <file-or-folder>... [--listfile=id-path.csv] [--format=text|json]
   wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin] [--listfile=id-path.csv]
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
+  wowcrucible asset gameobject-bulk-plan <GameObjectDisplayInfo.dbc> <schema.xml> <plan.json> <model-or-folder>... [--library=processed-folder] [--client-root=folder] [--display-start=N] [--template-start=N] [--occupied=ids.txt] [--format=text|json] [--overwrite]
+  wowcrucible asset gameobject-bulk-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
   wowcrucible asset creature-display-catalog <dbc-folder> [--schema=file] [--search=terms] [--limit=N] [--format=text|json]
   wowcrucible asset creature-appearance-port-plan <source-dbc-folder> <target-dbc-folder> <display-id> --schema=file [--output=plan.json] [--format=text|json] [--overwrite]
   wowcrucible asset creature-appearance-port-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
@@ -1057,7 +1088,7 @@ static async Task<int> Project(string[] args, CancellationToken cancellationToke
     return ProjectHelp(2);
 }
 
-static int ProjectHelp(int code = 0) => GroupHelp($"Usage:\n  wowcrucible project create <folder> <name> [--target={TargetProfileCatalog.DefaultProfileId}] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n  wowcrucible project occupancy <domain> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--format=text|json]\n  wowcrucible project reserve-live <project-folder> <domain> <count> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--start=N] [--purpose=text]\n\nLive commands read passwords from WOW_CRUCIBLE_DB_PASSWORD by default and refuse reservation unless every mapped SQL/DBC identity source is available. Mount and Spell deliberately share the same registry namespace.\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, Race, Class, Faction, Mount, Quest, Custom", code);
+static int ProjectHelp(int code = 0) => GroupHelp($"Usage:\n  wowcrucible project create <folder> <name> [--target={TargetProfileCatalog.DefaultProfileId}] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n  wowcrucible project occupancy <domain> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--format=text|json]\n  wowcrucible project reserve-live <project-folder> <domain> <count> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--start=N] [--purpose=text]\n\nLive commands read passwords from WOW_CRUCIBLE_DB_PASSWORD by default and refuse reservation unless every mapped SQL/DBC identity source is available. Mount and Spell deliberately share the same registry namespace.\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, GameObjectDisplayInfo, Race, Class, Faction, Mount, Quest, Custom", code);
 
 static int Client(string[] args)
 {
