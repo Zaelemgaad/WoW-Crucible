@@ -1041,6 +1041,36 @@ if (!new uint[] { 100, 102, 103, 104, 106 }.All(graphAcquired.ContainsKey) || gr
 var startingItems = ItemCatalogService.ReadCharStartOutfitItems(Path.Combine(args[1], "CharStartOutfit.dbc"));
 if (!startingItems.Contains(6948) || startingItems.Contains(17) || startingItems.Contains(17802))
     throw new InvalidOperationException("CharStartOutfit DBC acquisition coverage did not distinguish starting equipment from cut/developer items.");
+var creatureDisplayFile = WdbcFile.Load(Path.Combine(args[1], "CreatureDisplayInfo.dbc"));
+var creatureModelFile = WdbcFile.Load(Path.Combine(args[1], "CreatureModelData.dbc"));
+var creatureSchemas = DbcSchemaCatalog.Load(args[0]);
+var creatureDisplayColumns = creatureSchemas.ResolveColumns("CreatureDisplayInfo", creatureDisplayFile.FieldCount).Columns;
+var creatureModelColumns = creatureSchemas.ResolveColumns("CreatureModelData", creatureModelFile.FieldCount).Columns;
+var creatureDisplayIdColumn = creatureDisplayColumns.First(column => column.Name.Equals("ID", StringComparison.OrdinalIgnoreCase));
+var creatureDisplayModelColumn = creatureDisplayColumns.First(column => column.Name.Equals("ModelID", StringComparison.OrdinalIgnoreCase));
+var creatureModelIdColumn = creatureModelColumns.First(column => column.Name.Equals("ID", StringComparison.OrdinalIgnoreCase));
+var availableCreatureModels = Enumerable.Range(0, creatureModelFile.RowCount).Select(row => creatureModelFile.GetRaw(row, creatureModelIdColumn)).ToHashSet();
+var creatureDisplayRow = Enumerable.Range(0, creatureDisplayFile.RowCount).First(row => availableCreatureModels.Contains(creatureDisplayFile.GetRaw(row, creatureDisplayModelColumn)));
+var creatureDisplayId = creatureDisplayFile.GetRaw(creatureDisplayRow, creatureDisplayIdColumn);
+var creatureDisplayService = new CreatureDisplayPreviewService();
+var creatureDisplay = creatureDisplayService.ResolveDisplay(args[1], args[0], creatureDisplayId);
+if (creatureDisplay.DisplayId != creatureDisplayId || creatureDisplay.ModelId == 0 || !creatureDisplay.ModelClientPath.EndsWith(".m2", StringComparison.OrdinalIgnoreCase) || creatureDisplay.TextureVariations.Count != 3)
+    throw new InvalidOperationException("Creature display preview did not resolve the build-12340 display/model/texture chain.");
+var creatureLibrary = Path.Combine(Path.GetTempPath(), $"crucible-creature-display-{Guid.NewGuid():N}");
+var creatureProvenance = "fixture-source";
+var creatureModelDirectory = Path.Combine(creatureLibrary, "Archives", "Content", Path.GetDirectoryName(creatureDisplay.ModelClientPath) ?? string.Empty, creatureProvenance);
+Directory.CreateDirectory(creatureModelDirectory);
+File.WriteAllBytes(Path.Combine(creatureModelDirectory, Path.GetFileName(creatureDisplay.ModelClientPath)), [1]);
+File.WriteAllBytes(Path.Combine(creatureModelDirectory, Path.GetFileNameWithoutExtension(creatureDisplay.ModelClientPath) + "00.skin"), [2]);
+foreach (var texture in creatureDisplay.TextureVariations.Where(path => !string.IsNullOrWhiteSpace(path)))
+{
+    var directory = Path.Combine(creatureLibrary, "Archives", "Content", Path.GetDirectoryName(texture) ?? string.Empty, creatureProvenance);
+    Directory.CreateDirectory(directory); File.WriteAllBytes(Path.Combine(directory, Path.GetFileName(texture)), [3]);
+}
+var sourcedCreatureDisplay = creatureDisplayService.ResolveDisplay(args[1], args[0], creatureDisplayId, creatureLibrary);
+if (sourcedCreatureDisplay.Sources.Count != 1 || !sourcedCreatureDisplay.Sources[0].Ready || sourcedCreatureDisplay.Sources[0].Provenance != creatureProvenance)
+    throw new InvalidOperationException("Creature display preview did not preserve same-provenance M2/SKIN source resolution.");
+Directory.Delete(creatureLibrary, true);
 if (ItemCatalogEntry.ClassifyReviewGroup("Martin Fury", false) != ItemAcquisitionReviewGroup.OtherManualReview ||
     ItemCatalogEntry.ClassifyReviewGroup("Thunderfury, Blessed Blade of the Windseeker?", false) != ItemAcquisitionReviewGroup.OtherManualReview ||
     ItemCatalogEntry.ClassifyReviewGroup("NPC Equip 50505", false) != ItemAcquisitionReviewGroup.NpcOrMonsterEquipment ||

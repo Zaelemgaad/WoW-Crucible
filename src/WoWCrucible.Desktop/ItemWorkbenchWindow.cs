@@ -22,7 +22,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _password = new() { PasswordChar = '●', HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
-    private readonly TextBox _search = new() { PlaceholderText = "Filter scan or enter an exact ID (17802, 17,802, #17802)…" };
+    private readonly TextBox _search = new() { PlaceholderText = "Filter scan or pin exact IDs (17802, 17,802, #17 #17802)…" };
     private readonly ComboBox _classification = new()
     {
         ItemsSource = new[] { "No known acquisition path", "Known acquisition path", "All item_template rows" },
@@ -143,7 +143,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private Control AcquisitionPage()
     {
         var audit = AccentButton("Scan acquisition paths"); audit.Click += async (_, _) => await AuditAsync();
-        var findExact = new Button { Content = "Find exact ID" }; findExact.Click += async (_, _) => await InspectSearchExactAsync();
+        var findExact = new Button { Content = "Pin exact ID(s)" }; findExact.Click += async (_, _) => await InspectSearchExactAsync();
         var inspect = AccentButton("Explain exact ID"); inspect.Click += async (_, _) => await InspectExactAsync();
         var edit = new Button { Content = "Open selected in decoded editor" }; edit.Click += async (_, _) => await OpenSelectedItemAsync(false);
         var fullSql = new Button { Content = "Open complete SQL row" }; fullSql.Click += async (_, _) => await OpenSelectedInSqlAsync();
@@ -238,13 +238,15 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private async Task InspectSearchExactAsync()
     {
-        if (!TryParseItemId(_search.Text, out var entry))
+        var entries = ParseExactItemIds(_search.Text);
+        if (entries.Count == 0)
         {
-            _status.Text = "Enter one positive numeric item ID in the catalog search box for an exact database lookup.";
+            _status.Text = "Enter one or more positive item IDs. Use spaces, semicolons, or # prefixes for a batch; a grouped single ID such as 17,802 remains valid.";
             return;
         }
-        _inspectId.Text = entry.ToString();
-        await InspectExactAsync();
+        if (_audit is null) await AuditAsync();
+        if (_audit is null) return;
+        ShowPinnedExactItems(entries);
     }
 
     private void ShowCatalogEvidence(ItemCatalogEntry item)
@@ -308,6 +310,12 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private void ApplyAuditFilter()
     {
         if (_audit is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _status.Text = CanQueryDatabase() ? "The acquisition catalog is loading, or press Scan acquisition paths to refresh it now." : "Connect the live world database above. This tab will then load automatically."; return; } var query = _search.Text?.Trim() ?? string.Empty;
+        var exactIds = ParseExactItemIds(query);
+        if (exactIds.Count > 1)
+        {
+            ShowPinnedExactItems(exactIds);
+            return;
+        }
         if (TryParseItemId(query, out var exactId))
         {
             var exact = _audit.AllItems.FirstOrDefault(item => item.Entry == exactId);
@@ -352,6 +360,31 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         _status.Text = $"Showing {result.Length:N0} {label} item(s){group}. Numeric searches always show an existing exact row and state its classification.";
     }
 
+    private void ShowPinnedExactItems(IReadOnlyList<uint> entries)
+    {
+        if (_audit is null) return;
+        var requested = entries.Distinct().ToArray();
+        var byId = _audit.AllItems.ToDictionary(item => item.Entry);
+        var rows = requested.Where(byId.ContainsKey).Select(entry => byId[entry]).ToArray();
+        var missing = requested.Where(entry => !byId.ContainsKey(entry)).ToArray();
+        _items.ItemsSource = rows;
+        if (rows.Length > 0)
+        {
+            _items.SelectedItem = rows[0];
+            _items.ScrollIntoView(rows[0]);
+            _inspectId.Text = rows[0].Entry.ToString();
+        }
+        var noPath = rows.Count(item => !item.HasKnownAcquisitionPath);
+        var known = rows.Length - noPath;
+        _status.Text = $"Pinned {rows.Length:N0} exact item row(s) above all catalog filters · {noPath:N0} no-known-path · {known:N0} known-path" +
+            (missing.Length == 0 ? "." : $" · missing from item_template: {string.Join(", ", missing)}.");
+        _inspection.Text = string.Join("\n\n", rows.Select(item =>
+        {
+            var evidence = item.HasKnownAcquisitionPath ? item.AcquisitionSources.Select(value => $"Accepted · {value}") : item.NoPathReview;
+            return $"{item.Entry:N0} — {item.Name}\nClassification: {(item.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\n• {string.Join("\n• ", evidence)}";
+        }));
+    }
+
     private static string ReviewGroupName(ItemAcquisitionReviewGroup group) => group switch
     {
         ItemAcquisitionReviewGroup.KnownAcquisition => "Known acquisition",
@@ -367,6 +400,25 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         if (candidate.Length == 0 || candidate.Any(character => !char.IsDigit(character) && character is not ',' and not '_' and not ' ')) { entry = 0; return false; }
         candidate = candidate.Replace(",", string.Empty, StringComparison.Ordinal).Replace("_", string.Empty, StringComparison.Ordinal).Replace(" ", string.Empty, StringComparison.Ordinal);
         return uint.TryParse(candidate, out entry) && entry > 0;
+    }
+
+    private static IReadOnlyList<uint> ParseExactItemIds(string? text)
+    {
+        var candidate = text?.Trim() ?? string.Empty;
+        if (candidate.Length == 0 || candidate.Any(character => !char.IsDigit(character) && character is not ',' and not '_' and not ' ' and not '#' and not ';' and not '\r' and not '\n' and not '\t')) return [];
+        var hardBatch = candidate.IndexOfAny([';', '\r', '\n']) >= 0 || candidate.Count(character => character == '#') > 1;
+        var pieces = candidate.Split([',', ';', ' ', '\r', '\n', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(piece => piece.TrimStart('#').Replace("_", string.Empty, StringComparison.Ordinal)).Where(piece => piece.Length > 0).ToArray();
+        if (pieces.Length == 0 || pieces.Any(piece => piece.Any(character => !char.IsDigit(character)))) return [];
+        var looksGrouped = !hardBatch && pieces.Length > 1 && pieces[0].Length is >= 1 and <= 3 && pieces.Skip(1).All(piece => piece.Length == 3);
+        if (looksGrouped && uint.TryParse(string.Concat(pieces), out var grouped) && grouped > 0) return [grouped];
+        var result = new List<uint>();
+        foreach (var piece in pieces)
+        {
+            if (!uint.TryParse(piece, out var entry) || entry == 0) return [];
+            if (!result.Contains(entry)) result.Add(entry);
+        }
+        return result;
     }
 
     private async Task CloneAsync()

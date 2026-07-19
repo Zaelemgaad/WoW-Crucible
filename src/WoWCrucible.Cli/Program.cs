@@ -871,7 +871,7 @@ static int ServerHelp(int code = 0)
 
 static async Task<int> Database(string[] args, CancellationToken cancellationToken)
 {
-    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] [--password-env=NAME] [--ssl=Preferred]"); return DatabaseHelp(); }
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db pet-preview <host> <port> <user> <database> <creature-entry> --dbc=folder [--schema=definitions.xml] [--library=processed-assets] [--format=text|json]"); return DatabaseHelp(); }
     if (args[0].Equals("draft-template", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 3) return Fail("db draft-template requires a supported authoring domain and an output JSON path."); var options = args[3..]; var overwrite = options.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)); var unknown = options.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown draft-template option: {unknown[0]}");
@@ -978,6 +978,29 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
     if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
     if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
     var profile = new DatabaseConnectionProfile(host, port, user, password, database, ssl);
+    if (operation.Equals("pet-preview", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 6 || !uint.TryParse(args[5], out var creatureEntry) || creatureEntry == 0) return Fail("db pet-preview requires a positive creature entry after the database name.");
+        var options = args[6..]; var dbc = Option(options, "--dbc="); var schema = Option(options, "--schema="); var library = Option(options, "--library="); var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var unknown = options.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--schema=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--library=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown pet-preview option: {unknown[0]}");
+        if (string.IsNullOrWhiteSpace(dbc) || !Directory.Exists(dbc)) return Fail("--dbc must point to the server DBC folder containing CreatureDisplayInfo.dbc and CreatureModelData.dbc.");
+        if (schema is not null && !File.Exists(schema)) return Fail($"Creature preview schema does not exist: {Path.GetFullPath(schema)}");
+        if (library is not null && !Directory.Exists(library)) return Fail($"Processed asset library does not exist: {Path.GetFullPath(library)}");
+        var resolved = (await new CreatureDisplayPreviewService().ResolveCreaturesAsync(profile, dbc, schema, library, [creatureEntry], cancellationToken)).Single();
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(resolved, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"CREATURE\t{resolved.CreatureEntry}\t{resolved.Name}\t{resolved.Finding}");
+            foreach (var display in resolved.Displays)
+            {
+                Console.WriteLine($"DISPLAY\t{display.DisplayId}\tmodel={display.ModelId}\tpath={display.ModelClientPath}\tdisplay-scale={display.DisplayScale:0.###}\tmodel-scale={display.ModelScale:0.###}\t{display.Finding}");
+                foreach (var source in display.Sources) Console.WriteLine($"SOURCE\t{(source.Ready ? "READY" : "MISSING_SKIN")}\t{source.Provenance}\t{source.ModelPath}\t{source.SkinPath}\ttextures={source.CreatureTextures.Count}");
+            }
+        }
+        var ready = resolved.Displays.Sum(display => display.Sources.Count(source => source.Ready)); Console.Error.WriteLine($"Resolved {resolved.Displays.Count:N0} display(s) and {ready:N0} ready same-provenance M2/SKIN source(s) for creature {creatureEntry:N0}.");
+        return library is not null && ready == 0 ? 3 : resolved.Displays.Count == 0 ? 3 : 0;
+    }
     if (operation.Equals("pet-curve", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 7 || args[5].StartsWith("--", StringComparison.Ordinal) || args[6].StartsWith("--", StringComparison.Ordinal)) return Fail("db pet-curve requires <source-creature> <target-creature> after the database name.");
