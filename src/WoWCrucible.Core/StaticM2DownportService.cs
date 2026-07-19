@@ -63,13 +63,20 @@ public static class StaticM2DownportService
         var source = File.ReadAllBytes(sourceModelPath);
         var blockers = new List<string>(); var transformations = new List<string>(); var losses = new List<string>();
         var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0;
-        byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null;
+        byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false;
 
         if (source.Length < 8 || FourCc(source, 0) != "MD21") blockers.Add("Input is not a modern MD21 chunk container.");
         else
         {
             var chunks = ReadChunks(source, blockers);
-            var unexpected = chunks.Where(chunk => chunk.Id is not "MD21" and not "SFID" and not "TXID").Select(chunk => chunk.Id).Distinct().Order().ToArray();
+            var txac = chunks.Where(chunk => chunk.Id == "TXAC").ToArray();
+            if (txac.Length > 1) blockers.Add($"Expected at most one TXAC chunk; found {txac.Length:N0}.");
+            else if (txac.Length == 1)
+            {
+                if (txac[0].Size == 0 || source.AsSpan(checked((int)txac[0].DataOffset), checked((int)txac[0].Size)).IndexOfAnyExcept((byte)0) < 0) omittedEmptyTxac = true;
+                else blockers.Add("TXAC contains nonzero extended texture-animation data that has no verified Wrath translation yet.");
+            }
+            var unexpected = chunks.Where(chunk => chunk.Id is not "MD21" and not "SFID" and not "TXID" and not "TXAC").Select(chunk => chunk.Id).Distinct().Order().ToArray();
             if (unexpected.Length > 0) blockers.Add($"Modern semantic chunk(s) are outside the static profile: {string.Join(", ", unexpected)}.");
             var md21 = chunks.Where(chunk => chunk.Id == "MD21").ToArray();
             if (md21.Length != 1) blockers.Add($"Expected exactly one MD21 payload chunk; found {md21.Length:N0}.");
@@ -154,6 +161,7 @@ public static class StaticM2DownportService
         transformations.Add("Clear verified modern FileDataID/LOD flags only after proving TXID values are zero and exactly one SKIN is present.");
         transformations.Add("Append the missing primary-UV texture-coordinate lookup used by the verified single-stage SKIN batches.");
         transformations.Add("Repack modern SKIN v3 common arrays into the Wrath SKIN v2 header without changing their contents.");
+        if (omittedEmptyTxac) transformations.Add("Omit the proven zero-filled TXAC extension chunk; it contains no texture-animation values to translate.");
         return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, version, flags,
             flags & ~SupportedModernFlags, vertices, triangles, submeshes, materials, shadows, transformations, losses, blockers.Distinct().ToArray());
     }
