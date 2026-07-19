@@ -619,6 +619,26 @@ static int Asset(string[] args)
         }
         return plan.Ready ? 0 : 3;
     }
+    if (args.Length > 1 && args[0].Equals("m2-downport-scan", StringComparison.OrdinalIgnoreCase))
+    {
+        var scanOptions = args[1..].Where(value => value.StartsWith("--", StringComparison.Ordinal)).ToArray(); var scanInputs = args[1..].Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
+        var json = scanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var unknown = scanOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown m2-downport-scan option: {unknown[0]}");
+        if (scanInputs.Length == 0) return Fail("m2-downport-scan requires at least one M2 file or folder.");
+        var scan = StaticM2DownportService.Scan(scanInputs);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(scan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"FILES\t{scan.Entries.Count:N0}\nREADY\t{scan.Ready:N0}\nBLOCKED\t{scan.Blocked:N0}\nFAILED\t{scan.Failed:N0}");
+            foreach (var entry in scan.Entries)
+            {
+                Console.WriteLine($"{(entry.Ready ? "READY" : entry.Error is not null ? "FAILED" : "BLOCKED")}\t{entry.Path}");
+                if (entry.Error is not null) Console.WriteLine($"  ERROR\t{entry.Error}");
+                else if (entry.Plan is not null) foreach (var blocker in entry.Plan.Blockers) Console.WriteLine($"  BLOCKER\t{blocker}");
+            }
+        }
+        return scan.Blocked == 0 && scan.Failed == 0 ? 0 : 3;
+    }
     if (args is ["m2-downport", var downportModelPath, var downportOutput, .. var downportOptions])
     {
         var skinPath = Option(downportOptions, "--skin="); var unknown = downportOptions.Where(option => !option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -859,6 +879,7 @@ Usage:
   wowcrucible asset texture-validate <file-or-folder> [--recursive]
   wowcrucible asset inspect <model.m2|building.wmo>...
   wowcrucible asset m2-downport-plan <modern.m2> [--skin=file.skin] [--format=text|json]
+  wowcrucible asset m2-downport-scan <file-or-folder>... [--format=text|json]
   wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin]
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
   wowcrucible asset creature-appearances <model-client-path> [--dbc=folder] [--schema=file] [--library=folder --provenance=name] [--format=text|json]

@@ -54,12 +54,13 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var create = Accent("Create verified workspace"); create.Click += async (_, _) => await CreateWorkspaceAsync();
         var open = new Button { Content = "Open conversion report" }; open.Click += async (_, _) => await OpenReportAsync();
         var convert = Accent("Convert selected verified static M2"); convert.Click += async (_, _) => await ConvertSelectedAsync();
+        var convertEligible = new Button { Content = "Convert all eligible snapshots" }; convertEligible.Click += async (_, _) => await ConvertEligibleAsync();
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
 
         var header = new Border
         {
             BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 8),
-            Child = new WrapPanel { Children = { back, new TextBlock { Text = "MODERN ASSET CONVERSION", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, addFiles, addFolder, remove, clear, create, open, convert, cancel } }
+            Child = new WrapPanel { Children = { back, new TextBlock { Text = "MODERN ASSET CONVERSION", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, addFiles, addFolder, remove, clear, create, open, convert, convertEligible, cancel } }
         };
 
         var dropTarget = new Border
@@ -180,8 +181,8 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
     {
         if (_workspace is null) { _summary.Text = "Create or open a verified workspace before conversion; loose originals are never mutated."; return; }
         if (_assets.SelectedItem is not AssetInspection asset || asset.Format != AssetFormat.M2 || asset.Magic != "MD21") { _summary.Text = "Select a modern MD21 M2 snapshot first."; return; }
-        var source = NativeAssetConversionService.ResolveSnapshotPath(_workspace, asset); var skin = WorkspaceSkinSnapshot(asset);
-        var output = Path.Combine(_workspace.RootPath, "converted", asset.Sha256[..12].ToUpperInvariant());
+        var workspace = _workspace; var source = NativeAssetConversionService.ResolveSnapshotPath(workspace, asset); var skin = WorkspaceSkinSnapshot(asset, workspace);
+        var output = Path.Combine(workspace.RootPath, "converted", asset.Sha256[..12].ToUpperInvariant());
         var operation = BeginOperation("Planning and validating the selected immutable M2/SKIN snapshot…"); var token = operation.Token;
         try
         {
@@ -200,6 +201,42 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         }
         catch (OperationCanceledException) { _summary.Text = "Static M2 conversion cancelled before publication."; }
         catch (Exception exception) { _summary.Text = $"Static M2 conversion failed: {exception.Message}"; DesktopCrashLogger.Log("Static M2 downport failed", exception); }
+        finally { EndOperation(operation); }
+    }
+
+    private async Task ConvertEligibleAsync()
+    {
+        if (_workspace is null) { _summary.Text = "Create or open a verified workspace before batch conversion."; return; }
+        var workspace = _workspace; var candidates = workspace.Assets.Where(asset => asset.Format == AssetFormat.M2 && asset.Magic == "MD21").ToArray();
+        if (candidates.Length == 0) { _summary.Text = "This workspace has no modern MD21 M2 snapshots."; return; }
+        var operation = BeginOperation($"Planning {candidates.Length:N0} immutable M2 snapshot(s)…"); var token = operation.Token;
+        try
+        {
+            var batch = await Task.Run(() =>
+            {
+                var converted = new List<string>(); var skipped = new List<string>(); var blocked = new List<string>(); var failed = new List<string>();
+                foreach (var asset in candidates)
+                {
+                    token.ThrowIfCancellationRequested();
+                    try
+                    {
+                        var source = NativeAssetConversionService.ResolveSnapshotPath(workspace, asset); var plan = StaticM2DownportService.Plan(source, WorkspaceSkinSnapshot(asset, workspace));
+                        if (!plan.Ready) { blocked.Add($"{asset.Path} :: {string.Join(" | ", plan.Blockers)}"); continue; }
+                        var output = Path.Combine(workspace.RootPath, "converted", asset.Sha256[..12].ToUpperInvariant());
+                        if (File.Exists(Path.Combine(output, "conversion-receipt.json"))) { skipped.Add($"{asset.Path} :: existing receipt {output}"); continue; }
+                        var result = StaticM2DownportService.Convert(plan, output, token); converted.Add($"{asset.Path} -> {result.OutputDirectory}");
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception exception) { failed.Add($"{asset.Path} :: {exception.Message}"); }
+                }
+                return (Converted: converted, Skipped: skipped, Blocked: blocked, Failed: failed);
+            }, token);
+            _details.Text = $"BATCH STATIC M2 CONVERSION\n\nCONVERTED ({batch.Converted.Count:N0})\n{Lines(batch.Converted)}\n\nALREADY PRESENT ({batch.Skipped.Count:N0})\n{Lines(batch.Skipped)}\n\nBLOCKED WITHOUT WRITING ({batch.Blocked.Count:N0})\n{Lines(batch.Blocked)}\n\nFAILED ({batch.Failed.Count:N0})\n{Lines(batch.Failed)}";
+            _summary.Text = $"Batch complete · {batch.Converted.Count:N0} converted · {batch.Skipped.Count:N0} already present · {batch.Blocked.Count:N0} blocked · {batch.Failed.Count:N0} failed";
+            DesktopCrashLogger.Debug("CONVERT", "static-m2-batch-complete", ("converted", batch.Converted.Count), ("skipped", batch.Skipped.Count), ("blocked", batch.Blocked.Count), ("failed", batch.Failed.Count));
+        }
+        catch (OperationCanceledException) { _summary.Text = "Batch conversion cancelled. Already published per-model outputs remain valid; no partial model folder was published."; }
+        catch (Exception exception) { _summary.Text = $"Batch conversion failed: {exception.Message}"; DesktopCrashLogger.Log("Static M2 batch conversion failed", exception); }
         finally { EndOperation(operation); }
     }
 
@@ -289,13 +326,13 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         }
         return result;
     }
-    private string? WorkspaceSkinSnapshot(AssetInspection asset)
+    private string? WorkspaceSkinSnapshot(AssetInspection asset, NativeConversionWorkspace? workspace = null)
     {
-        if (_workspace is null) return null;
+        workspace ??= _workspace; if (workspace is null) return null;
         var expected = Path.GetFileNameWithoutExtension(asset.Path) + "00.skin";
         var skins = asset.Dependencies.Where(value => value.Exists && value.Kind.Equals("skin", StringComparison.OrdinalIgnoreCase)).ToArray();
         var dependency = skins.FirstOrDefault(value => Path.GetFileName(value.Path).Equals(expected, StringComparison.OrdinalIgnoreCase)) ?? (skins.Length == 1 ? skins[0] : null);
-        return dependency is null ? null : NativeAssetConversionService.ResolveDependencySnapshotPath(_workspace, asset, dependency);
+        return dependency is null ? null : NativeAssetConversionService.ResolveDependencySnapshotPath(workspace, asset, dependency);
     }
     private static string CompatibilityLabel(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "Wrath 3.3.5 ready", AssetCompatibility.RequiresNativeConversion => "native conversion required", AssetCompatibility.Unsupported => "unsupported layout", _ => "invalid asset" };
     private static string CompatibilityColor(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "#79C793", AssetCompatibility.RequiresNativeConversion => "#E5B768", _ => "#E27B7B" };

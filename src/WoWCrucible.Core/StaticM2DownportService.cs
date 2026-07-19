@@ -42,6 +42,20 @@ public sealed record StaticM2DownportResult(
     int ValidatedSubmeshes,
     int ValidatedMaterials);
 
+public sealed record StaticM2DownportScanEntry(string Path, StaticM2DownportPlan? Plan, string? Error)
+{
+    public bool Ready => Plan?.Ready == true && Error is null;
+}
+
+public sealed record StaticM2DownportScanResult(
+    int FormatVersion,
+    DateTimeOffset CreatedUtc,
+    IReadOnlyList<string> Inputs,
+    IReadOnlyList<StaticM2DownportScanEntry> Entries,
+    int Ready,
+    int Blocked,
+    int Failed);
+
 /// <summary>
 /// Clean-room, loss-accounted conversion for the deliberately narrow modern static M2 profile
 /// found in the imported corpus. Unsupported structures are refused instead of discarded.
@@ -168,6 +182,36 @@ public static class StaticM2DownportService
         if (omittedEmptyTxac) transformations.Add("Omit the proven zero-filled TXAC extension chunk; it contains no texture-animation values to translate.");
         return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, version, flags,
             flags & ~SupportedModernFlagMask, vertices, triangles, submeshes, materials, shadows, transformations, losses, blockers.Distinct().ToArray());
+    }
+
+    public static StaticM2DownportScanResult Scan(IEnumerable<string> inputs, CancellationToken cancellationToken = default)
+    {
+        var normalizedInputs = inputs.Where(value => !string.IsNullOrWhiteSpace(value)).Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (normalizedInputs.Length == 0) throw new ArgumentException("Add at least one M2 file or folder to scan.", nameof(inputs));
+        var files = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var input in normalizedInputs)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (File.Exists(input))
+            {
+                if (!Path.GetExtension(input).Equals(".m2", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Static M2 scan input is not an M2 file: {input}");
+                files.Add(input); continue;
+            }
+            if (!Directory.Exists(input)) throw new FileNotFoundException("Static M2 scan input does not exist.", input);
+            foreach (var file in Directory.EnumerateFiles(input, "*.m2", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint }))
+            {
+                cancellationToken.ThrowIfCancellationRequested(); files.Add(Path.GetFullPath(file));
+            }
+        }
+        if (files.Count == 0) throw new InvalidOperationException("The selected input contains no M2 files.");
+        var entries = new List<StaticM2DownportScanEntry>(files.Count);
+        foreach (var file in files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try { entries.Add(new(file, Plan(file), null)); }
+            catch (Exception exception) { entries.Add(new(file, null, exception.Message)); }
+        }
+        return new(1, DateTimeOffset.UtcNow, normalizedInputs, entries, entries.Count(value => value.Ready), entries.Count(value => value.Plan is { Ready: false }), entries.Count(value => value.Error is not null));
     }
 
     public static StaticM2DownportResult Convert(StaticM2DownportPlan plan, string outputDirectory, CancellationToken cancellationToken = default)
