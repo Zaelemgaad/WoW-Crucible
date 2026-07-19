@@ -55,6 +55,13 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _newSetId = new() { PlaceholderText = "New set ID" }; private readonly TextBox _setMap = new() { AcceptsReturn = true, PlaceholderText = "oldItem:newItem, one pair per line or comma-separated" };
     private readonly TextBox _setSuffix = new() { Text = " Variant" }; private readonly TextBox _setCloneOutput = new() { PlaceholderText = "Output ItemSet.dbc" };
     private readonly TextBox _effects = new() { AcceptsReturn = true, PlaceholderText = "requiredItems:spellId, one bonus per line" }; private readonly TextBox _effectsOutput = new() { PlaceholderText = "Output ItemSet.dbc" };
+    private readonly TextBox _clientItemPath = new() { PlaceholderText = "Target Item.dbc" };
+    private readonly TextBox _clientItemDisplayPath = new() { PlaceholderText = "Target ItemDisplayInfo.dbc" };
+    private readonly TextBlock _clientItemSummary = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#AEB8C8")) };
+    private readonly ListBox _clientItemRows = new();
+    private readonly Border _clientItemConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
+    private ItemClientSyncPlan? _pendingClientItemPlan;
+    private sealed record ClientItemReviewRow(uint Id, string State, string Detail);
 
     public event EventHandler? BackRequested;
     public event EventHandler? SqlStudioRequested;
@@ -66,7 +73,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     public ItemWorkbenchView(DesktopWorkspaceSession session)
     {
-        _session = session; _creator = new ItemCreatorView(session); _creator.ReferenceLookupRequested += (_, request) => ReferenceLookupRequested?.Invoke(this, request); _session.Changed += SessionChanged; LoadDefaults(); PopulateSessionConnection();
+        _session = session; _creator = new ItemCreatorView(session); _creator.ReferenceLookupRequested += (_, request) => ReferenceLookupRequested?.Invoke(this, request); _session.Changed += SessionChanged; LoadDefaults(); LoadClientItemDefaults(); PopulateSessionConnection();
         _items.ItemTemplate = new FuncDataTemplate<ItemCatalogEntry>((item, _) =>
         {
             var panel = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), Margin = new Thickness(3, 3), ColumnSpacing = 8 };
@@ -122,6 +129,11 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             ApplyAuditFilter();
         };
         _reviewGroup.SelectionChanged += (_, _) => ApplyAuditFilter();
+        _clientItemRows.ItemTemplate = new FuncDataTemplate<ClientItemReviewRow>((row, _) => row is null ? new Border() : new Border
+        {
+            BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Padding = new Thickness(8), Margin = new Thickness(0, 0, 0, 6),
+            Child = new StackPanel { Spacing = 3, Children = { new TextBlock { Text = $"{row.Id:N0} · {row.State}", FontWeight = FontWeight.SemiBold }, new TextBlock { Text = row.Detail, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) } } }
+        });
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
@@ -131,7 +143,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var titleActions = new WrapPanel { Children = { sqlStudio, sqlFavorites, mpqMerge } };
         root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, titleActions } } });
         var connection = ConnectionBar(); Grid.SetRow(connection, 1); root.Children.Add(connection);
-        _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Acquisition / cut-item audit", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() } } };
+        _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Acquisition / cut-item audit", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() }, new TabItem { Header = "SQL ↔ Item.dbc sync", Content = ClientItemSyncPage() } } };
         _tabs.SelectionChanged += async (_, _) =>
         {
             if (_tabs.SelectedIndex != 1 || _audit is not null || _auditLoading) return;
@@ -179,6 +191,102 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
         var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, and developer cheats. Exact-ID lookup has its own field and always bypasses every classification/review filter. The ordinary filter searches the selected catalog. Every row states which evidence was accepted or rejected; custom scripts and core code still require manual review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
         return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(rowActions, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
+    }
+
+    private Control ClientItemSyncPage()
+    {
+        var browseItem = new Button { Content = "Browse…" }; browseItem.Click += async (_, _) => { await PickFileAsync(_clientItemPath, "Choose target Item.dbc", "*.dbc"); InvalidateClientItemPlan(); };
+        var browseDisplay = new Button { Content = "Browse…" }; browseDisplay.Click += async (_, _) => { await PickFileAsync(_clientItemDisplayPath, "Choose target ItemDisplayInfo.dbc", "*.dbc"); InvalidateClientItemPlan(); };
+        var browseSchema = new Button { Content = "Browse…" }; browseSchema.Click += async (_, _) => { await PickFileAsync(_schemaPath, "Choose WotLK schema", "*.xml"); InvalidateClientItemPlan(); };
+        var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), RowSpacing = 5 };
+        AddPath(paths, 0, "Item.dbc", _clientItemPath, browseItem); AddPath(paths, 1, "ItemDisplayInfo.dbc", _clientItemDisplayPath, browseDisplay); AddPath(paths, 2, "Schema XML", _schemaPath, browseSchema);
+        var inspect = AccentButton("Compare complete SQL ↔ client records"); inspect.Click += async (_, _) => await PlanClientItemSyncAsync(inspect);
+        var export = new Button { Content = "Export review plan…" }; export.Click += async (_, _) => await ExportClientItemPlanAsync();
+        var build = AccentButton("Build new DBC + WMV CSV + tiny MPQ…"); build.Click += async (_, _) => await PrepareClientItemApplyAsync();
+        return new Grid
+        {
+            RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(4),
+            Children =
+            {
+                new StackPanel
+                {
+                    Spacing = 7,
+                    Children =
+                    {
+                        new TextBlock { Text = "Safe item_template → Item.dbc synchronization", FontSize = 18, FontWeight = FontWeight.SemiBold },
+                        new TextBlock { Text = "Unlike the legacy ClientItem workflow, Crucible never regenerates Item.dbc from SQL and therefore never deletes client-only/NPC equipment records. Existing rows are preserved, SQL-backed rows are added or updated field-by-field, and every display ID must exist in ItemDisplayInfo.dbc. Planning and bundle creation do not write to SQL or the configured DBC folder.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
+                        paths,
+                        new WrapPanel { Children = { inspect, export, build } },
+                        _clientItemSummary
+                    }
+                },
+                WithRow(new TextBlock { Text = "Complete review set: blockers, adds, updates, then preserved client-only records", FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 4) }, 1),
+                WithRow(_clientItemRows, 2),
+                WithRow(_clientItemConfirmation, 3)
+            }
+        };
+    }
+
+    private void InvalidateClientItemPlan()
+    {
+        _pendingClientItemPlan = null; _clientItemRows.ItemsSource = Array.Empty<ClientItemReviewRow>(); _clientItemConfirmation.IsVisible = false; _clientItemSummary.Text = "Paths changed · compare again before building.";
+    }
+
+    private async Task PlanClientItemSyncAsync(Button button)
+    {
+        try
+        {
+            button.IsEnabled = false; _clientItemConfirmation.IsVisible = false; SetBusy("Reading complete item_template and comparing Item.dbc dependencies…");
+            var plan = await ItemClientSyncService.CreatePlanAsync(_clientItemPath.Text ?? string.Empty, _clientItemDisplayPath.Text ?? string.Empty, _schemaPath.Text ?? string.Empty, Profile());
+            _pendingClientItemPlan = plan; ShowClientItemPlan(plan);
+            _status.Text = plan.Ready ? $"Item client plan ready · {plan.AddedRows:N0} add · {plan.UpdatedRows:N0} update · {plan.ClientOnlyRows.Count:N0} preserved client-only." : $"Item client plan blocked by {plan.Blockers.Count:N0} dependency problem(s).";
+        }
+        catch (Exception exception) { _pendingClientItemPlan = null; _clientItemRows.ItemsSource = Array.Empty<ClientItemReviewRow>(); await ErrorAsync("Item client comparison failed", exception); }
+        finally { button.IsEnabled = true; }
+    }
+
+    private void ShowClientItemPlan(ItemClientSyncPlan plan)
+    {
+        _clientItemSummary.Text = $"{(plan.Ready ? "READY" : "BLOCKED")} · target {plan.TargetRowCount:N0} · SQL {plan.ServerRowCount:N0} · add {plan.AddedRows:N0} · update {plan.UpdatedRows:N0} · preserve {plan.ClientOnlyRows.Count:N0} client-only · missing displays {plan.MissingDisplayIds.Count:N0}\n" + string.Join("\n", plan.Findings.Select(value => "• " + value));
+        var blockers = plan.MissingDisplayIds.Select(id => new ClientItemReviewRow(id, "BLOCKED · missing ItemDisplayInfo", $"Display ID {id:N0} is referenced by item(s) {string.Join(", ", plan.WmvCatalog.Where(row => row.Client.DisplayInfoId == id).Select(row => row.Client.Id.ToString("N0")))}; no output can be built until the dependency is supplied or corrected."));
+        var mutations = plan.Mutations.Select(row => new ClientItemReviewRow(row.Id, row.AddsRow ? "ADD from item_template" : "UPDATE from item_template", row.AddsRow ? $"Display {row.Desired.DisplayInfoId:N0} · all eight client fields will be added." : $"Changed: {string.Join(", ", row.ChangedFields)} · display {row.Desired.DisplayInfoId:N0}."));
+        var preserved = plan.ClientOnlyRows.Select(row => new ClientItemReviewRow(row.Id, "PRESERVE client-only / NPC equipment", $"Class {row.ClassId}, subclass {row.SubclassId}, display {row.DisplayInfoId:N0}, inventory {row.InventoryType}; no fake incomplete item_template row will be inserted."));
+        _clientItemRows.ItemsSource = blockers.Concat(mutations).Concat(preserved).ToArray();
+    }
+
+    private async Task ExportClientItemPlanAsync()
+    {
+        if (_pendingClientItemPlan is not { } plan) { _status.Text = "Compare Item.dbc with SQL before exporting a plan."; return; }
+        var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window.");
+        var file = await storage.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Export item client synchronization plan", SuggestedFileName = "item-client-sync.crucible.json", FileTypeChoices = [new FilePickerFileType("Crucible JSON") { Patterns = ["*.crucible.json", "*.json"] }] });
+        if (file?.TryGetLocalPath() is not { } path) return;
+        try { ItemClientSyncService.SavePlan(path, plan); _status.Text = $"Item client review plan exported: {path}"; } catch (Exception exception) { await ErrorAsync("Item client plan export failed", exception); }
+    }
+
+    private async Task PrepareClientItemApplyAsync()
+    {
+        if (_pendingClientItemPlan is not { Ready: true } plan) { _status.Text = "Build a blocker-free item client plan first."; return; }
+        var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window.");
+        var folders = await storage.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose parent for a new item client bundle", AllowMultiple = false }); if (folders.FirstOrDefault()?.TryGetLocalPath() is not { } parent) return;
+        var output = Path.Combine(parent, $"Crucible-Items-{DateTime.Now:yyyyMMdd-HHmmss}"); var cancel = new Button { Content = "Cancel" }; var confirm = AccentButton("Confirm new bundle");
+        cancel.Click += (_, _) => _clientItemConfirmation.IsVisible = false; confirm.Click += async (_, _) => await ApplyClientItemPlanAsync(confirm, output);
+        _clientItemConfirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Recheck the live SQL snapshot, then create {output}? The bundle will preserve {plan.ClientOnlyRows.Count:N0} client-only rows and contain a new Item.dbc, ASCII WMV items.csv, strict manifest/receipt, and ready tiny MPQ. It will not modify SQL or the selected DBCs.", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _clientItemConfirmation.IsVisible = true;
+    }
+
+    private async Task ApplyClientItemPlanAsync(Button button, string output)
+    {
+        if (_pendingClientItemPlan is not { Ready: true } plan) return;
+        try
+        {
+            button.IsEnabled = false; SetBusy("Rechecking the live item_template snapshot before writing…");
+            var fresh = await ItemClientSyncService.CreatePlanAsync(plan.TargetItemDbcPath, plan.ItemDisplayInfoDbcPath, plan.SchemaPath, Profile());
+            if (!fresh.ServerSnapshotSha256.Equals(plan.ServerSnapshotSha256, StringComparison.OrdinalIgnoreCase) || !fresh.ItemTemplateSchemaSha256.Equals(plan.ItemTemplateSchemaSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("item_template or its schema changed after review. Compare again before building.");
+            var result = await Task.Run(() => ItemClientSyncService.Apply(plan, output)); _clientItemConfirmation.IsVisible = false;
+            _clientItemSummary.Text += $"\n\nBUILT\nItem.dbc: {result.ItemDbcPath}\nWMV catalog: {result.WmvCatalogPath}\nPatch: {result.PatchPath}\nReceipt: {result.ReceiptPath}";
+            _status.Text = $"Item client bundle built · {plan.AddedRows:N0} added · {plan.UpdatedRows:N0} updated · {plan.ClientOnlyRows.Count:N0} client-only rows preserved.";
+        }
+        catch (Exception exception) { await ErrorAsync("Item client bundle failed safely", exception); }
+        finally { button.IsEnabled = true; }
     }
 
     private Control ClonePage()
@@ -506,6 +614,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
            connected.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) && connected.Port == profile.Port &&
            connected.User.Equals(profile.User, StringComparison.OrdinalIgnoreCase) && connected.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase);
     private void LoadDefaults() { try { var path = CruciblePaths.SettingsFileForRead; if (!File.Exists(path)) return; using var json = JsonDocument.Parse(File.ReadAllText(path)); var root = json.RootElement; if (root.TryGetProperty("DatabaseHost", out var host)) _host.Text = host.GetString(); if (root.TryGetProperty("DatabasePort", out var port)) _port.Value = port.GetUInt32(); if (root.TryGetProperty("DatabaseUser", out var user)) _user.Text = user.GetString(); if (root.TryGetProperty("WorldDatabase", out var db)) _database.Text = db.GetString(); if (root.TryGetProperty("SchemaDefinitionPath", out var schema)) _schemaPath.Text = schema.GetString(); if (root.TryGetProperty("CoreDbcPath", out var dbc)) { var directory = dbc.GetString(); _acquisitionDbc.Text = directory; if (Directory.Exists(directory)) { _itemSetPath.Text = Path.Combine(directory, "ItemSet.dbc"); _spellPath.Text = Path.Combine(directory, "Spell.dbc"); } } } catch (Exception exception) { DesktopCrashLogger.Debug("SETTINGS", "item-workbench-defaults-load-failed", ("error", exception.Message)); } }
+    private void LoadClientItemDefaults() { var directory = EmptyNull(_acquisitionDbc.Text) ?? _session.Settings.CoreDbcPath; if (!string.IsNullOrWhiteSpace(directory)) { _clientItemPath.Text = Path.Combine(directory, "Item.dbc"); _clientItemDisplayPath.Text = Path.Combine(directory, "ItemDisplayInfo.dbc"); } }
     private async Task PickFileAsync(TextBox target, string title, string pattern) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(title) { Patterns = [pattern] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }
     private async Task PickFolderAsync(TextBox target, string title) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var folders = await storage.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = title, AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }
     private async Task PickOutputAsync(TextBox target, string name) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var file = await storage.SaveFilePickerAsync(new FilePickerSaveOptions { SuggestedFileName = name, FileTypeChoices = [new FilePickerFileType("DBC") { Patterns = ["*.dbc"] }] }); var path = file?.TryGetLocalPath(); if (path is not null) target.Text = path; }

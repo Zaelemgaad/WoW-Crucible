@@ -1695,6 +1695,25 @@ if (generatedNpcExtra.GetRaw(generatedNpcExtraRow, generatedNpcHead) != 8815 || 
     throw new InvalidOperationException("Generated CreatureDisplayInfoExtra lost the resolved armor display or content-derived baked texture name.");
 try { _ = NpcChrAppearanceService.Parse(Path.Combine(npcChrRoot, "missing.chr")); throw new InvalidOperationException("A missing .chr file was accepted."); }
 catch (FileNotFoundException) { }
+
+var itemSyncRoot = Path.Combine(creatureLibrary, "item-client-sync"); Directory.CreateDirectory(itemSyncRoot);
+var sourceItemDbc = Path.Combine(args[1], "Item.dbc"); var sourceItemDisplayDbc = Path.Combine(args[1], "ItemDisplayInfo.dbc");
+var clientItems = ItemClientSyncService.LoadClientItems(sourceItemDbc, args[0]); var existingClientItem = clientItems.First(row => row.DisplayInfoId != 0); var preservedClientItem = clientItems.First(row => row.Id != existingClientItem.Id);
+var changedClientItem = existingClientItem with { Material = existingClientItem.Material == 0 ? 1 : 0 };
+var addedClientItem = changedClientItem with { Id = checked(clientItems.Max(row => row.Id) + 100u) };
+var serverItemSnapshot = new[] { new ServerClientItemRecord(changedClientItem, 6, "Cruciblé, Existing"), new ServerClientItemRecord(addedClientItem, 4, "Crucible Added") };
+var itemSyncPlan = ItemClientSyncService.CreatePlan(sourceItemDbc, sourceItemDisplayDbc, args[0], serverItemSnapshot);
+if (!itemSyncPlan.Ready || itemSyncPlan.AddedRows != 1 || itemSyncPlan.UpdatedRows != 1 || !itemSyncPlan.ClientOnlyRows.Any(row => row.Id == preservedClientItem.Id) || itemSyncPlan.MissingDisplayIds.Count != 0)
+    throw new InvalidOperationException("Safe Item.dbc synchronization did not distinguish add/update/client-only rows or validate display dependencies.");
+var itemSyncOutput = Path.Combine(itemSyncRoot, "output"); var itemSyncResult = ItemClientSyncService.Apply(itemSyncPlan, itemSyncOutput);
+var syncedClientItems = ItemClientSyncService.LoadClientItems(itemSyncResult.ItemDbcPath, args[0]).ToDictionary(row => row.Id);
+if (syncedClientItems.Count != clientItems.Count + 1 || syncedClientItems[existingClientItem.Id] != changedClientItem || syncedClientItems[addedClientItem.Id] != addedClientItem || syncedClientItems[preservedClientItem.Id] != preservedClientItem || !File.Exists(itemSyncResult.WmvCatalogPath) || !File.ReadAllText(itemSyncResult.WmvCatalogPath).Contains("Crucible, Existing", StringComparison.Ordinal) || !PatchManifestService.Validate(PatchManifestService.Load(itemSyncResult.ManifestPath), itemSyncResult.PatchPath).Passed)
+    throw new InvalidOperationException("Item client synchronization did not preserve client-only rows, apply exact SQL-backed changes, export WMV names, or build a valid tiny MPQ.");
+var tamperedItemMutation = itemSyncPlan.Mutations[0] with { Desired = itemSyncPlan.Mutations[0].Desired with { Material = itemSyncPlan.Mutations[0].Desired.Material + 1 } };
+try { _ = ItemClientSyncService.Apply(itemSyncPlan with { Mutations = [tamperedItemMutation, .. itemSyncPlan.Mutations.Skip(1)] }, Path.Combine(itemSyncRoot, "tampered")); throw new InvalidOperationException("A tampered Item client mutation was applied."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("fresh deterministic comparison", StringComparison.OrdinalIgnoreCase)) { }
+var missingDisplayPlan = ItemClientSyncService.CreatePlan(sourceItemDbc, sourceItemDisplayDbc, args[0], [new ServerClientItemRecord(addedClientItem with { DisplayInfoId = uint.MaxValue }, 4, "Broken display")]);
+if (missingDisplayPlan.Ready || missingDisplayPlan.MissingDisplayIds.Single() != uint.MaxValue) throw new InvalidOperationException("A missing ItemDisplayInfo dependency did not block Item client synchronization.");
 Directory.Delete(creatureLibrary, true);
 if (ItemCatalogEntry.ClassifyReviewGroup("Martin Fury", false, 6) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||
     ItemCatalogEntry.ClassifyReviewGroup("Thunderfury, Blessed Blade of the Windseeker?", false, 7, ["Ignored · quest 7561 is disabled (Deprecated quest)."] ) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||

@@ -850,6 +850,31 @@ static int Asset(string[] args)
         else { Console.WriteLine($"OUTPUT\t{result.OutputDirectory}\nDISPLAY\t{result.Plan.DisplayId}\nEXTRA\t{result.Plan.ExtraId}\nBAKED_TEXTURE\t{result.BakedTexturePath}\nMANIFEST\t{result.ManifestPath}\nPATCH\t{result.PatchPath}\nRECEIPT\t{result.ReceiptPath}"); foreach (var pair in result.OutputDbcFiles) Console.WriteLine($"DBC\t{pair.Key}\t{pair.Value}\t{result.OutputSha256[pair.Key]}"); }
         return 0;
     }
+    if (args is ["item-client-plan", var itemClientDbc, var itemClientDisplayDbc, var itemClientSchema, var itemClientHost, var itemClientPortText, var itemClientUser, var itemClientDatabase, var itemClientPlanPath, .. var itemClientOptions])
+    {
+        var allowed = new[] { "--password-env=", "--ssl=", "--format=" }; var unknown = itemClientOptions.Where(option => !allowed.Any(prefix => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown item-client-plan option: {unknown[0]}");
+        if (!uint.TryParse(itemClientPortText, out var port) || port is 0 or > 65535) return Fail("Database port must be from 1 to 65535.");
+        var passwordEnvironment = Option(itemClientOptions, "--password-env=") ?? "WOW_CRUCIBLE_DB_PASSWORD"; var password = Environment.GetEnvironmentVariable(passwordEnvironment); if (password is null) return Fail($"Set the {passwordEnvironment} environment variable. Passwords are not accepted on the command line.");
+        if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(Option(itemClientOptions, "--ssl=") ?? "Preferred", true, out var ssl)) return Fail("Unknown MySQL SSL mode.");
+        var plan = ItemClientSyncService.CreatePlanAsync(itemClientDbc, itemClientDisplayDbc, itemClientSchema, new(itemClientHost, port, itemClientUser, password, itemClientDatabase, ssl), CancellationToken.None).GetAwaiter().GetResult();
+        ItemClientSyncService.SavePlan(itemClientPlanPath, plan, itemClientOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase));
+        if (itemClientOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase)) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"READY\t{plan.Ready}\nTARGET_ROWS\t{plan.TargetRowCount}\nSERVER_ROWS\t{plan.ServerRowCount}\nADD\t{plan.AddedRows}\nUPDATE\t{plan.UpdatedRows}\nPRESERVE_CLIENT_ONLY\t{plan.ClientOnlyRows.Count}\nMISSING_DISPLAYS\t{plan.MissingDisplayIds.Count}\nPLAN\t{Path.GetFullPath(itemClientPlanPath)}");
+            foreach (var finding in plan.Findings) Console.WriteLine($"FINDING\t{finding}"); foreach (var blocker in plan.Blockers) Console.WriteLine($"BLOCKER\t{blocker}");
+        }
+        return plan.Ready ? 0 : 3;
+    }
+    if (args is ["item-client-apply", var itemClientApplyPlan, var itemClientOutput, .. var itemClientApplyOptions])
+    {
+        var unknown = itemClientApplyOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown item-client-apply option: {unknown[0]}");
+        var result = ItemClientSyncService.Apply(ItemClientSyncService.LoadPlan(itemClientApplyPlan), itemClientOutput, CancellationToken.None);
+        if (itemClientApplyOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase)) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else Console.WriteLine($"OUTPUT\t{result.OutputDirectory}\nITEM_DBC\t{result.ItemDbcPath}\t{result.ItemDbcSha256}\nWMV_CATALOG\t{result.WmvCatalogPath}\nMANIFEST\t{result.ManifestPath}\nPATCH\t{result.PatchPath}\nRECEIPT\t{result.ReceiptPath}");
+        return 0;
+    }
     if (args is ["creature-appearance-port-apply", var portPlanPath, var portOutputDirectory, .. var portApplyOptions])
     {
         var json = portApplyOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
@@ -1076,6 +1101,8 @@ Usage:
   wowcrucible asset creature-appearance-port-plan <source-dbc-folder> <target-dbc-folder> <display-id> --schema=file [--output=plan.json] [--format=text|json] [--overwrite]
   wowcrucible asset npc-chr-plan <file.chr> <texture> <target-dbc-folder> <schema.xml> <host> <port> <user> <database> <plan.json> [--display-start=N] [--extra-start=N] [--sound=N] [--scale=1] [--alpha=255] [--password-env=NAME] [--format=text|json] [--overwrite]
   wowcrucible asset npc-chr-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
+  wowcrucible asset item-client-plan <Item.dbc> <ItemDisplayInfo.dbc> <schema.xml> <host> <port> <user> <database> <plan.json> [--password-env=NAME] [--format=text|json] [--overwrite]
+  wowcrucible asset item-client-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
   wowcrucible asset creature-appearance-port-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
   wowcrucible asset creature-appearance-patch-plan <port-receipt.json> <processed-library> [--provenance=name] [--output=patch-plan.json] [--format=text|json] [--overwrite]
   wowcrucible asset creature-appearance-patch-manifest <patch-plan.json> <manifest.json> [--mpq=patch-name.MPQ] [--overwrite]
