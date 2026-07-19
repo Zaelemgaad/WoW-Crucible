@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
@@ -54,8 +55,12 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        var buildIdentity = ReadBuildIdentity();
+        BuildIdentityText.Text = buildIdentity.Label;
+        ToolTip.SetTip(BuildIdentityText, $"{buildIdentity.FullVersion}\nRunning from {AppContext.BaseDirectory}");
+        Title = $"WoW Crucible · {buildIdentity.Label}";
         DevbugModeToggle.IsChecked = DesktopCrashLogger.IsDevbugEnabled;
-        DesktopCrashLogger.Debug("UI", "main-window-created", ("devbug", DesktopCrashLogger.IsDevbugEnabled));
+        DesktopCrashLogger.Debug("UI", "main-window-created", ("devbug", DesktopCrashLogger.IsDevbugEnabled), ("build", buildIdentity.FullVersion), ("base_directory", AppContext.BaseDirectory));
         DbcView.SelectionChanged += (_, selection) => ShowSelection(selection);
         DbcView.CellEditRequested += async (_, selection) => await EditCellAsync(selection);
         DbcView.RenderMeasured += (_, measurement) =>
@@ -72,6 +77,18 @@ public partial class MainWindow : Window
         Closing += WindowClosing;
         Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
+    }
+
+    private static (string Label, string FullVersion) ReadBuildIdentity()
+    {
+        var assembly = typeof(MainWindow).Assembly;
+        var fullVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                          ?? assembly.GetName().Version?.ToString()
+                          ?? "unknown";
+        var separator = fullVersion.LastIndexOf('+');
+        var revision = separator >= 0 && separator + 1 < fullVersion.Length ? fullVersion[(separator + 1)..] : string.Empty;
+        var label = revision.Length >= 7 ? $"BUILD {revision[..7]}" : $"BUILD {fullVersion}";
+        return (label, fullVersion);
     }
 
     private void DevbugModeChanged(object? sender, RoutedEventArgs e)

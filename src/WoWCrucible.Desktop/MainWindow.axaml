@@ -12,6 +12,7 @@
             <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" Margin="14,4">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="9" Margin="0,2,10,4">
                     <TextBlock Text="WOW CRUCIBLE" FontWeight="SemiBold" FontSize="15" VerticalAlignment="Center" />
+                    <TextBlock x:Name="BuildIdentityText" Foreground="#7F8A9F" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center" />
                 </StackPanel>
                 <WrapPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <ToggleSwitch x:Name="DevbugModeToggle" OnContent="DEVBUG ON" OffContent="DEVBUG OFF" IsCheckedChanged="DevbugModeChanged" />

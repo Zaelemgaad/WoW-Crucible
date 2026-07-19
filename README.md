@@ -11,6 +11,7 @@ Client formats and server integration are separate: a client-build profile decla
 
 ## What works today
 
+- Displays the executable's exact source revision in the main header and window title, with the full product version and running folder in its tooltip, so a deliberately frozen test copy cannot be mistaken for the current development build.
 - Opens on a workflow-oriented Start Center with plain-language guided and advanced actions plus workspace-readiness checks.
 - Includes a same-window, searchable Tool Inventory backed by the executable consolidation catalog. It currently assigns all 94 discovered workspace/Tools roots, reports missing expected roots, sorts new unassigned additions first, and exposes the same scan through text/JSON CLI output so a newly dropped legacy tool cannot be silently overlooked.
 - Selects built-in target profiles for Classic 5875, TBC 8606, WotLK 12340, and experimental Cata 15595; accepts external JSON profiles without recompilation.
