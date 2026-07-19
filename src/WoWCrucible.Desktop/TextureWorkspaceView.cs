@@ -78,11 +78,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
                 Row(new Border { Background = Brush.Parse("#080B10"), Child = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Content = _preview } }, 1)
             }
         };
-        var body = new Grid
-        {
-            ColumnDefinitions = new("2*,Auto,3*"),
-            Children = { inspector, Column(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), Column(previewCard, 2) }
-        };
+        var body = new ResponsiveSplitGrid(inspector, previewCard, 2, 3);
         Content = new Grid
         {
             RowDefinitions = new("Auto,*,Auto"),

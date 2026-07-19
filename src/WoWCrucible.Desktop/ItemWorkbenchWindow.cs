@@ -135,14 +135,10 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private Control ConnectionBar()
     {
         var connect = AccentButton("Connect & share with SQL Studio"); connect.Click += async (_, _) => await ConnectDatabaseAsync(false);
-        var bar = new Grid { ColumnDefinitions = new("*,*,*"), RowDefinitions = new("Auto,Auto,Auto,Auto"), ColumnSpacing = 14, RowSpacing = 7, Margin = new Thickness(12, 8) };
         var heading = new TextBlock { Text = "LIVE WORLD DATABASE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = new SolidColorBrush(Color.Parse("#C58A2B")), VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetColumnSpan(heading, 3); bar.Children.Add(heading);
-        AddConnectionField(bar, "Host", _host, 1, 0); AddConnectionField(bar, "Port", _port, 1, 1); AddConnectionField(bar, "User", _user, 1, 2);
-        AddConnectionField(bar, "Password", _password, 2, 0); AddConnectionField(bar, "Database", _database, 2, 1);
         var privacy = new TextBlock { Text = "Password remains in memory only.", Foreground = new SolidColorBrush(Color.Parse("#78859A")), FontSize = 10, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetRow(privacy, 2); Grid.SetColumn(privacy, 2); bar.Children.Add(privacy);
-        Grid.SetRow(connect, 3); Grid.SetColumnSpan(connect, 3); connect.HorizontalAlignment = HorizontalAlignment.Stretch; bar.Children.Add(connect);
+        connect.HorizontalAlignment = HorizontalAlignment.Stretch;
+        var bar = new StackPanel { Spacing = 7, Margin = new Thickness(12, 8), Children = { heading, ConnectionField("Host", _host), ConnectionField("Port", _port), ConnectionField("User", _user), ConnectionField("Password", _password), ConnectionField("Database", _database), privacy, connect } };
         return new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Child = bar };
     }
 
@@ -156,14 +152,10 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var favorite = new Button { Content = "★ Favorite selected row" }; favorite.Click += async (_, _) => await OpenSelectedItemAsync(true);
         var browseDbc = new Button { Content = "DBC folder…" }; browseDbc.Click += async (_, _) => await PickFolderAsync(_acquisitionDbc, "Select the server DBC folder");
         var browseMpq = new Button { Content = "Related MPQ…" }; browseMpq.Click += async (_, _) => await PickFileAsync(_favoriteMpq, "Select an optional related MPQ", "*.mpq");
-        var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), RowSpacing = 7, Margin = new Thickness(0,0,0,8) };
-        header.Children.Add(audit);
-        var searchRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Margin = new Thickness(10,0), Children = { _search, WithColumn(findExact, 1) } };
-        Grid.SetColumn(searchRow, 1); header.Children.Add(searchRow); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
-        var classificationLabel = new TextBlock { Text = "Show", VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetRow(classificationLabel, 1); header.Children.Add(classificationLabel); Grid.SetRow(_classification, 1); Grid.SetColumn(_classification, 1); _classification.Margin = new Thickness(10,0); header.Children.Add(_classification);
-        var groupLabel = new TextBlock { Text = "Review group", VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetRow(groupLabel, 2); header.Children.Add(groupLabel); Grid.SetRow(_reviewGroup, 2); Grid.SetColumn(_reviewGroup, 1); _reviewGroup.Margin = new Thickness(10,0); header.Children.Add(_reviewGroup);
+        var searchRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { _search, WithColumn(findExact, 1) } };
+        var classificationRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Show", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_classification, 1) } };
+        var groupRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Review group", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_reviewGroup, 1) } };
+        var header = new StackPanel { Spacing = 7, Margin = new Thickness(0,0,0,8), Children = { new WrapPanel { Children = { audit, _auditSummary } }, searchRow, classificationRow, groupRow } };
         var rowActions = new WrapPanel { Children = { edit, fullSql, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
         var exact = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _inspectId, WithColumn(inspect, 1), rowActions } };
         var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
@@ -517,7 +509,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private static Button AccentButton(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
     private static Grid Form(params (string Label, Control Control)[] rows) { var grid = new Grid { ColumnDefinitions = new("Auto,*"), RowDefinitions = new(string.Join(',', Enumerable.Repeat("Auto", rows.Length))) }; for (var index=0; index<rows.Length; index++) { var label = new TextBlock { Text = rows[index].Label, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,5,12,5) }; Grid.SetRow(label,index); grid.Children.Add(label); rows[index].Control.Margin = new Thickness(0,4); Grid.SetRow(rows[index].Control,index); Grid.SetColumn(rows[index].Control,1); grid.Children.Add(rows[index].Control); } return grid; }
     private static Grid Row(Control first, Control second) { var grid = new Grid { ColumnDefinitions = new("*,Auto") }; grid.Children.Add(first); Grid.SetColumn(second,1); second.Margin = new Thickness(6,0,0,0); grid.Children.Add(second); return grid; }
-    private static void AddConnectionField(Grid grid, string label, Control input, int row, int column) { var field = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Stretch }; field.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center, FontSize = 11 }); Grid.SetColumn(input, 1); field.Children.Add(input); Grid.SetRow(field, row); Grid.SetColumn(field, column); grid.Children.Add(field); }
+    private static Control ConnectionField(string label, Control input) { var field = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Stretch }; field.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center, FontSize = 11 }); Grid.SetColumn(input, 1); field.Children.Add(input); return field; }
     private static void AddPath(Grid grid, int row, string label, Control field, Control button) { var text = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center }; Grid.SetRow(text,row); grid.Children.Add(text); Grid.SetRow(field,row); Grid.SetColumn(field,1); field.Margin = new Thickness(6,3); grid.Children.Add(field); Grid.SetRow(button,row); Grid.SetColumn(button,2); grid.Children.Add(button); }
     private static T WithRow<T>(T control, int row) where T:Control { Grid.SetRow(control,row); return control; }
     private static T WithColumn<T>(T control, int column) where T:Control { Grid.SetColumn(control,column); return control; }

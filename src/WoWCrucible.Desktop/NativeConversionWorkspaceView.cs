@@ -87,11 +87,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
                 WithRow(_details, 2)
             }
         };
-        var body = new Grid
-        {
-            ColumnDefinitions = new("*,Auto,2*"), ColumnSpacing = 5, Margin = new Thickness(12, 9, 12, 12),
-            Children = { left, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(right, 2) }
-        };
+        var body = new ResponsiveSplitGrid(left, right, 1, 2) { Margin = new Thickness(12, 9, 12, 12) };
         Content = new Grid { RowDefinitions = new("Auto,Auto,*"), Children = { header, WithRow(dropTarget, 1), WithRow(body, 2) } };
     }
 

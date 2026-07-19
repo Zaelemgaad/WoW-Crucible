@@ -80,7 +80,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         var allocationForm = Form(("ID domain", _domain), ("Count", _count), ("Start ID", _start), ("Purpose", _purpose));
         var configuration = new ScrollViewer { Content = new StackPanel { Spacing = 10, Margin = new Thickness(12), Children = { new TextBlock { Text = "Portable project", FontSize = 17, FontWeight = FontWeight.SemiBold }, projectForm, _projectSummary, new TextBlock { Text = "Authoritative occupancy", FontSize = 17, FontWeight = FontWeight.SemiBold }, sourceForm, new TextBlock { Text = "Reservation", FontSize = 17, FontWeight = FontWeight.SemiBold }, allocationForm, _policy, new WrapPanel { Children = { connect, scan, reserve, cancel } }, _status } } };
         var evidence = new Grid { RowDefinitions = new("Auto,*,Auto,Auto,*"), RowSpacing = 7, Margin = new Thickness(12), Children = { new TextBlock { Text = "Occupancy sources", FontSize = 17, FontWeight = FontWeight.SemiBold }, WithRow(_sources, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(new TextBlock { Text = "Project reservations", FontSize = 17, FontWeight = FontWeight.SemiBold }, 3), WithRow(_reservations, 4) } };
-        var body = new Grid { ColumnDefinitions = new("*,Auto,*"), Children = { configuration, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(evidence, 2) } };
+        var body = new ResponsiveSplitGrid(configuration, evidence);
         Content = new Grid { RowDefinitions = new("Auto,*"), Children = { heading, WithRow(body, 1) } };
         ShowPolicy(); TryLoadConfiguredProject();
     }

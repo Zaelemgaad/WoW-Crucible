@@ -101,11 +101,7 @@ internal sealed class LayeredDbcWorkspaceView : UserControl, IDisposable
         var openOutput = new Button { Content = "Open last output" }; openOutput.Click += (_, _) => { if (File.Exists(_lastOutput)) OpenDbcRequested?.Invoke(this, _lastOutput!); else _status.Text = "No promoted output has been created in this session."; };
         var left = new Grid { RowDefinitions = new("*,Auto"), Children = { _layers, WithRow(Card(_summary), 1) } };
         var right = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { applyFields, applyRows, additions, save, applyManifest, openOutput } }, WithRow(_differences, 1), WithRow(Card(_detail), 2) } };
-        return new Grid
-        {
-            ColumnDefinitions = new("*,Auto,*"),
-            Children = { left, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(right, 2) }
-        };
+        return new ResponsiveSplitGrid(left, right);
     }
 
     private async Task CompareLayersAsync()

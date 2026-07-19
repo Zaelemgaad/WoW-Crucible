@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 if (args.Length != 2)
     throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
@@ -1140,19 +1141,21 @@ try
 }
 finally { if (Directory.Exists(queryExportRoot)) Directory.Delete(queryExportRoot, true); }
 
-var desktopSourceRoot = Path.Combine(Directory.GetCurrentDirectory(), "src", "WoWCrucible.Desktop");
+var desktopSourceRoot = Path.Combine(FindRepositoryRoot(AppContext.BaseDirectory), "src", "WoWCrucible.Desktop");
 if (Directory.Exists(desktopSourceRoot))
 {
     var desktopSources = Directory.EnumerateFiles(desktopSourceRoot, "*.cs", SearchOption.AllDirectories).ToDictionary(path => path, File.ReadAllText);
     var featureWindows = desktopSources.Where(pair => !Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase) &&
         (pair.Value.Contains(": Window", StringComparison.Ordinal) || pair.Value.Contains("new Window", StringComparison.Ordinal) || pair.Value.Contains(".ShowDialog(", StringComparison.Ordinal) || pair.Value.Contains(".Show(", StringComparison.Ordinal))).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
     var rigidConstraints = desktopSources.Where(pair => pair.Value.Contains("MinWidth =", StringComparison.Ordinal) || pair.Value.Contains("MaxWidth =", StringComparison.Ordinal) || pair.Value.Contains("MinHeight =", StringComparison.Ordinal) || pair.Value.Contains("MaxHeight =", StringComparison.Ordinal)).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
+    var permanentHorizontalSplitters = desktopSources.Where(pair => !Path.GetFileName(pair.Key).Equals("ResponsiveSplitGrid.cs", StringComparison.OrdinalIgnoreCase) && Regex.IsMatch(pair.Value, @"new\s+GridSplitter\s*\{[^}]*ResizeDirection\s*=\s*GridResizeDirection\.Columns", RegexOptions.CultureInvariant)).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
+    var responsiveSplitters = desktopSources.Sum(pair => Regex.Matches(pair.Value, @"new\s+ResponsiveSplitGrid\s*\(", RegexOptions.CultureInvariant).Count);
     var markupConstraints = Directory.EnumerateFiles(desktopSourceRoot, "*.axaml", SearchOption.AllDirectories).Where(path =>
     {
         var markup = File.ReadAllText(path); return markup.Contains(" MinWidth=", StringComparison.Ordinal) || markup.Contains(" MaxWidth=", StringComparison.Ordinal) || markup.Contains(" MinHeight=", StringComparison.Ordinal) || markup.Contains(" MaxHeight=", StringComparison.Ordinal) || markup.Contains(" Width=\"", StringComparison.Ordinal) && !markup.Contains("d:DesignWidth=", StringComparison.Ordinal) || markup.Contains(" Height=\"", StringComparison.Ordinal) && !markup.Contains("d:DesignHeight=", StringComparison.Ordinal);
     }).Select(path => Path.GetRelativePath(desktopSourceRoot, path)).ToArray();
-    if (featureWindows.Length > 0 || rigidConstraints.Length > 0 || markupConstraints.Length > 0)
-        throw new InvalidOperationException($"Single-window/responsive desktop contract regressed. Feature windows: {string.Join(", ", featureWindows)}; C# rigid constraints: {string.Join(", ", rigidConstraints)}; markup constraints: {string.Join(", ", markupConstraints)}.");
+    if (featureWindows.Length > 0 || rigidConstraints.Length > 0 || markupConstraints.Length > 0 || permanentHorizontalSplitters.Length > 0 || responsiveSplitters < 15)
+        throw new InvalidOperationException($"Single-window/responsive desktop contract regressed. Feature windows: {string.Join(", ", featureWindows)}; C# rigid constraints: {string.Join(", ", rigidConstraints)}; markup constraints: {string.Join(", ", markupConstraints)}; permanent horizontal splitters: {string.Join(", ", permanentHorizontalSplitters)}; responsive splitter uses: {responsiveSplitters}.");
 }
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
@@ -2499,4 +2502,11 @@ static void WriteM2Track(byte[] target, int offset, int timestampSeriesOffset, i
     BitConverter.GetBytes((ushort)1).CopyTo(target, offset); BitConverter.GetBytes((short)-1).CopyTo(target, offset + 2);
     BitConverter.GetBytes((uint)1).CopyTo(target, offset + 4); BitConverter.GetBytes((uint)timestampSeriesOffset).CopyTo(target, offset + 8);
     BitConverter.GetBytes((uint)1).CopyTo(target, offset + 12); BitConverter.GetBytes((uint)valueSeriesOffset).CopyTo(target, offset + 16);
+}
+
+static string FindRepositoryRoot(string start)
+{
+    for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
+        if (File.Exists(Path.Combine(directory.FullName, "WoWCrucible.slnx"))) return directory.FullName;
+    throw new DirectoryNotFoundException($"Could not locate the WoW Crucible repository above {start}.");
 }

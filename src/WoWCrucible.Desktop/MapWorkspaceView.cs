@@ -134,10 +134,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var objectPreviewHost = new Grid { Children = { _wmoPreview, _m2Preview } }; Grid.SetRow(objectPreviewHost, 1);
         var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, objectPreviewHost, wmoFooter } };
         _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Placed object preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
-        var body = new Grid { ColumnDefinitions = new("3*,Auto,2*") };
-        body.Children.Add(_visualTabs);
-        var splitter = new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }; body.Children.Add(splitter); Grid.SetColumn(splitter, 1);
-        body.Children.Add(details); Grid.SetColumn(details, 2);
+        var body = new ResponsiveSplitGrid(_visualTabs, details, 3, 2);
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
         root.Children.Add(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading });
         root.Children.Add(controls); Grid.SetRow(controls, 1);

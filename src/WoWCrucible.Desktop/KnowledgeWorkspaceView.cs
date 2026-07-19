@@ -44,7 +44,7 @@ internal sealed class KnowledgeWorkspaceView : UserControl, IDisposable
         var left = new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Children = { filter, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _results }, 2), WithRow(_summary, 3) } };
         var articleHeader = new Grid { ColumnDefinitions = new("*,Auto"), Children = { new StackPanel { Spacing = 3, Children = { _articleTitle, _articleContext } }, WithColumn(new WrapPanel { Children = { reveal, copy } }, 1) } };
         var right = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 8, Children = { articleHeader, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(10), Child = _article }, 1) } };
-        var body = new Grid { ColumnDefinitions = new("1.1*,Auto,2*"), ColumnSpacing = 8, Children = { left, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(right, 2) } };
+        var body = new ResponsiveSplitGrid(left, right, 1.1, 2);
         Content = new Grid { RowDefinitions = new("Auto,Auto,*"), Margin = new Thickness(12), RowSpacing = 8, Children = { heading, WithRow(source, 1), WithRow(body, 2) } };
     }
 

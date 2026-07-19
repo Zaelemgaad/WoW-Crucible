@@ -98,11 +98,7 @@ internal sealed class DbcExportWorkspaceView : UserControl, IDisposable
             }
         };
         var right = new Grid { RowDefinitions = new("Auto,Auto,*"), RowSpacing = 8, Children = { controls, WithRow(_status, 1), WithRow(_preview, 2) } };
-        var body = new Grid
-        {
-            ColumnDefinitions = new("*,Auto,2*"), ColumnSpacing = 5, Margin = new Thickness(12, 9, 12, 12),
-            Children = { left, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(right, 2) }
-        };
+        var body = new ResponsiveSplitGrid(left, right, 1, 2) { Margin = new Thickness(12, 9, 12, 12) };
         Content = new Grid { RowDefinitions = new("Auto,Auto,*"), Children = { header, WithRow(identity, 1), WithRow(body, 2) } };
     }
 

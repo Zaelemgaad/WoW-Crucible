@@ -100,7 +100,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
                 new TabItem { Header = "SQL change plan", Content = _sqlPreview }
             }
         };
-        var workspace = new Grid { ColumnDefinitions = new("3*,Auto,2*"), Children = { editor, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(preview, 2) } };
+        var workspace = new ResponsiveSplitGrid(editor, preview, 3, 2);
         var export = new Button { Content = "Export SQL…" }; export.Click += async (_, _) => await ExportAsync();
         var reserveId = AccentButton("Reserve project ID"); reserveId.Click += async (_, _) => await ReserveProjectIdAsync(reserveId);
         _commit.Click += (_, _) => PrepareInsert();

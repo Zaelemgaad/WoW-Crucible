@@ -201,10 +201,20 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var exportCsv = new Button { Content = "Export table CSV" }; exportCsv.Click += async (_, _) => await ExportTableAsync(SqlExportFormat.Csv);
         var exportJson = new Button { Content = "Export table JSONL" }; exportJson.Click += async (_, _) => await ExportTableAsync(SqlExportFormat.JsonLines);
         var importCsv = new Button { Content = "Import CSV…" }; importCsv.Click += async (_, _) => await PrepareImportAsync();
-        var controls = new WrapPanel { Children = { refresh, _rowSearch, search, _filterColumn, _filterValue, new TextBlock { Text = "Sort", VerticalAlignment = VerticalAlignment.Center }, _sortColumn, _sortDirection, new TextBlock { Text = "Rows/page", VerticalAlignment = VerticalAlignment.Center }, _pageSize, _rowDisplay, previous, next, create, exportCsv, exportJson, importCsv, _pageStatus } };
-        var right = new Grid { RowDefinitions = new("Auto,2*,Auto,*"), Children = { new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = controls }, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _rows }, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(new ScrollViewer { Content = _rowEditor }, 3) } };
+        var controls = new StackPanel
+        {
+            Spacing = 4,
+            Children =
+            {
+                _rowSearch,
+                new WrapPanel { Children = { refresh, search, _filterColumn, _filterValue } },
+                new WrapPanel { Children = { new TextBlock { Text = "Sort", VerticalAlignment = VerticalAlignment.Center }, _sortColumn, _sortDirection, new TextBlock { Text = "Rows/page", VerticalAlignment = VerticalAlignment.Center }, _pageSize, _rowDisplay } },
+                new WrapPanel { Children = { previous, next, create, exportCsv, exportJson, importCsv, _pageStatus } }
+            }
+        };
+        var right = new Grid { RowDefinitions = new("Auto,2*,Auto,*"), Children = { controls, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _rows }, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(new ScrollViewer { Content = _rowEditor }, 3) } };
         var left = new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(0, 0, 8, 0), Children = { _tableFilter, WithRow(_tables, 1) } };
-        return new Grid { ColumnDefinitions = new("*,Auto,3*"), Children = { left, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(right, 2) } };
+        return new ResponsiveSplitGrid(left, right, 1, 3);
     }
 
     private Control QueryPage()
@@ -261,10 +271,12 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var openMpq = new Button { Content = "Open linked MPQ" }; openMpq.Click += (_, _) => { if (SelectedFavorite() is { MpqPath: { Length: > 0 } path }) OpenMpqRequested?.Invoke(this, path); };
         var pickDbc = new Button { Content = "DBC / DB2…" }; pickDbc.Click += async (_, _) => await PickFavoritePathAsync(_savedFavoriteDbc, "Select a related client table", "DBC or DB2", "*.dbc", "*.db2");
         var pickMpq = new Button { Content = "MPQ…" }; pickMpq.Click += async (_, _) => await PickFavoritePathAsync(_savedFavoriteMpq, "Select a related MPQ patch", "MPQ", "*.mpq");
-        var filter = new Grid { ColumnDefinitions = new("3*,*,Auto,Auto"), ColumnSpacing = 7, Children = { _favoriteSearch, WithColumn(_favoriteState, 1), WithColumn(verify, 2), WithColumn(verifyVisible, 3) } };
-        var paths = new Grid { ColumnDefinitions = new("*,Auto,*,Auto"), ColumnSpacing = 5, Children = { _savedFavoriteDbc, WithColumn(pickDbc, 1), WithColumn(_savedFavoriteMpq, 2), WithColumn(pickMpq, 3) } };
+        var filter = new StackPanel { Spacing = 5, Children = { _favoriteSearch, new WrapPanel { Children = { _favoriteState, verify, verifyVisible } } } };
+        var dbcPath = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 5, Children = { _savedFavoriteDbc, WithColumn(pickDbc, 1) } };
+        var mpqPath = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 5, Children = { _savedFavoriteMpq, WithColumn(pickMpq, 1) } };
+        var paths = new StackPanel { Spacing = 5, Children = { dbcPath, mpqPath } };
         var editor = new Grid { RowDefinitions = new("Auto,*,Auto,Auto,Auto"), RowSpacing = 6, Children = { _savedFavoriteLabel, WithRow(_savedFavoriteNotes, 1), WithRow(paths, 2), WithRow(new WrapPanel { Children = { save, remove, open, decoded, openDbc, openMpq } }, 3), WithRow(_favoriteStatus, 4) } };
-        var body = new Grid { ColumnDefinitions = new("2*,Auto,3*"), ColumnSpacing = 7, Children = { _favorites, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(editor, 2) } };
+        var body = new ResponsiveSplitGrid(_favorites, editor, 2, 3);
         return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { filter, WithRow(body, 1) } };
     }
 
@@ -296,7 +308,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var controls = new WrapPanel { Children = { refresh, new StackPanel { Children = { new TextBlock { Text = "Index name", Foreground = Brush.Parse("#9AA5B7") }, _indexName } }, new StackPanel { Children = { new TextBlock { Text = "Columns, in index order", Foreground = Brush.Parse("#9AA5B7") }, _indexColumns } }, new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, Children = { _indexUnique } }, create, drop } };
         var ddl = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Exact SHOW CREATE TABLE", FontWeight = FontWeight.SemiBold }, WithRow(_tableDdl, 1) } };
         var indexes = new Grid { RowDefinitions = new("Auto,*"), Children = { new TextBlock { Text = "Live indexes", FontWeight = FontWeight.SemiBold }, WithRow(_indexes, 1) } };
-        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { controls, WithRow(new Grid { ColumnDefinitions = new("2*,Auto,*"), ColumnSpacing = 7, Children = { ddl, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(indexes, 2) } }, 1) } };
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { controls, WithRow(new ResponsiveSplitGrid(ddl, indexes, 2, 1), 1) } };
     }
 
     private Control TableDesignerPage()
@@ -309,7 +321,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var drop = new Button { Content = "Review DROP selected" }; drop.Click += (_, _) => PrepareTableDesign(SqlTableDesignOperation.DropColumn);
         var cloneTable = new Button { Content = "Review CLONE structure" }; cloneTable.Click += (_, _) => PrepareTableDesign(SqlTableDesignOperation.CloneStructure);
         var renameTable = new Button { Content = "Review RENAME table" }; renameTable.Click += (_, _) => PrepareTableDesign(SqlTableDesignOperation.RenameTable);
-        var top = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = new WrapPanel { Children = { load, fresh, add, modify, rename, drop } } };
+        var top = new WrapPanel { Children = { load, fresh, add, modify, rename, drop } };
         var placement = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 7, Children = { new StackPanel { Children = { new TextBlock { Text = "Column placement", Foreground = Brush.Parse("#9AA5B7") }, _structurePlacement } }, WithColumn(new StackPanel { Children = { new TextBlock { Text = "After which column", Foreground = Brush.Parse("#9AA5B7") }, _structureAfter } }, 1) } };
         var editor = new StackPanel { Spacing = 7, Children =
         {
@@ -320,7 +332,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             new TextBlock { Text = "The definition is the complete clause after the quoted column name. Crucible preserves server-normalized definitions when loading a column and blocks statement injection, but MySQL decides whether existing values can be converted.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") },
             new StackPanel { Spacing = 5, Children = { new TextBlock { Text = "Table-level changes", FontWeight = FontWeight.SemiBold }, _structureTableName, new WrapPanel { Children = { cloneTable, renameTable } } } }
         } };
-        var body = new Grid { ColumnDefinitions = new("*,Auto,2*"), ColumnSpacing = 7, Children = { _structureColumns, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(new ScrollViewer { Content = editor }, 2) } };
+        var body = new ResponsiveSplitGrid(_structureColumns, new ScrollViewer { Content = editor }, 1, 2);
         return new Grid { RowDefinitions = new("Auto,*,Auto"), RowSpacing = 7, Children = { top, WithRow(body, 1), WithRow(_structureStatus, 2) } };
     }
 
@@ -332,12 +344,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var enable = new Button { Content = "Review ENABLE event" }; enable.Click += (_, _) => PrepareEventState(true);
         var disable = new Button { Content = "Review DISABLE event" }; disable.Click += (_, _) => PrepareEventState(false);
         var reviewView = AccentButton("Review CREATE / REPLACE view"); reviewView.Click += (_, _) => PrepareCreateOrReplaceView();
-        var controls = new ScrollViewer
-        {
-            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
-            Content = new WrapPanel { Children = { refresh, _databaseObjectType, _databaseObjectSearch, export, drop, enable, disable } }
-        };
+        var controls = new StackPanel { Spacing = 4, Children = { _databaseObjectSearch, new WrapPanel { Children = { refresh, _databaseObjectType, export, drop, enable, disable } } } };
         var selected = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 5, Children = { new TextBlock { Text = "Exact SHOW CREATE definition", FontWeight = FontWeight.SemiBold }, WithRow(_databaseObjectDefinition, 1) } };
         var viewEditor = new Grid
         {
@@ -349,7 +356,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             }
         };
         var details = new Grid { RowDefinitions = new("2*,Auto,*"), RowSpacing = 5, Children = { selected, WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 1), WithRow(viewEditor, 2) } };
-        var body = new Grid { ColumnDefinitions = new("*,Auto,2*"), ColumnSpacing = 7, Children = { _databaseObjects, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(details, 2) } };
+        var body = new ResponsiveSplitGrid(_databaseObjects, details, 1, 2);
         return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { controls, WithRow(body, 1) } };
     }
 
@@ -368,18 +375,18 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var lockAccount = new Button { Content = "Review lock" }; lockAccount.Click += (_, _) => PrepareAccountLock(true); var unlock = new Button { Content = "Review unlock" }; unlock.Click += (_, _) => PrepareAccountLock(false); var drop = new Button { Content = "Review DROP USER" }; drop.Click += (_, _) => PrepareDropUser();
         var grant = new Button { Content = "Review GRANT" }; grant.Click += (_, _) => PreparePrivilegeChange(false); var revoke = new Button { Content = "Review REVOKE" }; revoke.Click += (_, _) => PreparePrivilegeChange(true);
         var readOnly = new Button { Content = "Select read-only preset" }; readOnly.Click += (_, _) => SelectPrivilegePreset("SELECT", "SHOW VIEW"); var content = new Button { Content = "Select content-editor preset" }; content.Click += (_, _) => SelectPrivilegePreset("SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE", "SHOW VIEW"); var clear = new Button { Content = "Clear privilege selection" }; clear.Click += (_, _) => _accountPrivileges.SelectedItems?.Clear();
-        var accountFields = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 7, Children = { new StackPanel { Children = { new TextBlock { Text = "Account user", Foreground = Brush.Parse("#9AA5B7") }, _accountUser } }, WithColumn(new StackPanel { Children = { new TextBlock { Text = "Account host", Foreground = Brush.Parse("#9AA5B7") }, _accountHost } }, 1) } };
-        var scopeFields = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 7, Children = { _accountTable, WithColumn(_accountGlobal, 1), WithColumn(_accountGrantOption, 2) } };
+        var accountFields = new StackPanel { Spacing = 5, Children = { new StackPanel { Children = { new TextBlock { Text = "Account user", Foreground = Brush.Parse("#9AA5B7") }, _accountUser } }, new StackPanel { Children = { new TextBlock { Text = "Account host", Foreground = Brush.Parse("#9AA5B7") }, _accountHost } } } };
+        var scopeFields = new StackPanel { Spacing = 5, Children = { _accountTable, new WrapPanel { Children = { _accountGlobal, _accountGrantOption } } } };
         var editor = new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*,Auto,Auto"), RowSpacing = 7, Children = { accountFields, WithRow(_accountPassword, 1), WithRow(new WrapPanel { Children = { _accountCreateLocked, create, password, lockAccount, unlock, drop } }, 2), WithRow(new TextBlock { Text = "New passwords stay in memory, are parameterized at execution, and appear only as <password supplied in memory> in review SQL. Every mutation requires the inline second confirmation below SQL Studio.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, 3), WithRow(scopeFields, 4), WithRow(_accountPrivileges, 5), WithRow(new WrapPanel { Children = { readOnly, content, clear, grant, revoke } }, 6), WithRow(_accountGrants, 7) } };
         var top = new WrapPanel { Children = { refresh, grants, new TextBlock { Text = "Account metadata and SHOW GRANTS are permission-aware. Password hashes are never queried.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } };
-        var body = new Grid { ColumnDefinitions = new("*,Auto,2*"), ColumnSpacing = 7, Children = { _databaseUsers, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(new ScrollViewer { Content = editor }, 2) } };
+        var body = new ResponsiveSplitGrid(_databaseUsers, new ScrollViewer { Content = editor }, 1, 2);
         return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { top, WithRow(body, 1) } };
     }
 
     private Control JoinDesignerPage()
     {
         var build = new Button { Content = "Build exact join SQL" }; build.Click += (_, _) => BuildJoinSql(); var run = AccentButton("Run read-only join"); run.Click += async (_, _) => await RunJoinAsync(run);
-        var controls = new Grid { ColumnDefinitions = new("3*,*,*,Auto,Auto"), ColumnSpacing = 7, Children = { _joinRelation, WithColumn(_joinType, 1), WithColumn(_joinLimit, 2), WithColumn(build, 3), WithColumn(run, 4) } };
+        var controls = new StackPanel { Spacing = 5, Children = { _joinRelation, new WrapPanel { Children = { _joinType, _joinLimit, build, run } } } };
         return new Grid { RowDefinitions = new("Auto,*,Auto,*"), RowSpacing = 7, Children = { controls, WithRow(_joinSql, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(_joinOutput, 3) } };
     }
 

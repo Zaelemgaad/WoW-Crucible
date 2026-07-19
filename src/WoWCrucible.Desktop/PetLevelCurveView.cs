@@ -92,7 +92,7 @@ internal sealed class PetLevelCurveView : UserControl, IDisposable
         var comparisonHeader = new WrapPanel { Children = { new TextBlock { Text = "Metric", VerticalAlignment = VerticalAlignment.Center }, _comparisonMetric } };
         var comparisonWorkspace = new Grid { RowDefinitions = new("Auto,2*,*"), Children = { comparisonHeader, WithRow(_comparisonPlot, 1), WithRow(new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Content = _comparisonText }, 2) } };
         var right = new TabControl { Items = { new TabItem { Header = "Curve summary", Content = new ScrollViewer { Content = new Border { Padding = new Thickness(16), Child = _summary } } }, new TabItem { Header = "Family comparison", Content = comparisonWorkspace }, new TabItem { Header = "Companion preview", Content = CompanionWorkspace() }, new TabItem { Header = "Exact SQL preview", Content = _sql } } };
-        var workspace = new Grid { ColumnDefinitions = new("2*,Auto,3*"), Children = { new ScrollViewer { Content = settings }, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(right, 2) } };
+        var workspace = new ResponsiveSplitGrid(new ScrollViewer { Content = settings }, right, 2, 3);
         var export = new Button { Content = "Export reviewed SQL…" }; export.Click += async (_, _) => await ExportAsync(); _deploy.Click += (_, _) => PrepareCommit();
         var footer = new WrapPanel { Children = { export, _deploy, _status } };
         Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(footer, 2), WithRow(_confirmation, 3) } };
@@ -195,11 +195,7 @@ internal sealed class PetLevelCurveView : UserControl, IDisposable
             RowDefinitions = new("Auto,*,Auto"), RowSpacing = 7,
             Children = { _targetModelChoice, WithRow(_targetModel, 1), WithRow(_targetModelStatus, 2) }
         };
-        return new Grid
-        {
-            ColumnDefinitions = new("*,Auto,*"), ColumnSpacing = 7, Margin = new Thickness(8),
-            Children = { left, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(right, 2) }
-        };
+        return new ResponsiveSplitGrid(left, right) { Margin = new Thickness(8) };
     }
 
     private async Task ResolveCompanionsAsync()

@@ -155,11 +155,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var back = new Button { Content = "← Editor" }; ToolTip.SetTip(back, "Return to the main Crucible workspace"); back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var browse = new Button { Content = "Browse…" }; browse.Click += async (_, _) => await RunUiActionAsync("library-picker", BrowseLibraryAsync);
         var load = AccentButton("Index library"); load.Click += async (_, _) => await RunUiActionAsync("index-request", LoadIndexAsync);
-        var top = new Grid { ColumnDefinitions = new("Auto,Auto,*,Auto,Auto"), Margin = new Thickness(14, 10), ColumnSpacing = 8 };
-        top.Children.Add(back);
         var libraryLabel = new TextBlock { Text = "ASSET LIBRARY", FontWeight = FontWeight.Bold, FontSize = 10, Foreground = Brush.Parse("#C58A2B"), VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetColumn(libraryLabel, 1); top.Children.Add(libraryLabel);
-        Grid.SetColumn(_library, 2); top.Children.Add(_library); Grid.SetColumn(browse, 3); top.Children.Add(browse); Grid.SetColumn(load, 4); top.Children.Add(load);
+        var top = new Grid { RowDefinitions = new("Auto,Auto"), Margin = new Thickness(14, 10), RowSpacing = 7 };
+        top.Children.Add(new WrapPanel { Orientation = Orientation.Horizontal, Children = { back, libraryLabel, browse, load } });
+        Grid.SetRow(_library, 1); top.Children.Add(_library);
 
         var left = new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(10) };
         left.Children.Add(_directorySearch); Grid.SetRow(_directories, 1); _directories.Margin = new Thickness(0, 8, 0, 0); left.Children.Add(_directories);
@@ -176,7 +175,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var stage = new Button { Content = "Stage keepers…" }; stage.Click += async (_, _) => await RunUiActionAsync("stage-keepers", StageKeepersAsync);
         var revealProject = new Button { Content = "Reveal project" }; revealProject.Click += (_, _) => RevealProject();
         var decisionButtons = new WrapPanel { Orientation = Orientation.Horizontal, Children = { keeper, alternative, reject, review } };
-        var decisionInputs = new Grid { ColumnDefinitions = new("*,2*"), ColumnSpacing = 8, Children = { _assetCategory, WithColumn(_assetNotes, 1) } };
+        var decisionInputs = new StackPanel { Spacing = 6, Children = { _assetCategory, _assetNotes } };
         var decisionActions = new WrapPanel { Orientation = Orientation.Horizontal, Children = { stage, revealProject, _projectStatus } };
         var projectTools = new StackPanel { Spacing = 7, Margin = new Thickness(10, 7), Children = { decisionButtons, decisionInputs, decisionActions } };
         var middleHeader = new StackPanel { Spacing = 8, Margin = new Thickness(10, 10, 10, 4), Children = { _folderTitle, _folderHelp, _imageDirectoryTools } };
@@ -206,12 +205,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         Grid.SetRow(cardScroll, 1); middle.Children.Add(cardScroll); Grid.SetRow(_modelOnlyCatalogNotice, 1); middle.Children.Add(_modelOnlyCatalogNotice); Grid.SetRow(pager, 2); middle.Children.Add(pager);
 
         var compare = BuildComparisonPane();
-        var body = new Grid { ColumnDefinitions = new("0.85*,Auto,1.35*,Auto,2*") };
-        body.Children.Add(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,1,0), Child = left });
-        var firstSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }; Grid.SetColumn(firstSplitter, 1); body.Children.Add(firstSplitter);
-        Grid.SetColumn(middle, 2); body.Children.Add(middle);
-        var secondSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }; Grid.SetColumn(secondSplitter, 3); body.Children.Add(secondSplitter);
-        Grid.SetColumn(compare, 4); body.Children.Add(compare);
+        var directoryPane = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,1,0), Child = left };
+        var reviewAndCompare = new ResponsiveSplitGrid(middle, compare, 1.35, 2, compactFirstWeight: 1.4, compactSecondWeight: 1);
+        var body = new ResponsiveSplitGrid(directoryPane, reviewAndCompare, 0.85, 3.35, compactFirstWeight: 1, compactSecondWeight: 3);
         var root = new Grid { RowDefinitions = new("Auto,*,Auto,Auto") }; root.Children.Add(top); Grid.SetRow(body, 1); root.Children.Add(body); Grid.SetRow(projectTools, 2); root.Children.Add(projectTools);
         var status = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,1,0,0), Padding = new Thickness(14,7), Child = _status }; Grid.SetRow(status, 3); root.Children.Add(status); return root;
     }
@@ -220,7 +216,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     {
         var zoom = new Slider { Minimum = 0.1, Maximum = 4, Value = 1, HorizontalAlignment = HorizontalAlignment.Stretch }; zoom.ValueChanged += (_, e) => { _zoom = e.NewValue; ApplyZoom(); };
         var openLeft = new Button { Content = "Reveal left" }; openLeft.Click += (_, _) => RevealSlot(0); var openRight = new Button { Content = "Reveal right" }; openRight.Click += (_, _) => RevealSlot(1);
-        _imageComparisonTools = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = "SYNCHRONIZED ZOOM & PAN", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, FontWeight = FontWeight.Bold, Margin = new Thickness(4, 0) }, WithColumn(zoom, 1), WithColumn(openLeft, 2), WithColumn(openRight, 3) } };
+        _imageComparisonTools = new StackPanel { Spacing = 5, Children = { new TextBlock { Text = "SYNCHRONIZED ZOOM & PAN", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, FontWeight = FontWeight.Bold, Margin = new Thickness(4, 0) }, zoom, new WrapPanel { Children = { openLeft, openRight } } } };
         var toolbar = new StackPanel { Spacing = 6, Margin = new Thickness(12, 8), Children = { _previewMode, _imageComparisonTools } };
         var grid = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,*") };
         for (var index = 0; index < 2; index++)
@@ -235,9 +231,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var previousModel = new Button { Content = "← Model" }; previousModel.Click += (_, _) => MoveModel(-1); var nextModel = new Button { Content = "Model →" }; nextModel.Click += (_, _) => MoveModel(1);
         _modelPicker.HorizontalAlignment = HorizontalAlignment.Stretch;
         _modelSkinPicker.HorizontalAlignment = HorizontalAlignment.Stretch;
-        var modelFilters = new Grid { ColumnDefinitions = new("2*,*,Auto,Auto"), ColumnSpacing = 8, Children = { _modelSearch, WithColumn(_modelFilter, 1), WithColumn(previousModel, 2), WithColumn(nextModel, 3) } };
+        var modelFilters = new StackPanel { Spacing = 5, Children = { _modelSearch, new WrapPanel { Children = { _modelFilter, previousModel, nextModel } } } };
         var appearanceHeader = new TextBlock { Text = "CHARSECTIONS BASE APPEARANCE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") };
-        var appearancePickers = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Children = { _skinPicker, WithColumn(_appearanceSourcePicker, 1), WithCell(_facePicker, 1, 0), WithCell(_facialHairPicker, 1, 1), WithCell(_hairPicker, 2, 0) } };
+        var appearancePickers = new StackPanel { Spacing = 6, Children = { _skinPicker, _appearanceSourcePicker, _facePicker, _facialHairPicker, _hairPicker } };
         _creatureAppearancePanel.Children.Add(new TextBlock { Text = "CREATURE DISPLAY APPEARANCE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") });
         _creatureAppearancePanel.Children.Add(_creatureAppearancePicker); _creatureAppearancePanel.Children.Add(_creatureAppearanceStatus);
         var geosetInspector = new Expander
@@ -271,7 +267,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         };
         var exportModel = new Button { Content = "Export visible/current-pose OBJ…" }; exportModel.Click += async (_, _) => await RunUiActionAsync("model-export", ExportModelAsync);
         var modelActions = new WrapPanel { Orientation = Orientation.Horizontal, Children = { exportModel } };
-        var modelSkinRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 8, Children = { new TextBlock { Text = "SKIN VIEW / LOD", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, WithColumn(_modelSkinPicker, 1) } };
+        var modelSkinRow = new StackPanel { Spacing = 5, Children = { new TextBlock { Text = "SKIN VIEW / LOD", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, _modelSkinPicker } };
         var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, modelSkinRow, _geosetMode, modelActions, geosetInspector, attachmentInspector, _creatureAppearancePanel, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
         var modelHeaderScroll = new ScrollViewer { Content = modelHeader, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
         var modelPane = new Grid { RowDefinitions = new("2*,Auto,3*"), IsVisible = false, Children = { modelHeaderScroll } };
