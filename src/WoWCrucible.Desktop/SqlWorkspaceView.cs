@@ -21,6 +21,10 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private sealed record RelationChoice(DatabaseRelationCapability Relation) { public override string ToString() => $"{Relation.FromTable}.{Relation.FromColumn} → {Relation.ToTable}.{Relation.ToColumn} · {(Relation.Declared ? "FK" : "inferred")}"; }
     private sealed record FieldEditor(TextBox Text, CheckBox? Null, ComboBox? InsertMode);
     private sealed record QueryDisplayRow(int Number, IReadOnlyList<string> Columns, IReadOnlyList<object?> Values);
+    private sealed record FavoriteDisplayRow(SqlRowFavorite Favorite, SqlFavoriteVerification Verification)
+    {
+        public string Identity => Favorite.Identity;
+    }
     private readonly DesktopWorkspaceSession _session;
     private readonly SqlWorkspaceService _service = new();
     private readonly SqlAdministrationService _administration = new();
@@ -84,6 +88,16 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly ListBox _queryHistory = new();
     private readonly TextBox _queryBookmarkLabel = new() { PlaceholderText = "Optional bookmark label" };
     private readonly ListBox _favorites = new();
+    private readonly TextBox _favoriteSearch = new() { PlaceholderText = "Search labels, notes, tables, keys, DBCs, or MPQs…" };
+    private readonly ComboBox _favoriteState = new() { ItemsSource = new[] { "All states", "Unchecked", "Live", "Missing", "Schema changed", "Check failed" }, SelectedIndex = 0 };
+    private readonly TextBox _savedFavoriteLabel = new() { PlaceholderText = "Favorite label" };
+    private readonly TextBox _savedFavoriteNotes = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, PlaceholderText = "Notes about the row or planned edit" };
+    private readonly TextBox _savedFavoriteDbc = new() { PlaceholderText = "Optional related DBC / DB2 path" };
+    private readonly TextBox _savedFavoriteMpq = new() { PlaceholderText = "Optional related MPQ path" };
+    private readonly TextBlock _favoriteStatus = Status("Favorites are portable and have not been checked against the live server yet.");
+    private readonly SqlFavoriteWorkspaceService _favoriteService = new();
+    private IReadOnlyList<SqlRowFavorite> _favoriteCache = [];
+    private readonly Dictionary<string, SqlFavoriteVerification> _favoriteChecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly TabControl _tabs;
     private readonly TextBox _favoriteNotes = new() { PlaceholderText = "Optional note: what you changed or why this row matters" };
     private readonly TextBox _favoriteDbc = new() { PlaceholderText = "Optional related DBC path" };
@@ -130,6 +144,9 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _databaseObjectSearch.TextChanged += (_, _) => FilterDatabaseObjects();
         _databaseObjectType.SelectionChanged += (_, _) => FilterDatabaseObjects();
         _databaseObjects.SelectionChanged += async (_, _) => await LoadSelectedDatabaseObjectAsync();
+        _favoriteSearch.TextChanged += (_, _) => ApplyFavoriteFilter();
+        _favoriteState.SelectionChanged += (_, _) => ApplyFavoriteFilter();
+        _favorites.SelectionChanged += (_, _) => SelectFavorite();
         RefreshConnectionStatus(); RefreshFavorites(); RefreshQueryHistory(); PopulateTables(); PopulateRelations();
     }
 
@@ -202,13 +219,31 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private Control FavoritesPage()
     {
-        _favorites.ItemTemplate = new FuncDataTemplate<SqlRowFavorite>((item, _) => item is null ? new TextBlock() : new StackPanel { Margin = new Thickness(4), Children = { new TextBlock { Text = $"{item.Label}  ·  {item.Database}.{item.Table}", FontWeight = FontWeight.SemiBold }, new TextBlock { Text = $"{string.Join(", ", item.Key.Select(pair => $"{pair.Key}={pair.Value}"))}{(string.IsNullOrWhiteSpace(item.Notes) ? string.Empty : $"  ·  {item.Notes}")}{(string.IsNullOrWhiteSpace(item.DbcPath) ? string.Empty : $"  ·  DBC {item.DbcPath}")}{(string.IsNullOrWhiteSpace(item.MpqPath) ? string.Empty : $"  ·  MPQ {item.MpqPath}")}", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") } } });
+        _favorites.ItemTemplate = new FuncDataTemplate<FavoriteDisplayRow>((item, _) => item is null ? new TextBlock() : new StackPanel
+        {
+            Margin = new Thickness(5, 4), Spacing = 2,
+            Children =
+            {
+                new WrapPanel { Children = { new TextBlock { Text = item.Verification.Display, FontSize = 10, FontWeight = FontWeight.Bold, Foreground = FavoriteStateBrush(item.Verification.State), Margin = new Thickness(0, 0, 8, 0) }, new TextBlock { Text = $"{item.Favorite.Label}  ·  {item.Favorite.Database}.{item.Favorite.Table}", FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap } } },
+                new TextBlock { Text = $"{string.Join(", ", item.Favorite.Key.Select(pair => $"{pair.Key}={pair.Value}"))}{(string.IsNullOrWhiteSpace(item.Favorite.Notes) ? string.Empty : $"  ·  {item.Favorite.Notes}")}", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") },
+                new TextBlock { Text = item.Verification.Detail, TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = Brush.Parse("#7F8BA0") }
+            }
+        });
         var open = AccentButton("Open selected favorite"); open.Click += async (_, _) => await OpenFavoriteAsync();
         var decoded = new Button { Content = "Open favorite in decoded editor" }; decoded.Click += async (_, _) => await OpenFavoriteAsync(true);
-        var remove = new Button { Content = "Remove favorite" }; remove.Click += (_, _) => { if (_favorites.SelectedItem is SqlRowFavorite favorite) { SqlFavoriteStore.Remove(favorite.Identity); RefreshFavorites(); } };
-        var openDbc = new Button { Content = "Open linked DBC" }; openDbc.Click += (_, _) => { if (_favorites.SelectedItem is SqlRowFavorite { DbcPath: { Length: > 0 } path }) OpenDbcRequested?.Invoke(this, path); };
-        var openMpq = new Button { Content = "Open linked MPQ" }; openMpq.Click += (_, _) => { if (_favorites.SelectedItem is SqlRowFavorite { MpqPath: { Length: > 0 } path }) OpenMpqRequested?.Invoke(this, path); };
-        return new Grid { RowDefinitions = new("Auto,*"), Children = { new WrapPanel { Children = { open, decoded, remove, openDbc, openMpq } }, WithRow(_favorites, 1) } };
+        var verify = new Button { Content = "Verify selected" }; verify.Click += async (_, _) => await VerifyFavoritesAsync(verify, selectedOnly: true);
+        var verifyVisible = new Button { Content = "Verify visible" }; verifyVisible.Click += async (_, _) => await VerifyFavoritesAsync(verifyVisible, selectedOnly: false);
+        var save = AccentButton("Save favorite details"); save.Click += (_, _) => SaveFavoriteDetails();
+        var remove = new Button { Content = "Remove favorite" }; remove.Click += (_, _) => RemoveFavorite();
+        var openDbc = new Button { Content = "Open linked DBC" }; openDbc.Click += (_, _) => { if (SelectedFavorite() is { DbcPath: { Length: > 0 } path }) OpenDbcRequested?.Invoke(this, path); };
+        var openMpq = new Button { Content = "Open linked MPQ" }; openMpq.Click += (_, _) => { if (SelectedFavorite() is { MpqPath: { Length: > 0 } path }) OpenMpqRequested?.Invoke(this, path); };
+        var pickDbc = new Button { Content = "DBC / DB2…" }; pickDbc.Click += async (_, _) => await PickFavoritePathAsync(_savedFavoriteDbc, "Select a related client table", "DBC or DB2", "*.dbc", "*.db2");
+        var pickMpq = new Button { Content = "MPQ…" }; pickMpq.Click += async (_, _) => await PickFavoritePathAsync(_savedFavoriteMpq, "Select a related MPQ patch", "MPQ", "*.mpq");
+        var filter = new Grid { ColumnDefinitions = new("3*,*,Auto,Auto"), ColumnSpacing = 7, Children = { _favoriteSearch, WithColumn(_favoriteState, 1), WithColumn(verify, 2), WithColumn(verifyVisible, 3) } };
+        var paths = new Grid { ColumnDefinitions = new("*,Auto,*,Auto"), ColumnSpacing = 5, Children = { _savedFavoriteDbc, WithColumn(pickDbc, 1), WithColumn(_savedFavoriteMpq, 2), WithColumn(pickMpq, 3) } };
+        var editor = new Grid { RowDefinitions = new("Auto,*,Auto,Auto,Auto"), RowSpacing = 6, Children = { _savedFavoriteLabel, WithRow(_savedFavoriteNotes, 1), WithRow(paths, 2), WithRow(new WrapPanel { Children = { save, remove, open, decoded, openDbc, openMpq } }, 3), WithRow(_favoriteStatus, 4) } };
+        var body = new Grid { ColumnDefinitions = new("2*,Auto,3*"), ColumnSpacing = 7, Children = { _favorites, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(editor, 2) } };
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { filter, WithRow(body, 1) } };
     }
 
     private Control DependencyPage()
@@ -955,13 +990,13 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private async Task OpenFavoriteAsync(bool openDecoded = false)
     {
-        if (_favorites.SelectedItem is not SqlRowFavorite favorite || _profile is null) return;
+        if (SelectedFavorite() is not { } favorite || _profile is null) return;
         try
         {
             if (!_profile.Database.Equals(favorite.Database, StringComparison.OrdinalIgnoreCase)) await SwitchSchemaAsync(favorite.Database);
             if (_capabilities is null || _profile is null) return; var table = _capabilities.FindTable(favorite.Table); if (table is null) { _status.Text = $"{favorite.Database} has no {favorite.Table} table."; return; }
             Begin($"Opening exact favorite {favorite.Label}…");
-            var key = favorite.Key.ToDictionary(pair => pair.Key, pair => ParseFavoriteKey(table.Find(pair.Key) ?? throw new InvalidOperationException($"Favorite key column {pair.Key} no longer exists."), pair.Value), StringComparer.OrdinalIgnoreCase);
+            var key = favorite.Key.ToDictionary(pair => pair.Key, pair => SqlFavoriteWorkspaceService.ParseStoredKey(table.Find(pair.Key) ?? throw new InvalidOperationException($"Favorite key column {pair.Key} no longer exists."), pair.Value), StringComparer.OrdinalIgnoreCase);
             var row = await _service.ReadRowAsync(_profile, table, key, _operation!.Token);
             if (row is null) { _status.Text = $"The exact favorite no longer exists: {favorite.Database}.{favorite.Table} · {string.Join(", ", favorite.Key.Select(pair => $"{pair.Key}={pair.Value}"))}."; return; }
             ResetBrowseOptions(table.Name);
@@ -981,7 +1016,109 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         finally { End(); }
     }
 
-    private void RefreshFavorites() => _favorites.ItemsSource = SqlFavoriteStore.Load();
+    private SqlRowFavorite? SelectedFavorite() => (_favorites.SelectedItem as FavoriteDisplayRow)?.Favorite;
+
+    private void RefreshFavorites(string? preferredIdentity = null)
+    {
+        preferredIdentity ??= (_favorites.SelectedItem as FavoriteDisplayRow)?.Identity;
+        _favoriteCache = SqlFavoriteStore.Load();
+        var identities = _favoriteCache.Select(favorite => favorite.Identity).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var stale in _favoriteChecks.Keys.Where(identity => !identities.Contains(identity)).ToArray()) _favoriteChecks.Remove(stale);
+        ApplyFavoriteFilter(preferredIdentity);
+    }
+
+    private void ApplyFavoriteFilter(string? preferredIdentity = null)
+    {
+        preferredIdentity ??= (_favorites.SelectedItem as FavoriteDisplayRow)?.Identity;
+        var requestedState = _favoriteState.SelectedIndex switch
+        {
+            1 => SqlFavoriteVerificationState.Unchecked,
+            2 => SqlFavoriteVerificationState.Live,
+            3 => SqlFavoriteVerificationState.Missing,
+            4 => SqlFavoriteVerificationState.SchemaMismatch,
+            5 => SqlFavoriteVerificationState.Error,
+            _ => (SqlFavoriteVerificationState?)null
+        };
+        var rows = _favoriteCache
+            .Where(favorite => SqlFavoriteWorkspaceService.Matches(favorite, _favoriteSearch.Text))
+            .Select(favorite => new FavoriteDisplayRow(favorite, _favoriteChecks.GetValueOrDefault(favorite.Identity) ?? Unchecked(favorite)))
+            .Where(row => requestedState is null || row.Verification.State == requestedState)
+            .OrderBy(row => row.Favorite.Database, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(row => row.Favorite.Table, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(row => row.Favorite.Label, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        _favorites.ItemsSource = rows;
+        _favorites.SelectedItem = preferredIdentity is null ? rows.FirstOrDefault() : rows.FirstOrDefault(row => row.Identity.Equals(preferredIdentity, StringComparison.OrdinalIgnoreCase));
+        _favoriteStatus.Text = $"Showing {rows.Length:N0} of {_favoriteCache.Count:N0} favorite(s) · {rows.Count(row => row.Verification.State == SqlFavoriteVerificationState.Live):N0} verified live · {rows.Count(row => row.Verification.State == SqlFavoriteVerificationState.Missing):N0} missing.";
+    }
+
+    private void SelectFavorite()
+    {
+        if (_favorites.SelectedItem is not FavoriteDisplayRow row)
+        {
+            _savedFavoriteLabel.Text = _savedFavoriteNotes.Text = _savedFavoriteDbc.Text = _savedFavoriteMpq.Text = string.Empty;
+            return;
+        }
+        _savedFavoriteLabel.Text = row.Favorite.Label;
+        _savedFavoriteNotes.Text = row.Favorite.Notes;
+        _savedFavoriteDbc.Text = row.Favorite.DbcPath ?? string.Empty;
+        _savedFavoriteMpq.Text = row.Favorite.MpqPath ?? string.Empty;
+        _favoriteStatus.Text = $"{row.Verification.Display} · {row.Verification.Detail}";
+    }
+
+    private void SaveFavoriteDetails()
+    {
+        if (SelectedFavorite() is not { } favorite) { _favoriteStatus.Text = "Select a favorite first."; return; }
+        var label = (_savedFavoriteLabel.Text ?? string.Empty).Trim();
+        if (label.Length == 0) { _favoriteStatus.Text = "A favorite label cannot be empty."; return; }
+        var updated = favorite with
+        {
+            Label = label,
+            Notes = _savedFavoriteNotes.Text ?? string.Empty,
+            DbcPath = EmptyNull(_savedFavoriteDbc.Text),
+            MpqPath = EmptyNull(_savedFavoriteMpq.Text)
+        };
+        SqlFavoriteStore.Save(updated); RefreshFavorites(updated.Identity); _status.Text = $"Updated favorite details for {updated.Label}.";
+    }
+
+    private void RemoveFavorite()
+    {
+        if (SelectedFavorite() is not { } favorite) { _favoriteStatus.Text = "Select a favorite first."; return; }
+        SqlFavoriteStore.Remove(favorite.Identity); _favoriteChecks.Remove(favorite.Identity); RefreshFavorites(); _status.Text = $"Removed favorite {favorite.Label}. The live SQL row was not changed.";
+    }
+
+    private async Task VerifyFavoritesAsync(Button button, bool selectedOnly)
+    {
+        if (_profile is null) { _favoriteStatus.Text = "Connect Server & SQL before checking favorites."; return; }
+        var favorites = selectedOnly
+            ? SelectedFavorite() is { } selected ? new[] { selected } : []
+            : (_favorites.ItemsSource as IEnumerable<FavoriteDisplayRow>)?.Select(row => row.Favorite).ToArray() ?? [];
+        if (favorites.Length == 0) { _favoriteStatus.Text = selectedOnly ? "Select a favorite first." : "No visible favorites match the current filters."; return; }
+        try
+        {
+            button.IsEnabled = false; Begin($"Verifying {favorites.Length:N0} exact SQL favorite(s)…");
+            var results = await _favoriteService.VerifyAsync(_profile, favorites, _operation!.Token);
+            foreach (var result in results) _favoriteChecks[result.Identity] = result;
+            var selectedIdentity = (_favorites.SelectedItem as FavoriteDisplayRow)?.Identity; ApplyFavoriteFilter(selectedIdentity);
+            var live = results.Count(result => result.State == SqlFavoriteVerificationState.Live); var missing = results.Count(result => result.State == SqlFavoriteVerificationState.Missing); var changed = results.Count(result => result.State == SqlFavoriteVerificationState.SchemaMismatch); var failed = results.Count(result => result.State == SqlFavoriteVerificationState.Error);
+            _favoriteStatus.Text = $"Checked {results.Count:N0} exact favorite(s) · {live:N0} live · {missing:N0} missing · {changed:N0} schema changed · {failed:N0} failed.";
+            _status.Text = _favoriteStatus.Text;
+        }
+        catch (OperationCanceledException) { _favoriteStatus.Text = "Favorite verification cancelled."; }
+        catch (Exception exception) { Fail("Favorite verification failed", exception); _favoriteStatus.Text = exception.Message; }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private static SqlFavoriteVerification Unchecked(SqlRowFavorite favorite) => new(favorite.Identity, SqlFavoriteVerificationState.Unchecked, "Not checked against the current live server in this session.", DateTimeOffset.MinValue);
+
+    private static IBrush FavoriteStateBrush(SqlFavoriteVerificationState state) => Brush.Parse(state switch
+    {
+        SqlFavoriteVerificationState.Live => "#79B58A",
+        SqlFavoriteVerificationState.Missing => "#D96C68",
+        SqlFavoriteVerificationState.SchemaMismatch => "#D4A45F",
+        SqlFavoriteVerificationState.Error => "#D96C68",
+        _ => "#8995A9"
+    });
 
     private async Task PickFavoritePathAsync(TextBox target, string title, string label, params string[] patterns)
     {
@@ -1045,7 +1182,6 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     }
     private static string CellText(object? value) => value switch { null => string.Empty, byte[] bytes => "0x" + Convert.ToHexString(bytes), DateTime date => date.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture), IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture), _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty };
     private static string QueryCellText(object? value) => value is null ? "<NULL>" : CellText(value);
-    private static object? ParseFavoriteKey(DatabaseColumnCapability column, string? value) { if (value is null) return null; var type = column.DataType.ToLowerInvariant(); return (type.Contains("binary") || type.Contains("blob")) && value.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? Convert.FromHexString(value[2..]) : value; }
     private static object? ParseCell(DatabaseColumnCapability column, string? text)
     {
         text ??= string.Empty; var type = column.DataType.ToLowerInvariant();

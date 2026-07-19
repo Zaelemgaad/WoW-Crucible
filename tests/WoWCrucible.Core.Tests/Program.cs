@@ -1035,6 +1035,26 @@ if (readStatements.Count != 2 || !SqlWorkspaceService.IsReadOnlyBatch(readBatchS
     throw new InvalidOperationException("SQL read-batch splitting did not preserve quoted semicolons or independently reject write/file-output statements.");
 try { _ = SqlReadBatchParser.Split("SELECT 'unterminated"); throw new InvalidOperationException("An unterminated SQL literal was accepted."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("quoted", StringComparison.OrdinalIgnoreCase)) { }
+var favoriteFixture = new SqlRowFavorite("acore_world", "item_template", new Dictionary<string, string?> { ["entry"] = "17802" }, "Thunderfury review", "Deprecated quest reward; restore usable stats", DateTimeOffset.UnixEpoch, @"C:\dbc\Item.dbc", @"C:\client\Data\patch-X.MPQ");
+if (!SqlFavoriteWorkspaceService.Matches(favoriteFixture, "thunderfury 17802") ||
+    !SqlFavoriteWorkspaceService.Matches(favoriteFixture, "deprecated patch-x") ||
+    SqlFavoriteWorkspaceService.Matches(favoriteFixture, "creature 17802") ||
+    SqlFavoriteWorkspaceService.ParseStoredKey(new("guid", "binary", "binary(16)", false, null, "PRI", string.Empty, 1), "0x00112233445566778899AABBCCDDEEFF") is not byte[] parsedFavoriteGuid ||
+    Convert.ToHexString(parsedFavoriteGuid) != "00112233445566778899AABBCCDDEEFF")
+    throw new InvalidOperationException("SQL favorite search or byte-safe primary-key restoration regressed.");
+var favoriteStoreRoot = Path.Combine(Path.GetTempPath(), $"crucible-favorite-store-{Guid.NewGuid():N}"); Directory.CreateDirectory(favoriteStoreRoot);
+try
+{
+    var favoriteStorePath = Path.Combine(favoriteStoreRoot, "favorites.json");
+    File.WriteAllText(favoriteStorePath, """[{"database":"acore_world","table":"item_template","key":{"entry":"17802"},"label":"Thunderfury review","notes":"portable","addedUtc":"2026-07-18T00:00:00Z","dbcPath":null,"mpqPath":null}]""");
+    var portableFavorites = SqlFavoriteStore.Load(favoriteStorePath);
+    if (portableFavorites.Count != 1 || portableFavorites[0].Key["entry"] != "17802" || SqlFavoriteStore.Save(portableFavorites[0] with { Notes = "updated" }, favoriteStorePath).Single().Notes != "updated")
+        throw new InvalidOperationException("Portable SQL favorite loading did not accept case-insensitive JSON or atomically update metadata.");
+    File.WriteAllText(favoriteStorePath, "{broken");
+    if (SqlFavoriteStore.Load(favoriteStorePath).Count != 0 || Directory.EnumerateFiles(favoriteStoreRoot, "favorites.json.corrupt-*.json").Count() != 1)
+        throw new InvalidOperationException("A corrupt SQL favorites file was discarded instead of being preserved before recovery.");
+}
+finally { if (Directory.Exists(favoriteStoreRoot)) Directory.Delete(favoriteStoreRoot, true); }
 var queryHistoryRoot = Path.Combine(Path.GetTempPath(), $"crucible-query-history-{Guid.NewGuid():N}"); Directory.CreateDirectory(queryHistoryRoot);
 try
 {

@@ -305,23 +305,49 @@ public sealed class SqlWorkspaceService
 
 public static class SqlFavoriteStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
-    public static IReadOnlyList<SqlRowFavorite> Load()
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
+    public static IReadOnlyList<SqlRowFavorite> Load(string? path = null)
     {
-        try { return File.Exists(CruciblePaths.SqlFavoritesFile) ? JsonSerializer.Deserialize<List<SqlRowFavorite>>(File.ReadAllText(CruciblePaths.SqlFavoritesFile)) ?? [] : []; }
-        catch { return []; }
+        path = string.IsNullOrWhiteSpace(path) ? CruciblePaths.SqlFavoritesFile : Path.GetFullPath(path);
+        if (!File.Exists(path)) return [];
+        try
+        {
+            var favorites = JsonSerializer.Deserialize<List<SqlRowFavorite?>>(File.ReadAllText(path), JsonOptions) ?? [];
+            if (favorites.Any(favorite => favorite is null || string.IsNullOrWhiteSpace(favorite.Database) || string.IsNullOrWhiteSpace(favorite.Table) || favorite.Key is null || favorite.Key.Count == 0 || string.IsNullOrWhiteSpace(favorite.Label)))
+                throw new InvalidDataException("The favorites file contains a row without a database, table, complete key, or label.");
+            return favorites.Cast<SqlRowFavorite>().ToArray();
+        }
+        catch
+        {
+            PreserveCorrupt(path);
+            return [];
+        }
     }
-    public static IReadOnlyList<SqlRowFavorite> Save(SqlRowFavorite favorite)
+    public static IReadOnlyList<SqlRowFavorite> Save(SqlRowFavorite favorite, string? path = null)
     {
-        var favorites = Load().Where(item => !item.Identity.Equals(favorite.Identity, StringComparison.OrdinalIgnoreCase)).Append(favorite).OrderBy(item => item.Database).ThenBy(item => item.Table).ThenBy(item => item.Label).ToArray(); SaveAll(favorites); return favorites;
+        path = string.IsNullOrWhiteSpace(path) ? CruciblePaths.SqlFavoritesFile : Path.GetFullPath(path);
+        var favorites = Load(path).Where(item => !item.Identity.Equals(favorite.Identity, StringComparison.OrdinalIgnoreCase)).Append(favorite).OrderBy(item => item.Database).ThenBy(item => item.Table).ThenBy(item => item.Label).ToArray(); SaveAll(favorites, path); return favorites;
     }
-    public static IReadOnlyList<SqlRowFavorite> Remove(string identity)
+    public static IReadOnlyList<SqlRowFavorite> Remove(string identity, string? path = null)
     {
-        var favorites = Load().Where(item => !item.Identity.Equals(identity, StringComparison.OrdinalIgnoreCase)).ToArray(); SaveAll(favorites); return favorites;
+        path = string.IsNullOrWhiteSpace(path) ? CruciblePaths.SqlFavoritesFile : Path.GetFullPath(path);
+        var favorites = Load(path).Where(item => !item.Identity.Equals(identity, StringComparison.OrdinalIgnoreCase)).ToArray(); SaveAll(favorites, path); return favorites;
     }
-    private static void SaveAll(IReadOnlyList<SqlRowFavorite> favorites)
+    private static void SaveAll(IReadOnlyList<SqlRowFavorite> favorites, string path)
     {
-        Directory.CreateDirectory(CruciblePaths.SettingsDirectory); var temporary = CruciblePaths.SqlFavoritesFile + ".tmp";
-        File.WriteAllText(temporary, JsonSerializer.Serialize(favorites, JsonOptions)); File.Move(temporary, CruciblePaths.SqlFavoritesFile, true);
+        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? throw new InvalidOperationException("The favorites file must have a parent directory.")); var temporary = path + ".tmp";
+        File.WriteAllText(temporary, JsonSerializer.Serialize(favorites, JsonOptions)); File.Move(temporary, path, true);
+    }
+
+    private static void PreserveCorrupt(string path)
+    {
+        try
+        {
+            var backup = $"{path}.corrupt-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss-fff}.json";
+            var suffix = 0;
+            while (File.Exists(backup)) backup = $"{path}.corrupt-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss-fff}-{++suffix}.json";
+            File.Move(path, backup);
+        }
+        catch { }
     }
 }

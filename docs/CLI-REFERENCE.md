@@ -281,6 +281,7 @@ wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snap
 wowcrucible db snapshot-inspect <snapshot-file> [--quick]
 wowcrucible db recovery-audit <legacy-snapshot> <output.crucible-db-audit> [--baseline=stock-snapshot] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
 wowcrucible db recovery-inspect <audit-file> [--quick]
+wowcrucible db favorites <host> <port> <user> <database> [--search=text] [--verify] [--format=text|json]
 wowcrucible db sync-plan <host> <port> <user> <database> <verified-audit> <plan.json> [--include=glob]... [--include-removals] [--auto-remap] [--remap-start=ID] [--maximum=N] [--overwrite]
 wowcrucible db sync-inspect <plan.json> [--sql=preview.sql] [--overwrite]
 wowcrucible db sync-apply <host> <port> <user> <database> <plan.json> <receipt.json> [--apply] [--overwrite]
@@ -302,6 +303,12 @@ Server detection reads the live `worldserver.conf`; it does not accept `.dist` t
 `--bundle` creates a new portable, secret-free deployment directory only after an exact named schema and a proven SQL-overlay binding succeed. It copies and hashes the edited DBC and schema, records the live server DBC hash and exact SQL pre-image, writes read-only audit/idempotent migration/exact rollback SQL, and emits a one-entry `DBFilesClient` patch manifest. `dbc-apply` revalidates every bundle artifact and target, locks and compares the reviewed SQL rows, performs the SQL migration and atomic server-DBC replacement with a verified backup, verifies parity before committing, and writes a receipt. `dbc-rollback` requires that receipt and refuses to overwrite either destination if it changed after apply. `dbc-module-export` copies the already reviewed migration into a collision-safe `data/sql/db-world` filename without connecting to MySQL.
 
 `db schemas` lists every database visible to the login. The desktop SQL Studio uses the same discovery to switch locally among world, characters, auth, or other accessible schemas; it does not rewrite the shared server workspace's saved world-database target. A favorite records its database and complete primary key and switches back to that schema when reopened.
+
+`db favorites` searches the same portable cross-table favorites shown in SQL Studio. Terms are matched across database, table, complete key, label, notes, and optional DBC/DB2 or MPQ paths. Add `--verify` to group the filtered favorites by recorded schema, reuse one connection per schema, and require each recorded key to still equal that table's complete current primary key before checking for exactly one row. Text/JSON output distinguishes live, missing, schema-changed, and failed checks; any non-live result returns review exit code `3`. The command never changes SQL data or favorite metadata.
+
+```powershell
+wowcrucible db favorites 127.0.0.1 3306 acore acore_world --search="17802 thunderfury" --verify --format=json
+```
 
 `db rows` is the read-only CLI half of the complete live table browser. It always returns every live-schema column, supports broad search plus an exact `column=value` filter (`column=<NULL>` for SQL null), validates requested sort/filter columns against the inspected schema, adds primary-key tie breakers for stable paging, and bounds one page to 1–500 rows. The desktop exposes the same operations and can clone any complete primary-keyed row into a new identity; every insert column independently selects VALUE, NULL, or OMIT, so defaults and explicit nulls are not conflated.
 
