@@ -1,0 +1,51 @@
+name: Build pinned CascLib
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Check out Crucible
+        uses: actions/checkout@v4
+
+      - name: Check out audited CascLib source
+        uses: actions/checkout@v4
+        with:
+          repository: ladislav-zezula/CascLib
+          ref: 9fb2d3894198d44dee2ec56c0d48b49727a124d8
+          path: external/CascLib
+
+      - name: Configure MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build CascLib x64 Release DLL
+        shell: pwsh
+        run: msbuild external/CascLib/CascLib_dll.vcxproj /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Assemble provenance-bearing artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifact | Out-Null
+          Copy-Item external/CascLib/bin/CascLib_dll/x64/Release/CascLib.dll artifact/CascLib.dll
+          Copy-Item external/CascLib/LICENSE artifact/LICENSE
+          Set-Content artifact/SOURCE.txt @'
+          Project: CascLib
+          Upstream: https://github.com/ladislav-zezula/CascLib
+          Commit: 9fb2d3894198d44dee2ec56c0d48b49727a124d8
+          Configuration: Release
+          Platform: x64
+          '@
+          Get-FileHash artifact/CascLib.dll -Algorithm SHA256 | Format-List | Out-File artifact/SHA256.txt
+
+      - name: Upload native provider
+        uses: actions/upload-artifact@v4
+        with:
+          name: CascLib-win-x64
+          path: artifact
+          if-no-files-found: error
+          retention-days: 7
