@@ -1546,6 +1546,9 @@ var loadedAppearancePlan = CreatureAppearancePortService.LoadPlan(appearancePlan
 var appearanceOutput = Path.Combine(appearancePortRoot, "output"); var appearanceResult = CreatureAppearancePortService.Apply(loadedAppearancePlan, appearanceOutput);
 if (appearanceResult.TargetDisplayId != remappedDisplay.TargetId || !File.Exists(appearanceResult.ReceiptPath) || !appearanceResult.OutputFiles.Keys.Order().SequenceEqual(remappedAppearancePlan.ChangedTables.Order()) || appearanceResult.OutputFiles.ContainsKey("CreatureModelData") || appearanceResult.OutputFiles.ContainsKey("ItemDisplayInfo"))
     throw new InvalidOperationException("Creature appearance port output did not contain exactly the target-based DBCs that received additive rows.");
+var loadedAppearanceResult = CreatureAppearancePortService.LoadResult(appearanceResult.ReceiptPath);
+if (loadedAppearanceResult.TargetDisplayId != appearanceResult.TargetDisplayId || !loadedAppearanceResult.OutputSha256.OrderBy(pair => pair.Key).SequenceEqual(appearanceResult.OutputSha256.OrderBy(pair => pair.Key)))
+    throw new InvalidOperationException("Creature appearance receipt did not reload and verify its immutable changed-DBC outputs.");
 var appearanceReceiptText = File.ReadAllText(appearanceResult.ReceiptPath);
 if (appearanceReceiptText.Contains(".crucible-", StringComparison.OrdinalIgnoreCase) || appearanceResult.OutputFiles.Values.Any(path => !path.StartsWith(appearanceOutput, StringComparison.OrdinalIgnoreCase)))
     throw new InvalidOperationException("Creature appearance receipt retained temporary staging paths instead of final output paths.");
@@ -1560,11 +1563,41 @@ var outputExtraRow = Enumerable.Range(0, outputExtra.RowCount).Single(row => out
 if (outputExtraItemColumns.All(column => outputExtra.GetRaw(outputExtraRow, column) != remappedItemDisplay.TargetId))
     throw new InvalidOperationException("Written CreatureDisplayInfoExtra did not retain its planned remapped item-display dependency.");
 
+var appearancePatchLibrary = Path.Combine(appearancePortRoot, "processed-library"); var appearancePatchContent = Path.Combine(appearancePatchLibrary, "Archives", "Content"); const string appearanceProvenance = "fixture-source";
+var closureModelBytes = new byte[0x80]; System.Text.Encoding.ASCII.GetBytes("MD20").CopyTo(closureModelBytes, 0); BitConverter.GetBytes((uint)264).CopyTo(closureModelBytes, 4); BitConverter.GetBytes((uint)1).CopyTo(closureModelBytes, 0x44);
+foreach (var required in remappedAppearancePlan.RequiredAssets.Select(asset => PatchInputMapper.NormalizeArchivePath(asset.ClientPath)).Distinct(StringComparer.OrdinalIgnoreCase))
+{
+    var extension = Path.GetExtension(required); var bytes = extension.Equals(".m2", StringComparison.OrdinalIgnoreCase) ? closureModelBytes : System.Text.Encoding.UTF8.GetBytes("fixture:" + required);
+    WriteGraphAsset(appearancePatchContent, appearanceProvenance, required, bytes);
+    if (extension.Equals(".m2", StringComparison.OrdinalIgnoreCase)) WriteGraphAsset(appearancePatchContent, appearanceProvenance, Path.ChangeExtension(required, null) + "00.skin", System.Text.Encoding.ASCII.GetBytes("SKIN"));
+}
+var appearancePatchPlan = CreatureAppearancePatchService.CreatePlan(appearanceResult, appearancePatchLibrary, appearanceProvenance);
+var expectedChangedDbcs = remappedAppearancePlan.ChangedTables.Select(table => $"DBFilesClient\\{table}.dbc").ToHashSet(StringComparer.OrdinalIgnoreCase);
+if (!appearancePatchPlan.Ready || appearancePatchPlan.Blockers.Count != 0 || appearancePatchPlan.EffectiveProvenance != appearanceProvenance || expectedChangedDbcs.Any(path => appearancePatchPlan.Entries.All(entry => !entry.ArchivePath.Equals(path, StringComparison.OrdinalIgnoreCase))) ||
+    remappedAppearancePlan.RequiredAssets.Any(required => appearancePatchPlan.Entries.All(entry => !entry.ArchivePath.Equals(PatchInputMapper.NormalizeArchivePath(required.ClientPath), StringComparison.OrdinalIgnoreCase))) ||
+    remappedAppearancePlan.RequiredAssets.Where(required => Path.GetExtension(required.ClientPath).Equals(".m2", StringComparison.OrdinalIgnoreCase)).Any(required => appearancePatchPlan.Entries.All(entry => !entry.ArchivePath.Equals(Path.ChangeExtension(PatchInputMapper.NormalizeArchivePath(required.ClientPath), null) + "00.skin", StringComparison.OrdinalIgnoreCase))))
+    throw new InvalidOperationException($"Creature appearance patch closure did not stage every changed DBC, required asset, and native M2 skin dependency: entries={appearancePatchPlan.Entries.Count}, blockers={appearancePatchPlan.Blockers.Count}.");
+var appearancePatchPlanPath = Path.Combine(appearancePortRoot, "appearance-patch-plan.json"); CreatureAppearancePatchService.SavePlan(appearancePatchPlanPath, appearancePatchPlan); var loadedAppearancePatchPlan = CreatureAppearancePatchService.LoadPlan(appearancePatchPlanPath); CreatureAppearancePatchService.Verify(loadedAppearancePatchPlan);
+var appearancePatchManifestPath = Path.Combine(appearancePortRoot, "appearance-patch.crucible-patch.json"); var appearancePatchManifest = CreatureAppearancePatchService.ExportManifest(loadedAppearancePatchPlan, appearancePatchManifestPath, "patch-Crucible-Appearance.MPQ");
+if (!PatchManifestService.Validate(appearancePatchManifest).Passed || appearancePatchManifest.Entries.Count != appearancePatchPlan.Entries.Count)
+    throw new InvalidOperationException("Creature appearance patch closure did not export a complete strict MPQ manifest.");
+var mutablePatchEntry = appearancePatchPlan.Entries.First(entry => !entry.Kind.Equals("changed-dbc", StringComparison.OrdinalIgnoreCase)); var mutablePatchBytes = File.ReadAllBytes(mutablePatchEntry.SourcePath); File.WriteAllBytes(mutablePatchEntry.SourcePath, mutablePatchBytes.Concat(new byte[] { 0x7F }).ToArray());
+try { CreatureAppearancePatchService.Verify(appearancePatchPlan); throw new InvalidOperationException("A creature appearance patch plan accepted an asset changed after planning."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("changed after planning", StringComparison.OrdinalIgnoreCase)) { }
+File.WriteAllBytes(mutablePatchEntry.SourcePath, mutablePatchBytes);
+
+var ambiguityClientPath = remappedAppearancePlan.RequiredAssets.Select(asset => PatchInputMapper.NormalizeArchivePath(asset.ClientPath)).First(path => !Path.GetExtension(path).Equals(".m2", StringComparison.OrdinalIgnoreCase));
+WriteGraphAsset(appearancePatchContent, "different-source", ambiguityClientPath, System.Text.Encoding.UTF8.GetBytes("different bytes"));
+var ambiguousAppearancePatchPlan = CreatureAppearancePatchService.CreatePlan(appearanceResult, appearancePatchLibrary);
+if (ambiguousAppearancePatchPlan.Ready || !ambiguousAppearancePatchPlan.Assets.Any(asset => asset.ClientPath.Equals(ambiguityClientPath, StringComparison.OrdinalIgnoreCase) && asset.State == ClientAssetDependencyState.CrossSourceConflict))
+    throw new InvalidOperationException("A different-byte cross-provenance appearance asset was silently selected without an explicit provenance.");
+
 var targetDisplayPath = Path.Combine(appearancePortTarget, "CreatureDisplayInfo.dbc"); var staleTargetDisplay = WdbcFile.Load(targetDisplayPath);
 var staleDisplayColumns = creatureSchemas.ResolveColumns("CreatureDisplayInfo", staleTargetDisplay.FieldCount).Columns; var staleDisplayId = staleDisplayColumns.First(column => column.Name.Equals("ID", StringComparison.OrdinalIgnoreCase)); var staleSound = staleDisplayColumns.First(column => column.Name.Equals("SoundID", StringComparison.OrdinalIgnoreCase));
 var staleDisplayRow = Enumerable.Range(0, staleTargetDisplay.RowCount).Single(row => staleTargetDisplay.GetRaw(row, staleDisplayId) == 115); staleTargetDisplay.SetRaw(staleDisplayRow, staleSound, staleTargetDisplay.GetRaw(staleDisplayRow, staleSound) + 1); staleTargetDisplay.Save(targetDisplayPath, createBackup: false);
 try { _ = CreatureAppearancePortService.Apply(remappedAppearancePlan, Path.Combine(appearancePortRoot, "stale-output")); throw new InvalidOperationException("A stale creature appearance plan was applied after its target DBC changed."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("changed after", StringComparison.OrdinalIgnoreCase)) { }
+CreatureAppearancePatchService.Verify(appearancePatchPlan);
 Directory.Delete(creatureLibrary, true);
 if (ItemCatalogEntry.ClassifyReviewGroup("Martin Fury", false, 6) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||
     ItemCatalogEntry.ClassifyReviewGroup("Thunderfury, Blessed Blade of the Windseeker?", false, 7, ["Ignored · quest 7561 is disabled (Deprecated quest)."] ) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||

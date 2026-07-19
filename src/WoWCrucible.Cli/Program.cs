@@ -761,6 +761,35 @@ static int Asset(string[] args)
         }
         return 0;
     }
+    if (args is ["creature-appearance-patch-plan", var portReceiptPath, var processedLibrary, .. var patchPlanOptions])
+    {
+        var patchProvenance = Option(patchPlanOptions, "--provenance="); var output = Option(patchPlanOptions, "--output="); var overwrite = patchPlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var json = patchPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = patchPlanOptions.Where(option => !option.StartsWith("--provenance=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown creature-appearance-patch-plan option: {unknown[0]}");
+        if (output is not null && File.Exists(output) && !overwrite) return Fail($"Patch plan already exists; use --overwrite to replace it: {Path.GetFullPath(output)}");
+        var result = CreatureAppearancePortService.LoadResult(portReceiptPath); var plan = CreatureAppearancePatchService.CreatePlan(result, processedLibrary, patchProvenance);
+        if (output is not null) CreatureAppearancePatchService.SavePlan(output, plan);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"READY\t{plan.Ready}\nDISPLAY\t{plan.AppearancePlan.SourceDisplayId}->{plan.AppearancePlan.TargetDisplayId}\nPROVENANCE\t{plan.EffectiveProvenance ?? "<unbound>"}\nENTRIES\t{plan.Entries.Count:N0}\nASSETS\t{plan.Assets.Count:N0}\nBLOCKERS\t{plan.Blockers.Count:N0}");
+            foreach (var entry in plan.Entries) Console.WriteLine($"ENTRY\t{entry.Kind}\t{entry.ArchivePath}\t{entry.SourcePath}\t{entry.Sha256}");
+            foreach (var blocker in plan.Blockers) Console.WriteLine($"BLOCKER\t{blocker}");
+            foreach (var finding in plan.Findings) Console.WriteLine($"FINDING\t{finding}");
+            if (output is not null) Console.WriteLine($"PLAN\t{Path.GetFullPath(output)}");
+        }
+        return plan.Ready ? 0 : 3;
+    }
+    if (args is ["creature-appearance-patch-manifest", var appearancePatchPlanPath, var appearanceManifestPath, .. var patchManifestOptions])
+    {
+        var outputMpq = Option(patchManifestOptions, "--mpq=") ?? "patch-Crucible-Appearance.MPQ"; var overwrite = patchManifestOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
+        var unknown = patchManifestOptions.Where(option => !option.StartsWith("--mpq=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown creature-appearance-patch-manifest option: {unknown[0]}");
+        if (File.Exists(appearanceManifestPath) && !overwrite) return Fail($"Manifest already exists; use --overwrite to replace it: {Path.GetFullPath(appearanceManifestPath)}");
+        var plan = CreatureAppearancePatchService.LoadPlan(appearancePatchPlanPath); var manifest = CreatureAppearancePatchService.ExportManifest(plan, appearanceManifestPath, outputMpq);
+        Console.WriteLine($"MANIFEST\t{Path.GetFullPath(appearanceManifestPath)}\nOUTPUT_MPQ\t{manifest.OutputFileName}\nENTRIES\t{manifest.Entries.Count:N0}\nDISPLAY\t{plan.AppearancePlan.TargetDisplayId}");
+        return 0;
+    }
     if (args is ["creature-display-catalog", var creatureCatalogDbc, .. var creatureCatalogOptions])
     {
         var schema = Option(creatureCatalogOptions, "--schema="); var search = Option(creatureCatalogOptions, "--search="); var limitText = Option(creatureCatalogOptions, "--limit="); var json = creatureCatalogOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
@@ -939,6 +968,8 @@ Usage:
   wowcrucible asset creature-display-catalog <dbc-folder> [--schema=file] [--search=terms] [--limit=N] [--format=text|json]
   wowcrucible asset creature-appearance-port-plan <source-dbc-folder> <target-dbc-folder> <display-id> --schema=file [--output=plan.json] [--format=text|json] [--overwrite]
   wowcrucible asset creature-appearance-port-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
+  wowcrucible asset creature-appearance-patch-plan <port-receipt.json> <processed-library> [--provenance=name] [--output=patch-plan.json] [--format=text|json] [--overwrite]
+  wowcrucible asset creature-appearance-patch-manifest <patch-plan.json> <manifest.json> [--mpq=patch-name.MPQ] [--overwrite]
   wowcrucible asset creature-appearances <model-client-path> [--dbc=folder] [--schema=file] [--library=folder --provenance=name] [--format=text|json]
   wowcrucible asset preview-info <wrath-model.m2> [--skin=file.skin] [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
   wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--naked|--groups=group:variant,...|--all-geosets] [--overwrite]

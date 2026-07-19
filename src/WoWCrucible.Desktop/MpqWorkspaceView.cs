@@ -144,6 +144,23 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         AddPaths(paths);
     }
 
+    public void StageEntries(IEnumerable<PatchEntry> entries)
+    {
+        _tabs.SelectedIndex = 0; _targetClientRequirement = null;
+        foreach (var entry in entries)
+        {
+            var source = Path.GetFullPath(entry.SourcePath); var archive = PatchInputMapper.NormalizeArchivePath(entry.ArchivePath); var existing = _entries.FindIndex(row => row.ArchivePath.Equals(archive, StringComparison.OrdinalIgnoreCase)); var row = new PatchRow(source, archive);
+            if (existing >= 0) _entries[existing] = row; else _entries.Add(row);
+        }
+        _expectedCount.Value = _entries.Count;
+        if (_entries.Any(row => row.ArchivePath.StartsWith("DBFilesClient\\", StringComparison.OrdinalIgnoreCase)))
+        {
+            var required = (_required.Text ?? string.Empty).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            if (!required.Contains("DBFilesClient\\*.dbc", StringComparer.OrdinalIgnoreCase)) required.Add("DBFilesClient\\*.dbc"); _required.Text = string.Join(Environment.NewLine, required);
+        }
+        RefreshBuilder();
+    }
+
     private Control BuildBuilderPage()
     {
         var addFiles = new Button { Content = "Add files" }; addFiles.Click += async (_, _) => await AddFilesAsync();

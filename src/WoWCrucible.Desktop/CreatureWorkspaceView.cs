@@ -69,11 +69,14 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     private readonly ComboBox _appearanceSlot = Choices((0, "Display slot 1"), (1, "Display slot 2"), (2, "Display slot 3"), (3, "Display slot 4"));
     private readonly TextBlock _appearanceStatus = Status("Load the configured target DBC catalog to browse every creature appearance.");
     private readonly TextBox _appearancePortPreview = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "Select a source appearance and build an additive import plan. Nothing is written while planning." };
+    private readonly TextBox _appearancePatchProvenance = new() { PlaceholderText = "Optional exact asset provenance (auto when possible)" };
     private readonly Border _appearancePortConfirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private CreatureDisplayCatalog? _appearanceCatalog;
     private string? _appearanceCatalogRoot;
     private bool _appearanceCatalogIsTarget = true;
     private CreatureAppearancePortPlan? _pendingAppearancePortPlan;
+    private CreatureAppearancePortResult? _lastAppearancePortResult;
+    private CreatureAppearancePatchPlan? _appearancePatchPlan;
     private string? _pendingAppearancePortOutput;
     private CancellationTokenSource? _appearanceLoadOperation;
     private CancellationTokenSource? _appearanceFilterOperation;
@@ -85,6 +88,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     public event EventHandler? BackRequested;
     public event EventHandler? ProjectWorkspaceRequested;
     public event EventHandler? MpqWorkspaceRequested;
+    public event EventHandler<IReadOnlyList<PatchEntry>>? PatchEntriesRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public CreatureWorkspaceView(DesktopWorkspaceSession session)
@@ -146,6 +150,8 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         var plan = AccentButton("Plan additive import"); plan.Click += async (_, _) => await PlanAppearancePortAsync();
         var export = new Button { Content = "Export plan…" }; export.Click += async (_, _) => await ExportAppearancePortPlanAsync();
         var write = new Button { Content = "Write changed DBCs…" }; write.Click += async (_, _) => await PrepareAppearancePortApplyAsync();
+        var patch = AccentButton("Plan tiny MPQ closure"); patch.Click += async (_, _) => await PlanAppearancePatchAsync();
+        var stage = new Button { Content = "Stage verified closure" }; stage.Click += (_, _) => StageAppearancePatch();
         var mpq = new Button { Content = "Open MPQ workspace" }; mpq.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
         return new Grid
         {
@@ -160,7 +166,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
                         new TextBlock { Text = "Every CreatureDisplayInfo row", FontSize = 17, FontWeight = FontWeight.SemiBold },
                         new TextBlock { Text = "Browse the configured target DBCs or an imported source folder. Preview is read-only. A source display must pass the additive plan before Crucible assigns its collision-safe target ID; equal rows are reused, genuinely different conflicts are cloned to new IDs, and only changed target-based DBCs are written.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") },
                         new WrapPanel { Children = { reload, source, _appearanceSearch, _appearanceSlot, apply, preview } },
-                        new WrapPanel { Children = { plan, export, write, mpq } }
+                        new WrapPanel { Children = { plan, export, write, _appearancePatchProvenance, patch, stage, mpq } }
                     }
                 },
                 WithRow(_appearanceResults, 1),
@@ -193,7 +199,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         {
             _appearanceStatus.Text = announce ? "Loading CreatureDisplayInfo and CreatureModelData…" : "Loading configured creature appearance catalog…";
             var catalog = await Task.Run(() => new CreatureDisplayPreviewService().LoadCatalog(dbc, schema, operation.Token), operation.Token); operation.Token.ThrowIfCancellationRequested();
-            if (!ReferenceEquals(_appearanceLoadOperation, operation)) return; _appearanceCatalog = catalog; _appearanceCatalogRoot = catalog.DbcRoot; _appearanceCatalogIsTarget = SamePath(catalog.DbcRoot, _session.Settings.CoreDbcPath); _pendingAppearancePortPlan = null; _pendingAppearancePortOutput = null; _appearancePortConfirmation.IsVisible = false; _appearancePortPreview.Text = _appearanceCatalogIsTarget ? "Target catalog loaded. Select a row to use it directly, or load source DBCs to plan an additive import." : "Source catalog loaded. Select an appearance, then build an additive import plan against the configured target DBCs."; await FilterAppearancesAsync(false);
+            if (!ReferenceEquals(_appearanceLoadOperation, operation)) return; _appearanceCatalog = catalog; _appearanceCatalogRoot = catalog.DbcRoot; _appearanceCatalogIsTarget = SamePath(catalog.DbcRoot, _session.Settings.CoreDbcPath); _pendingAppearancePortPlan = null; _lastAppearancePortResult = null; _appearancePatchPlan = null; _pendingAppearancePortOutput = null; _appearancePortConfirmation.IsVisible = false; _appearancePortPreview.Text = _appearanceCatalogIsTarget ? "Target catalog loaded. Select a row to use it directly, or load source DBCs to plan an additive import." : "Source catalog loaded. Select an appearance, then build an additive import plan against the configured target DBCs."; await FilterAppearancesAsync(false);
         }
         catch (OperationCanceledException) { }
         catch (Exception exception) { if (ReferenceEquals(_appearanceLoadOperation, operation)) { _appearanceCatalog = null; _appearanceResults.ItemsSource = null; _appearanceStatus.Text = $"Appearance catalog failed: {exception.Message}"; DesktopCrashLogger.Log("Creature appearance catalog failed", exception); } }
@@ -216,7 +222,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         try
         {
             _appearanceStatus.Text = $"Comparing display {entry.DisplayId:N0} and its complete dependency chain against the target DBCs…";
-            var plan = await Task.Run(() => CreatureAppearancePortService.CreatePlan(source, target, schema, entry.DisplayId)); _pendingAppearancePortPlan = plan; _pendingAppearancePortOutput = null; _appearancePortConfirmation.IsVisible = false; _appearancePortPreview.Text = FormatAppearancePortPlan(plan);
+            var plan = await Task.Run(() => CreatureAppearancePortService.CreatePlan(source, target, schema, entry.DisplayId)); _pendingAppearancePortPlan = plan; _lastAppearancePortResult = null; _appearancePatchPlan = null; _pendingAppearancePortOutput = null; _appearancePortConfirmation.IsVisible = false; _appearancePortPreview.Text = FormatAppearancePortPlan(plan);
             _appearanceStatus.Text = plan.AddedRows == 0
                 ? $"No duplicate rows needed. Target already has the equivalent chain at display {plan.TargetDisplayId:N0}."
                 : $"Plan ready · add {plan.AddedRows:N0}, reuse {plan.ReusedRows:N0}, assign target display {plan.TargetDisplayId:N0}. Review DBC import plan before writing.";
@@ -236,7 +242,8 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         var plan = _pendingAppearancePortPlan; if (plan is null) { _appearanceStatus.Text = "Build and review an additive import plan first."; return; }
         if (plan.AddedRows == 0)
         {
-            var slot = Math.Clamp(Selected(_appearanceSlot), 0, _displayIds.Length - 1); _displayIds[slot].Value = plan.TargetDisplayId; RefreshPreview(); _appearanceStatus.Text = $"Target already contains the equivalent chain. Applied display {plan.TargetDisplayId:N0} to draft slot {slot + 1}; no DBC output was needed."; return;
+            _lastAppearancePortResult = new(string.Empty, string.Empty, plan.TargetDisplayId, new Dictionary<string, string>(), new Dictionary<string, string>(), plan); _appearancePatchPlan = null;
+            var slot = Math.Clamp(Selected(_appearanceSlot), 0, _displayIds.Length - 1); _displayIds[slot].Value = plan.TargetDisplayId; RefreshPreview(); _appearanceStatus.Text = $"Target already contains the equivalent chain. Applied display {plan.TargetDisplayId:N0} to draft slot {slot + 1}; no DBC output was needed. You may still plan the exact client-asset closure."; return;
         }
         var folders = await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose parent folder for new changed-DBC output", AllowMultiple = false });
         var parent = folders.FirstOrDefault()?.TryGetLocalPath(); if (parent is null) return; var stem = $"CreatureDisplay-{plan.TargetDisplayId}-Port"; var output = Path.Combine(parent, stem); for (var suffix = 2; Directory.Exists(output) || File.Exists(output); suffix++) output = Path.Combine(parent, $"{stem}-{suffix}"); _pendingAppearancePortOutput = output;
@@ -249,12 +256,33 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         if (_pendingAppearancePortPlan is not { } plan || string.IsNullOrWhiteSpace(_pendingAppearancePortOutput)) return;
         try
         {
-            button.IsEnabled = false; var result = await Task.Run(() => CreatureAppearancePortService.Apply(plan, _pendingAppearancePortOutput)); _appearancePortConfirmation.IsVisible = false;
+            button.IsEnabled = false; var result = await Task.Run(() => CreatureAppearancePortService.Apply(plan, _pendingAppearancePortOutput)); _lastAppearancePortResult = result; _appearancePatchPlan = null; _appearancePortConfirmation.IsVisible = false;
             var slot = Math.Clamp(Selected(_appearanceSlot), 0, _displayIds.Length - 1); _displayIds[slot].Value = result.TargetDisplayId; RefreshPreview(); _appearancePortPreview.Text = FormatAppearancePortPlan(plan) + $"\n\nWRITTEN\n{string.Join(Environment.NewLine, result.OutputFiles.Select(pair => $"{pair.Key}\t{pair.Value}\t{result.OutputSha256[pair.Key]}"))}\nReceipt\t{result.ReceiptPath}";
             _appearanceStatus.Text = $"Wrote {result.OutputFiles.Count:N0} changed DBC(s) and applied target display {result.TargetDisplayId:N0} to draft slot {slot + 1}. Deploy these files to server DBCs and DBFilesClient in a small MPQ after review."; _pendingAppearancePortOutput = null;
         }
         catch (Exception exception) { _appearanceStatus.Text = $"Appearance output failed safely: {exception.Message}"; DesktopCrashLogger.Log("Creature appearance port apply failed", exception); }
         finally { button.IsEnabled = true; }
+    }
+
+    private async Task PlanAppearancePatchAsync()
+    {
+        if (_lastAppearancePortResult is null) { _appearanceStatus.Text = "Write the reviewed changed DBCs first (or confirm the no-change import) so the MPQ closure can bind exact output hashes."; return; }
+        var library = _session.Settings.ProcessedAssetLibraryPath; if (string.IsNullOrWhiteSpace(library) || !Directory.Exists(library)) { _appearanceStatus.Text = "Configure the processed asset library in Client workshop or Assets & compare first."; return; }
+        try
+        {
+            _appearanceStatus.Text = "Resolving every required appearance asset and recursive model dependency without crossing provenance layers…";
+            var provenance = string.IsNullOrWhiteSpace(_appearancePatchProvenance.Text) ? null : _appearancePatchProvenance.Text.Trim(); var plan = await Task.Run(() => CreatureAppearancePatchService.CreatePlan(_lastAppearancePortResult, library, provenance)); _appearancePatchPlan = plan;
+            _appearancePortPreview.Text = FormatAppearancePortPlan(plan.AppearancePlan) + $"\n\nTINY MPQ CLOSURE\nREADY\t{plan.Ready}\nPROVENANCE\t{plan.EffectiveProvenance ?? "unbound"}\nENTRIES\t{plan.Entries.Count:N0}\nASSETS\t{plan.Assets.Count:N0}\nBLOCKERS\t{plan.Blockers.Count:N0}\n\n{string.Join(Environment.NewLine, plan.Entries.Select(entry => $"{entry.Kind}\t{entry.ArchivePath}\t{entry.Provenance}"))}\n\n{string.Join(Environment.NewLine, plan.Blockers.Select(blocker => "BLOCKER\t" + blocker))}";
+            _appearanceStatus.Text = plan.Ready ? $"Verified tiny patch closure ready: {plan.Entries.Count:N0} exact file(s). Stage it into the same-window MPQ builder." : $"Patch closure blocked safely by {plan.Blockers.Count:N0} missing, ambiguous, invalid, or cross-source dependency issue(s). Review the detailed plan.";
+        }
+        catch (Exception exception) { _appearancePatchPlan = null; _appearanceStatus.Text = $"Patch closure failed safely: {exception.Message}"; DesktopCrashLogger.Log("Creature appearance patch closure failed", exception); }
+    }
+
+    private void StageAppearancePatch()
+    {
+        if (_appearancePatchPlan is not { Ready: true } plan) { _appearanceStatus.Text = "Build a blocker-free tiny MPQ closure first."; return; }
+        try { CreatureAppearancePatchService.Verify(plan); PatchEntriesRequested?.Invoke(this, plan.PatchEntries); _appearanceStatus.Text = $"Staged {plan.Entries.Count:N0} hash-verified file(s) in the same-window MPQ builder with exact client paths."; }
+        catch (Exception exception) { _appearanceStatus.Text = $"Closure changed and was not staged: {exception.Message}"; DesktopCrashLogger.Log("Creature appearance patch staging failed", exception); }
     }
 
     private static string FormatAppearancePortPlan(CreatureAppearancePortPlan plan)

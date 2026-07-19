@@ -704,6 +704,7 @@ public partial class MainWindow : Window
             _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
             _creatureWorkspaceView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace();
             _creatureWorkspaceView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace();
+            _creatureWorkspaceView.PatchEntriesRequested += (_, entries) => OpenPatchBuilderWithEntries(entries);
             _creatureWorkspaceView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         }
         OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
@@ -912,6 +913,16 @@ public partial class MainWindow : Window
         _mpqWorkspaceView.StagePaths(paths);
         OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
     }
+    private void OpenPatchBuilderWithEntries(IReadOnlyList<PatchEntry> entries)
+    {
+        if (_mpqWorkspaceView is null)
+        {
+            _mpqWorkspaceView = new MpqWorkspaceView(_workspaceSession);
+            _mpqWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        _mpqWorkspaceView.StageEntries(entries);
+        OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
+    }
     private void OpenServerSqlClick(object? sender, RoutedEventArgs e) => OpenServerSqlWorkspace();
     private void OpenServerSqlWorkspace()
     {
@@ -968,7 +979,7 @@ public partial class MainWindow : Window
         }
         else if (request.Table.Equals("creature_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_creatureWorkspaceView is null) { _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession); _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _creatureWorkspaceView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _creatureWorkspaceView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace(); _creatureWorkspaceView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
+            if (_creatureWorkspaceView is null) { _creatureWorkspaceView = new CreatureWorkspaceView(_workspaceSession); _creatureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _creatureWorkspaceView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _creatureWorkspaceView.MpqWorkspaceRequested += (_, _) => OpenMpqWorkspace(); _creatureWorkspaceView.PatchEntriesRequested += (_, entries) => OpenPatchBuilderWithEntries(entries); _creatureWorkspaceView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
             _creatureWorkspaceView.OpenCreatureRow(request.Row); OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
         }
         else if (request.Table.Equals("gameobject_template", StringComparison.OrdinalIgnoreCase))

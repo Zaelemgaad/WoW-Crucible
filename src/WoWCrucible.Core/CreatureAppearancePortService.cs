@@ -111,6 +111,28 @@ public static class CreatureAppearancePortService
         if (plan.FormatVersion != FormatVersion) throw new InvalidDataException($"Unsupported creature appearance port plan version {plan.FormatVersion}."); return plan;
     }
 
+    public static CreatureAppearancePortResult LoadResult(string receiptPath)
+    {
+        receiptPath = RequiredFile(receiptPath, "Creature appearance port receipt");
+        var result = JsonSerializer.Deserialize<CreatureAppearancePortResult>(File.ReadAllText(receiptPath), JsonOptions) ?? throw new InvalidDataException("Creature appearance port receipt is empty.");
+        if (result.Plan.FormatVersion != FormatVersion || result.TargetDisplayId != result.Plan.TargetDisplayId) throw new InvalidDataException("Creature appearance port receipt has an unsupported plan or mismatched target display ID.");
+        var expected = result.Plan.ChangedTables.Order(StringComparer.OrdinalIgnoreCase).ToArray(); var actual = result.OutputFiles.Keys.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (!expected.SequenceEqual(actual, StringComparer.OrdinalIgnoreCase) || !actual.SequenceEqual(result.OutputSha256.Keys.Order(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase)) throw new InvalidDataException("Creature appearance port receipt does not contain exactly the changed DBC outputs declared by its plan.");
+        foreach (var table in actual)
+        {
+            var path = RequiredFile(result.OutputFiles[table], $"Receipt output {table}.dbc");
+            if (!Hash(path).Equals(result.OutputSha256[table], StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Receipt output {table}.dbc no longer matches its recorded SHA-256.");
+        }
+        return result with { ReceiptPath = receiptPath, OutputDirectory = Path.GetFullPath(result.OutputDirectory) };
+    }
+
+    public static void VerifyPlanInputs(CreatureAppearancePortPlan plan) => VerifyInputs(plan);
+    public static void VerifyPlanSourceInputs(CreatureAppearancePortPlan plan)
+    {
+        if (!Hash(plan.SchemaPath).Equals(plan.SchemaSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("The schema changed after the appearance port plan was created.");
+        foreach (var pair in plan.SourceFileSha256) if (!Hash(RequiredTablePath(plan.SourceDbcRoot, pair.Key)).Equals(pair.Value, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Source {pair.Key}.dbc changed after planning.");
+    }
+
     public static CreatureAppearancePortResult Apply(CreatureAppearancePortPlan plan, string outputDirectory, CancellationToken cancellationToken = default)
     {
         if (plan.FormatVersion != FormatVersion) throw new InvalidDataException($"Unsupported creature appearance port plan version {plan.FormatVersion}."); outputDirectory = Path.GetFullPath(outputDirectory);
