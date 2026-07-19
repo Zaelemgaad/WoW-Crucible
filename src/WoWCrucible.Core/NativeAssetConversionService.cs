@@ -86,7 +86,14 @@ public static class NativeAssetConversionService
             }
             var fileIdChunks = chunks.Where(chunk => chunk.Id is "TXID" or "SFID" or "AFID" or "BFID" or "PFID" or "SKID").ToArray();
             foreach (var chunk in fileIdChunks) findings.Add($"{chunk.Id} contains up to {chunk.Size / 4:N0} external FileDataID reference(s) requiring a supplied listfile/source provider.");
-            findings.Add("Chunked MD21 models require native structure conversion before the Wrath client can load them; Crucible has not written an output model yet.");
+            try
+            {
+                var plan = StaticM2DownportService.Plan(path);
+                findings.Add(plan.Ready
+                    ? $"Eligible for Crucible's verified static M2 downport profile ({plan.VertexCount:N0} vertices, {plan.TriangleCount:N0} triangles, {plan.Losses.Count:N0} declared loss finding(s))."
+                    : $"Static M2 downport is currently blocked by {plan.Blockers.Count:N0} explicit structure/dependency finding(s); inspect the plan for details.");
+            }
+            catch (Exception exception) { findings.Add($"Static M2 downport planning could not complete: {exception.Message}"); }
             return Result(AssetCompatibility.RequiresNativeConversion, magic, version, chunks, CompanionDependencies(path), findings.ToArray());
         }
 

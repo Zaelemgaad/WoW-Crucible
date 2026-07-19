@@ -908,6 +908,37 @@ using (var stream = File.Create(modernModel)) using (var writer = new BinaryWrit
 var modernInspection = NativeAssetConversionService.Inspect(modernModel);
 if (modernInspection.Compatibility != AssetCompatibility.RequiresNativeConversion || modernInspection.Chunks.Count != 2 || modernInspection.Version != 274 || !modernInspection.Findings.Any(finding => finding.Contains("FileDataID")))
     throw new InvalidOperationException("Native asset inspection did not classify a chunked modern M2 or report FileDataID dependencies.");
+var staticModernPayload = geometryBytes.ToArray(); BitConverter.GetBytes((uint)274).CopyTo(staticModernPayload, 4); BitConverter.GetBytes((uint)0x2080).CopyTo(staticModernPayload, 0x10); BitConverter.GetBytes((uint)1).CopyTo(staticModernPayload, 0x44);
+BitConverter.GetBytes((uint)0).CopyTo(staticModernPayload, 0xF0); BitConverter.GetBytes((uint)0).CopyTo(staticModernPayload, 0xF8); BitConverter.GetBytes((uint)0).CopyTo(staticModernPayload, 0x88); BitConverter.GetBytes((uint)0).CopyTo(staticModernPayload, 0x8C);
+BitConverter.GetBytes((uint)2).CopyTo(staticModernPayload, textureDefinitionOffset); BitConverter.GetBytes((uint)0).CopyTo(staticModernPayload, textureDefinitionOffset + 8); BitConverter.GetBytes((uint)0).CopyTo(staticModernPayload, textureDefinitionOffset + 12);
+var staticModernModel = Path.Combine(assetFixture, "static-modern.m2");
+using (var stream = File.Create(staticModernModel)) using (var writer = new BinaryWriter(stream))
+{
+    writer.Write(System.Text.Encoding.ASCII.GetBytes("MD21")); writer.Write((uint)staticModernPayload.Length); writer.Write(staticModernPayload);
+    writer.Write(System.Text.Encoding.ASCII.GetBytes("SFID")); writer.Write((uint)4); writer.Write((uint)12345);
+    writer.Write(System.Text.Encoding.ASCII.GetBytes("TXID")); writer.Write((uint)4); writer.Write((uint)0);
+}
+var staticModernSkin = new byte[geometrySkin.Length + 20]; System.Text.Encoding.ASCII.GetBytes("SKIN").CopyTo(staticModernSkin, 0); geometrySkin.AsSpan(48).CopyTo(staticModernSkin.AsSpan(56));
+foreach (var pairOffset in new[] { 4, 12, 20, 28, 36 })
+{
+    var count = BitConverter.ToUInt32(geometrySkin, pairOffset); var oldOffset = BitConverter.ToUInt32(geometrySkin, pairOffset + 4); BitConverter.GetBytes(count).CopyTo(staticModernSkin, pairOffset); BitConverter.GetBytes(oldOffset == 0 ? 0u : oldOffset + 8).CopyTo(staticModernSkin, pairOffset + 4);
+}
+BitConverter.GetBytes(BitConverter.ToUInt32(geometrySkin, 44)).CopyTo(staticModernSkin, 44); BitConverter.GetBytes((uint)1).CopyTo(staticModernSkin, 48); BitConverter.GetBytes((uint)(geometrySkin.Length + 8)).CopyTo(staticModernSkin, 52);
+BitConverter.GetBytes((ushort)1).CopyTo(staticModernSkin, 216 + 8 + 14);
+File.WriteAllBytes(Path.Combine(assetFixture, "static-modern00.skin"), staticModernSkin);
+var staticPlan = StaticM2DownportService.Plan(staticModernModel);
+if (!staticPlan.Ready || staticPlan.VertexCount != 3 || staticPlan.TriangleCount != 3 || staticPlan.SubmeshCount != 3 || staticPlan.MaterialCount != 1 || staticPlan.ShadowBatchCount != 1 || staticPlan.Losses.Count != 1)
+    throw new InvalidOperationException($"Portable static M2 downport planning rejected the verified fixture: {string.Join("; ", staticPlan.Blockers)}");
+var staticOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-downport-{Guid.NewGuid():N}"); var sourceModelBefore = File.ReadAllBytes(staticModernModel); var sourceSkinBefore = File.ReadAllBytes(staticPlan.SourceSkinPath!);
+var staticResult = StaticM2DownportService.Convert(staticPlan, staticOutput); var staticGeometry = M2PreviewGeometryService.Load(staticResult.OutputModelPath, staticResult.OutputSkinPath, M2PreviewVisibilityMode.AllGeosets);
+if (staticGeometry.Vertices.Count != 3 || staticGeometry.TotalTriangleIndices / 3 != 3 || staticGeometry.Submeshes.Count != 3 || staticGeometry.MaterialUnits.Count != 1 || !File.Exists(staticResult.ReceiptPath) || !File.ReadAllBytes(staticModernModel).SequenceEqual(sourceModelBefore) || !File.ReadAllBytes(staticPlan.SourceSkinPath!).SequenceEqual(sourceSkinBefore))
+    throw new InvalidOperationException("Static M2 downport did not preserve geometry/material counts, publish a receipt, or leave sources immutable.");
+Directory.Delete(staticOutput, true);
+var blockedModernModel = Path.Combine(assetFixture, "static-modern-blocked.m2"); var blockedModernBytes = File.ReadAllBytes(staticModernModel); BitConverter.GetBytes((uint)9).CopyTo(blockedModernBytes, blockedModernBytes.Length - 4); File.WriteAllBytes(blockedModernModel, blockedModernBytes); File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-blocked00.skin"));
+if (StaticM2DownportService.Plan(blockedModernModel).Ready) throw new InvalidOperationException("Static M2 downport accepted a nonzero external texture FileDataID.");
+var staleM2Model = Path.Combine(assetFixture, "static-modern-stale.m2"); File.Copy(staticModernModel, staleM2Model); File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-stale00.skin")); var staleM2Plan = StaticM2DownportService.Plan(staleM2Model); File.AppendAllText(staleM2Model, "tamper");
+var staleM2Output = Path.Combine(Path.GetTempPath(), $"crucible-static-stale-{Guid.NewGuid():N}"); try { _ = StaticM2DownportService.Convert(staleM2Plan, staleM2Output); throw new InvalidOperationException("Static M2 downport accepted a source changed after planning."); } catch (InvalidDataException exception) when (exception.Message.Contains("changed after planning", StringComparison.Ordinal)) { }
+if (Directory.Exists(staleM2Output)) throw new InvalidOperationException("Rejected stale static M2 conversion published an output folder.");
 var wmoFixture = Path.Combine(assetFixture, "fixture.wmo");
 using (var stream = File.Create(wmoFixture)) using (var writer = new BinaryWriter(stream))
 {

@@ -53,12 +53,13 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var clear = new Button { Content = "Clear" }; clear.Click += (_, _) => Clear();
         var create = Accent("Create verified workspace"); create.Click += async (_, _) => await CreateWorkspaceAsync();
         var open = new Button { Content = "Open conversion report" }; open.Click += async (_, _) => await OpenReportAsync();
+        var convert = Accent("Convert selected verified static M2"); convert.Click += async (_, _) => await ConvertSelectedAsync();
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
 
         var header = new Border
         {
             BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 8),
-            Child = new WrapPanel { Children = { back, new TextBlock { Text = "MODERN ASSET CONVERSION", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, addFiles, addFolder, remove, clear, create, open, cancel } }
+            Child = new WrapPanel { Children = { back, new TextBlock { Text = "MODERN ASSET CONVERSION", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, addFiles, addFolder, remove, clear, create, open, convert, cancel } }
         };
 
         var dropTarget = new Border
@@ -175,12 +176,39 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         finally { EndOperation(operation); }
     }
 
+    private async Task ConvertSelectedAsync()
+    {
+        if (_workspace is null) { _summary.Text = "Create or open a verified workspace before conversion; loose originals are never mutated."; return; }
+        if (_assets.SelectedItem is not AssetInspection asset || asset.Format != AssetFormat.M2 || asset.Magic != "MD21") { _summary.Text = "Select a modern MD21 M2 snapshot first."; return; }
+        var source = NativeAssetConversionService.ResolveSnapshotPath(_workspace, asset); var skin = WorkspaceSkinSnapshot(asset);
+        var output = Path.Combine(_workspace.RootPath, "converted", asset.Sha256[..12].ToUpperInvariant());
+        var operation = BeginOperation("Planning and validating the selected immutable M2/SKIN snapshot…"); var token = operation.Token;
+        try
+        {
+            var result = await Task.Run(() =>
+            {
+                var plan = StaticM2DownportService.Plan(source, skin);
+                if (!plan.Ready) throw new InvalidOperationException("Static profile blocked this model:\n- " + string.Join("\n- ", plan.Blockers));
+                return StaticM2DownportService.Convert(plan, output, token);
+            }, token);
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(result.OutputModelPath, result.OutputSkinPath, M2PreviewVisibilityMode.AllGeosets), token);
+            _preview.IsVisible = true; _wmoPreview.IsVisible = false; _preview.SetGeometry(geometry);
+            _previewStatus.Text = $"Converted and independently reloaded · {geometry.Vertices.Count:N0} vertices · {geometry.TotalTriangleIndices / 3:N0} triangles";
+            _details.Text = $"CONVERSION COMPLETE\n\nModel: {result.OutputModelPath}\nModel SHA-256: {result.OutputModelSha256}\nSKIN: {result.OutputSkinPath}\nSKIN SHA-256: {result.OutputSkinSha256}\nReceipt: {result.ReceiptPath}\n\nTRANSFORMATIONS\n{Lines(result.Plan.Transformations)}\n\nDECLARED LOSSES\n{Lines(result.Plan.Losses)}";
+            _summary.Text = $"Verified static M2 conversion published atomically · {result.OutputDirectory}";
+            DesktopCrashLogger.Debug("CONVERT", "static-m2-downport-complete", ("source", asset.Path), ("output", result.OutputDirectory), ("vertices", result.ValidatedVertices), ("triangles", result.ValidatedTriangles));
+        }
+        catch (OperationCanceledException) { _summary.Text = "Static M2 conversion cancelled before publication."; }
+        catch (Exception exception) { _summary.Text = $"Static M2 conversion failed: {exception.Message}"; DesktopCrashLogger.Log("Static M2 downport failed", exception); }
+        finally { EndOperation(operation); }
+    }
+
     private async Task ShowSelectedAsync()
     {
         _previewOperation?.Cancel(); _previewOperation?.Dispose(); _previewOperation = new CancellationTokenSource(); var previewToken = _previewOperation.Token;
         var generation = ++_previewGeneration; _preview.ClearGeometry(); _wmoPreview.ClearGeometry(); _preview.IsVisible = true; _wmoPreview.IsVisible = false;
         if (_assets.SelectedItem is not AssetInspection asset) { _details.Text = string.Empty; _previewStatus.Text = "Select an asset."; return; }
-        var source = File.Exists(asset.Path) ? asset.Path : _workspace is not null ? NativeAssetConversionService.ResolveSnapshotPath(_workspace, asset) : asset.Path;
+        var source = _workspace is not null ? NativeAssetConversionService.ResolveSnapshotPath(_workspace, asset) : asset.Path;
         _details.Text = $"{asset.Path}\n\nFormat: {asset.Format}\nCompatibility: {CompatibilityLabel(asset.Compatibility)}\nMagic: {asset.Magic}\nVersion: {asset.Version?.ToString() ?? "unknown"}\nBytes: {asset.Size:N0}\nSHA-256: {asset.Sha256}\nPreview source: {source}\n\nFINDINGS\n{Lines(asset.Findings)}\n\nCHUNKS\n{Lines(asset.Chunks.Select(chunk => $"{chunk.Id} · offset {chunk.Offset:N0} · {chunk.Size:N0} bytes"))}\n\nDEPENDENCIES\n{Lines(asset.Dependencies.Select(dependency => $"{dependency.Kind} · {(dependency.Exists ? "found" : "missing")} · {dependency.Path}"))}";
         if (asset.Format == AssetFormat.Wmo && asset.Version == 17)
         {
@@ -195,6 +223,20 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             }
             catch (OperationCanceledException) { }
             catch (Exception exception) { if (generation == _previewGeneration) _previewStatus.Text = $"WMO preview unavailable: {exception.Message}"; }
+            return;
+        }
+        if (asset.Format == AssetFormat.M2 && asset.Compatibility == AssetCompatibility.RequiresNativeConversion)
+        {
+            _previewStatus.Text = "Checking the loss-accounted static M2 conversion profile…";
+            try
+            {
+                var plan = await Task.Run(() => StaticM2DownportService.Plan(source, WorkspaceSkinSnapshot(asset)), previewToken);
+                if (generation != _previewGeneration) return;
+                _details.Text += $"\n\nSTATIC M2 DOWNPORT PLAN\nReady: {plan.Ready}\nOutput flags: 0x{plan.OutputFlags:X}\nGeometry: {plan.VertexCount:N0} vertices · {plan.TriangleCount:N0} triangles · {plan.SubmeshCount:N0} submeshes · {plan.MaterialCount:N0} materials\n\nTRANSFORMATIONS\n{Lines(plan.Transformations)}\n\nDECLARED LOSSES\n{Lines(plan.Losses)}\n\nBLOCKERS\n{Lines(plan.Blockers)}";
+                _previewStatus.Text = plan.Ready ? "Eligible for verified static M2 downport. Create/open a workspace, then use Convert selected." : $"Static profile blocked this model with {plan.Blockers.Count:N0} explicit finding(s).";
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception exception) { if (generation == _previewGeneration) _previewStatus.Text = $"Conversion planning unavailable: {exception.Message}"; }
             return;
         }
         if (asset.Format != AssetFormat.M2 || asset.Compatibility != AssetCompatibility.AlreadyWotlk335) { _previewStatus.Text = "This asset must be converted to the verified Wrath layout before preview can load it."; return; }
@@ -246,6 +288,14 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             result[index] = NativeAssetConversionService.ResolveDependencySnapshotPath(_workspace, asset, dependency);
         }
         return result;
+    }
+    private string? WorkspaceSkinSnapshot(AssetInspection asset)
+    {
+        if (_workspace is null) return null;
+        var expected = Path.GetFileNameWithoutExtension(asset.Path) + "00.skin";
+        var skins = asset.Dependencies.Where(value => value.Exists && value.Kind.Equals("skin", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var dependency = skins.FirstOrDefault(value => Path.GetFileName(value.Path).Equals(expected, StringComparison.OrdinalIgnoreCase)) ?? (skins.Length == 1 ? skins[0] : null);
+        return dependency is null ? null : NativeAssetConversionService.ResolveDependencySnapshotPath(_workspace, asset, dependency);
     }
     private static string CompatibilityLabel(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "Wrath 3.3.5 ready", AssetCompatibility.RequiresNativeConversion => "native conversion required", AssetCompatibility.Unsupported => "unsupported layout", _ => "invalid asset" };
     private static string CompatibilityColor(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "#79C793", AssetCompatibility.RequiresNativeConversion => "#E5B768", _ => "#E27B7B" };
