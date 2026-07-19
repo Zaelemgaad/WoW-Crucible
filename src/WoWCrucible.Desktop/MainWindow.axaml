@@ -31,6 +31,7 @@
                         <Button Margin="0,0,8,0" Content="Close" Click="CloseDocumentClick" />
                         <Button Margin="0,0,8,0" Content="Logs" Click="OpenLogsClick" />
                         <Button Margin="0,0,8,0" Content="CLI Guide" Click="OpenCliGuideClick" />
+                        <Button Margin="0,0,8,0" Content="Commands · Ctrl+K" Click="OpenCommandPaletteClick" />
                         <TextBox x:Name="SearchBox" PlaceholderText="Search loaded table…" TextChanged="SearchChanged" />
                     </WrapPanel>
                 </ScrollViewer>
@@ -145,6 +146,28 @@
         </Border>
 
         <Border x:Name="FeatureWorkspaceHost" Grid.Row="0" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#090C11" />
+        <Grid x:Name="CommandPaletteHost" Grid.Row="0" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#B805070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,6*,*">
+            <Border Grid.Row="1" Grid.Column="1" Padding="16" CornerRadius="10" BorderBrush="#4A5A76" BorderThickness="1" Background="#111722">
+                <Grid RowDefinitions="Auto,Auto,*,Auto" RowSpacing="9">
+                    <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="COMMAND PALETTE" Foreground="#C58A2B" FontSize="10" FontWeight="Bold" />
+                            <TextBlock Text="Search every native workspace and common action" FontSize="17" FontWeight="SemiBold" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="Close · Esc" Click="CloseCommandPaletteClick" />
+                    </Grid>
+                    <TextBox x:Name="CommandPaletteSearch" Grid.Row="1" PlaceholderText="Try: cut items, Heidi favorites, MPQ merge, model viewer, server restart…" />
+                    <Grid Grid.Row="2">
+                        <ListBox x:Name="CommandPaletteResults" HorizontalAlignment="Stretch" Background="#0A0E15" BorderBrush="#283247" BorderThickness="1" />
+                        <TextBlock x:Name="CommandPaletteEmptyText" Text="No command matches every search term." IsVisible="False" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="#8793A7" />
+                    </Grid>
+                    <Grid Grid.Row="3" ColumnDefinitions="*,Auto">
+                        <TextBlock x:Name="CommandPaletteStatus" Foreground="#8793A7" FontSize="11" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" Text="↑↓ select · Enter open · Esc close" Foreground="#8793A7" FontSize="11" />
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
         <Grid x:Name="DialogOverlayHost" Grid.Row="0" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#CC05070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,8*,*">
             <Border Grid.Row="1" Grid.Column="1" Padding="20" CornerRadius="10" BorderBrush="#39465E" BorderThickness="1" Background="#111722">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">

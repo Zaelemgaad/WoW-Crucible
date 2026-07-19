@@ -11,6 +11,14 @@ Exit codes are consistent across workflows:
 - `2`: missing/invalid command syntax.
 - `3`: work completed but unresolved conflicts, blocked assets, warnings that require review, or partial failures remain.
 
+## Searchable desktop/CLI command catalog
+
+```text
+wowcrucible tools commands [search words...] [--format=text|json]
+```
+
+The command catalog is the same source used by the desktop's same-window `Ctrl+K` palette. Search accepts multiple intent terms rather than requiring an exact feature name, so queries such as `cut items`, `Heidi favorites`, `MPQ merge`, `model viewer animation`, and `server restart` resolve to their native workspaces. Empty search lists all commands in navigation order; no matches return review exit code `3`. Launch `WoWCrucible.Desktop-latest.exe --command-palette="search words"` to open the desktop directly into the filtered palette.
+
 ## Tool consolidation inventory
 
 ```text

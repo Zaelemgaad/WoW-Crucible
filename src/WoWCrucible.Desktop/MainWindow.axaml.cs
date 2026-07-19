@@ -4,7 +4,9 @@ using System.Reflection;
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using Avalonia.Controls.Primitives;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
@@ -47,6 +49,8 @@ public partial class MainWindow : Window
     private readonly Stack<(Control Workspace, string Title)> _featureHistory = new();
     private string _featureTitle = string.Empty;
     private readonly Dictionary<string, (WdbcFile File, IReadOnlyList<DbcColumn> Columns)> _referenceDbcCache = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<CrucibleCommandMatch> _commandMatches = [];
+    private readonly IReadOnlyDictionary<string, Func<Task>> _commandRoutes;
 
     private DbcDocumentSession? Current => _activeDocument >= 0 && _activeDocument < _documents.Count ? _documents[_activeDocument] : null;
     private WdbcFile? CurrentFile => Current?.File;
@@ -60,6 +64,12 @@ public partial class MainWindow : Window
         ToolTip.SetTip(BuildIdentityText, $"{buildIdentity.FullVersion}\nRunning from {AppContext.BaseDirectory}");
         Title = $"WoW Crucible · {buildIdentity.Label}";
         DevbugModeToggle.IsChecked = DesktopCrashLogger.IsDevbugEnabled;
+        _commandRoutes = BuildCommandRoutes();
+        var unrouted = CrucibleCommandCatalog.All.Where(command => !_commandRoutes.ContainsKey(command.Id)).Select(command => command.Id).ToArray();
+        if (unrouted.Length > 0 || _commandRoutes.Count != CrucibleCommandCatalog.All.Count) throw new InvalidOperationException($"Desktop command routes do not exactly match the shared catalog. Missing: {string.Join(", ", unrouted)}");
+        CommandPaletteResults.ItemTemplate = new FuncDataTemplate<CrucibleCommandMatch>((match, _) => match is null ? new Grid() : BuildCommandPaletteRow(match.Command));
+        CommandPaletteSearch.TextChanged += (_, _) => RefreshCommandPalette();
+        CommandPaletteResults.DoubleTapped += async (_, _) => await ExecuteSelectedCommandAsync();
         DesktopCrashLogger.Debug("UI", "main-window-created", ("devbug", DesktopCrashLogger.IsDevbugEnabled), ("build", buildIdentity.FullVersion), ("base_directory", AppContext.BaseDirectory));
         DbcView.SelectionChanged += (_, selection) => ShowSelection(selection);
         DbcView.CellEditRequested += async (_, selection) => await EditCellAsync(selection);
@@ -967,13 +977,121 @@ public partial class MainWindow : Window
         _syncingScrollbars = false;
     }
 
-    protected override void OnKeyDown(Avalonia.Input.KeyEventArgs e)
+    private void OpenCommandPaletteClick(object? sender, RoutedEventArgs e) => OpenCommandPalette();
+    private void CloseCommandPaletteClick(object? sender, RoutedEventArgs e) => CloseCommandPalette();
+
+    public void OpenCommandPalette(string? query = null)
+    {
+        if (DialogOverlayHost.IsVisible) return;
+        if (query is not null) CommandPaletteSearch.Text = query;
+        CommandPaletteHost.IsVisible = true;
+        RefreshCommandPalette();
+        Dispatcher.UIThread.Post(() => { CommandPaletteSearch.Focus(); CommandPaletteSearch.SelectAll(); }, DispatcherPriority.Input);
+        DesktopCrashLogger.Debug("UI", "command-palette-opened", ("workspace", _featureTitle.Length == 0 ? "DBC tables" : _featureTitle), ("query", CommandPaletteSearch.Text), ("matches", _commandMatches.Count));
+    }
+
+    private void CloseCommandPalette()
+    {
+        if (!CommandPaletteHost.IsVisible) return;
+        CommandPaletteHost.IsVisible = false;
+        DesktopCrashLogger.Debug("UI", "command-palette-closed", ("query", CommandPaletteSearch.Text), ("matches", _commandMatches.Count));
+    }
+
+    private void RefreshCommandPalette()
+    {
+        _commandMatches = CrucibleCommandCatalog.Search(CommandPaletteSearch.Text, 60);
+        CommandPaletteResults.ItemsSource = _commandMatches;
+        CommandPaletteResults.SelectedIndex = _commandMatches.Count > 0 ? 0 : -1;
+        CommandPaletteEmptyText.IsVisible = _commandMatches.Count == 0;
+        CommandPaletteStatus.Text = $"{_commandMatches.Count:N0} match(es) · {CrucibleCommandCatalog.All.Count:N0} native command(s)";
+    }
+
+    private static Control BuildCommandPaletteRow(CrucibleCommandDescriptor command)
+    {
+        var title = new TextBlock { Text = command.Title, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap };
+        var category = new TextBlock { Text = command.Category.ToUpperInvariant(), Foreground = new SolidColorBrush(Color.Parse("#C58A2B")), FontSize = 10, FontWeight = FontWeight.Bold, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right };
+        var description = new TextBlock { Text = command.Description, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8793A7")), FontSize = 11, Margin = new Thickness(0, 3, 8, 0) };
+        var shortcut = new TextBlock { Text = command.Shortcut ?? string.Empty, Foreground = new SolidColorBrush(Color.Parse("#8793A7")), FontSize = 10, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
+        Grid.SetColumn(category, 1); Grid.SetRow(description, 1); Grid.SetColumn(shortcut, 1); Grid.SetRow(shortcut, 1);
+        return new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(4, 5), Children = { title, category, description, shortcut } };
+    }
+
+    private IReadOnlyDictionary<string, Func<Task>> BuildCommandRoutes()
+    {
+        Func<Task> Done(Action action) => () => { action(); return Task.CompletedTask; };
+        return new Dictionary<string, Func<Task>>(StringComparer.Ordinal)
+        {
+            ["workspace.dbc"] = Done(CloseAllFeatureWorkspaces),
+            ["workspace.dbc-layers"] = Done(() => OpenLayeredDbcsClick(null, new RoutedEventArgs())),
+            ["workspace.dbd"] = Done(OpenDbdSchemaAudit),
+            ["workspace.items"] = Done(OpenItemWorkbench),
+            ["workspace.creatures"] = Done(() => OpenCreatureWorkspaceClick(null, new RoutedEventArgs())),
+            ["workspace.gameobjects"] = Done(OpenGameObjectWorkspace),
+            ["workspace.quests"] = Done(OpenQuestWorkspace),
+            ["workspace.behaviors"] = Done(OpenBehaviorWorkspace),
+            ["workspace.mpq"] = Done(OpenMpqWorkspace),
+            ["workspace.client"] = Done(() => OpenClientWorkspaceClick(null, new RoutedEventArgs())),
+            ["workspace.maps"] = Done(() => OpenMapWorkspace()),
+            ["workspace.textures"] = Done(() => OpenTextureWorkspace()),
+            ["workspace.assets"] = Done(() => OpenAssetComparison()),
+            ["workspace.conversion"] = Done(OpenNativeConversionWorkspace),
+            ["workspace.tools"] = OpenToolInventoryAsync,
+            ["workspace.server"] = Done(OpenServerSqlWorkspace),
+            ["workspace.sql"] = Done(OpenSqlWorkspace),
+            ["workspace.cli-guide"] = Done(() => OpenCliGuideClick(null, new RoutedEventArgs())),
+            ["action.open-dbc"] = Done(() => OpenDbcClick(null, new RoutedEventArgs())),
+            ["action.open-m2"] = Done(() => OpenM2Click(null, new RoutedEventArgs())),
+            ["action.save"] = () => SaveCurrentAsync(false),
+            ["action.save-as"] = () => SaveCurrentAsync(true),
+            ["action.export-rows"] = Done(() => OpenDbcExportClick(null, new RoutedEventArgs())),
+            ["action.import-rows"] = Done(() => OpenDbcImportClick(null, new RoutedEventArgs())),
+            ["action.spell"] = Done(() => OpenSpellWorkspaceClick(null, new RoutedEventArgs())),
+            ["action.logs"] = Done(DesktopCrashLogger.OpenDirectory),
+            ["action.devbug"] = Done(() => DevbugModeToggle.IsChecked = DevbugModeToggle.IsChecked != true),
+            ["action.back"] = Done(CloseFeatureWorkspace)
+        };
+    }
+
+    private async Task ExecuteSelectedCommandAsync()
+    {
+        if (CommandPaletteResults.SelectedItem is not CrucibleCommandMatch match) return;
+        var command = match.Command; CloseCommandPalette();
+        try
+        {
+            if (!_commandRoutes.TryGetValue(command.Id, out var route)) throw new InvalidOperationException($"Command route is not implemented: {command.Id}");
+            await route();
+            DesktopCrashLogger.Debug("UI", "command-palette-executed", ("id", command.Id), ("title", command.Title));
+        }
+        catch (Exception exception)
+        {
+            DesktopCrashLogger.Log($"Command palette route failed: {command.Id}", exception);
+            await ShowErrorAsync($"Could not open {command.Title}", exception.Message);
+        }
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
-        if (!e.KeyModifiers.HasFlag(Avalonia.Input.KeyModifiers.Control)) return;
-        if (e.Key == Avalonia.Input.Key.Z) Undo();
-        else if (e.Key == Avalonia.Input.Key.Y) Redo();
-        else if (e.Key == Avalonia.Input.Key.S) _ = SaveCurrentAsync(false);
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Control) && e.Key == Key.K)
+        {
+            if (CommandPaletteHost.IsVisible) CloseCommandPalette(); else OpenCommandPalette();
+            e.Handled = true; return;
+        }
+        if (CommandPaletteHost.IsVisible)
+        {
+            if (e.Key == Key.Escape) CloseCommandPalette();
+            else if (e.Key == Key.Enter) _ = ExecuteSelectedCommandAsync();
+            else if (e.Key == Key.Down && _commandMatches.Count > 0) CommandPaletteResults.SelectedIndex = Math.Min(_commandMatches.Count - 1, CommandPaletteResults.SelectedIndex + 1);
+            else if (e.Key == Key.Up && _commandMatches.Count > 0) CommandPaletteResults.SelectedIndex = Math.Max(0, CommandPaletteResults.SelectedIndex - 1);
+            else return;
+            e.Handled = true; return;
+        }
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Alt) && e.Key == Key.Left) { CloseFeatureWorkspace(); e.Handled = true; return; }
+        if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
+        if (e.Key == Key.Z) Undo();
+        else if (e.Key == Key.Y) Redo();
+        else if (e.Key == Key.S) _ = SaveCurrentAsync(false);
+        else if (e.Key == Key.O) OpenDbcClick(null, new RoutedEventArgs());
         else return;
         e.Handled = true;
     }

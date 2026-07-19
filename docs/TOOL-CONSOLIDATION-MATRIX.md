@@ -96,7 +96,7 @@ Every top-level Tools directory is assigned below, including redundant editors. 
 | ADT object placement fidelity | Native MMID→MMDX/MDDF and MWID→MWMO/MODF decoding preserves placed M2/WMO UID, path, finite position/orientation, flags, and raw scale; WMO extents plus doodad/name sets are retained. Same-window selection resolves exact provenance, previews either native M2/SKIN or WMO geometry, and applies the selected instance's orientation/scale through a reset-safe scene transform | Compose multiple placed objects together at world coordinates on terrain, then add guarded placement editing |
 | CASC | Local libraries/listfiles inventoried | Native provider integrated beside MPQ in the same archive UI |
 | Client/server fusion | Diff/planning services exist | Additive ID allocation, cross-layer dependency/change plan, verified deploy/rollback |
-| CLI | Broad command groups and shipped guide | Command parity for every UI operation, structured JSON output, generated searchable command palette |
+| CLI | Broad command groups and shipped guide; a shared 28-route intent/alias catalog drives both the responsive same-window `Ctrl+K` palette and `tools commands` text/JSON search, including direct filtered desktop launch | Command parity for every remaining UI operation and structured JSON output across every command family |
 
 This matrix is updated whenever a capability lands, a new local tool appears, or a previously unknown workflow is discovered.
 

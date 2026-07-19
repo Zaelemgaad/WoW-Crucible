@@ -40,6 +40,13 @@ public partial class App : Application
             else if (arguments.Any(argument => IsOption(argument, "--tool-inventory"))) window.Opened += async (_, _) => await window.OpenToolInventoryAsync();
             else if (arguments.Any(argument => IsOption(argument, "--dbd-schemas"))) window.Opened += (_, _) => window.OpenDbdSchemaAudit();
             else if (arguments.Any(argument => IsOption(argument, "--mpq"))) window.Opened += (_, _) => window.OpenMpqWorkspace();
+            var paletteIndex = Array.FindIndex(arguments, argument => IsOption(argument, "--command-palette"));
+            if (paletteIndex >= 0)
+            {
+                var paletteArgument = arguments[paletteIndex]; var separator = paletteArgument.IndexOf('='); var query = separator < 0 ? null : paletteArgument[(separator + 1)..].Trim('"');
+                if (string.IsNullOrWhiteSpace(query) && paletteIndex + 1 < arguments.Length && !arguments[paletteIndex + 1].StartsWith("--", StringComparison.Ordinal)) query = arguments[paletteIndex + 1].Trim('"');
+                window.Opened += (_, _) => window.OpenCommandPalette(query);
+            }
             var initialPaths = desktop.Args?.Where(File.Exists).ToArray() ?? [];
             if (initialPaths.Length > 0)
                 window.Opened += async (_, _) =>

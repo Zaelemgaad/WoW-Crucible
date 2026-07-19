@@ -7,6 +7,14 @@ using System.Text.Json;
 if (args.Length != 2)
     throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
 
+if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(command => command.Id).Distinct(StringComparer.Ordinal).Count() != CrucibleCommandCatalog.All.Count ||
+    CrucibleCommandCatalog.Search("heidi favorites").FirstOrDefault()?.Command.Id != "workspace.sql" ||
+    CrucibleCommandCatalog.Search("mpq merge").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
+    CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.items" ||
+    CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.assets" ||
+    CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
+    throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
+
 var itemDisplayPath = Path.Combine(args[1], "ItemDisplayInfo.dbc");
 var dbdFixture=Path.Combine(Path.GetTempPath(),$"crucible-dbd-{Guid.NewGuid():N}.dbd");
 try
