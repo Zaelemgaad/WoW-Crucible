@@ -973,6 +973,29 @@ if (ItemCatalogService.IsDirectLootItem(17, 1_072_025) || !ItemCatalogService.Is
     ItemCatalogService.IsUsableQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }) ||
     !ItemCatalogService.IsUsableQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }, new HashSet<uint>()))
     throw new InvalidOperationException("Item acquisition evidence confused loot references or unlinked quest rewards with direct player acquisition.");
+var lootGraph = new ItemCatalogService.LootReachabilityData(
+    new Dictionary<string, IReadOnlyList<ItemCatalogService.LootRow>>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["creature_loot_template"] = [new(10, 100, 0), new(10, 1, 900), new(99, 101, 0)],
+        ["item_loot_template"] = [new(100, 102, 0)],
+        ["disenchant_loot_template"] = [new(77, 106, 0)],
+        ["spell_loot_template"] = [new(500, 103, 0)]
+    },
+    new Dictionary<uint, IReadOnlyList<ItemCatalogService.LootRow>>
+    {
+        [900] = [new(900, 104, 0)],
+        [901] = [new(901, 105, 0)]
+    },
+    new Dictionary<string, IReadOnlySet<uint>>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["creature_loot_template"] = new HashSet<uint> { 10 }
+    },
+    new Dictionary<uint, uint> { [102] = 77 });
+var graphAcquired = new Dictionary<uint, HashSet<string>>(); var graphRejected = new Dictionary<uint, HashSet<string>>();
+ItemCatalogService.ApplyReachableLoot(lootGraph, graphAcquired, new HashSet<uint> { 500 }, graphRejected, CancellationToken.None);
+if (!new uint[] { 100, 102, 103, 104, 106 }.All(graphAcquired.ContainsKey) || graphAcquired.ContainsKey(1) || graphAcquired.ContainsKey(101) || graphAcquired.ContainsKey(105) ||
+    !graphRejected.ContainsKey(101) || !graphRejected.ContainsKey(105) || graphRejected.ContainsKey(1))
+    throw new InvalidOperationException("Source-aware loot closure did not distinguish reachable owners, dynamic item/disenchant/spell edges, nested reference pools, and orphaned rows.");
 var startingItems = ItemCatalogService.ReadCharStartOutfitItems(Path.Combine(args[1], "CharStartOutfit.dbc"));
 if (!startingItems.Contains(6948) || startingItems.Contains(17) || startingItems.Contains(17802))
     throw new InvalidOperationException("CharStartOutfit DBC acquisition coverage did not distinguish starting equipment from cut/developer items.");

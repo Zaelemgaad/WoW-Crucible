@@ -25,6 +25,12 @@ public sealed class ItemCatalogService
     private sealed record AcquisitionScan(IReadOnlyList<ItemCatalogEntry> Items, IReadOnlyDictionary<uint, HashSet<string>> Rejected,
         IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources);
     private sealed record AcquisitionSpec(string Table, params string[] Columns);
+    internal sealed record LootRow(uint Entry, uint Item, uint Reference);
+    internal sealed record LootReachabilityData(
+        IReadOnlyDictionary<string, IReadOnlyList<LootRow>> Tables,
+        IReadOnlyDictionary<uint, IReadOnlyList<LootRow>> ReferencePools,
+        IReadOnlyDictionary<string, IReadOnlySet<uint>> FixedOwners,
+        IReadOnlyDictionary<uint, uint> ItemDisenchantPools);
     private static readonly AcquisitionSpec[] DirectAcquisitionSpecs =
     [
         new("npc_vendor", "item"),
@@ -85,6 +91,26 @@ public sealed class ItemCatalogService
             var columns = spec.Columns.Select(candidate => ResolveColumn(schema[table], candidate)).Where(column => column is not null).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (columns.Length == 0) { missingSources.Add(spec.Table); continue; }
             checkedSources.Add(table);
+            if (spec.Table.Equals("npc_vendor", StringComparison.OrdinalIgnoreCase))
+            {
+                var ownerColumn = ResolveColumn(schema[table], "entry", "Entry"); var templateTable = ResolveTable(schema, "creature_template");
+                var templateEntry = templateTable is null ? null : ResolveColumn(schema[templateTable], "entry", "Entry");
+                if (ownerColumn is null || templateTable is null || templateEntry is null) { missingSources.Add("npc_vendor template ownership"); continue; }
+                var validOwners = new HashSet<uint>(); await ReadPositiveColumnAsync(connection, templateTable, templateEntry, validOwners, cancellationToken);
+                foreach (var column in columns)
+                {
+                    await using var command = new MySqlCommand($"SELECT DISTINCT {Quote(column!)},{Quote(ownerColumn)} FROM {Quote(table)} WHERE {Quote(column!)}>0", connection) { CommandTimeout = 120 };
+                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        var rawItem = Convert.ToInt64(reader.GetValue(0)); var rawOwner = Convert.ToInt64(reader.GetValue(1));
+                        if (rawItem is <= 0 or > uint.MaxValue) continue;
+                        if (rawOwner is > 0 and <= uint.MaxValue && validOwners.Contains((uint)rawOwner)) AddAcquired(acquired, (uint)rawItem, $"{table}.{column} (template-linked vendor {rawOwner})");
+                        else AddRejected(rejected, (uint)rawItem, $"Ignored · {table}.{column} vendor owner {rawOwner} has no creature_template row.");
+                    }
+                }
+                continue;
+            }
             foreach (var column in columns)
             {
                 await using var command = new MySqlCommand($"SELECT DISTINCT {Quote(column!)} FROM {Quote(table)} WHERE {Quote(column!)} > 0", connection) { CommandTimeout = 120 };
@@ -96,11 +122,22 @@ public sealed class ItemCatalogService
                 }
             }
         }
-        await CollectReachableLootAsync(connection, schema, acquired, rejected, checkedSources, missingSources, cancellationToken);
         var reachableSpells = new HashSet<uint>();
         await CollectLinkedQuestRewardsAsync(connection, schema, acquired, rejected, reachableSpells, checkedSources, missingSources, cancellationToken);
         CollectCharStartOutfitItems(dbcFolder, acquired, checkedSources, missingSources);
-        await CollectReachableSpellCreatedItemsAsync(connection, schema, itemTable, dbcFolder, reachableSpells, acquired, checkedSources, missingSources, cancellationToken);
+        var loot = await ReadLootReachabilityAsync(connection, schema, itemTable, dbcFolder, checkedSources, missingSources, cancellationToken);
+        // Item loot and item-use/create-spell effects form a real graph: a reachable
+        // container can award an item that teaches a spell, which can create another
+        // millable/container item. Iterate to a fixed point instead of assuming the
+        // order of the source tables proves reachability.
+        while (true)
+        {
+            var itemCount = acquired.Count;
+            var spellCount = reachableSpells.Count;
+            await CollectReachableSpellCreatedItemsAsync(connection, schema, itemTable, dbcFolder, reachableSpells, acquired, checkedSources, missingSources, cancellationToken);
+            ApplyReachableLoot(loot, acquired, reachableSpells, rejected, cancellationToken);
+            if (itemCount == acquired.Count && spellCount == reachableSpells.Count) break;
+        }
 
         var itemColumns = schema[itemTable];
         var entryColumn = RequireColumn(itemColumns, "entry"); var nameColumn = RequireColumn(itemColumns, "name");
@@ -148,64 +185,287 @@ public sealed class ItemCatalogService
         checkedSources.Add("CharStartOutfit.dbc (starting equipment)");
     }
 
-    private static async Task CollectReachableLootAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
-        Dictionary<uint, HashSet<string>> acquired, Dictionary<uint, HashSet<string>> rejected, ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+    private static async Task<LootReachabilityData> ReadLootReachabilityAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
+        string itemTable, string? dbcFolder, ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
     {
-        var referencedPools = new HashSet<uint>();
+        var tables = new Dictionary<string, IReadOnlyList<LootRow>>(StringComparer.OrdinalIgnoreCase);
         foreach (var requested in LootTables)
         {
             var table = ResolveTable(schema, requested);
             if (table is null) { missingSources.Add(requested); continue; }
+            var entry = ResolveColumn(schema[table], "Entry", "entry");
             var item = ResolveColumn(schema[table], "Item", "item");
-            if (item is null) { missingSources.Add(requested); continue; }
+            if (entry is null || item is null) { missingSources.Add($"{requested} owner/item columns"); continue; }
             var reference = ResolveColumn(schema[table], "Reference", "reference");
             checkedSources.Add(table);
             var sql = reference is null
-                ? $"SELECT {Quote(item)},0 FROM {Quote(table)} WHERE {Quote(item)}>0"
-                : $"SELECT {Quote(item)},{Quote(reference)} FROM {Quote(table)} WHERE {Quote(item)}>0 OR {Quote(reference)}>0";
+                ? $"SELECT {Quote(entry)},{Quote(item)},0 FROM {Quote(table)} WHERE {Quote(item)}>0"
+                : $"SELECT {Quote(entry)},{Quote(item)},{Quote(reference)} FROM {Quote(table)} WHERE {Quote(item)}>0 OR {Quote(reference)}>0";
+            var rows = new List<LootRow>();
             await using var command = new MySqlCommand(sql, connection) { CommandTimeout = 120 };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                var rawItemId = Convert.ToInt64(reader.GetValue(0)); var rawReferenceId = Convert.ToInt64(reader.GetValue(1));
-                // In Trinity/Azeroth loot schemas Item is not an awarded item when
-                // Reference is nonzero. Treating both columns as independent made
-                // reference-count/group values look like real obtainable item IDs.
-                if (rawReferenceId > 0 && rawReferenceId <= uint.MaxValue)
-                {
-                    referencedPools.Add((uint)rawReferenceId);
-                    if (rawItemId is > 0 and <= uint.MaxValue) AddRejected(rejected, (uint)rawItemId, $"Ignored · {table} has nonzero Reference values; its Item field is a reference-control value, not a direct award.");
-                }
-                else if (IsDirectLootItem(rawItemId, rawReferenceId)) AddAcquired(acquired, (uint)rawItemId, $"{table} (direct loot)");
+                var rawEntry = Convert.ToInt64(reader.GetValue(0)); var rawItem = Convert.ToInt64(reader.GetValue(1)); var rawReference = Convert.ToInt64(reader.GetValue(2));
+                if (rawEntry is <= 0 or > uint.MaxValue) continue;
+                rows.Add(new((uint)rawEntry, rawItem is > 0 and <= uint.MaxValue ? (uint)rawItem : 0, rawReference is > 0 and <= uint.MaxValue ? (uint)rawReference : 0));
             }
+            tables[requested] = rows;
         }
 
         var referenceTable = ResolveTable(schema, "reference_loot_template");
-        if (referenceTable is null) { missingSources.Add("reference_loot_template (reachable pools)"); return; }
-        var columns = schema[referenceTable]; var entryColumn = ResolveColumn(columns, "Entry", "entry"); var itemColumn = ResolveColumn(columns, "Item", "item"); var referenceColumn = ResolveColumn(columns, "Reference", "reference");
-        if (entryColumn is null || itemColumn is null || referenceColumn is null) { missingSources.Add("reference_loot_template (reachable pools)"); return; }
-        checkedSources.Add("reference_loot_template (reachable pools only)");
-        var rows = new Dictionary<uint, List<(uint Item, uint Reference)>>();
-        await using (var command = new MySqlCommand($"SELECT {Quote(entryColumn)},{Quote(itemColumn)},{Quote(referenceColumn)} FROM {Quote(referenceTable)}", connection) { CommandTimeout = 120 })
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
-            while (await reader.ReadAsync(cancellationToken))
+        var referenceRows = new Dictionary<uint, IReadOnlyList<LootRow>>();
+        if (referenceTable is null) missingSources.Add("reference_loot_template (reachable pools)");
+        else
+        {
+            var columns = schema[referenceTable]; var entryColumn = ResolveColumn(columns, "Entry", "entry"); var itemColumn = ResolveColumn(columns, "Item", "item"); var referenceColumn = ResolveColumn(columns, "Reference", "reference");
+            if (entryColumn is null || itemColumn is null || referenceColumn is null) missingSources.Add("reference_loot_template (reachable pools)");
+            else
             {
-                var rawEntry = Convert.ToInt64(reader.GetValue(0));
-                if (rawEntry <= 0 || rawEntry > uint.MaxValue) continue;
-                var entry = (uint)rawEntry;
-                if (!rows.TryGetValue(entry, out var values)) rows[entry] = values = [];
-                var rawItem = Convert.ToInt64(reader.GetValue(1)); var rawReference = Convert.ToInt64(reader.GetValue(2));
-                values.Add((rawItem is > 0 and <= uint.MaxValue ? (uint)rawItem : 0, rawReference is > 0 and <= uint.MaxValue ? (uint)rawReference : 0));
+                checkedSources.Add("reference_loot_template (reachable pools only)");
+                var grouped = new Dictionary<uint, List<LootRow>>();
+                await using var command = new MySqlCommand($"SELECT {Quote(entryColumn)},{Quote(itemColumn)},{Quote(referenceColumn)} FROM {Quote(referenceTable)}", connection) { CommandTimeout = 120 };
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var rawEntry = Convert.ToInt64(reader.GetValue(0)); if (rawEntry is <= 0 or > uint.MaxValue) continue;
+                    var entry = (uint)rawEntry; var rawItem = Convert.ToInt64(reader.GetValue(1)); var rawReference = Convert.ToInt64(reader.GetValue(2));
+                    if (!grouped.TryGetValue(entry, out var values)) grouped[entry] = values = [];
+                    values.Add(new(entry, rawItem is > 0 and <= uint.MaxValue ? (uint)rawItem : 0, rawReference is > 0 and <= uint.MaxValue ? (uint)rawReference : 0));
+                }
+                referenceRows = grouped.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<LootRow>)pair.Value);
             }
-        var pending = new Queue<uint>(referencedPools); var visited = new HashSet<uint>();
+        }
+
+        var fixedOwners = new Dictionary<string, IReadOnlySet<uint>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["creature_loot_template"] = await ReadCreatureLootOwnersAsync(connection, schema, "lootid", checkedSources, missingSources, cancellationToken),
+            ["pickpocketing_loot_template"] = await ReadCreatureLootOwnersAsync(connection, schema, "pickpocketloot", checkedSources, missingSources, cancellationToken),
+            ["skinning_loot_template"] = await ReadCreatureLootOwnersAsync(connection, schema, "skinloot", checkedSources, missingSources, cancellationToken),
+            ["gameobject_loot_template"] = await ReadGameObjectLootOwnersAsync(connection, schema, checkedSources, missingSources, cancellationToken),
+            ["mail_loot_template"] = await ReadMailLootOwnersAsync(connection, schema, checkedSources, missingSources, cancellationToken),
+            ["fishing_loot_template"] = await ReadFishingLootOwnersAsync(dbcFolder, connection, schema, checkedSources, missingSources, cancellationToken)
+        };
+        var disenchantPools = await ReadItemDisenchantPoolsAsync(connection, schema, itemTable, checkedSources, missingSources, cancellationToken);
+        return new(tables, referenceRows, fixedOwners, disenchantPools);
+    }
+
+    internal static void ApplyReachableLoot(LootReachabilityData data, Dictionary<uint, HashSet<string>> acquired, IReadOnlySet<uint> reachableSpells,
+        Dictionary<uint, HashSet<string>> rejected, CancellationToken cancellationToken)
+    {
+        var groupedTables = data.Tables.ToDictionary(pair => pair.Key,
+            pair => (IReadOnlyDictionary<uint, IReadOnlyList<LootRow>>)pair.Value.GroupBy(row => row.Entry)
+                .ToDictionary(group => group.Key, group => (IReadOnlyList<LootRow>)group.ToArray()), StringComparer.OrdinalIgnoreCase);
+        var processedOwners = new Dictionary<string, HashSet<uint>>(StringComparer.OrdinalIgnoreCase);
+        var processedPools = new HashSet<uint>();
+        var changed = true;
+        while (changed)
+        {
+            changed = false; cancellationToken.ThrowIfCancellationRequested();
+            foreach (var (table, rows) in data.Tables)
+            {
+                if (!processedOwners.TryGetValue(table, out var processed)) processedOwners[table] = processed = [];
+                var owners = data.FixedOwners.TryGetValue(table, out var fixedValues) ? fixedValues : table switch
+                {
+                    "item_loot_template" or "prospecting_loot_template" or "milling_loot_template" => acquired.Keys.ToHashSet(),
+                    "disenchant_loot_template" => acquired.Keys.Where(data.ItemDisenchantPools.ContainsKey).Select(item => data.ItemDisenchantPools[item]).ToHashSet(),
+                    "spell_loot_template" => reachableSpells,
+                    _ => EmptyOwners
+                };
+                foreach (var owner in owners)
+                {
+                    if (!processed.Add(owner) || !groupedTables[table].TryGetValue(owner, out var ownerRows)) continue;
+                    foreach (var row in ownerRows)
+                    {
+                        if (row.Reference != 0) changed |= ApplyReferencePool(row.Reference, $"{table} owner {owner}", data.ReferencePools, acquired, rejected, processedPools);
+                        else if (row.Item != 0)
+                        {
+                            var before = acquired.Count; AddAcquired(acquired, row.Item, $"{table} owner {owner} (reachable direct loot)"); changed |= acquired.Count != before;
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach (var (table, rows) in data.Tables)
+        {
+            var processed = processedOwners.TryGetValue(table, out var values) ? values : EmptyOwners;
+            foreach (var row in rows.Where(row => !processed.Contains(row.Entry)))
+                if (row.Reference == 0) AddRejected(rejected, row.Item, $"Ignored · {table} owner {row.Entry} has no known reachable source.");
+                // With a nonzero Reference, Trinity/AzerothCore interprets Item as
+                // a control value rather than an item ID. Never attach that row as
+                // either accepted or rejected evidence for the numerically equal item.
+        }
+        foreach (var (pool, rows) in data.ReferencePools.Where(pair => !processedPools.Contains(pair.Key)))
+            foreach (var row in rows)
+                if (row.Reference == 0) AddRejected(rejected, row.Item, $"Ignored · reference_loot_template pool {pool} has no reachable parent loot row.");
+    }
+
+    private static bool ApplyReferencePool(uint firstPool, string owner, IReadOnlyDictionary<uint, IReadOnlyList<LootRow>> pools,
+        Dictionary<uint, HashSet<string>> acquired, Dictionary<uint, HashSet<string>> rejected, ISet<uint> processedPools)
+    {
+        var changed = false; var pending = new Queue<uint>(); pending.Enqueue(firstPool);
         while (pending.TryDequeue(out var pool))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!visited.Add(pool) || !rows.TryGetValue(pool, out var values)) continue;
-            foreach (var row in values)
-                if (row.Reference != 0) { pending.Enqueue(row.Reference); AddRejected(rejected, row.Item, "Ignored · reference_loot_template row links to another pool; its Item field is not directly awarded."); }
-                else AddAcquired(acquired, row.Item, "reference_loot_template (reachable pool)");
+            if (!processedPools.Add(pool) || !pools.TryGetValue(pool, out var rows)) continue;
+            foreach (var row in rows)
+                if (row.Reference != 0)
+                {
+                    pending.Enqueue(row.Reference);
+                }
+                else if (row.Item != 0)
+                {
+                    var before = acquired.Count; AddAcquired(acquired, row.Item, $"reference_loot_template pool {pool} reached from {owner}"); changed |= acquired.Count != before;
+                }
         }
+        return changed;
+    }
+
+    private static readonly IReadOnlySet<uint> EmptyOwners = new HashSet<uint>();
+
+    private static async Task<IReadOnlySet<uint>> ReadCreatureLootOwnersAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
+        string ownerColumnName, ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        var templateTable = ResolveTable(schema, "creature_template");
+        if (templateTable is null) { missingSources.Add($"creature_template ({ownerColumnName} ownership)"); return EmptyOwners; }
+        var owner = ResolveColumn(schema[templateTable], ownerColumnName);
+        if (owner is null) { missingSources.Add($"{templateTable}.{ownerColumnName} ownership"); return EmptyOwners; }
+        var result = new HashSet<uint>(); await ReadPositiveColumnAsync(connection, templateTable, owner, result, cancellationToken);
+        // A static spawn is deliberately not required. Dungeon/event scripts can
+        // summon valid creature templates at runtime; the template-to-loot link is
+        // the strongest schema-level evidence available without executing scripts.
+        checkedSources.Add($"{templateTable}.{ownerColumnName} (template-linked owners)");
+        return result;
+    }
+
+    private static async Task<IReadOnlySet<uint>> ReadGameObjectLootOwnersAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
+        ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        var templateTable = ResolveTable(schema, "gameobject_template");
+        if (templateTable is null) { missingSources.Add("gameobject_template loot ownership"); return EmptyOwners; }
+        var type = ResolveColumn(schema[templateTable], "type"); var data1 = ResolveColumn(schema[templateTable], "Data1", "data1");
+        if (type is null || data1 is null) { missingSources.Add("gameobject_template chest/fishing-hole loot ownership"); return EmptyOwners; }
+        var result = new HashSet<uint>();
+        await using var command = new MySqlCommand($"SELECT DISTINCT {Quote(data1)} FROM {Quote(templateTable)} WHERE {Quote(type)} IN (3,25) AND {Quote(data1)}>0", connection) { CommandTimeout = 120 };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var loot = Convert.ToInt64(reader.GetValue(0)); if (loot is > 0 and <= uint.MaxValue) result.Add((uint)loot);
+        }
+        // Script-created boss caches are normal, so template ownership—not a
+        // literal gameobject spawn row—is the correct core-compatible boundary.
+        checkedSources.Add("gameobject_template.Data1 (template-linked chest/fishing-hole owners)");
+        return result;
+    }
+
+    private static async Task<IReadOnlySet<uint>> ReadMailLootOwnersAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
+        ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        var result = new HashSet<uint>(); var levelTable = ResolveTable(schema, "mail_level_reward");
+        if (levelTable is null) missingSources.Add("mail_level_reward (mail loot owners)");
+        else
+        {
+            var mail = ResolveColumn(schema[levelTable], "mailTemplateId", "mailTemplateID");
+            if (mail is null) missingSources.Add("mail_level_reward.mailTemplateId");
+            else { await ReadPositiveColumnAsync(connection, levelTable, mail, result, cancellationToken); checkedSources.Add("mail_level_reward (mail loot owners)"); }
+        }
+        foreach (var (requested, candidates) in new[]
+        {
+            ("achievement_reward", new[] { "MailTemplateID", "mailTemplateId" }),
+            ("arena_season_reward_group", new[] { "reward_mail_template_id", "RewardMailTemplateID" })
+        })
+        {
+            var table = ResolveTable(schema, requested); var mail = table is null ? null : ResolveColumn(schema[table], candidates);
+            if (table is null || mail is null) missingSources.Add($"{requested} (mail loot owners)");
+            else { await ReadPositiveColumnAsync(connection, table, mail, result, cancellationToken); checkedSources.Add($"{table} (mail loot owners)"); }
+        }
+        var addonTable = ResolveTable(schema, "quest_template_addon");
+        if (addonTable is null) missingSources.Add("quest_template_addon (mail loot owners)");
+        else
+        {
+            var id = ResolveColumn(schema[addonTable], "ID", "entry"); var mail = ResolveColumn(schema[addonTable], "RewardMailTemplateID", "RewardMailTemplateId");
+            if (id is null || mail is null) missingSources.Add("quest_template_addon reward-mail columns");
+            else
+            {
+                var starters = await ReadQuestLinksAsync(connection, schema, ["creature_queststarter", "gameobject_queststarter", "game_event_creature_quest", "game_event_gameobject_quest"], missingSources, cancellationToken);
+                var enders = await ReadQuestLinksAsync(connection, schema, ["creature_questender", "gameobject_questender"], missingSources, cancellationToken);
+                var systemGranted = await ReadSystemGrantedQuestIdsAsync(connection, schema, checkedSources, missingSources, cancellationToken);
+                var disabled = await ReadDisabledQuestsAsync(connection, schema, missingSources, cancellationToken);
+                var disabledIds = disabled.Keys.ToHashSet();
+                await using var command = new MySqlCommand($"SELECT {Quote(id)},{Quote(mail)} FROM {Quote(addonTable)} WHERE {Quote(mail)}>0", connection);
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var quest = Convert.ToInt64(reader.GetValue(0)); var template = Convert.ToInt64(reader.GetValue(1));
+                    if (quest is > 0 and <= uint.MaxValue && template is > 0 and <= uint.MaxValue &&
+                        (IsLinkedQuestReward((uint)quest, starters, enders) || systemGranted.Contains((uint)quest)) && !disabledIds.Contains((uint)quest)) result.Add((uint)template);
+                }
+                checkedSources.Add("quest_template_addon (usable quest mail owners)");
+            }
+        }
+        return result;
+    }
+
+    private static async Task<IReadOnlySet<uint>> ReadFishingLootOwnersAsync(string? dbcFolder, MySqlConnection connection, Dictionary<string, List<string>> schema,
+        ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        var result = new HashSet<uint>();
+        if (!string.IsNullOrWhiteSpace(dbcFolder))
+        {
+            var path = Directory.Exists(dbcFolder) ? Path.Combine(dbcFolder, "AreaTable.dbc") : string.Empty;
+            if (File.Exists(path))
+            {
+                var file = WdbcFile.Load(path); var id = new DbcColumn(0, 0, 4, "ID", DbcValueType.UInt32, true);
+                for (var row = 0; row < file.RowCount; row++) { var value = file.GetRaw(row, id); if (value != 0) result.Add(value); }
+                checkedSources.Add("AreaTable.dbc (fishing loot owners)");
+            }
+        }
+        if (result.Count == 0)
+        {
+            var table = ResolveTable(schema, "skill_fishing_base_level"); var entry = table is null ? null : ResolveColumn(schema[table], "entry", "ID");
+            if (table is null || entry is null) missingSources.Add("AreaTable.dbc/skill_fishing_base_level (fishing loot owners)");
+            else { await ReadPositiveColumnAsync(connection, table, entry, result, cancellationToken); checkedSources.Add("skill_fishing_base_level (fishing loot owners fallback)"); }
+        }
+        return result;
+    }
+
+    private static async Task<IReadOnlyDictionary<uint, uint>> ReadItemDisenchantPoolsAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
+        string itemTable, ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        var entry = ResolveColumn(schema[itemTable], "entry", "ID"); var pool = ResolveColumn(schema[itemTable], "DisenchantID", "disenchantid");
+        if (entry is null || pool is null) { missingSources.Add($"{itemTable}.DisenchantID"); return new Dictionary<uint, uint>(); }
+        var result = new Dictionary<uint, uint>();
+        await using var command = new MySqlCommand($"SELECT {Quote(entry)},{Quote(pool)} FROM {Quote(itemTable)} WHERE {Quote(pool)}>0", connection) { CommandTimeout = 120 };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var rawItem = Convert.ToInt64(reader.GetValue(0)); var rawPool = Convert.ToInt64(reader.GetValue(1));
+            if (rawItem is > 0 and <= uint.MaxValue && rawPool is > 0 and <= uint.MaxValue) result[(uint)rawItem] = (uint)rawPool;
+        }
+        checkedSources.Add($"{itemTable}.DisenchantID (reachable item ownership)");
+        return result;
+    }
+
+    private static async Task ReadPositiveColumnAsync(MySqlConnection connection, string table, string column, ISet<uint> destination, CancellationToken cancellationToken)
+    {
+        await using var command = new MySqlCommand($"SELECT DISTINCT {Quote(column)} FROM {Quote(table)} WHERE {Quote(column)}>0", connection) { CommandTimeout = 120 };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var raw = Convert.ToInt64(reader.GetValue(0)); if (raw is > 0 and <= uint.MaxValue) destination.Add((uint)raw);
+        }
+    }
+
+    private static async Task<HashSet<uint>> ReadSystemGrantedQuestIdsAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
+        ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        var result = new HashSet<uint>(); var table = ResolveTable(schema, "lfg_dungeon_rewards");
+        if (table is null) { missingSources.Add("lfg_dungeon_rewards (system-granted quests)"); return result; }
+        var columns = new[] { "firstQuestId", "otherQuestId" }.Select(name => ResolveColumn(schema[table], name)).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (columns.Length == 0) { missingSources.Add("lfg_dungeon_rewards quest columns"); return result; }
+        foreach (var column in columns) await ReadPositiveColumnAsync(connection, table, column, result, cancellationToken);
+        checkedSources.Add("lfg_dungeon_rewards (system-granted reward quests)");
+        return result;
     }
 
     private static async Task CollectLinkedQuestRewardsAsync(MySqlConnection connection, Dictionary<string, List<string>> schema,
@@ -220,8 +480,9 @@ public sealed class ItemCatalogService
         var startItem = ResolveColumn(schema[questTable], "StartItem", "SourceItemId");
         var rewardSpell = ResolveColumn(schema[questTable], "RewardSpell");
 
-        var starters = await ReadQuestLinksAsync(connection, schema, ["creature_queststarter", "gameobject_queststarter"], missingSources, cancellationToken);
+        var starters = await ReadQuestLinksAsync(connection, schema, ["creature_queststarter", "gameobject_queststarter", "game_event_creature_quest", "game_event_gameobject_quest"], missingSources, cancellationToken);
         var enders = await ReadQuestLinksAsync(connection, schema, ["creature_questender", "gameobject_questender"], missingSources, cancellationToken);
+        var systemGranted = await ReadSystemGrantedQuestIdsAsync(connection, schema, checkedSources, missingSources, cancellationToken);
         var disabled = await ReadDisabledQuestsAsync(connection, schema, missingSources, cancellationToken);
         var disabledIds = disabled.Keys.ToHashSet();
         checkedSources.Add("quest_template (usable rewards, starting items, and reward spells)");
@@ -232,7 +493,7 @@ public sealed class ItemCatalogService
         while (await reader.ReadAsync(cancellationToken))
         {
             var currentQuest = Convert.ToUInt32(reader.GetValue(0));
-            var usable = IsUsableQuestReward(currentQuest, starters, enders, disabledIds);
+            var usable = (IsLinkedQuestReward(currentQuest, starters, enders) || systemGranted.Contains(currentQuest)) && !disabledIds.Contains(currentQuest);
             for (var index = 0; index < rewards.Length; index++)
             {
                 var reward = Convert.ToUInt32(reader.GetValue(index + 1)); if (reward == 0) continue;
@@ -251,7 +512,7 @@ public sealed class ItemCatalogService
                 var entry = Convert.ToUInt32(reader.GetValue(next++));
                 if (entry != 0)
                 {
-                    var usableStart = starters.Contains(currentQuest) && !disabledIds.Contains(currentQuest);
+                    var usableStart = (starters.Contains(currentQuest) || systemGranted.Contains(currentQuest)) && !disabledIds.Contains(currentQuest);
                     if (usableStart) AddAcquired(acquired, entry, $"quest_template starting item from usable quest {currentQuest}");
                     else AddRejected(rejected, entry, disabled.TryGetValue(currentQuest, out var comment)
                         ? $"Ignored · quest {currentQuest} starting item belongs to a disabled quest{(string.IsNullOrWhiteSpace(comment) ? string.Empty : $" ({comment})")}."
