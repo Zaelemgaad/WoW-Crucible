@@ -241,7 +241,7 @@ public static class StaticM2DownportService
         for (var index = 0; index < skin.MaterialCount; index++)
         {
             var offset = skin.MaterialOffset + index * 24; var shader = U16(data, offset + 2); var submesh = U16(data, offset + 4); var submesh2 = U16(data, offset + 6); var render = U16(data, offset + 10); var stages = U16(data, offset + 14); var textureCombo = U16(data, offset + 16); var coordinateCombo = U16(data, offset + 18);
-            if (shader != 0) blockers.Add($"SKIN material {index:N0} uses shader {shader}; the first static profile accepts shader 0 only.");
+            if (shader is not 0 and not 16) blockers.Add($"SKIN material {index:N0} uses shader {shader}; the static profile accepts verified single-stage packed shaders 0 (Opaque) and 16 (Mod) only.");
             if (submesh >= skin.SubmeshCount || submesh2 >= skin.SubmeshCount) blockers.Add($"SKIN material {index:N0} references a missing submesh.");
             if (render >= renderCount) blockers.Add($"SKIN material {index:N0} references missing render flag {render:N0}.");
             if (stages != 1) blockers.Add($"SKIN material {index:N0} declares {stages:N0} texture stages; the first static profile requires one.");
