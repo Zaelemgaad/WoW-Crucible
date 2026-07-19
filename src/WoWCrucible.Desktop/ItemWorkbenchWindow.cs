@@ -57,6 +57,10 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _effects = new() { AcceptsReturn = true, PlaceholderText = "requiredItems:spellId, one bonus per line" }; private readonly TextBox _effectsOutput = new() { PlaceholderText = "Output ItemSet.dbc" };
     private readonly TextBox _clientItemPath = new() { PlaceholderText = "Target Item.dbc" };
     private readonly TextBox _clientItemDisplayPath = new() { PlaceholderText = "Target ItemDisplayInfo.dbc" };
+    // Item sets and Item.dbc synchronization are separate tabs. Avalonia controls
+    // can only have one visual parent, so each tab needs its own path editor even
+    // though both start from the same configured schema path.
+    private readonly TextBox _clientItemSchemaPath = new() { PlaceholderText = "WotLK schema XML" };
     private readonly TextBlock _clientItemSummary = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#AEB8C8")) };
     private readonly ListBox _clientItemRows = new();
     private readonly Border _clientItemConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
@@ -197,9 +201,9 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     {
         var browseItem = new Button { Content = "Browse…" }; browseItem.Click += async (_, _) => { await PickFileAsync(_clientItemPath, "Choose target Item.dbc", "*.dbc"); InvalidateClientItemPlan(); };
         var browseDisplay = new Button { Content = "Browse…" }; browseDisplay.Click += async (_, _) => { await PickFileAsync(_clientItemDisplayPath, "Choose target ItemDisplayInfo.dbc", "*.dbc"); InvalidateClientItemPlan(); };
-        var browseSchema = new Button { Content = "Browse…" }; browseSchema.Click += async (_, _) => { await PickFileAsync(_schemaPath, "Choose WotLK schema", "*.xml"); InvalidateClientItemPlan(); };
+        var browseSchema = new Button { Content = "Browse…" }; browseSchema.Click += async (_, _) => { await PickFileAsync(_clientItemSchemaPath, "Choose WotLK schema", "*.xml"); InvalidateClientItemPlan(); };
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), RowSpacing = 5 };
-        AddPath(paths, 0, "Item.dbc", _clientItemPath, browseItem); AddPath(paths, 1, "ItemDisplayInfo.dbc", _clientItemDisplayPath, browseDisplay); AddPath(paths, 2, "Schema XML", _schemaPath, browseSchema);
+        AddPath(paths, 0, "Item.dbc", _clientItemPath, browseItem); AddPath(paths, 1, "ItemDisplayInfo.dbc", _clientItemDisplayPath, browseDisplay); AddPath(paths, 2, "Schema XML", _clientItemSchemaPath, browseSchema);
         var inspect = AccentButton("Compare complete SQL ↔ client records"); inspect.Click += async (_, _) => await PlanClientItemSyncAsync(inspect);
         var export = new Button { Content = "Export review plan…" }; export.Click += async (_, _) => await ExportClientItemPlanAsync();
         var build = AccentButton("Build new DBC + WMV CSV + tiny MPQ…"); build.Click += async (_, _) => await PrepareClientItemApplyAsync();
@@ -237,7 +241,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         try
         {
             button.IsEnabled = false; _clientItemConfirmation.IsVisible = false; SetBusy("Reading complete item_template and comparing Item.dbc dependencies…");
-            var plan = await ItemClientSyncService.CreatePlanAsync(_clientItemPath.Text ?? string.Empty, _clientItemDisplayPath.Text ?? string.Empty, _schemaPath.Text ?? string.Empty, Profile());
+            var plan = await ItemClientSyncService.CreatePlanAsync(_clientItemPath.Text ?? string.Empty, _clientItemDisplayPath.Text ?? string.Empty, _clientItemSchemaPath.Text ?? string.Empty, Profile());
             _pendingClientItemPlan = plan; ShowClientItemPlan(plan);
             _status.Text = plan.Ready ? $"Item client plan ready · {plan.AddedRows:N0} add · {plan.UpdatedRows:N0} update · {plan.ClientOnlyRows.Count:N0} preserved client-only." : $"Item client plan blocked by {plan.Blockers.Count:N0} dependency problem(s).";
         }
@@ -614,7 +618,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
            connected.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) && connected.Port == profile.Port &&
            connected.User.Equals(profile.User, StringComparison.OrdinalIgnoreCase) && connected.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase);
     private void LoadDefaults() { try { var path = CruciblePaths.SettingsFileForRead; if (!File.Exists(path)) return; using var json = JsonDocument.Parse(File.ReadAllText(path)); var root = json.RootElement; if (root.TryGetProperty("DatabaseHost", out var host)) _host.Text = host.GetString(); if (root.TryGetProperty("DatabasePort", out var port)) _port.Value = port.GetUInt32(); if (root.TryGetProperty("DatabaseUser", out var user)) _user.Text = user.GetString(); if (root.TryGetProperty("WorldDatabase", out var db)) _database.Text = db.GetString(); if (root.TryGetProperty("SchemaDefinitionPath", out var schema)) _schemaPath.Text = schema.GetString(); if (root.TryGetProperty("CoreDbcPath", out var dbc)) { var directory = dbc.GetString(); _acquisitionDbc.Text = directory; if (Directory.Exists(directory)) { _itemSetPath.Text = Path.Combine(directory, "ItemSet.dbc"); _spellPath.Text = Path.Combine(directory, "Spell.dbc"); } } } catch (Exception exception) { DesktopCrashLogger.Debug("SETTINGS", "item-workbench-defaults-load-failed", ("error", exception.Message)); } }
-    private void LoadClientItemDefaults() { var directory = EmptyNull(_acquisitionDbc.Text) ?? _session.Settings.CoreDbcPath; if (!string.IsNullOrWhiteSpace(directory)) { _clientItemPath.Text = Path.Combine(directory, "Item.dbc"); _clientItemDisplayPath.Text = Path.Combine(directory, "ItemDisplayInfo.dbc"); } }
+    private void LoadClientItemDefaults() { var directory = EmptyNull(_acquisitionDbc.Text) ?? _session.Settings.CoreDbcPath; if (!string.IsNullOrWhiteSpace(directory)) { _clientItemPath.Text = Path.Combine(directory, "Item.dbc"); _clientItemDisplayPath.Text = Path.Combine(directory, "ItemDisplayInfo.dbc"); } _clientItemSchemaPath.Text = EmptyNull(_schemaPath.Text) ?? _session.Settings.SchemaDefinitionPath; }
     private async Task PickFileAsync(TextBox target, string title, string pattern) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(title) { Patterns = [pattern] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }
     private async Task PickFolderAsync(TextBox target, string title) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var folders = await storage.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = title, AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }
     private async Task PickOutputAsync(TextBox target, string name) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var file = await storage.SaveFilePickerAsync(new FilePickerSaveOptions { SuggestedFileName = name, FileTypeChoices = [new FilePickerFileType("DBC") { Patterns = ["*.dbc"] }] }); var path = file?.TryGetLocalPath(); if (path is not null) target.Text = path; }

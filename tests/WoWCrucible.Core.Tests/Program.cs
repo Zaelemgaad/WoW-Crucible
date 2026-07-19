@@ -1428,12 +1428,14 @@ if (Directory.Exists(desktopSourceRoot))
         !itemWorkbenchSource.Contains("the catalog is not capped", StringComparison.Ordinal) ||
         itemWorkbenchSource.Contains("Inspect exact item ID", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("SqlFavoritesRequested", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("private readonly TextBox _clientItemSchemaPath", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("_clientItemSchemaPath.Text ?? string.Empty, Profile()", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("ActivateFavorites", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related DBC / DB2 path", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related MPQ path", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenSqlFavorites", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenMpqMergeWorkspace", StringComparison.Ordinal))
-        throw new InvalidOperationException("Cut-item classification, exact-ID bypass, arbitrary SQL-row favorites, or the direct same-window Favorites route regressed.");
+        throw new InvalidOperationException("Cut-item classification, exact-ID bypass, independent item-tab path controls, arbitrary SQL-row favorites, or the direct same-window Favorites route regressed.");
 }
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
