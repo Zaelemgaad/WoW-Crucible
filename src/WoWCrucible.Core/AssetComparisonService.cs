@@ -8,7 +8,8 @@ public sealed record AssetComparisonEntry(string LogicalPath, string Provenance,
 public enum AssetModelCompatibility { Ready, MissingSkin, RequiresConversion, Invalid }
 public sealed record AssetComparisonModel(string LogicalPath, string Provenance, string FileName, string ModelPath, string? SkinPath, AssetModelCompatibility Compatibility, uint? Version, string Status)
 {
-    public override string ToString() => $"{(Compatibility == AssetModelCompatibility.Ready ? "READY" : Compatibility.ToString().ToUpperInvariant())} · {Provenance} · {FileName}{(string.IsNullOrEmpty(LogicalPath) ? string.Empty : $" · {LogicalPath}")}";
+    public IReadOnlyList<string> SkinPaths { get; init; } = SkinPath is null ? [] : [SkinPath];
+    public override string ToString() => $"{(Compatibility == AssetModelCompatibility.Ready ? "READY" : Compatibility.ToString().ToUpperInvariant())} · {Provenance} · {FileName} · {SkinPaths.Count:N0} SKIN view(s){(string.IsNullOrEmpty(LogicalPath) ? string.Empty : $" · {LogicalPath}")}";
 }
 public sealed record AssetComparisonDuplicateGroup(string Sha256, long Bytes, IReadOnlyList<AssetComparisonEntry> Entries)
 {
@@ -159,14 +160,15 @@ public static class AssetComparisonService
             Span<byte> header = stackalloc byte[8]; if (stream.Read(header) != header.Length) return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, null, AssetModelCompatibility.Invalid, null, "M2 header is truncated.");
             var magic = Encoding.ASCII.GetString(header[..4]); var version = BitConverter.ToUInt32(header[4..]);
             var directory = Path.GetDirectoryName(modelPath)!; var stem = Path.GetFileNameWithoutExtension(modelPath);
-            var skins = Directory.EnumerateFiles(directory, stem + "*.skin", SearchOption.TopDirectoryOnly).OrderBy(path => path.EndsWith("00.skin", StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
-            var skin = skins.FirstOrDefault(IsSkin);
-            if (magic == "MD21") return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.RequiresConversion, version, "Modern chunked MD21 model; convert it to Wrath before preview/deployment.");
-            if (magic != "MD20") return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.Invalid, version, $"Invalid M2 signature '{magic}'.");
-            if (version != 264) return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.RequiresConversion, version, $"M2 version {version}; Wrath preview requires version 264.");
-            return skin is null
+            var skins = Directory.EnumerateFiles(directory, stem + "*.skin", SearchOption.TopDirectoryOnly).Where(IsSkin).OrderBy(path => path.EndsWith("00.skin", StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+            var skin = skins.FirstOrDefault(); AssetComparisonModel result;
+            if (magic == "MD21") result = new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.RequiresConversion, version, "Modern chunked MD21 model; convert it to Wrath before preview/deployment.");
+            else if (magic != "MD20") result = new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.Invalid, version, $"Invalid M2 signature '{magic}'.");
+            else if (version != 264) result = new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.RequiresConversion, version, $"M2 version {version}; Wrath preview requires version 264.");
+            else result = skin is null
                 ? new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, null, AssetModelCompatibility.MissingSkin, version, $"Wrath M2 is valid but no matching {stem}00.skin is available.")
                 : new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, skin, AssetModelCompatibility.Ready, version, $"Wrath M2 version 264 with {Path.GetFileName(skin)}.");
+            return result with { SkinPaths = skins };
         }
         catch (Exception exception) { return new(logicalPath, provenance, Path.GetFileName(modelPath), modelPath, null, AssetModelCompatibility.Invalid, null, exception.Message); }
     }

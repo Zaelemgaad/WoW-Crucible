@@ -17,6 +17,12 @@ public static class M2TextureCombinerRenderPlanService
             // lit * mix(base * environment * 2, base, base alpha)
             return [new(0, M2TextureRenderPassBlend.Source, true), new(1, M2TextureRenderPassBlend.Modulate, false), new(0, M2TextureRenderPassBlend.DestinationOut, false), new(0, M2TextureRenderPassBlend.Add, true)];
         }
+        if (combiner.Kind == M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlphaAdd)
+        {
+            if (stages.Count != 3) throw new InvalidDataException($"{combiner.Name} requires exactly three texture stages, but {stages.Count:N0} were supplied.");
+            // lit * mix(base * environment * 2, base, base alpha) + additive.rgb * additive.a
+            return [new(0, M2TextureRenderPassBlend.Source, true), new(1, M2TextureRenderPassBlend.Modulate, false), new(0, M2TextureRenderPassBlend.DestinationOut, false), new(0, M2TextureRenderPassBlend.Add, true), new(2, M2TextureRenderPassBlend.Add, false)];
+        }
         if (combiner.Kind is M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha or M2PreviewTextureCombinerKind.ExplicitModAddAlpha)
         {
             RequireTwo(stages, combiner);

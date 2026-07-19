@@ -41,6 +41,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly CheckBox _autoAdvance = new() { Content = "Auto-advance", IsChecked = true };
     private readonly ComboBox _previewMode = new() { ItemsSource = new[] { "Image comparison", "Live model preview" }, SelectedIndex = 0 };
     private readonly ComboBox _modelPicker = new();
+    private readonly ComboBox _modelSkinPicker = new() { PlaceholderText = "No compatible SKIN views" };
     private readonly TextBox _modelSearch = new() { PlaceholderText = "Filter discovered M2 models…" };
     private readonly ComboBox _modelFilter = new() { ItemsSource = new[] { "Ready models", "All models" }, SelectedIndex = 0 };
     private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Character appearance (DBC-driven)", "Naked base (no hair or facial hair)", "Manual: exactly one variant per group", "Everything stacked (diagnostic only)" }, SelectedIndex = 0 };
@@ -79,7 +80,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath; private string? _geosetInspectorModel; private int _resolvedModelTextureCount; private bool _appearanceComposed;
     private IReadOnlyDictionary<int, RgbaTexture> _loadedModelTextures = new Dictionary<int, RgbaTexture>();
     private Task? _modelDiscoveryTask;
-    private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _suppressAppearanceSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
+    private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _suppressModelSkinSelection; private bool _suppressAppearanceSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
 
     public event EventHandler? BackRequested;
 
@@ -101,7 +102,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _sort.SelectionChanged += async (_, _) => await RunUiActionAsync("sort-change", FilterFilesAsync); _collapseDuplicates.Click += async (_, _) => await RunUiActionAsync("duplicate-collapse", FilterFilesAsync); _undecidedOnly.Click += async (_, _) => await RunUiActionAsync("decision-filter", FilterFilesAsync); _scanDuplicates.Click += async (_, _) => await RunUiActionAsync("exact-copy-scan", ScanDuplicatesAsync);
         _cardDensity.SelectionChanged += (_, _) => _cards.Columns = Math.Max(1, _cardDensity.SelectedIndex + 1);
         _previewMode.SelectionChanged += async (_, _) => { if (!_suppressPreviewModeChange) await RunUiActionAsync("preview-mode-change", ChangePreviewModeAsync); };
-        _modelPicker.SelectionChanged += async (_, _) => { if (!_suppressModelSelection) await RunUiActionAsync("model-selection", LoadSelectedModelAsync); };
+        _modelSkinPicker.ItemTemplate = new FuncDataTemplate<string>((item, _) => new TextBlock { Text = item is null ? string.Empty : Path.GetFileName(item), TextTrimming = TextTrimming.CharacterEllipsis });
+        _modelPicker.SelectionChanged += async (_, _) => { if (_suppressModelSelection) return; RefreshModelSkinPicker(); await RunUiActionAsync("model-selection", LoadSelectedModelAsync); };
+        _modelSkinPicker.SelectionChanged += async (_, _) => { if (!_suppressModelSkinSelection) await RunUiActionAsync("model-skin-selection", LoadSelectedModelAsync); };
         _geosetMode.SelectionChanged += async (_, _) => await RunUiActionAsync("geoset-mode-change", LoadSelectedModelAsync);
         _showAttachmentPoints.Click += (_, _) => ApplyAttachmentOverlay();
         _attachmentPicker.SelectionChanged += (_, _) => ApplyAttachmentOverlay();
@@ -222,6 +225,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _imageComparisonPane = grid;
         var previousModel = new Button { Content = "← Model" }; previousModel.Click += (_, _) => MoveModel(-1); var nextModel = new Button { Content = "Model →" }; nextModel.Click += (_, _) => MoveModel(1);
         _modelPicker.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _modelSkinPicker.HorizontalAlignment = HorizontalAlignment.Stretch;
         var modelFilters = new Grid { ColumnDefinitions = new("2*,*,Auto,Auto"), ColumnSpacing = 8, Children = { _modelSearch, WithColumn(_modelFilter, 1), WithColumn(previousModel, 2), WithColumn(nextModel, 3) } };
         var appearanceHeader = new TextBlock { Text = "CHARSECTIONS BASE APPEARANCE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") };
         var appearancePickers = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Children = { _skinPicker, WithColumn(_appearanceSourcePicker, 1), WithCell(_facePicker, 1, 0), WithCell(_facialHairPicker, 1, 1), WithCell(_hairPicker, 2, 0) } };
@@ -256,7 +260,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         };
         var exportModel = new Button { Content = "Export visible/current-pose OBJ…" }; exportModel.Click += async (_, _) => await RunUiActionAsync("model-export", ExportModelAsync);
         var modelActions = new WrapPanel { Orientation = Orientation.Horizontal, Children = { exportModel } };
-        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _geosetMode, modelActions, geosetInspector, attachmentInspector, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
+        var modelSkinRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 8, Children = { new TextBlock { Text = "SKIN VIEW / LOD", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, WithColumn(_modelSkinPicker, 1) } };
+        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, modelSkinRow, _geosetMode, modelActions, geosetInspector, attachmentInspector, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
         var modelHeaderScroll = new ScrollViewer { Content = modelHeader, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
         var modelPane = new Grid { RowDefinitions = new("2*,Auto,3*"), IsVisible = false, Children = { modelHeaderScroll } };
         var modelSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }; Grid.SetRow(modelSplitter, 1); modelPane.Children.Add(modelSplitter);
@@ -545,10 +550,11 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                 : $"{_allModels.Count:N0} M2 file(s) were discovered, but none match the current model filter. Choose All models to inspect compatibility details.";
             return;
         }
-        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>(); _modelDependencyGraph = null; _modelView.ClearGeometry(); ClearGeosetInspector("This model has no compatible M2/SKIN geometry to inspect."); ClearAttachmentInspector("This model has no compatible attachment data to inspect."); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
+        var selectedSkinPath = _modelSkinPicker.SelectedItem as string ?? model.SkinPath;
+        if (model.Compatibility != AssetModelCompatibility.Ready || selectedSkinPath is null) { _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>(); _modelDependencyGraph = null; _modelView.ClearGeometry(); ClearGeosetInspector("This model has no compatible M2/SKIN geometry to inspect."); ClearAttachmentInspector("This model has no compatible attachment data to inspect."); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
         _modelStatus.Text = $"Loading {model.FileName}…";
         var stopwatch = Stopwatch.StartNew();
-        DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
+        DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", selectedSkinPath));
         try
         {
             var requestedSkin = _skinPicker.SelectedItem as CharacterBaseSkin; var requestedFace = _facePicker.SelectedItem as CharacterSection; var requestedFacialHair = _facialHairPicker.SelectedItem as CharacterSection; var requestedHair = _hairPicker.SelectedItem as CharacterSection; var requestedSource = (_appearanceSourcePicker.SelectedItem as AppearanceSourceChoice)?.FullPath;
@@ -562,8 +568,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                 2 when _manualGeosetVariants.Count > 0 => new(new Dictionary<int, int>(_manualGeosetVariants), "manual exact geoset inspector"),
                 _ => null
             };
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, model.SkinPath, visibilityMode, geosetSelection), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
-            var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, model), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, selectedSkinPath, visibilityMode, geosetSelection), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+            var selectedModel = model with { SkinPath = selectedSkinPath };
+            var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, selectedModel), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             ApplyAppearancePlan(appearance);
             var embeddedTextures = new Dictionary<int, RgbaTexture>(); string? embeddedTexturePath = null;
             _appearanceComposed = false;
@@ -769,13 +776,13 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var visibleGeosets = _loadedModelGeometry is null ? string.Empty : string.Join(" · ", M2GeosetCatalog.Describe(_loadedModelGeometry.Submeshes)
             .SelectMany(group => group.Variants.Where(variant => variant.Visible).Select(variant => $"{group.Name}={variant.Variant}")));
         var previewNote = _appearanceComposed
-            ? "Geometry, per-material textures, supported legacy and explicit two-stage WotLK combiners with primary/secondary UV and view-space sphere-map routing, the selected CharSections appearance, and animation playback are live. Unhandled explicit/three-plus-stage shaders and remaining particle variants stay visibly labeled; the visible/current pose can be exported above."
+            ? "Geometry, per-material textures, supported legacy and explicit two/three-stage WotLK combiners with primary/secondary UV and view-space sphere-map routing, the selected CharSections appearance, and animation playback are live. Unhandled explicit/other three-plus-stage shaders and remaining particle variants stay visibly labeled; the visible/current pose can be exported above."
             : _resolvedModelTexturePath is not null
-            ? "Geometry, resolved per-material textures, supported legacy and explicit two-stage WotLK combiners with primary/secondary UV and view-space sphere-map routing, and animation playback are live. Unresolved replaceable slots, unhandled explicit/three-plus-stage shaders, and remaining particle variants stay visibly labeled."
+            ? "Geometry, resolved per-material textures, supported legacy and explicit two/three-stage WotLK combiners with primary/secondary UV and view-space sphere-map routing, and animation playback are live. Unresolved replaceable slots, unhandled explicit/other three-plus-stage shaders, and remaining particle variants stay visibly labeled."
             : _modelOnlyDirectory
             ? "Geometry and animation are live. Replacement texture resolution and Character layer/CharSections composition remain incomplete until the appearance plan supplies every layer."
             : "Geometry, animation, and the selected PNG diagnostic override are live. The override is not treated as an invented WoW material binding.";
-        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{geosets}{(visibleGeosets.Length == 0 ? string.Empty : $"\nVisible groups: {visibleGeosets}")}\n{texture}\n{slots}\n{materials}\n{dependencies}\n{previewNote}";
+        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(_loadedModelGeometry?.SkinPath ?? model.SkinPath)} · {model.SkinPaths.Count:N0} available view(s)\n{geosets}{(visibleGeosets.Length == 0 ? string.Empty : $"\nVisible groups: {visibleGeosets}")}\n{texture}\n{slots}\n{materials}\n{dependencies}\n{previewNote}";
     }
 
     private async Task ScanDuplicatesAsync()
@@ -824,8 +831,24 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _suppressModelSelection = true;
         try { _modelPicker.ItemsSource = _folderModels; _modelPicker.SelectedIndex = selectedIndex; }
         finally { _suppressModelSelection = false; }
+        RefreshModelSkinPicker();
         if (requestModelLoad && _active && _previewMode.SelectedIndex == 1)
             _ = RunUiActionAsync("model-filter-selection", LoadSelectedModelAsync);
+    }
+
+    private void RefreshModelSkinPicker()
+    {
+        _suppressModelSkinSelection = true;
+        try
+        {
+            if (_modelPicker.SelectedItem is not AssetComparisonModel model)
+            {
+                _modelSkinPicker.ItemsSource = Array.Empty<string>(); _modelSkinPicker.SelectedIndex = -1; _modelSkinPicker.IsEnabled = false; return;
+            }
+            _modelSkinPicker.ItemsSource = model.SkinPaths; _modelSkinPicker.SelectedItem = model.SkinPath; _modelSkinPicker.IsEnabled = model.SkinPaths.Count > 0;
+            if (_modelSkinPicker.SelectedIndex < 0 && model.SkinPaths.Count > 0) _modelSkinPicker.SelectedIndex = 0;
+        }
+        finally { _suppressModelSkinSelection = false; }
     }
 
     private void MoveModel(int offset)
@@ -843,6 +866,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             if (_previewMode.SelectedIndex == 1)
             {
                 if (_modelPicker.SelectedItem is not AssetComparisonModel model) { _status.Text = "Select a model first."; return; }
+                if (_modelSkinPicker.SelectedItem is string selectedSkin) model = model with { SkinPath = selectedSkin };
                 if (_index is null) return; var index = _index;
                 _project = await Task.Run(() => DefinitiveAssetProjectService.RecordModel(_projectPath, _project, index, model, decision, category, notes));
                 _status.Text = $"Recorded {decision}: {model.Provenance} · {model.FileName} plus its SKIN/animation dependencies.";

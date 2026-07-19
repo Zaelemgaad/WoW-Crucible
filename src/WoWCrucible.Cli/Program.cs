@@ -510,7 +510,7 @@ static int Asset(string[] args)
     }
     if (args is ["preview-info", var previewModelPath, .. var previewOptions])
     {
-        var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.Equals("--naked", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.Equals("--naked", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (known.Length != previewOptions.Length) return Fail($"Unknown preview-info option: {previewOptions.Except(known).First()}");
         var allGeosets = previewOptions.Contains("--all-geosets", StringComparer.OrdinalIgnoreCase); var naked = previewOptions.Contains("--naked", StringComparer.OrdinalIgnoreCase); var groupText = Option(previewOptions, "--groups=");
         if (allGeosets && (naked || groupText is not null)) return Fail("--all-geosets cannot be combined with --naked or --groups because it intentionally shows every variant.");
@@ -533,7 +533,7 @@ static int Asset(string[] args)
             selectionSource = selectionSource.Length == 0 ? "explicit CLI group selection" : selectionSource + " + explicit CLI overrides";
         }
         var selection = selectedGroups.Count == 0 ? null : new M2GeosetSelection(selectedGroups, selectionSource);
-        var geometry = M2PreviewGeometryService.Load(previewModelPath, visibilityMode: mode, geosetSelection: selection);
+        var geometry = M2PreviewGeometryService.Load(previewModelPath, Option(previewOptions, "--skin="), mode, selection);
         Console.WriteLine($"Model\t{geometry.ModelPath}\nSkin\t{geometry.SkinPath}\nVertices\t{geometry.Vertices.Count:N0}\nBones\t{geometry.Bones.Count:N0}\nAttachments\t{geometry.Attachments.Count:N0}\nCameras\t{geometry.Cameras.Count:N0}\nLights\t{geometry.Lights.Count:N0}\nParticle emitters\t{geometry.ParticleEmitters.Count:N0}\nRibbon emitters\t{geometry.RibbonEmitters.Count:N0}\nGeosets\t{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} ({geometry.VisibilityMode})\nTriangles\t{geometry.TriangleIndices.Count / 3:N0}/{geometry.TotalTriangleIndices / 3:N0}\nMinimum\t{geometry.Minimum}\nMaximum\t{geometry.Maximum}");
         if (geometry.GeosetSelection is not null) Console.WriteLine($"GEOSET_SELECTION\t{geometry.GeosetSelection.Source}\t{string.Join(",", geometry.GeosetSelection.GroupVariants.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value}"))}");
         foreach (var group in M2GeosetCatalog.Describe(geometry.Submeshes)) Console.WriteLine($"GEOSET_GROUP\t{group.Group}\t{group.Name}\tvariants={string.Join(',', group.Variants.Select(variant => variant.Variant))}\tvisible={string.Join(',', group.Variants.Where(variant => variant.Visible).Select(variant => variant.Variant))}");
@@ -639,7 +639,7 @@ Usage:
   wowcrucible asset texture-validate <file-or-folder> [--recursive]
   wowcrucible asset inspect <model.m2|building.wmo>...
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
-  wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
+  wowcrucible asset preview-info <wrath-model.m2> [--skin=file.skin] [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
   wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--naked|--groups=group:variant,...|--all-geosets] [--overwrite]
   wowcrucible asset wmo-preview-info <root-or-group.wmo> [--groups] [--content-root=folder] [--format=text|json]
   wowcrucible asset path-candidates <processed-library> <client-path> [--preferred=provenance] [--format=text|json]

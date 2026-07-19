@@ -49,7 +49,7 @@ public sealed record M2PreviewRibbonEmitter(int Index, int BoneIndex, Vector3 Po
 public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
 public enum M2PreviewTextureCoordinateSource { Primary, Secondary, Environment, Unsupported }
 public enum M2PreviewTextureStageBlend { Source, Modulate, Modulate2X, Add, AddNoAlpha, Unsupported }
-public enum M2PreviewTextureCombinerKind { Standard, ExplicitOpaqueMod2xNaAlpha, ExplicitOpaqueAddAlpha, ExplicitModAddAlpha, Unsupported }
+public enum M2PreviewTextureCombinerKind { Standard, ExplicitOpaqueMod2xNaAlpha, ExplicitOpaqueAddAlpha, ExplicitModAddAlpha, ExplicitOpaqueMod2xNaAlphaAdd, Unsupported }
 public sealed record M2PreviewTextureStage(int StageIndex, int TextureLookupIndex, int TextureDefinitionIndex,
     short TextureCoordinateLookup, M2PreviewTextureCoordinateSource CoordinateSource,
     int? TransparencyDefinitionIndex, int? TextureAnimationDefinitionIndex, M2PreviewTextureStageBlend Blend);
@@ -393,6 +393,8 @@ public static class M2PreviewGeometryService
         if (textureCount <= 0) return M2PreviewTextureCombiner.None;
         if ((shaderId & 0x8000) != 0)
         {
+            if ((shaderId & 0x7FFF) == 3 && textureCount == 3)
+                return new("Opaque_Mod2xNA_Alpha_Add", true, false) { Kind = M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlphaAdd };
             if (textureCount == 2)
                 return (shaderId & 0x7FFF) switch
                 {
@@ -425,6 +427,7 @@ public static class M2PreviewGeometryService
     private static M2PreviewTextureCoordinateSource ExplicitCoordinateSource(M2PreviewTextureCombinerKind kind, int stage, M2PreviewTextureCoordinateSource fallback) => kind switch
     {
         M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlpha or M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha => stage == 0 ? M2PreviewTextureCoordinateSource.Primary : M2PreviewTextureCoordinateSource.Environment,
+        M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlphaAdd => stage == 1 ? M2PreviewTextureCoordinateSource.Environment : M2PreviewTextureCoordinateSource.Primary,
         M2PreviewTextureCombinerKind.ExplicitModAddAlpha => M2PreviewTextureCoordinateSource.Primary,
         _ => fallback
     };
@@ -432,6 +435,7 @@ public static class M2PreviewGeometryService
     private static M2PreviewTextureStageBlend StageBlend(M2PreviewTextureCombiner combiner, int stage)
     {
         if (stage == 0) return M2PreviewTextureStageBlend.Source;
+        if (combiner.Kind == M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlphaAdd) return stage switch { 1 => M2PreviewTextureStageBlend.Modulate2X, 2 => M2PreviewTextureStageBlend.Add, _ => M2PreviewTextureStageBlend.Unsupported };
         if (stage > 1) return M2PreviewTextureStageBlend.Unsupported;
         if (combiner.Kind == M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlpha) return M2PreviewTextureStageBlend.Modulate2X;
         if (combiner.Kind is M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha or M2PreviewTextureCombinerKind.ExplicitModAddAlpha) return M2PreviewTextureStageBlend.Add;
@@ -544,7 +548,11 @@ public static class M2PreviewGeometryService
     {
         if (!string.IsNullOrWhiteSpace(selected))
         {
-            var path = Path.GetFullPath(selected); if (!File.Exists(path)) throw new FileNotFoundException("The selected SKIN file does not exist.", path); return path;
+            var path = Path.IsPathFullyQualified(selected)
+                ? Path.GetFullPath(selected)
+                : Path.GetFullPath(selected, Path.GetDirectoryName(modelPath)!);
+            if (!File.Exists(path)) throw new FileNotFoundException("The selected SKIN file does not exist.", path);
+            return path;
         }
         var directory = Path.GetDirectoryName(modelPath)!; var stem = Path.GetFileNameWithoutExtension(modelPath);
         var exact = Path.Combine(directory, stem + "00.skin"); if (File.Exists(exact)) return exact;
