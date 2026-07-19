@@ -1,7 +1,7 @@
 namespace WoWCrucible.Core;
 
 public enum M2TextureRenderPassBlend { Source, Modulate, Add, AddNoAlpha, DestinationOut, DestinationOver }
-public sealed record M2TextureRenderPass(int StageIndex, M2TextureRenderPassBlend Blend, bool UseLighting);
+public sealed record M2TextureRenderPass(int StageIndex, M2TextureRenderPassBlend Blend, bool UseLighting, bool UseEdgeFade = false);
 
 /// <summary>Produces a deterministic pass plan for supported build-264 texture combiners.</summary>
 public static class M2TextureCombinerRenderPlanService
@@ -44,6 +44,11 @@ public static class M2TextureCombinerRenderPlanService
             RequireTwo(stages, combiner);
             // lit * mix(base.rgb, detail.rgb, detail.a)
             return [new(0, M2TextureRenderPassBlend.Source, true), new(1, M2TextureRenderPassBlend.Source, true)];
+        }
+        if (combiner.Kind == M2PreviewTextureCombinerKind.ExplicitModModEdgeFade)
+        {
+            RequireTwo(stages, combiner);
+            return [new(0, M2TextureRenderPassBlend.Source, true, true), new(1, M2TextureRenderPassBlend.Modulate, false)];
         }
         var result = new M2TextureRenderPass[stages.Count];
         result[0] = new(0, M2TextureRenderPassBlend.Source, true);

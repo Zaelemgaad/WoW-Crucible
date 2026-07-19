@@ -57,6 +57,7 @@ public enum M2PreviewTextureCombinerKind
     ExplicitOpaqueAddAlphaAlpha,
     ExplicitOpaqueAddAlphaPrimary,
     ExplicitModAddAlpha,
+    ExplicitModModEdgeFade,
     ExplicitOpaqueAlpha,
     ExplicitOpaqueMod2xNaAlphaAdd,
     Unsupported
@@ -414,6 +415,7 @@ public static class M2PreviewGeometryService
                     2 => new("Opaque_AddAlpha_Alpha", true, false) { Kind = M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlphaAlpha },
                     5 => new("Opaque_AddAlpha (primary/primary)", true, false) { Kind = M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlphaPrimary },
                     6 => new("Mod_AddAlpha", true, false) { Kind = M2PreviewTextureCombinerKind.ExplicitModAddAlpha },
+                    21 => new("Mod_Mod (edge fade)", true, false) { Kind = M2PreviewTextureCombinerKind.ExplicitModModEdgeFade },
                     23 => new("Opaque_Alpha", true, false) { Kind = M2PreviewTextureCombinerKind.ExplicitOpaqueAlpha },
                     _ => new($"Explicit shader {shaderId & 0x7FFF}", false, false) { Kind = M2PreviewTextureCombinerKind.Unsupported }
                 };
@@ -443,6 +445,7 @@ public static class M2PreviewGeometryService
         M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlpha or M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha or M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlphaAlpha => stage == 0 ? M2PreviewTextureCoordinateSource.Primary : M2PreviewTextureCoordinateSource.Environment,
         M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlphaAdd => stage == 1 ? M2PreviewTextureCoordinateSource.Environment : M2PreviewTextureCoordinateSource.Primary,
         M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlphaPrimary or M2PreviewTextureCombinerKind.ExplicitModAddAlpha or M2PreviewTextureCombinerKind.ExplicitOpaqueAlpha => M2PreviewTextureCoordinateSource.Primary,
+        M2PreviewTextureCombinerKind.ExplicitModModEdgeFade => stage == 0 ? M2PreviewTextureCoordinateSource.Primary : M2PreviewTextureCoordinateSource.Secondary,
         _ => fallback
     };
 
@@ -453,6 +456,7 @@ public static class M2PreviewGeometryService
         if (stage > 1) return M2PreviewTextureStageBlend.Unsupported;
         if (combiner.Kind == M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlpha) return M2PreviewTextureStageBlend.Modulate2X;
         if (combiner.Kind is M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha or M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlphaAlpha or M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlphaPrimary or M2PreviewTextureCombinerKind.ExplicitModAddAlpha) return M2PreviewTextureStageBlend.Add;
+        if (combiner.Kind == M2PreviewTextureCombinerKind.ExplicitModModEdgeFade) return M2PreviewTextureStageBlend.Modulate;
         if (combiner.Kind == M2PreviewTextureCombinerKind.ExplicitOpaqueAlpha) return M2PreviewTextureStageBlend.Source;
         var suffix = combiner.Name[(combiner.Name.LastIndexOf('_') + 1)..];
         return suffix switch
