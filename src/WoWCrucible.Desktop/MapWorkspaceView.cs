@@ -29,6 +29,9 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly TextBox _brushSeed = new() { Text = "0", PlaceholderText = "Noise seed" };
     private readonly TextBox _textureLayerSlot = new() { Text = "0", PlaceholderText = "Layer slot" };
     private readonly ComboBox _textureChoice = new() { PlaceholderText = "Existing MTEX texture…" };
+    private readonly TextBox _newTexturePath = new() { PlaceholderText = @"Client-relative texture path, e.g. Tileset\Crucible\Ground.blp" };
+    private readonly ComboBox _newTextureEncoding = new() { ItemsSource = Enum.GetValues<AdtNewLayerEncoding>(), SelectedItem = AdtNewLayerEncoding.Auto };
+    private readonly TextBox _newTextureInitialAlpha = new() { Text = "0", PlaceholderText = "Initial alpha 0–255" };
     private readonly TextBox _alphaLayerSlot = new() { Text = "1", PlaceholderText = "Painted layer slot" };
     private readonly TextBox _alphaTarget = new() { Text = "255", PlaceholderText = "Target alpha 0–255" };
     private readonly TextBox _alphaOpacity = new() { Text = "1", PlaceholderText = "Opacity 0–1" };
@@ -43,6 +46,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private AdtHeightEditPlan? _heightPlan;
     private AdtTerrainBrushPlan? _brushPlan;
     private AdtTextureLayerPlan? _texturePlan;
+    private AdtTextureStructurePlan? _textureStructurePlan;
     private AdtAlphaBrushPlan? _alphaPlan;
 
     public event EventHandler? BackRequested;
@@ -52,7 +56,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
         var inspect = new Button { Content = "Inspect / reload" }; inspect.Click += async (_, _) => await OpenAsync(_path.Text);
-        _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
+        _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
         var selectAll = new Button { Content = "Select all present" }; selectAll.Click += (_, _) => _grid.SelectAllPresent();
         var clear = new Button { Content = "Clear selection" }; clear.Click += (_, _) => _grid.ClearSelection();
         var previewHeight = new Button { Content = "Preview height offset" }; previewHeight.Click += async (_, _) => await PreviewHeightAsync();
@@ -61,12 +65,15 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var saveBrush = new Button { Content = "Write brushed ADT…" }; saveBrush.Click += async (_, _) => await SaveBrushAsync();
         var previewTexture = new Button { Content = "Preview layer texture" }; previewTexture.Click += async (_, _) => await PreviewTextureAsync();
         var saveTexture = new Button { Content = "Write texture-edited ADT…" }; saveTexture.Click += async (_, _) => await SaveTextureAsync();
+        var previewNewTexture = new Button { Content = "Preview new texture layer" }; previewNewTexture.Click += async (_, _) => await PreviewTextureStructureAsync();
+        var saveNewTexture = new Button { Content = "Write structurally edited ADT…" }; saveNewTexture.Click += async (_, _) => await SaveTextureStructureAsync();
         var previewAlpha = new Button { Content = "Preview alpha paint" }; previewAlpha.Click += async (_, _) => await PreviewAlphaAsync();
         var saveAlpha = new Button { Content = "Write alpha-painted ADT…" }; saveAlpha.Click += async (_, _) => await SaveAlphaAsync();
         _grid.TerrainPointSelected += (_, point) => { _brushCenterX.Text = point.X.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _brushCenterY.Text = point.Y.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _alphaPlan = null; UpdateBrushOverlay(); };
         _brushCenterX.TextChanged += (_, _) => BrushInputChanged(); _brushCenterY.TextChanged += (_, _) => BrushInputChanged(); _brushRadius.TextChanged += (_, _) => BrushInputChanged(); _brushStrength.TextChanged += (_, _) => _brushPlan = null; _brushMode.SelectionChanged += (_, _) => _brushPlan = null; _brushFalloff.SelectionChanged += (_, _) => _brushPlan = null; _brushTarget.TextChanged += (_, _) => _brushPlan = null; _brushSeed.TextChanged += (_, _) => _brushPlan = null;
         _heightDelta.TextChanged += (_, _) => _heightPlan = null;
         _textureLayerSlot.TextChanged += (_, _) => InvalidateTexturePreview(); _textureChoice.SelectionChanged += (_, _) => InvalidateTexturePreview();
+        _newTexturePath.TextChanged += (_, _) => InvalidateTextureStructurePreview(); _newTextureEncoding.SelectionChanged += (_, _) => InvalidateTextureStructurePreview(); _newTextureInitialAlpha.TextChanged += (_, _) => InvalidateTextureStructurePreview();
         _alphaLayerSlot.TextChanged += (_, _) => InvalidateAlphaPreview(); _alphaTarget.TextChanged += (_, _) => InvalidateAlphaPreview(); _alphaOpacity.TextChanged += (_, _) => InvalidateAlphaPreview(); _alphaFalloff.SelectionChanged += (_, _) => InvalidateAlphaPreview(); _alphaRestrict.IsCheckedChanged += (_, _) => InvalidateAlphaPreview();
 
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 10, Margin = new Thickness(12, 8) };
@@ -88,7 +95,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             Content = new StackPanel
             {
                 Margin = new Thickness(10), Spacing = 8,
-                Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable."), Label("ADT TEXTURE LAYER"), TextureFields(), new WrapPanel { Children = { previewTexture, saveTexture } }, Info("Reassigns an existing MCLY layer slot to one of this ADT's existing MTEX textures. It does not invent a new catalog entry."), Label("ADT ALPHA TEXTURE BRUSH"), AlphaFields(), _alphaRestrict, new WrapPanel { Children = { previewAlpha, saveAlpha } }, Info("Uses the click-positioned center and radius above to paint an existing additional layer toward alpha 0–255. Packed, big, and RLE maps preserve their current fixed-width encoding; an RLE stroke that cannot fit is refused instead of shifting MCNK offsets."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
+                Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable."), Label("ADT TEXTURE LAYER"), TextureFields(), new WrapPanel { Children = { previewTexture, saveTexture } }, Info("Reassigns an existing MCLY layer slot to one of this ADT's existing MTEX textures."), Label("ADD MTEX + MCLY LAYER"), NewTextureFields(), new WrapPanel { Children = { previewNewTexture, saveNewTexture } }, Info("Appends one client-relative BLP to MTEX and adds a matching MCLY/MCAL layer to every selected cell. Wrath's four-layer limit is enforced. Auto preserves the tile's existing packed-versus-8-bit alpha family; mixed or evidence-free tiles require an explicit encoding."), Label("ADT ALPHA TEXTURE BRUSH"), AlphaFields(), _alphaRestrict, new WrapPanel { Children = { previewAlpha, saveAlpha } }, Info("Uses the click-positioned center and radius above to paint an existing additional layer toward alpha 0–255. Packed, big, and RLE maps preserve their current fixed-width encoding; an RLE stroke that cannot fit is refused instead of shifting MCNK offsets."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
             }
         };
         var body = new Grid { ColumnDefinitions = new("3*,Auto,2*") };
@@ -112,7 +119,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             _path.Text = Path.GetFullPath(path!); _status.Text = $"Inspecting {Path.GetFileName(path)}…";
             var loaded = await Task.Run(() => { token.ThrowIfCancellationRequested(); var inspection = MapAssetInspectionService.Inspect(path!); var textureResult = inspection.Kind == MapAssetKind.Adt ? TryInspectTextures(path!) : (Inspection: (AdtTextureLayerInspection?)null, Error: (string?)null); var alphaResult = inspection.Kind == MapAssetKind.Adt ? TryInspectAlpha(path!) : (Inspection: (AdtAlphaMapInspection?)null, Error: (string?)null); return (inspection, textureResult, alphaResult); }, token); var inspection = loaded.inspection;
             if (token.IsCancellationRequested) return;
-            _inspection = inspection; _textureSourceInspection = _textureInspection = loaded.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = loaded.alphaResult.Inspection; _heightPlan = null; _brushPlan = null; _texturePlan = null; _alphaPlan = null; SetTextureChoices(_textureInspection); _grid.SetInspection(inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(inspection); _selected.Text = "Select a present grid cell for exact terrain, texture-layer, and alpha-map metadata.";
+            _inspection = inspection; _textureSourceInspection = _textureInspection = loaded.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = loaded.alphaResult.Inspection; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; SetTextureChoices(_textureInspection); _grid.SetInspection(inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(inspection); _selected.Text = "Select a present grid cell for exact terrain, texture-layer, and alpha-map metadata.";
             _chunks.ItemsSource = inspection.Chunks.Select(chunk => $"{chunk.Id} · {chunk.Occurrences:N0} chunk(s) · {chunk.PayloadBytes:N0} bytes").ToArray();
             _dependencies.ItemsSource = inspection.TexturePaths.Select(value => "Texture · " + value).Concat(inspection.ModelPaths.Select(value => "Model · " + value)).Concat(inspection.WmoPaths.Select(value => "WMO · " + value)).DefaultIfEmpty("No path-list dependencies in this file.").ToArray();
             _status.Text = $"Loaded {inspection.Kind} · {inspection.PresentCells:N0}/{inspection.Cells.Count:N0} present cells · click a cell for details · drop another map file anywhere on the grid" + (loaded.textureResult.Error is null ? string.Empty : $" · texture layers unavailable: {loaded.textureResult.Error}") + (loaded.alphaResult.Error is null ? string.Empty : $" · alpha maps unavailable: {loaded.alphaResult.Error}");
@@ -129,7 +136,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             if (!float.TryParse(_heightDelta.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var delta) || !float.IsFinite(delta)) throw new InvalidOperationException("Enter a finite height delta using a period as the decimal separator.");
             var selected = _grid.SelectedCells.Where(cell => cell.Present).Select(cell => (cell.X, cell.Y)).ToArray();
             _status.Text = $"Planning {selected.Length:N0} terrain-cell height edit(s)…"; var plan = await Task.Run(() => AdtHeightEditService.Plan(_inspection.Path, selected, delta)); var preview = await Task.Run(() => AdtHeightEditService.Preview(plan));
-            _brushPlan = null; _grid.SetInspection(preview, plan.Cells.Select(cell => (cell.X, cell.Y))); _heightPlan = plan; _summary.Text = Summary(preview); _status.Text = $"Preview only · {plan.Cells.Count:N0} cell(s) offset by {plan.Delta:R} · source bytes unchanged";
+            _brushPlan = null; _textureStructurePlan = null; _grid.SetInspection(preview, plan.Cells.Select(cell => (cell.X, cell.Y))); _heightPlan = plan; _summary.Text = Summary(preview); _status.Text = $"Preview only · {plan.Cells.Count:N0} cell(s) offset by {plan.Delta:R} · source bytes unchanged";
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT height preview failed", exception); }
     }
@@ -143,7 +150,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             var mode = _brushMode.SelectedItem is MapBrushModeChoice selectedMode ? selectedMode.Value : AdtTerrainBrushMode.RaiseLower; var falloff = _brushFalloff.SelectedItem is AdtTerrainBrushFalloff selectedFalloff ? selectedFalloff : AdtTerrainBrushFalloff.Smooth;
             float? target = mode == AdtTerrainBrushMode.Flatten ? Number(_brushTarget, "flatten target height") : null; var seed = 0; if (mode == AdtTerrainBrushMode.Noise && !int.TryParse(_brushSeed.Text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out seed)) throw new InvalidOperationException("Enter a signed 32-bit integer noise seed."); _status.Text = $"Planning exact {mode} MCVT vertex edits…";
             var plan = await Task.Run(() => AdtTerrainBrushService.Plan(_inspection.Path, centerX, centerY, radius, strength, falloff, mode, target, seed)); var preview = await Task.Run(() => AdtTerrainBrushService.Preview(plan));
-            _brushPlan = plan; _heightPlan = null; _grid.SetInspection(preview, plan.Vertices.Select(vertex => (vertex.CellX, vertex.CellY)).Distinct()); _grid.SetBrush(plan.CenterX, plan.CenterY, plan.Radius); _summary.Text = Summary(preview);
+            _brushPlan = plan; _heightPlan = null; _textureStructurePlan = null; _grid.SetInspection(preview, plan.Vertices.Select(vertex => (vertex.CellX, vertex.CellY)).Distinct()); _grid.SetBrush(plan.CenterX, plan.CenterY, plan.Radius); _summary.Text = Summary(preview);
             _status.Text = $"Preview only · {plan.Mode} · {plan.Vertices.Count:N0} vertex edits across {plan.Vertices.Select(vertex => (vertex.CellX, vertex.CellY)).Distinct().Count():N0} cell(s) · {plan.Falloff} falloff · source bytes unchanged";
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT terrain brush preview failed", exception); }
@@ -157,7 +164,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             var top = TopLevel.GetTopLevel(this); if (top is null) return; var stem = Path.GetFileNameWithoutExtension(_brushPlan.InputPath);
             var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Write a separate vertex-brushed ADT", SuggestedFileName = stem + "-brush.adt", DefaultExtension = "adt", FileTypeChoices = [new FilePickerFileType("WoW ADT") { Patterns = ["*.adt"] }] });
             var output = file?.TryGetLocalPath(); if (output is null) return; _status.Text = "Writing and re-validating every affected terrain cell…"; var saved = await Task.Run(() => { var result = AdtTerrainBrushService.Apply(_brushPlan, output, overwrite: false); return (result, textureResult: TryInspectTextures(result.OutputPath), alphaResult: TryInspectAlpha(result.OutputPath)); }); var result = saved.result;
-            _path.Text = result.OutputPath; _inspection = result.Inspection; _textureSourceInspection = _textureInspection = saved.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = saved.alphaResult.Inspection; SetTextureChoices(_textureInspection); _brushPlan = null; _texturePlan = null; _alphaPlan = null; _grid.SetInspection(result.Inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(result.Inspection);
+            _path.Text = result.OutputPath; _inspection = result.Inspection; _textureSourceInspection = _textureInspection = saved.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = saved.alphaResult.Inspection; SetTextureChoices(_textureInspection); _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; _grid.SetInspection(result.Inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(result.Inspection);
             _status.Text = $"Wrote {result.EditedVertices:N0} vertex edit(s) across {result.EditedCells:N0} cell(s) atomically · receipt {Path.GetFileName(result.ReceiptPath)} · original retained" + (saved.textureResult.Error is null ? string.Empty : $" · texture layers unavailable: {saved.textureResult.Error}") + (saved.alphaResult.Error is null ? string.Empty : $" · alpha maps unavailable: {saved.alphaResult.Error}");
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT terrain brush write failed", exception); }
@@ -175,6 +182,13 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private Control TextureFields()
     {
         var fields = new Grid { ColumnDefinitions = new("*,3*"), ColumnSpacing = 6 }; var slot = Field("LAYER SLOT", _textureLayerSlot); var texture = Field("EXISTING MTEX TEXTURE", _textureChoice); fields.Children.Add(slot); fields.Children.Add(texture); Grid.SetColumn(texture, 1); return fields;
+    }
+
+    private Control NewTextureFields()
+    {
+        var fields = new Grid { ColumnDefinitions = new("3*,*,*"), ColumnSpacing = 6 }; var values = new[] { Field("NEW CLIENT BLP PATH", _newTexturePath), Field("ALPHA ENCODING", _newTextureEncoding), Field("INITIAL ALPHA", _newTextureInitialAlpha) };
+        for (var index = 0; index < values.Length; index++) { fields.Children.Add(values[index]); Grid.SetColumn(values[index], index); }
+        return fields;
     }
 
     private Control AlphaFields()
@@ -195,7 +209,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             IReadOnlyList<(int X, int Y)>? cells = _alphaRestrict.IsChecked == true ? _grid.SelectedCells.Select(cell => (cell.X, cell.Y)).ToArray() : null;
             if (_alphaRestrict.IsChecked == true && cells is { Count: 0 }) throw new InvalidOperationException("Select at least one present cell or turn off the selected-cell restriction.");
             _status.Text = $"Planning fixed-width layer {slot} alpha paint…"; var plan = await Task.Run(() => AdtAlphaMapService.Plan(_inspection.Path, slot, centerX, centerY, radius, target, opacity, falloff, cells)); var preview = await Task.Run(() => AdtAlphaMapService.Preview(plan));
-            _alphaPlan = plan; _alphaInspection = preview; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureInspection = _textureSourceInspection; _grid.SetInspection(_inspection, plan.Edits.Select(edit => (edit.CellX, edit.CellY)).Distinct()); _grid.SetBrush(plan.CenterX, plan.CenterY, plan.Radius); _selected.Text = DescribeSelection(_grid.SelectedCells);
+            _alphaPlan = plan; _alphaInspection = preview; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; _textureInspection = _textureSourceInspection; _grid.SetInspection(_inspection, plan.Edits.Select(edit => (edit.CellX, edit.CellY)).Distinct()); _grid.SetBrush(plan.CenterX, plan.CenterY, plan.Radius); _selected.Text = DescribeSelection(_grid.SelectedCells);
             _status.Text = $"Preview only · {plan.Edits.Sum(edit => edit.ChangedPixels):N0} stored alpha pixel(s) across {plan.Edits.Count:N0} map(s) · layer {plan.LayerSlot} toward {plan.TargetAlpha} at {plan.Opacity:0.###} opacity · source bytes unchanged";
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT alpha-brush preview failed", exception); }
@@ -208,7 +222,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             if (_alphaPlan is null) { await PreviewAlphaAsync(); if (_alphaPlan is null) return; } var top = TopLevel.GetTopLevel(this); if (top is null) return; var stem = Path.GetFileNameWithoutExtension(_alphaPlan.InputPath);
             var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Write a separate alpha-painted ADT", SuggestedFileName = stem + "-alpha.adt", DefaultExtension = "adt", FileTypeChoices = [new FilePickerFileType("WoW ADT") { Patterns = ["*.adt"] }] }); var output = file?.TryGetLocalPath(); if (output is null) return; _status.Text = "Writing and re-validating every painted MCAL map…";
             var saved = await Task.Run(() => { var result = AdtAlphaMapService.Apply(_alphaPlan, output, overwrite: false); return (result, map: MapAssetInspectionService.Inspect(result.OutputPath), textures: TryInspectTextures(result.OutputPath)); });
-            _path.Text = saved.result.OutputPath; _inspection = saved.map; _textureSourceInspection = _textureInspection = saved.textures.Inspection; _alphaSourceInspection = _alphaInspection = saved.result.Inspection; _alphaPlan = null; _heightPlan = null; _brushPlan = null; _texturePlan = null; SetTextureChoices(_textureInspection); _grid.SetInspection(_inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(_inspection);
+            _path.Text = saved.result.OutputPath; _inspection = saved.map; _textureSourceInspection = _textureInspection = saved.textures.Inspection; _alphaSourceInspection = _alphaInspection = saved.result.Inspection; _alphaPlan = null; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; SetTextureChoices(_textureInspection); _grid.SetInspection(_inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(_inspection);
             _status.Text = $"Wrote {saved.result.EditedPixels:N0} alpha pixel edit(s) across {saved.result.EditedMaps:N0} map(s) and {saved.result.EditedCells:N0} cell(s) atomically · receipt {Path.GetFileName(saved.result.ReceiptPath)} · original retained" + (saved.textures.Error is null ? string.Empty : $" · texture layers unavailable: {saved.textures.Error}");
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT alpha-brush write failed", exception); }
@@ -220,7 +234,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         {
             if (_inspection?.Kind != MapAssetKind.Adt || _textureInspection is null) throw new InvalidOperationException("Texture-layer editing requires an ADT with a valid MTEX/MCLY layout."); if (!int.TryParse(_textureLayerSlot.Text, out var slot) || slot < 0) throw new InvalidOperationException("Enter a non-negative texture layer slot."); if (_textureChoice.SelectedItem is not MapTextureChoice choice) throw new InvalidOperationException("Choose an existing MTEX texture.");
             var selectedCells = _grid.SelectedCells.Select(cell => (cell.X, cell.Y)).ToArray(); var cells = selectedCells.Where(cell => _textureSourceInspection?.Layers.Any(layer => layer.CellX == cell.X && layer.CellY == cell.Y && layer.Slot == slot) == true).ToArray(); var skipped = selectedCells.Length - cells.Length; _status.Text = $"Planning layer {slot} reassignment across {cells.Length:N0} compatible selected cell(s)…"; var plan = await Task.Run(() => AdtTextureLayerService.Plan(_inspection.Path, cells, slot, choice.Id)); var preview = await Task.Run(() => AdtTextureLayerService.Preview(plan));
-            _grid.SetInspection(_inspection, plan.Edits.Select(edit => (edit.CellX, edit.CellY)).Distinct()); _textureInspection = preview; _texturePlan = plan; _alphaPlan = null; _alphaInspection = _alphaSourceInspection; _selected.Text = DescribeSelection(_grid.SelectedCells); _status.Text = $"Preview only · {plan.Edits.Count:N0} layer(s) → MTEX {plan.TextureId}: {plan.TexturePath} · source bytes unchanged" + (skipped == 0 ? string.Empty : $" · skipped {skipped:N0} selected cell(s) without slot {slot}");
+            _grid.SetInspection(_inspection, plan.Edits.Select(edit => (edit.CellX, edit.CellY)).Distinct()); _textureInspection = preview; _texturePlan = plan; _textureStructurePlan = null; _alphaPlan = null; _alphaInspection = _alphaSourceInspection; _selected.Text = DescribeSelection(_grid.SelectedCells); _status.Text = $"Preview only · {plan.Edits.Count:N0} layer(s) → MTEX {plan.TextureId}: {plan.TexturePath} · source bytes unchanged" + (skipped == 0 ? string.Empty : $" · skipped {skipped:N0} selected cell(s) without slot {slot}");
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT texture-layer preview failed", exception); }
     }
@@ -231,10 +245,47 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         {
             if (_texturePlan is null) { await PreviewTextureAsync(); if (_texturePlan is null) return; } var top = TopLevel.GetTopLevel(this); if (top is null) return; var stem = Path.GetFileNameWithoutExtension(_texturePlan.InputPath);
             var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Write a separate texture-edited ADT", SuggestedFileName = stem + "-texture.adt", DefaultExtension = "adt", FileTypeChoices = [new FilePickerFileType("WoW ADT") { Patterns = ["*.adt"] }] }); var output = file?.TryGetLocalPath(); if (output is null) return; _status.Text = "Writing and re-validating texture layers…";
-            var saved = await Task.Run(() => { var result = AdtTextureLayerService.Apply(_texturePlan, output, overwrite: false); return (result, map: MapAssetInspectionService.Inspect(result.OutputPath), alphaResult: TryInspectAlpha(result.OutputPath)); }); _path.Text = saved.result.OutputPath; _inspection = saved.map; _textureSourceInspection = _textureInspection = saved.result.Inspection; _alphaSourceInspection = _alphaInspection = saved.alphaResult.Inspection; _texturePlan = null; _alphaPlan = null; _heightPlan = null; _brushPlan = null; SetTextureChoices(_textureInspection); _grid.SetInspection(_inspection); _summary.Text = Summary(_inspection);
+            var saved = await Task.Run(() => { var result = AdtTextureLayerService.Apply(_texturePlan, output, overwrite: false); return (result, map: MapAssetInspectionService.Inspect(result.OutputPath), alphaResult: TryInspectAlpha(result.OutputPath)); }); _path.Text = saved.result.OutputPath; _inspection = saved.map; _textureSourceInspection = _textureInspection = saved.result.Inspection; _alphaSourceInspection = _alphaInspection = saved.alphaResult.Inspection; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; _heightPlan = null; _brushPlan = null; SetTextureChoices(_textureInspection); _grid.SetInspection(_inspection); _summary.Text = Summary(_inspection);
             _status.Text = $"Wrote {saved.result.EditedLayers:N0} texture-layer edit(s) across {saved.result.EditedCells:N0} cell(s) atomically · receipt {Path.GetFileName(saved.result.ReceiptPath)} · original retained";
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT texture-layer write failed", exception); }
+    }
+
+    private async Task PreviewTextureStructureAsync()
+    {
+        try
+        {
+            if (_inspection?.Kind != MapAssetKind.Adt) throw new InvalidOperationException("Adding a texture catalog entry and layer requires a complete WotLK ADT.");
+            var cells = _grid.SelectedCells.Where(cell => cell.Present).Select(cell => (cell.X, cell.Y)).ToArray();
+            if (cells.Length == 0) throw new InvalidOperationException("Select at least one present ADT cell for the new texture layer.");
+            if (!byte.TryParse(_newTextureInitialAlpha.Text, out var initialAlpha)) throw new InvalidOperationException("Initial alpha must be an integer from 0 through 255.");
+            var encoding = _newTextureEncoding.SelectedItem is AdtNewLayerEncoding selected ? selected : AdtNewLayerEncoding.Auto;
+            _status.Text = $"Planning structural MTEX/MCLY/MCAL insertion for {cells.Length:N0} selected cell(s)…";
+            var plan = await Task.Run(() => AdtTextureStructureService.Plan(_inspection.Path, _newTexturePath.Text ?? string.Empty, cells, encoding, initialAlpha));
+            _textureStructurePlan = plan; _texturePlan = null; _alphaPlan = null; _heightPlan = null; _brushPlan = null;
+            _grid.SetInspection(_inspection, plan.Cells.Select(cell => (cell.X, cell.Y)));
+            _selected.Text = DescribeSelection(_grid.SelectedCells) + $"\n\nPlanned new layer: slot {string.Join(", ", plan.Cells.Select(cell => cell.NewLayerSlot).Distinct().Order())} · MTEX {plan.TextureId} · {plan.TexturePath} · {plan.Encoding} · initial alpha {plan.InitialAlpha}";
+            _status.Text = $"Preview only · append MTEX {plan.TextureId} and one {plan.Encoding} layer in {plan.Cells.Count:N0} cell(s) · source bytes unchanged";
+        }
+        catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT structural texture-layer preview failed", exception); }
+    }
+
+    private async Task SaveTextureStructureAsync()
+    {
+        try
+        {
+            if (_textureStructurePlan is null) { await PreviewTextureStructureAsync(); if (_textureStructurePlan is null) return; }
+            var top = TopLevel.GetTopLevel(this); if (top is null) return; var stem = Path.GetFileNameWithoutExtension(_textureStructurePlan.InputPath);
+            var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Write a separate structurally edited ADT", SuggestedFileName = stem + "-new-layer.adt", DefaultExtension = "adt", FileTypeChoices = [new FilePickerFileType("WoW ADT") { Patterns = ["*.adt"] }] });
+            var output = file?.TryGetLocalPath(); if (output is null) return; _status.Text = "Rebuilding ADT offsets and re-validating MTEX, MCLY, MCAL, MHDR, and MCIN…";
+            var result = await Task.Run(() => AdtTextureStructureService.Apply(_textureStructurePlan, output, overwrite: false));
+            _path.Text = result.OutputPath; _inspection = result.MapInspection; _textureSourceInspection = _textureInspection = result.TextureInspection; _alphaSourceInspection = _alphaInspection = result.AlphaInspection;
+            _textureStructurePlan = null; _texturePlan = null; _alphaPlan = null; _heightPlan = null; _brushPlan = null; SetTextureChoices(_textureInspection); _grid.SetInspection(_inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(_inspection); _selected.Text = "Select a present grid cell for exact terrain, texture-layer, and alpha-map metadata.";
+            _chunks.ItemsSource = _inspection.Chunks.Select(chunk => $"{chunk.Id} · {chunk.Occurrences:N0} chunk(s) · {chunk.PayloadBytes:N0} bytes").ToArray();
+            _dependencies.ItemsSource = _inspection.TexturePaths.Select(value => "Texture · " + value).Concat(_inspection.ModelPaths.Select(value => "Model · " + value)).Concat(_inspection.WmoPaths.Select(value => "WMO · " + value)).DefaultIfEmpty("No path-list dependencies in this file.").ToArray();
+            _status.Text = $"Appended MTEX {result.TextureId} and added {result.EditedCells:N0} layer(s) atomically · receipt {Path.GetFileName(result.ReceiptPath)} · original retained";
+        }
+        catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT structural texture-layer write failed", exception); }
     }
 
     private void SetTextureChoices(AdtTextureLayerInspection? inspection)
@@ -245,6 +296,11 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private void InvalidateTexturePreview(bool refreshSelection = true)
     {
         _texturePlan = null; _textureInspection = _textureSourceInspection; if (refreshSelection) _selected.Text = DescribeSelection(_grid.SelectedCells);
+    }
+
+    private void InvalidateTextureStructurePreview(bool refreshSelection = true)
+    {
+        _textureStructurePlan = null; if (refreshSelection) _selected.Text = DescribeSelection(_grid.SelectedCells);
     }
 
     private void InvalidateAlphaPreview(bool refreshSelection = true)
@@ -288,7 +344,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Write a separate edited ADT", SuggestedFileName = stem + "-height-edit.adt", DefaultExtension = "adt", FileTypeChoices = [new FilePickerFileType("WoW ADT") { Patterns = ["*.adt"] }] });
             var output = file?.TryGetLocalPath(); if (output is null) return; _status.Text = "Writing and re-validating edited ADT…";
             var saved = await Task.Run(() => { var result = AdtHeightEditService.Apply(_heightPlan, output, overwrite: false); return (result, textureResult: TryInspectTextures(result.OutputPath), alphaResult: TryInspectAlpha(result.OutputPath)); }); var result = saved.result;
-            _path.Text = result.OutputPath; _inspection = result.Inspection; _textureSourceInspection = _textureInspection = saved.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = saved.alphaResult.Inspection; SetTextureChoices(_textureInspection); _heightPlan = null; _texturePlan = null; _alphaPlan = null; _grid.SetInspection(result.Inspection); _summary.Text = Summary(result.Inspection);
+            _path.Text = result.OutputPath; _inspection = result.Inspection; _textureSourceInspection = _textureInspection = saved.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = saved.alphaResult.Inspection; SetTextureChoices(_textureInspection); _heightPlan = null; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; _grid.SetInspection(result.Inspection); _summary.Text = Summary(result.Inspection);
             _status.Text = $"Wrote {result.EditedCells:N0} edited terrain cell(s) atomically · receipt {Path.GetFileName(result.ReceiptPath)} · original retained" + (saved.textureResult.Error is null ? string.Empty : $" · texture layers unavailable: {saved.textureResult.Error}") + (saved.alphaResult.Error is null ? string.Empty : $" · alpha maps unavailable: {saved.alphaResult.Error}");
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("ADT height write failed", exception); }
