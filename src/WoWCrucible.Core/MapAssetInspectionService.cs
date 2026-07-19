@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -10,9 +11,15 @@ public sealed record MapTileCell(int X, int Y, bool Present, uint Flags, uint As
 {
     public override string ToString() => $"{X:N0},{Y:N0}" + (AreaId is { } area ? $" · area {area:N0}" : string.Empty);
 }
+public sealed record MapWmoPlacement(int Index, uint NameId, uint UniqueId, string? ClientPath, Vector3 Position, Vector3 Orientation,
+    Vector3 MinimumExtent, Vector3 MaximumExtent, ushort Flags, ushort DoodadSet, ushort NameSet, ushort ScaleRaw)
+{
+    public float Scale => ScaleRaw == 0 ? 1f : ScaleRaw / 1024f;
+    public override string ToString() => $"UID {UniqueId:N0} · {ClientPath ?? $"unresolved name {NameId:N0}"} · pos {Position.X:0.##}, {Position.Y:0.##}, {Position.Z:0.##}";
+}
 public sealed record MapAssetInspection(string Path, MapAssetKind Kind, uint Version, int GridWidth, int GridHeight, IReadOnlyList<MapTileCell> Cells,
     IReadOnlyList<MapChunkSummary> Chunks, IReadOnlyList<string> TexturePaths, IReadOnlyList<string> ModelPaths, IReadOnlyList<string> WmoPaths,
-    uint HeaderFlags, int? TileX, int? TileY, IReadOnlyList<string> Findings)
+    uint HeaderFlags, int? TileX, int? TileY, IReadOnlyList<MapWmoPlacement> WmoPlacements, IReadOnlyList<string> Findings)
 {
     public int PresentCells => Cells.Count(cell => cell.Present);
     public float? MinimumHeight => Cells.Where(cell => cell.MinimumHeight is not null).Select(cell => cell.MinimumHeight!.Value).DefaultIfEmpty(float.NaN).Min() is var value && float.IsFinite(value) ? value : null;
@@ -24,6 +31,7 @@ public static partial class MapAssetInspectionService
     private const int MaximumCapturedChunkBytes = 64 * 1024 * 1024;
     private const int WdtCells = 64 * 64;
     private const int AdtCells = 16 * 16;
+    private const int MaximumWmoPlacements = 100_000;
 
     public static MapAssetInspection Inspect(string path)
     {
@@ -51,7 +59,7 @@ public static partial class MapAssetInspectionService
                 "MAIN" => (int)size,
                 "MAOF" => (int)size,
                 "MCNK" => Math.Min(128, (int)size),
-                "MTEX" or "MMDX" or "MWMO" => (int)size,
+                "MTEX" or "MMDX" or "MWMO" or "MWID" or "MODF" => (int)size,
                 _ => 0
             };
             if (captureBytes > MaximumCapturedChunkBytes) throw new InvalidDataException($"Map chunk {id} is too large to inspect safely ({captureBytes:N0} bytes).");
@@ -66,7 +74,8 @@ public static partial class MapAssetInspectionService
         var findings = new List<string>(); if (version != 18) findings.Add($"MVER is {version:N0}; the verified Wrath terrain version is 18.");
         var texturePaths = Strings("MTEX").Where(value => Path.GetExtension(value).Equals(".blp", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
         var modelPaths = Strings("MMDX").Where(value => Path.GetExtension(value) is ".m2" or ".M2" or ".mdx" or ".MDX").Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
-        var wmoPaths = Strings("MWMO").Where(value => Path.GetExtension(value).Equals(".wmo", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        var wmoNames = StringOffsets("MWMO");
+        var wmoPaths = wmoNames.Values.Where(value => Path.GetExtension(value).Equals(".wmo", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
         uint headerFlags = 0; if (Captures("MPHD").FirstOrDefault().Data is { Length: >= 4 } mphd) headerFlags = BitConverter.ToUInt32(mphd);
         int? tileX = null, tileY = null; var match = AdtName().Match(Path.GetFileName(path));
         if (match.Success) { tileX = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture); tileY = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture); }
@@ -80,9 +89,41 @@ public static partial class MapAssetInspectionService
         if (cells.Count != expectedCells) findings.Add($"Expected {expectedCells:N0} grid cells but decoded {cells.Count:N0}.");
         if (kind == MapAssetKind.Adt && (tileX is null || tileY is null)) findings.Add("The ADT filename does not end in _<tileX>_<tileY>.adt, so its world-tile coordinate is unknown.");
         if (kind == MapAssetKind.Wdt && cells.All(cell => !cell.Present) && (headerFlags & 1) != 0) findings.Add("This WDT uses a global WMO rather than terrain ADT tiles.");
+        var wmoPlacements = ReadWmoPlacements();
         return new(path, kind, version, kind == MapAssetKind.Adt ? 16 : 64, kind == MapAssetKind.Adt ? 16 : 64, cells,
             chunks.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new MapChunkSummary(pair.Key, pair.Value.Count, pair.Value.Bytes)).ToArray(),
-            texturePaths, modelPaths, wmoPaths, headerFlags, tileX, tileY, findings);
+            texturePaths, modelPaths, wmoPaths, headerFlags, tileX, tileY, wmoPlacements, findings);
+
+        IReadOnlyList<MapWmoPlacement> ReadWmoPlacements()
+        {
+            var modfCaptures = Captures("MODF").ToArray(); if (modfCaptures.Length == 0) return [];
+            if (modfCaptures.Length != 1) throw new InvalidDataException($"Map asset contains {modfCaptures.Length:N0} MODF chunks; one placement table is expected.");
+            var modf = modfCaptures[0].Data; if (modf.Length % 64 != 0) throw new InvalidDataException($"MODF size {modf.Length:N0} is not divisible by its 64-byte placement record size.");
+            if (modf.Length / 64 > MaximumWmoPlacements) throw new InvalidDataException($"MODF declares {modf.Length / 64:N0} placements, above the bounded {MaximumWmoPlacements:N0}-instance inspection limit.");
+            var mwidCaptures = Captures("MWID").ToArray(); if (mwidCaptures.Length > 1) throw new InvalidDataException($"Map asset contains {mwidCaptures.Length:N0} MWID chunks; one name-index table is expected.");
+            var mwid = mwidCaptures.FirstOrDefault().Data ?? [];
+            if (mwid.Length % 4 != 0) throw new InvalidDataException($"MWID size {mwid.Length:N0} is not divisible by four bytes.");
+            var offsets = Enumerable.Range(0, mwid.Length / 4).Select(index => BitConverter.ToUInt32(mwid, index * 4)).ToArray(); var result = new MapWmoPlacement[modf.Length / 64];
+            for (var index = 0; index < result.Length; index++)
+            {
+                var offset = index * 64; var nameId = BitConverter.ToUInt32(modf, offset); string? clientPath = null;
+                if (nameId < (uint)offsets.Length) wmoNames.TryGetValue(offsets[checked((int)nameId)], out clientPath);
+                else if (offsets.Length == 0 && nameId == 0 && wmoNames.Count == 1) clientPath = wmoNames.Values.Single();
+                if (clientPath is null) findings.Add($"MODF placement {index:N0} UID {BitConverter.ToUInt32(modf, offset + 4):N0} references unresolved MWID name {nameId:N0}.");
+                var position = Vector(offset + 8, $"MODF placement {index:N0} position"); var orientation = Vector(offset + 20, $"MODF placement {index:N0} orientation");
+                var minimum = Vector(offset + 32, $"MODF placement {index:N0} minimum extent"); var maximum = Vector(offset + 44, $"MODF placement {index:N0} maximum extent");
+                if (minimum.X > maximum.X || minimum.Y > maximum.Y || minimum.Z > maximum.Z) findings.Add($"MODF placement {index:N0} UID {BitConverter.ToUInt32(modf, offset + 4):N0} has reversed extent bounds.");
+                result[index] = new(index, nameId, BitConverter.ToUInt32(modf, offset + 4), clientPath, position, orientation, minimum, maximum,
+                    BitConverter.ToUInt16(modf, offset + 56), BitConverter.ToUInt16(modf, offset + 58), BitConverter.ToUInt16(modf, offset + 60), BitConverter.ToUInt16(modf, offset + 62));
+            }
+            var duplicate = result.GroupBy(value => value.UniqueId).FirstOrDefault(group => group.Count() > 1); if (duplicate is not null) findings.Add($"MODF unique ID {duplicate.Key:N0} occurs {duplicate.Count():N0} times.");
+            return result;
+            Vector3 Vector(int offset, string label)
+            {
+                var value = new Vector3(BitConverter.ToSingle(modf, offset), BitConverter.ToSingle(modf, offset + 4), BitConverter.ToSingle(modf, offset + 8));
+                if (!float.IsFinite(value.X) || !float.IsFinite(value.Y) || !float.IsFinite(value.Z)) throw new InvalidDataException($"{label} contains a non-finite coordinate."); return value;
+            }
+        }
 
         IReadOnlyList<MapTileCell> ReadWdtCells()
         {
@@ -150,6 +191,13 @@ public static partial class MapAssetInspectionService
                 var start = 0; for (var index = 0; index <= data.Length; index++) if (index == data.Length || data[index] == 0)
                 { if (index > start) { var value = Encoding.UTF8.GetString(data, start, index - start).Trim(); if (value.Length > 0) yield return value; } start = index + 1; }
             }
+        }
+        IReadOnlyDictionary<uint, string> StringOffsets(string id)
+        {
+            var result = new Dictionary<uint, string>(); var chunk = Captures(id).SingleOrDefault().Data; if (chunk is null) return result;
+            var start = 0; for (var index = 0; index <= chunk.Length; index++) if (index == chunk.Length || chunk[index] == 0)
+            { if (index > start) { var value = Encoding.UTF8.GetString(chunk, start, index - start).Trim(); if (value.Length > 0) result[(uint)start] = value; } start = index + 1; }
+            return result;
         }
     }
 

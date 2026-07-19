@@ -38,6 +38,7 @@ public sealed class WmoPreviewView : UserControl, IDisposable
     }
 
     public void SetDecodedTextures(IReadOnlyDictionary<int, RgbaTexture> textures) => _canvas.SetDecodedTextures(textures);
+    public void SetPlacement(MapWmoPlacement? placement) => _canvas.SetPlacement(placement);
     public void ClearGeometry() { _groups.ItemsSource = null; _canvas.ClearGeometry(); }
     public void Dispose() => _canvas.Dispose();
 }
@@ -52,12 +53,14 @@ internal sealed class WmoPreviewCanvas : Control, IDisposable
     private Avalonia.Point? _dragStart;
     private int? _group;
     private bool _wireframe;
+    private MapWmoPlacement? _placement;
 
     public WmoPreviewCanvas() => ClipToBounds = true;
-    public void SetGeometry(WmoPreviewGeometry geometry) { _geometry = geometry; _yaw = -0.65f; _pitch = 0.35f; _zoom = 1; _group = null; ClearTextures(); InvalidateVisual(); }
-    public void ClearGeometry() { _geometry = null; _group = null; ClearTextures(); InvalidateVisual(); }
+    public void SetGeometry(WmoPreviewGeometry geometry) { _geometry = geometry; _yaw = -0.65f; _pitch = 0.35f; _zoom = 1; _group = null; _placement = null; ClearTextures(); InvalidateVisual(); }
+    public void ClearGeometry() { _geometry = null; _group = null; _placement = null; ClearTextures(); InvalidateVisual(); }
     public void SetGroup(int? group) { _group = group; InvalidateVisual(); }
     public void SetWireframe(bool enabled) { _wireframe = enabled; InvalidateVisual(); }
+    public void SetPlacement(MapWmoPlacement? placement) { _placement = placement; InvalidateVisual(); }
     public void SetDecodedTextures(IReadOnlyDictionary<int, RgbaTexture> textures)
     {
         ClearTextures(); foreach (var (material, texture) in textures) _textures[material] = CreateBitmap(texture); InvalidateVisual();
@@ -76,14 +79,14 @@ internal sealed class WmoPreviewCanvas : Control, IDisposable
     public override void Render(DrawingContext context)
     {
         base.Render(context); context.FillRectangle(new SolidColorBrush(Color.Parse("#090D14")), Bounds);
-        if (_geometry is not null) context.Custom(new WmoDrawOperation(Bounds, _geometry, _textures, _yaw, _pitch, _zoom, _group, _wireframe));
+        if (_geometry is not null) context.Custom(new WmoDrawOperation(Bounds, _geometry, _textures, _yaw, _pitch, _zoom, _group, _wireframe, _placement));
     }
     protected override void OnPointerPressed(PointerPressedEventArgs e) { base.OnPointerPressed(e); if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return; _dragStart = e.GetPosition(this); e.Pointer.Capture(this); e.Handled = true; }
     protected override void OnPointerMoved(PointerEventArgs e) { base.OnPointerMoved(e); if (_dragStart is not { } start || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return; var current = e.GetPosition(this); _yaw += (float)(current.X - start.X) * 0.012f; _pitch = Math.Clamp(_pitch + (float)(current.Y - start.Y) * 0.012f, -1.5f, 1.5f); _dragStart = current; InvalidateVisual(); }
     protected override void OnPointerReleased(PointerReleasedEventArgs e) { base.OnPointerReleased(e); _dragStart = null; e.Pointer.Capture(null); }
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e) { base.OnPointerWheelChanged(e); _zoom = Math.Clamp(_zoom * (e.Delta.Y > 0 ? 1.12f : 0.89f), 0.08f, 12f); InvalidateVisual(); e.Handled = true; }
 
-    private sealed class WmoDrawOperation(Rect bounds, WmoPreviewGeometry geometry, IReadOnlyDictionary<int, SKBitmap> textures, float yaw, float pitch, float zoom, int? selectedGroup, bool wireframe) : ICustomDrawOperation
+    private sealed class WmoDrawOperation(Rect bounds, WmoPreviewGeometry geometry, IReadOnlyDictionary<int, SKBitmap> textures, float yaw, float pitch, float zoom, int? selectedGroup, bool wireframe, MapWmoPlacement? placement) : ICustomDrawOperation
     {
         private readonly record struct Face(float Depth, int Material, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy, byte Shade, SKBitmap? Texture, uint BlendMode);
         private readonly record struct TextureGroup(int Material, SKBitmap Texture, uint BlendMode);
@@ -100,9 +103,14 @@ internal sealed class WmoPreviewCanvas : Control, IDisposable
             if (visibleGroups.Count == 0) return;
             var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity);
             foreach (var group in visibleGroups) { minimum = Vector3.Min(minimum, group.Minimum); maximum = Vector3.Max(maximum, group.Maximum); }
-            var center = (minimum + maximum) * 0.5f; var extent = maximum - minimum; var largest = Math.Max(extent.X, Math.Max(extent.Y, extent.Z)); if (!float.IsFinite(largest) || largest <= 0.00001f) return;
-            var scale = Math.Min(width, height) * 0.42f / largest * zoom; var rotation = Matrix4x4.CreateRotationZ(yaw) * Matrix4x4.CreateRotationX(pitch);
+            var center = (minimum + maximum) * 0.5f; var placementTransform = placement is null ? Matrix4x4.Identity :
+                Matrix4x4.CreateScale(placement.Scale) * Matrix4x4.CreateRotationX(Degrees(placement.Orientation.X)) * Matrix4x4.CreateRotationY(Degrees(placement.Orientation.Y)) * Matrix4x4.CreateRotationZ(Degrees(placement.Orientation.Z));
+            var rotation = placementTransform * Matrix4x4.CreateRotationZ(yaw) * Matrix4x4.CreateRotationX(pitch);
             var transformed = new Vector3[geometry.Vertices.Count]; for (var index = 0; index < transformed.Length; index++) transformed[index] = Vector3.Transform(geometry.Vertices[index] - center, rotation);
+            var transformedMinimum = new Vector3(float.PositiveInfinity); var transformedMaximum = new Vector3(float.NegativeInfinity);
+            foreach (var group in visibleGroups) for (var index = group.VertexStart; index < group.VertexStart + group.VertexCount; index++) { transformedMinimum = Vector3.Min(transformedMinimum, transformed[index]); transformedMaximum = Vector3.Max(transformedMaximum, transformed[index]); }
+            var extent = transformedMaximum - transformedMinimum; var largest = Math.Max(extent.X, Math.Max(extent.Y, extent.Z)); if (!float.IsFinite(largest) || largest <= 0.00001f) return;
+            var scale = Math.Min(width, height) * 0.42f / largest * zoom;
             var visibleSet = visibleGroups.Select(group => group.Index).ToHashSet(); var renderBatches = geometry.Batches.Where(batch => visibleSet.Contains(batch.GroupIndex)).ToArray();
             var triangleCount = renderBatches.Sum(batch => batch.TriangleIndexCount) / 3; var sampling = Math.Max(1, (int)Math.Ceiling(triangleCount / 50_000d)); var faces = new List<Face>(Math.Min(triangleCount, 50_000)); var light = Vector3.Normalize(new Vector3(-0.35f, -0.65f, 0.9f));
             foreach (var batch in renderBatches)
@@ -135,7 +143,7 @@ internal sealed class WmoPreviewCanvas : Control, IDisposable
                 void AddUv(int destination, int vertex) { var uv = geometry.TextureCoordinates[vertex]; coordinates[destination] = new(uv.X * group.Key.Texture.Width, uv.Y * group.Key.Texture.Height); }
             }
             using var text = new SKPaint { IsAntialias = true, Color = new SKColor(225, 231, 240) }; using var titleFont = new SKFont(SKTypeface.Default, 13); using var hintFont = new SKFont(SKTypeface.Default, 12);
-            var groupLabel = selectedGroup is null ? $"{visibleGroups.Count:N0} groups" : $"group {selectedGroup:000}"; canvas.DrawText($"{Path.GetFileName(geometry.RootPath)} · {groupLabel} · {textures.Count:N0}/{geometry.Materials.Count:N0} textures · {faces.Count:N0} displayed faces", 12, 23, SKTextAlign.Left, titleFont, text); text.Color = new SKColor(170, 182, 200); canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
+            var groupLabel = selectedGroup is null ? $"{visibleGroups.Count:N0} groups" : $"group {selectedGroup:000}"; var placementLabel = placement is null ? string.Empty : $" · UID {placement.UniqueId:N0} · MODF rot {placement.Orientation.X:0.#},{placement.Orientation.Y:0.#},{placement.Orientation.Z:0.#} · scale {placement.Scale:0.###}"; canvas.DrawText($"{Path.GetFileName(geometry.RootPath)} · {groupLabel} · {textures.Count:N0}/{geometry.Materials.Count:N0} textures · {faces.Count:N0} displayed faces{placementLabel}", 12, 23, SKTextAlign.Left, titleFont, text); text.Color = new SKColor(170, 182, 200); canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }
 
         private static SKColor MaterialColor(int material, byte shade)
@@ -143,5 +151,6 @@ internal sealed class WmoPreviewCanvas : Control, IDisposable
             var seed = unchecked((uint)(material + 1) * 2654435761u); var brightness = 0.42f + shade / 15f * 0.58f; return new((byte)(((seed >> 16 & 0x7F) + 80) * brightness), (byte)(((seed >> 8 & 0x7F) + 80) * brightness), (byte)(((seed & 0x7F) + 80) * brightness), 255);
         }
         private static SKBlendMode Blend(uint mode) => mode switch { 3 or 4 => SKBlendMode.Plus, 5 or 6 => SKBlendMode.Modulate, _ => SKBlendMode.SrcOver };
+        private static float Degrees(float value) => value * MathF.PI / 180f;
     }
 }

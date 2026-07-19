@@ -15,6 +15,10 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     {
         public override string ToString() => $"{Location.Provenance} · {Path.GetFileName(Location.SourcePath)}";
     }
+    private sealed record WmoReferenceChoice(string? ClientPath, MapWmoPlacement? Placement)
+    {
+        public override string ToString() => Placement is null ? ClientPath ?? "Unresolved WMO" : $"UID {Placement.UniqueId:N0} · {Path.GetFileName(ClientPath)} · pos {Placement.Position.X:0.##}, {Placement.Position.Y:0.##}, {Placement.Position.Z:0.##}";
+    }
     private static readonly MapBrushModeChoice[] BrushModes = [new("Raise / lower", AdtTerrainBrushMode.RaiseLower), new("Flatten toward height", AdtTerrainBrushMode.Flatten), new("Smooth terrain", AdtTerrainBrushMode.Smooth), new("Seeded noise", AdtTerrainBrushMode.Noise)];
     private readonly DesktopWorkspaceSession _session;
     private readonly TextBox _path = new() { PlaceholderText = "Open or drop a WotLK ADT, WDT, or WDL file…" };
@@ -146,8 +150,12 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             _inspection = inspection; _textureSourceInspection = _textureInspection = loaded.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = loaded.alphaResult.Inspection; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; SetTextureChoices(_textureInspection); _grid.SetInspection(inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(inspection); _selected.Text = "Select a present grid cell for exact terrain, texture-layer, and alpha-map metadata.";
             _chunks.ItemsSource = inspection.Chunks.Select(chunk => $"{chunk.Id} · {chunk.Occurrences:N0} chunk(s) · {chunk.PayloadBytes:N0} bytes").ToArray();
             _dependencies.ItemsSource = inspection.TexturePaths.Select(value => "Texture · " + value).Concat(inspection.ModelPaths.Select(value => "Model · " + value)).Concat(inspection.WmoPaths.Select(value => "WMO · " + value)).DefaultIfEmpty("No path-list dependencies in this file.").ToArray();
-            _wmoCandidates.ItemsSource = null; _wmoReferences.ItemsSource = inspection.WmoPaths; _wmoReferences.SelectedIndex = inspection.WmoPaths.Count > 0 ? 0 : -1;
-            if (inspection.WmoPaths.Count == 0) _wmoStatus.Text = "This map contains no path-listed WMO references.";
+            _wmoCandidates.ItemsSource = null;
+            var placedPaths = inspection.WmoPlacements.Where(value => value.ClientPath is not null).Select(value => value.ClientPath!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var wmoReferences = inspection.WmoPlacements.Select(value => new WmoReferenceChoice(value.ClientPath, value))
+                .Concat(inspection.WmoPaths.Where(value => !placedPaths.Contains(value)).Select(value => new WmoReferenceChoice(value, null))).ToArray();
+            _wmoReferences.ItemsSource = wmoReferences; _wmoReferences.SelectedIndex = wmoReferences.Length > 0 ? 0 : -1;
+            if (wmoReferences.Length == 0) _wmoStatus.Text = "This map contains no path-listed WMO references or MODF placements.";
             _status.Text = $"Loaded {inspection.Kind} · {inspection.PresentCells:N0}/{inspection.Cells.Count:N0} present cells · click a cell for details · drop another map file anywhere on the grid" + (loaded.textureResult.Error is null ? string.Empty : $" · texture layers unavailable: {loaded.textureResult.Error}") + (loaded.alphaResult.Error is null ? string.Empty : $" · alpha maps unavailable: {loaded.alphaResult.Error}");
         }
         catch (OperationCanceledException) { }
@@ -387,7 +395,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     {
         var top = TopLevel.GetTopLevel(this); if (top is null) return;
         var files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Open an extracted WotLK root or group WMO", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WoW WMO") { Patterns = ["*.wmo"] }] });
-        var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) await LoadWmoAsync(path);
+        var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) await LoadWmoAsync(path, null);
     }
 
     private async Task PickWmoLibraryAsync()
@@ -401,7 +409,9 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private async Task ResolveSelectedWmoAsync()
     {
         _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = new CancellationTokenSource(); var token = _wmoOperation.Token; _wmoCandidates.ItemsSource = null;
-        if (_wmoReferences.SelectedItem is not string clientPath) return;
+        if (_wmoReferences.SelectedItem is not WmoReferenceChoice reference) return;
+        if (string.IsNullOrWhiteSpace(reference.ClientPath)) { _wmoStatus.Text = $"MODF placement UID {reference.Placement?.UniqueId.ToString("N0") ?? "?"} has no resolvable MWID→MWMO path."; return; }
+        var clientPath = reference.ClientPath;
         var library = _wmoLibrary.Text?.Trim(); if (string.IsNullOrWhiteSpace(library)) { _wmoStatus.Text = $"Referenced WMO: {clientPath} · choose the processed asset library to resolve it."; return; }
         _wmoStatus.Text = $"Resolving every provenance candidate for {clientPath}…";
         try
@@ -441,23 +451,24 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private async Task PreviewSelectedWmoAsync()
     {
         if (_wmoCandidates.SelectedItem is not WmoCandidateChoice choice) { _wmoStatus.Text = "Select an explicit WMO provenance candidate first."; return; }
-        await LoadWmoAsync(choice.Location.SourcePath);
+        await LoadWmoAsync(choice.Location.SourcePath, (_wmoReferences.SelectedItem as WmoReferenceChoice)?.Placement);
     }
 
-    private async Task LoadWmoAsync(string path)
+    private async Task LoadWmoAsync(string path, MapWmoPlacement? placement)
     {
         _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = new CancellationTokenSource(); var token = _wmoOperation.Token; _wmoStatus.Text = "Loading WMO root, groups, and available BLP materials…";
         try
         {
             var loaded = await Task.Run(() => { var geometry = WmoPreviewGeometryService.Load(path, cancellationToken: token); var textures = WmoPreviewGeometryService.LoadTextures(geometry, cancellationToken: token); return (geometry, textures); }, token); token.ThrowIfCancellationRequested();
-            _wmoPreview.SetGeometry(loaded.geometry); _wmoPreview.SetDecodedTextures(loaded.textures.Textures); _visualTabs.SelectedIndex = 1;
-            _wmoStatus.Text = $"{Path.GetFileName(loaded.geometry.RootPath)} · {loaded.geometry.Groups.Count:N0} groups · {loaded.geometry.TriangleIndices.Count / 3:N0} triangles · {loaded.textures.Textures.Count:N0}/{loaded.geometry.Materials.Count:N0} textures" + (loaded.geometry.Findings.Count + loaded.textures.Findings.Count == 0 ? string.Empty : $" · {loaded.geometry.Findings.Count + loaded.textures.Findings.Count:N0} finding(s)");
+            _wmoPreview.SetGeometry(loaded.geometry); _wmoPreview.SetPlacement(placement); _wmoPreview.SetDecodedTextures(loaded.textures.Textures); _visualTabs.SelectedIndex = 1;
+            var placementText = placement is null ? string.Empty : $" · UID {placement.UniqueId:N0} · pos {placement.Position.X:0.##},{placement.Position.Y:0.##},{placement.Position.Z:0.##} · rot {placement.Orientation.X:0.##},{placement.Orientation.Y:0.##},{placement.Orientation.Z:0.##} · scale {placement.Scale:0.###}";
+            _wmoStatus.Text = $"{Path.GetFileName(loaded.geometry.RootPath)} · {loaded.geometry.Groups.Count:N0} groups · {loaded.geometry.TriangleIndices.Count / 3:N0} triangles · {loaded.textures.Textures.Count:N0}/{loaded.geometry.Materials.Count:N0} textures{placementText}" + (loaded.geometry.Findings.Count + loaded.textures.Findings.Count == 0 ? string.Empty : $" · {loaded.geometry.Findings.Count + loaded.textures.Findings.Count:N0} finding(s)");
         }
         catch (OperationCanceledException) { }
         catch (Exception exception) { _wmoStatus.Text = $"WMO preview unavailable: {exception.Message}"; DesktopCrashLogger.Log("Map WMO preview failed", exception); }
     }
 
-    private static string Summary(MapAssetInspection value) => $"{Path.GetFileName(value.Path)}\n{value.Kind} · MVER {value.Version:N0}\nGrid {value.GridWidth:N0}×{value.GridHeight:N0} · {value.PresentCells:N0}/{value.Cells.Count:N0} present\nWorld tile {(value.TileX is null ? "not encoded by filename" : $"{value.TileX:N0},{value.TileY:N0}")}\nHeight {value.MinimumHeight?.ToString("0.###") ?? "-"} .. {value.MaximumHeight?.ToString("0.###") ?? "-"}\nHeader flags 0x{value.HeaderFlags:X}\n{value.TexturePaths.Count:N0} textures · {value.ModelPaths.Count:N0} models · {value.WmoPaths.Count:N0} WMOs" + (value.Findings.Count == 0 ? "\nValidation: clean" : "\n" + string.Join("\n", value.Findings.Select(finding => "Review: " + finding)));
+    private static string Summary(MapAssetInspection value) => $"{Path.GetFileName(value.Path)}\n{value.Kind} · MVER {value.Version:N0}\nGrid {value.GridWidth:N0}×{value.GridHeight:N0} · {value.PresentCells:N0}/{value.Cells.Count:N0} present\nWorld tile {(value.TileX is null ? "not encoded by filename" : $"{value.TileX:N0},{value.TileY:N0}")}\nHeight {value.MinimumHeight?.ToString("0.###") ?? "-"} .. {value.MaximumHeight?.ToString("0.###") ?? "-"}\nHeader flags 0x{value.HeaderFlags:X}\n{value.TexturePaths.Count:N0} textures · {value.ModelPaths.Count:N0} models · {value.WmoPaths.Count:N0} WMO paths · {value.WmoPlacements.Count:N0} placed WMO instances" + (value.Findings.Count == 0 ? "\nValidation: clean" : "\n" + string.Join("\n", value.Findings.Select(finding => "Review: " + finding)));
     private static string Describe(MapTileCell cell) => $"Grid {cell.X:N0},{cell.Y:N0}\nPresent: {cell.Present}\nFlags: 0x{cell.Flags:X}\nAsync ID: {cell.AsyncId:N0}\nArea ID: {cell.AreaId?.ToString("N0") ?? "-"}\nHoles: 0x{cell.Holes?.ToString("X") ?? "-"}\nHeight: {cell.MinimumHeight?.ToString("0.###") ?? "-"} .. {cell.MaximumHeight?.ToString("0.###") ?? "-"}";
     private static bool IsMap(string? path) => path is not null && File.Exists(path) && Path.GetExtension(path).ToLowerInvariant() is ".adt" or ".wdt" or ".wdl";
     private static TextBlock Info(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#AAB5C7") };

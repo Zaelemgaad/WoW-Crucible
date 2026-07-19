@@ -33,7 +33,7 @@ A content project separates Assets, DBC, SQL, Manifests, Reports, and Staging ou
 
 ```text
 wowcrucible asset texture-info <file.blp>
-wowcrucible asset map-info <file.adt|wdt|wdl> [--cells] [--format=text|json]
+wowcrucible asset map-info <file.adt|wdt|wdl> [--cells] [--placements] [--format=text|json]
 wowcrucible asset adt-height-plan <input.adt> <delta> <x:y,x:y|all> <plan.json> [--overwrite]
 wowcrucible asset adt-height-apply <plan.json> <output.adt> [--overwrite]
 wowcrucible asset adt-brush-plan <input.adt> <center-x:center-y> <radius> <strength> <plan.json> [--mode=raise-lower|flatten|smooth|noise] [--target-height=N] [--seed=N] [--falloff=linear|smooth|constant] [--overwrite]
@@ -82,7 +82,7 @@ The same native inspection/workspace flow is available under **Modern asset conv
 
 `path-candidates` resolves one exact client-relative path against the content-first processed library without scanning or loading its full visual catalog. A single physical candidate is selected automatically. Multiple provenance candidates remain unresolved and return exit code `3` until `--preferred` names one exact provenance; their bytes are not assumed equivalent. Maps & World uses the same operation for the WMO paths extracted from an ADT/WDT.
 
-`map-info` validates a WotLK ADT, WDT, or WDL without loading the complete file into memory. The normal report summarizes chunks, terrain/world-grid occupancy, height range, coordinates, and referenced assets; `--cells` emits every present cell and `--format=json` returns the complete inspection model used by the same-window Maps & World grid.
+`map-info` validates a WotLK ADT, WDT, or WDL without loading the complete file into memory. The normal report summarizes chunks, terrain/world-grid occupancy, height range, coordinates, referenced assets, and placed-WMO count; `--cells` emits every present terrain cell and `--placements` emits every decoded MWID→MWMO/MODF instance with UID, position, orientation, extents, flags, doodad/name sets, and scale. `--format=json` returns the complete inspection model with numeric vector fields used by the same-window Maps & World grid and placed-instance selector.
 
 ADT height editing is intentionally two-stage. `adt-height-plan` binds a finite signed delta and explicit `x:y` cells (or all present cells) to the exact source SHA-256 and original MCNK base heights. `adt-height-apply` refuses a changed source or in-place source overwrite, writes a separate ADT atomically, re-parses every edited height range, and emits a companion `.crucible-map-edit.json` receipt. The Maps & World workspace provides the same selection, preview, and write path visually.
 
