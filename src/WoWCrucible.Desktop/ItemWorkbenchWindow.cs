@@ -22,7 +22,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _password = new() { PasswordChar = '●', HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
-    private readonly TextBox _search = new() { PlaceholderText = "Search every item by name, or enter exact ID(s): 17802 / #17 #17802…" };
+    private readonly TextBox _search = new() { PlaceholderText = "Filter the selected catalog by item name, quality, level, set, or ID…" };
+    private readonly TextBox _exactIds = new() { PlaceholderText = "Exact item ID(s), always bypassing filters: 17 17802" };
     private readonly ComboBox _classification = new()
     {
         ItemsSource = new[] { "No known acquisition path", "Known acquisition path", "All item_template rows" },
@@ -103,14 +104,16 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         _search.TextChanged += (_, _) => ApplyAuditFilter();
         _search.KeyDown += async (_, args) =>
         {
-            if (args.Key != Key.Enter) return; args.Handled = true;
-            var entries = ItemIdQueryParser.Parse(_search.Text);
-            if (entries.Count > 0)
-            {
-                if (_audit is null) await AuditAsync();
-                if (_audit is not null) ShowPinnedExactItems(entries);
-            }
-            else if (_audit is null) await AuditAsync();
+            if (args.Key != Key.Enter) return;
+            args.Handled = true;
+            if (_audit is null) await AuditAsync();
+            else ApplyAuditFilter();
+        };
+        _exactIds.KeyDown += async (_, args) =>
+        {
+            if (args.Key != Key.Enter) return;
+            args.Handled = true;
+            await InspectSearchExactAsync();
         };
         _classification.SelectionChanged += (_, _) =>
         {
@@ -124,11 +127,11 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var sqlStudio = AccentButton("SQL Studio — full database"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
         var sqlFavorites = new Button { Content = "★ SQL row favorites" }; sqlFavorites.Click += async (_, _) => await OpenSqlFavoritesAsync();
-        var mpqMerge = new Button { Content = "MPQ patches / merge" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
+        var mpqMerge = new Button { Content = "Merge MPQ patches" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
         var titleActions = new WrapPanel { Children = { sqlStudio, sqlFavorites, mpqMerge } };
         root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, titleActions } } });
         var connection = ConnectionBar(); Grid.SetRow(connection, 1); root.Children.Add(connection);
-        _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Unobtainable / cut items", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() } } };
+        _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Acquisition / cut-item audit", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() } } };
         _tabs.SelectionChanged += async (_, _) =>
         {
             if (_tabs.SelectedIndex != 1 || _audit is not null || _auditLoading) return;
@@ -160,21 +163,21 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private Control AcquisitionPage()
     {
         var audit = AccentButton("Scan acquisition paths"); audit.Click += async (_, _) => await AuditAsync();
-        var findExact = new Button { Content = "Find exact ID(s) — bypass every filter" }; findExact.Click += async (_, _) => await InspectSearchExactAsync();
+        var findExact = AccentButton("Find exact ID(s) — bypass every filter"); findExact.Click += async (_, _) => await InspectSearchExactAsync();
         var inspect = AccentButton("Explain selected / exact ID"); inspect.Click += async (_, _) => await InspectExactAsync();
-        var reset = new Button { Content = "Reset to every no-path item" }; reset.Click += (_, _) => { _search.Text = string.Empty; _classification.SelectedIndex = 0; _reviewGroup.SelectedIndex = 0; ApplyAuditFilter(); };
+        var reset = new Button { Content = "Reset to every no-path item" }; reset.Click += (_, _) => { _exactIds.Text = string.Empty; _search.Text = string.Empty; _classification.SelectedIndex = 0; _reviewGroup.SelectedIndex = 0; ApplyAuditFilter(); };
         var edit = new Button { Content = "Open selected in decoded editor" }; edit.Click += async (_, _) => await OpenSelectedItemAsync(false);
         var fullSql = new Button { Content = "Open complete SQL row" }; fullSql.Click += async (_, _) => await OpenSelectedInSqlAsync();
         var favorite = new Button { Content = "★ Favorite selected row" }; favorite.Click += async (_, _) => await OpenSelectedItemAsync(true);
         var browseDbc = new Button { Content = "DBC folder…" }; browseDbc.Click += async (_, _) => await PickFolderAsync(_acquisitionDbc, "Select the server DBC folder");
         var browseMpq = new Button { Content = "Related MPQ…" }; browseMpq.Click += async (_, _) => await PickFileAsync(_favoriteMpq, "Select an optional related MPQ", "*.mpq");
-        var searchRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { _search, WithColumn(findExact, 1) } };
+        var exactRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { _exactIds, WithColumn(findExact, 1) } };
         var classificationRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Show", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_classification, 1) } };
         var groupRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Review group", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_reviewGroup, 1) } };
-        var header = new StackPanel { Spacing = 7, Margin = new Thickness(0,0,0,8), Children = { new WrapPanel { Children = { audit, reset, _auditSummary } }, searchRow, classificationRow, groupRow } };
+        var header = new StackPanel { Spacing = 7, Margin = new Thickness(0,0,0,8), Children = { new WrapPanel { Children = { audit, reset, _auditSummary } }, exactRow, _search, classificationRow, groupRow } };
         var rowActions = new WrapPanel { Children = { inspect, edit, fullSql, favorite } };
         var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
-        var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, and developer cheats. Entering one or more exact numeric IDs in the single search box always bypasses classification and review filters; entering text searches the currently selected classification. Every row states which evidence was accepted or rejected. Custom scripts and core code still require manual review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, and developer cheats. Exact-ID lookup has its own field and always bypasses every classification/review filter. The ordinary filter searches the selected catalog. Every row states which evidence was accepted or rejected; custom scripts and core code still require manual review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
         return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(rowActions, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
@@ -232,8 +235,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private async Task InspectExactAsync()
     {
         var selectedEntry = (_items.SelectedItem as ItemCatalogEntry)?.Entry;
-        if (!ItemIdQueryParser.TryParseSingle(_search.Text, out var entry) && selectedEntry is null) { _inspection.Text = "Select a row, or enter one positive item ID in the main search box. Plain, comma-grouped, and #prefixed forms are accepted (17802, 17,802, or #17802)."; return; }
-        entry = ItemIdQueryParser.TryParseSingle(_search.Text, out var searchedEntry) ? searchedEntry : selectedEntry!.Value;
+        if (!ItemIdQueryParser.TryParseSingle(_exactIds.Text, out var entry) && selectedEntry is null) { _inspection.Text = "Select a row, or enter one positive item ID in the exact-ID field. Plain, comma-grouped, and #prefixed forms are accepted (17802, 17,802, or #17802)."; return; }
+        entry = ItemIdQueryParser.TryParseSingle(_exactIds.Text, out var searchedEntry) ? searchedEntry : selectedEntry!.Value;
         SetBusy($"Locating exact item {entry:N0} in the complete acquisition catalog…");
         try
         {
@@ -254,10 +257,10 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private async Task InspectSearchExactAsync()
     {
-        var entries = ItemIdQueryParser.Parse(_search.Text);
+        var entries = ItemIdQueryParser.Parse(_exactIds.Text);
         if (entries.Count == 0)
         {
-            _status.Text = "Enter one or more positive item IDs. Use spaces, semicolons, or # prefixes for a batch; a grouped single ID such as 17,802 remains valid.";
+            _status.Text = "Enter one or more positive IDs in the exact-ID field. Use spaces, semicolons, or # prefixes for a batch; a grouped single ID such as 17,802 remains valid.";
             return;
         }
         if (_audit is null) await AuditAsync();
@@ -326,31 +329,6 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private void ApplyAuditFilter()
     {
         if (_audit is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _status.Text = CanQueryDatabase() ? "The acquisition catalog is loading, or press Scan acquisition paths to refresh it now." : "Connect the live world database above. This tab will then load automatically."; return; } var query = _search.Text?.Trim() ?? string.Empty;
-        var exactIds = ItemIdQueryParser.Parse(query);
-        if (exactIds.Count > 1)
-        {
-            ShowPinnedExactItems(exactIds);
-            return;
-        }
-        if (ItemIdQueryParser.TryParseSingle(query, out var exactId))
-        {
-            _auditById.TryGetValue(exactId, out var exact);
-            if (exact is null)
-            {
-                _items.ItemsSource = Array.Empty<ItemCatalogEntry>();
-                _status.Text = $"Exact item {exactId:N0} does not exist in item_template.";
-                return;
-            }
-            if (exact.HasKnownAcquisitionPath)
-            {
-                _items.ItemsSource = new[] { exact }; _items.SelectedItem = exact; _items.ScrollIntoView(exact);
-                _status.Text = $"Exact item {exactId:N0} has a KNOWN acquisition path: {string.Join("; ", exact.AcquisitionSources.Take(3))}. It is shown so its classification is never mistaken for a missing row.";
-                return;
-            }
-            _items.ItemsSource = new[] { exact }; _items.SelectedItem = exact; _items.ScrollIntoView(exact);
-            _status.Text = $"Exact item {exactId:N0} is classified NO KNOWN ACQUISITION PATH.";
-            return;
-        }
         var mode = _classification.SelectedIndex;
         IEnumerable<ItemCatalogEntry> rows = mode switch
         {
@@ -373,7 +351,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         if (result.Length > 0) { _items.SelectedItem = result[0]; _items.ScrollIntoView(result[0]); }
         var label = mode switch { 1 => "known-path", 2 => "total", _ => "no-known-path" };
         var group = mode == 0 && _reviewGroup.SelectedIndex > 0 ? $" · {Convert.ToString(_reviewGroup.SelectedItem)}" : string.Empty;
-        _status.Text = $"Showing {result.Length:N0} {label} item(s){group}. Numeric searches always show an existing exact row and state its classification.";
+        _status.Text = $"Showing all {result.Length:N0} matching {label} item(s){group}; the catalog is not capped. Use Exact item ID(s) for a guaranteed filter-bypassing lookup.";
     }
 
     private void ShowPinnedExactItems(IReadOnlyList<uint> entries)

@@ -1423,13 +1423,16 @@ if (Directory.Exists(desktopSourceRoot))
     var sqlWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("SqlWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 17802", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Find exact ID(s) — bypass every filter", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("the catalog is not capped", StringComparison.Ordinal) ||
         itemWorkbenchSource.Contains("Inspect exact item ID", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("SqlFavoritesRequested", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("ActivateFavorites", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related DBC / DB2 path", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related MPQ path", StringComparison.Ordinal) ||
-        !mainWindowSource.Contains("OpenSqlFavorites", StringComparison.Ordinal))
+        !mainWindowSource.Contains("OpenSqlFavorites", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("OpenMpqMergeWorkspace", StringComparison.Ordinal))
         throw new InvalidOperationException("Cut-item classification, exact-ID bypass, arbitrary SQL-row favorites, or the direct same-window Favorites route regressed.");
 }
 

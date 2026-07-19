@@ -144,6 +144,13 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         AddPaths(paths);
     }
 
+    public void ActivateMerge()
+    {
+        _tabs.SelectedIndex = 4;
+        RefreshMergeInputs();
+        _mergeInputs.Focus();
+    }
+
     public void StageEntries(IEnumerable<PatchEntry> entries)
     {
         _tabs.SelectedIndex = 0; _targetClientRequirement = null;
