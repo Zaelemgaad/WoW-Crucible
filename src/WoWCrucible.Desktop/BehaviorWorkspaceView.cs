@@ -19,19 +19,21 @@ internal sealed class BehaviorWorkspaceView : UserControl, IDisposable
     private readonly TextBox _sql = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
     private readonly TextBlock _status = Status("Offline behavior schemas ready.");
     private readonly Button _commit = AccentButton("Insert into connected world database");
+    private readonly Button _petCurve = new() { Content = "Bulk level curve…", IsVisible = false };
     private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private IReadOnlyDictionary<string, object?>? _initialValues;
     private IReadOnlyDictionary<string, object?>? _loadedKey;
     private WorldContentWritePlan? _pendingPlan;
     private bool _syncing;
     public event EventHandler? BackRequested;
+    public event EventHandler? PetCurveRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public BehaviorWorkspaceView(DesktopWorkspaceSession session)
     {
         _session = session; _session.Changed += SessionChanged; _domain.SelectedItem = BehaviorDomainCatalog.All[0]; _domain.SelectionChanged += (_, _) => { if (_syncing) return; ResetNew(); };
-        var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty); var create = new Button { Content = "New row" }; create.Click += (_, _) => ResetNew();
-        var heading = new Grid { ColumnDefinitions = new("Auto,*,2*,Auto"), Margin = new Thickness(12, 8), ColumnSpacing = 10, Children = { back, WithColumn(new TextBlock { Text = "WORLD DATA EDITORS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center }, 1), WithColumn(_domain, 2), WithColumn(create, 3) } };
+        var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty); var create = new Button { Content = "New row" }; create.Click += (_, _) => ResetNew(); _petCurve.Click += (_, _) => PetCurveRequested?.Invoke(this, EventArgs.Empty);
+        var heading = new WrapPanel { Margin = new Thickness(12, 8), Children = { back, new TextBlock { Text = "WORLD DATA EDITORS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center }, _domain, _petCurve, create } };
         var preview = new TabControl { Items = { new TabItem { Header = "Decoded summary", Content = new ScrollViewer { Content = new Border { Padding = new Thickness(16), BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _summary } } }, new TabItem { Header = "SQL change plan", Content = _sql } } };
         var workspace = new Grid { ColumnDefinitions = new("3*,Auto,2*"), Children = { _fieldTabs, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(preview, 2) } };
         var import = new Button { Content = "Open portable draft…" }; import.Click += async (_, _) => await ImportDraftAsync(); var exportDraft = new Button { Content = "Export portable draft…" }; exportDraft.Click += async (_, _) => await ExportDraftAsync(); var exportSql = new Button { Content = "Export SQL…" }; exportSql.Click += async (_, _) => await ExportSqlAsync(); _commit.Click += (_, _) => PrepareCommit();
@@ -53,7 +55,7 @@ internal sealed class BehaviorWorkspaceView : UserControl, IDisposable
 
     private void RebuildFields()
     {
-        _fieldTabs.ItemsSource = null; _editors.Clear(); var table = Table(); var initial = new Dictionary<string, object?>(BehaviorAuthoringAdapter.Defaults(table), StringComparer.OrdinalIgnoreCase); if (_initialValues is not null) foreach (var pair in _initialValues) initial[pair.Key] = pair.Value; var tabs = new List<TabItem>();
+        _fieldTabs.ItemsSource = null; _editors.Clear(); var table = Table(); _petCurve.IsVisible = table.Name.Equals("pet_levelstats", StringComparison.OrdinalIgnoreCase); var initial = new Dictionary<string, object?>(BehaviorAuthoringAdapter.Defaults(table), StringComparer.OrdinalIgnoreCase); if (_initialValues is not null) foreach (var pair in _initialValues) initial[pair.Key] = pair.Value; var tabs = new List<TabItem>();
         foreach (var group in table.Columns.GroupBy(column => BehaviorAuthoringAdapter.Group(table.Name, column.Name)))
         {
             var panel = new StackPanel { Spacing = 7, Margin = new Thickness(12) };

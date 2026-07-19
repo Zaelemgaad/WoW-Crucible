@@ -281,6 +281,7 @@ wowcrucible db import <host> <port> <user> <database> <table> <input.csv> [--app
 wowcrucible db dependency-snapshot <host> <port> <user> <database> <table> <output.json> --key=column=value [--key=column=value]... [--limit=N] [--overwrite]
 wowcrucible db draft-template <domain> <output.json> [--overwrite]
 wowcrucible db content-plan <host> <port> <user> <database> <domain> <draft.json> [--output=plan.sql] [--overwrite] [--apply] [--update] --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db pet-curve <host> <port> <user> <database> <source-creature> <target-creature> [--levels=1-80] [--health=1] [--mana=1] [--armor=1] [--attributes=1] [--damage=1] [--output=curve.sql] [--overwrite] [--format=text|json] [--apply] [--update-existing] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=ENV_NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
 wowcrucible db snapshot-inspect <snapshot-file> [--quick]
 wowcrucible db recovery-audit <legacy-snapshot> <output.crucible-db-audit> [--baseline=stock-snapshot] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
@@ -343,6 +344,14 @@ wowcrucible db draft-template smartai smartai.json
 wowcrucible db content-plan 127.0.0.1 3306 acore acore_world smartai smartai.json --password-env=WOW_CRUCIBLE_DB_PASSWORD
 wowcrucible db draft-template pet-level-stats pet-level-80.json
 wowcrucible db content-plan 127.0.0.1 3306 acore acore_world pet-level-stats pet-level-80.json --password-env=WOW_CRUCIBLE_DB_PASSWORD
+```
+
+`db pet-curve` reads every requested `pet_levelstats` row from an existing source creature and creates a target curve with the same per-level shape. Health, mana, armor, all five attributes, and minimum/maximum damage have independent invariant-decimal scale factors; unknown live columns are retained unchanged. A source gap, composite-key mismatch, numeric overflow, invalid damage range, or changed target/schema blocks the operation. The default is a dry-run SQL preview. `--apply` inserts only missing target levels and preserves existing rows; replacing exact existing levels additionally requires `--update-existing`. Both policies run in one transaction and never delete levels.
+
+The desktop exposes this under **Pets & companions → Bulk level curve…** without opening another application window. `WoWCrucible.Desktop-latest.exe --pet-curve` launches directly into it.
+
+```powershell
+wowcrucible db pet-curve 127.0.0.1 3306 admin acore_world 416 900416 --levels=1-80 --health=1.25 --damage=1.1 --output=review-pet-curve.sql --password-env=WOW_CRUCIBLE_DB_PASSWORD
 ```
 
 `db snapshot` is phase one of legacy SQL recovery. It issues only fixed metadata queries and `SELECT` statements, requests a consistent read-only transaction where the server supports one, streams base-table rows without loading the database into memory, and publishes the compressed artifact atomically. By default it verifies that the selected schema looks like a world database and excludes known auth/character runtime-state tables while retaining reusable definitions such as `mail_loot_template`, `instance_template`, `guild_rewards`, and `pet_levelstats`. Repeat `--include` or `--exclude` for table-name globs. `--include-sensitive` deliberately removes the runtime-state safety filter; those captured rows may themselves contain account secrets even though the live connection password is never serialized.

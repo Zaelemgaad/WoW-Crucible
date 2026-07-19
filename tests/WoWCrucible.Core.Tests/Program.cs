@@ -1,6 +1,7 @@
 using WoWCrucible.Core;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Globalization;
 using System.Numerics;
 using System.Text.Json;
 
@@ -13,6 +14,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.items" ||
     CrucibleCommandCatalog.Search("project collision ids").FirstOrDefault()?.Command.Id != "workspace.projects" ||
     CrucibleCommandCatalog.Search("pet companion level stats").FirstOrDefault()?.Command.Id != "workspace.pets" ||
+    CrucibleCommandCatalog.Search("pet level curve scale").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.assets" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
@@ -1203,6 +1205,22 @@ var petAuraValues = new Dictionary<string, object?>(BehaviorAuthoringAdapter.Def
 var petAuraPlan = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("spell-pet-aura"), portablePetAuras, petAuraValues);
 if (petStatsPlan.Rows[0].Key.Count != 2 || petAuraPlan.Rows[0].Key.Count != 3 || BehaviorSemanticCatalog.PetNameHalves.Single(choice => choice.Value == 1).Name != "Second half" || !petAuraPlan.PreviewSql().Contains("35696", StringComparison.Ordinal))
     throw new InvalidOperationException("Pet complete-field planning, composite identities, decoded name halves, or SQL preview failed.");
+var customPetStats = portablePetStats with { Columns = portablePetStats.Columns.Concat([new DatabaseColumnCapability("custom_growth_bucket", "int", "int unsigned", false, "0", "", "", 13)]).ToArray() };
+var petCurveSource = Enumerable.Range(1, 3).Select(level => (IReadOnlyDictionary<string, object?>)new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+{
+    ["creature_entry"] = 416, ["level"] = level, ["hp"] = level == 3 ? 31 : level * 10, ["mana"] = level * 5, ["armor"] = level * 20,
+    ["str"] = 10 + level, ["agi"] = 11 + level, ["sta"] = 12 + level, ["inte"] = 13 + level, ["spi"] = 14 + level,
+    ["min_dmg"] = level, ["max_dmg"] = level + 2, ["custom_growth_bucket"] = 77
+}).ToArray();
+var curveService = new PetLevelCurveService(); var curveRequest = new PetLevelCurveRequest(416, 990416, 1, 3, new(1.5m, 0m, 1m, 2m, 1.25m)); var curvePlan = curveService.CreateScaledPlan(customPetStats, curveRequest, petCurveSource);
+var finalCurveValues = curvePlan.Rows[2].Values;
+if (curvePlan.Rows.Count != 3 || Convert.ToUInt32(curvePlan.Rows[0].Values["creature_entry"], CultureInfo.InvariantCulture) != 990416 || Convert.ToDecimal(finalCurveValues["hp"], CultureInfo.InvariantCulture) != 47m || Convert.ToDecimal(finalCurveValues["mana"], CultureInfo.InvariantCulture) != 0m || Convert.ToDecimal(finalCurveValues["str"], CultureInfo.InvariantCulture) != 26m || Convert.ToDecimal(finalCurveValues["custom_growth_bucket"], CultureInfo.InvariantCulture) != 77m)
+    throw new InvalidOperationException("Pet curve cloning did not preserve the source shape, scale known stat families, round integral fields, or retain custom columns.");
+var preparedCurve = new PetLevelCurvePreparedPlan(curveRequest, curvePlan, "schema", new Dictionary<int, string?> { [1] = null, [2] = null, [3] = null }, 3);
+if (!curveService.PreviewSql(preparedCurve, PetLevelCurveWriteMode.InsertMissing).Contains("WHERE NOT EXISTS", StringComparison.Ordinal) || !curveService.PreviewSql(preparedCurve, PetLevelCurveWriteMode.UpdateExactRange).Contains("UPDATE `pet_levelstats` SET", StringComparison.Ordinal))
+    throw new InvalidOperationException("Pet curve SQL previews no longer distinguish missing-only from explicit exact-range updates.");
+try { _ = curveService.CreateScaledPlan(customPetStats, curveRequest with { EndLevel = 4 }, petCurveSource); throw new InvalidOperationException("A pet curve with a missing source level was accepted."); }
+catch (InvalidDataException) { }
 try { var invalid = new Dictionary<string, object?>(petStatsValues, StringComparer.OrdinalIgnoreCase) { ["min_dmg"] = 459, ["max_dmg"] = 458 }; _ = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("pet-level-stats"), portablePetStats, invalid); throw new InvalidOperationException("Invalid pet damage range was accepted."); }
 catch (InvalidDataException) { }
 try { var invalid = new Dictionary<string, object?>(petAuraValues, StringComparer.OrdinalIgnoreCase) { ["effectId"] = 3 }; _ = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("spell-pet-aura"), portablePetAuras, invalid); throw new InvalidOperationException("Invalid fourth WotLK pet-aura effect slot was accepted."); }

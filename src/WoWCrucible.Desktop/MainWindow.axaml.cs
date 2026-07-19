@@ -45,6 +45,7 @@ public partial class MainWindow : Window
     private GameObjectWorkspaceView? _gameObjectWorkspaceView;
     private QuestWorkspaceView? _questWorkspaceView;
     private BehaviorWorkspaceView? _behaviorWorkspaceView;
+    private PetLevelCurveView? _petLevelCurveView;
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
     private SqlWorkspaceView? _sqlWorkspaceView;
     private readonly Stack<(Control Workspace, string Title)> _featureHistory = new();
@@ -86,7 +87,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
+        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -737,8 +738,19 @@ public partial class MainWindow : Window
         if (_behaviorWorkspaceView is not null) return _behaviorWorkspaceView;
         _behaviorWorkspaceView = new BehaviorWorkspaceView(_workspaceSession);
         _behaviorWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        _behaviorWorkspaceView.PetCurveRequested += (_, _) => OpenPetLevelCurveWorkspace();
         _behaviorWorkspaceView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         return _behaviorWorkspaceView;
+    }
+    public void OpenPetLevelCurveWorkspace()
+    {
+        if (_petLevelCurveView is null)
+        {
+            _petLevelCurveView = new PetLevelCurveView(_workspaceSession);
+            _petLevelCurveView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _petLevelCurveView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
+        }
+        OpenFeatureWorkspace(_petLevelCurveView, "Pet level curve");
     }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
     private void OpenNativeConversionClick(object? sender, RoutedEventArgs e) => OpenNativeConversionWorkspace();
