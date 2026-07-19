@@ -34,6 +34,29 @@ public sealed record PetLevelCurvePreparedPlan(
 
 public sealed record PetLevelCurveApplyResult(int Inserted, int Updated, int Skipped);
 
+public sealed record PetLevelCurveComparisonRequest(uint LeftCreatureEntry, uint RightCreatureEntry, byte StartLevel, byte EndLevel);
+
+public sealed record PetLevelCurveValuePoint(int Level, decimal? Left, decimal? Right, decimal? DeltaPercent);
+
+public sealed record PetLevelCurveMetricComparison(
+    string Column,
+    string Display,
+    IReadOnlyList<PetLevelCurveValuePoint> Points,
+    decimal? LeftGrowthPercent,
+    decimal? RightGrowthPercent,
+    decimal? EndDeltaPercent,
+    decimal? AverageDeltaPercent,
+    int PairedLevels)
+{
+    public override string ToString() => $"{Display} · {Column}";
+}
+
+public sealed record PetLevelCurveComparison(
+    PetLevelCurveComparisonRequest Request,
+    IReadOnlyList<PetLevelCurveMetricComparison> Metrics,
+    IReadOnlyList<int> MissingLeftLevels,
+    IReadOnlyList<int> MissingRightLevels);
+
 public sealed class PetLevelCurveService
 {
     private static readonly HashSet<string> AttributeColumns = new(StringComparer.OrdinalIgnoreCase) { "str", "agi", "sta", "inte", "spi" };
@@ -85,6 +108,40 @@ public sealed class PetLevelCurveService
         var targetByLevel = target.ToDictionary(row => ToInt(Value(row, "level"), "target level"));
         var expected = Enumerable.Range(request.StartLevel, request.EndLevel - request.StartLevel + 1).ToDictionary(level => level, level => targetByLevel.TryGetValue(level, out var row) ? FingerprintRow(table, row) : null);
         return new(request, content, FingerprintSchema(table), expected, source.Count);
+    }
+
+    public PetLevelCurveComparison CreateComparison(DatabaseTableCapability table, PetLevelCurveComparisonRequest request, IReadOnlyList<IReadOnlyDictionary<string, object?>> leftRows, IReadOnlyList<IReadOnlyDictionary<string, object?>> rightRows)
+    {
+        ValidateTable(table); ValidateComparisonRequest(request);
+        var left = IndexComparisonRows(leftRows, request.LeftCreatureEntry, "left"); var right = IndexComparisonRows(rightRows, request.RightCreatureEntry, "right");
+        var levels = Enumerable.Range(request.StartLevel, request.EndLevel - request.StartLevel + 1).ToArray();
+        var missingLeft = levels.Where(level => !left.ContainsKey(level)).ToArray(); var missingRight = levels.Where(level => !right.ContainsKey(level)).ToArray();
+        var metrics = new List<PetLevelCurveMetricComparison>();
+        foreach (var column in table.Columns.Where(column => !column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase) && !IsGenerated(column) && IsNumeric(column)))
+        {
+            var points = levels.Select(level =>
+            {
+                var leftValue = left.TryGetValue(level, out var leftRow) ? DecimalValue(Value(leftRow, column.Name)) : null;
+                var rightValue = right.TryGetValue(level, out var rightRow) ? DecimalValue(Value(rightRow, column.Name)) : null;
+                return new PetLevelCurveValuePoint(level, leftValue, rightValue, leftValue is not null && rightValue is not null ? PercentDelta(leftValue.Value, rightValue.Value) : null);
+            }).ToArray();
+            var start = points[0]; var end = points[^1]; var paired = points.Where(point => point.Left is not null && point.Right is not null).ToArray(); var deltas = paired.Where(point => point.DeltaPercent is not null).Select(point => point.DeltaPercent!.Value).ToArray();
+            metrics.Add(new(column.Name, MetricDisplay(column.Name), points,
+                start.Left is not null && end.Left is not null ? PercentDelta(start.Left.Value, end.Left.Value) : null,
+                start.Right is not null && end.Right is not null ? PercentDelta(start.Right.Value, end.Right.Value) : null,
+                end.Left is not null && end.Right is not null ? PercentDelta(end.Left.Value, end.Right.Value) : null,
+                deltas.Length == 0 ? null : deltas.Average(), paired.Length));
+        }
+        if (metrics.Count == 0) throw new NotSupportedException("pet_levelstats exposes no numeric stat columns to compare.");
+        return new(request, metrics, missingLeft, missingRight);
+    }
+
+    public async Task<PetLevelCurveComparison> CompareAsync(DatabaseConnectionProfile profile, PetLevelCurveComparisonRequest request, CancellationToken cancellationToken = default)
+    {
+        ValidateComparisonRequest(request); var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, cancellationToken); var table = capabilities.FindTable("pet_levelstats") ?? throw new NotSupportedException("The connected world database has no pet_levelstats table."); ValidateTable(table);
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
+        var left = await ReadRowsAsync(connection, null, table, request.LeftCreatureEntry, request.StartLevel, request.EndLevel, false, cancellationToken); var right = await ReadRowsAsync(connection, null, table, request.RightCreatureEntry, request.StartLevel, request.EndLevel, false, cancellationToken);
+        return CreateComparison(table, request, left, right);
     }
 
     public string PreviewSql(PetLevelCurvePreparedPlan plan, PetLevelCurveWriteMode mode)
@@ -163,6 +220,17 @@ public sealed class PetLevelCurveService
             if (factor < 0m || factor > 1000m) throw new InvalidDataException($"Pet curve {name} scale must be between 0 and 1000.");
     }
 
+    private static void ValidateComparisonRequest(PetLevelCurveComparisonRequest request)
+    {
+        if (request.LeftCreatureEntry == 0 || request.RightCreatureEntry == 0) throw new InvalidDataException("Both comparison creature entries must be positive.");
+        if (request.StartLevel == 0 || request.EndLevel < request.StartLevel) throw new InvalidDataException("Comparison levels must begin at 1 or higher and end at or above the starting level.");
+    }
+
+    private static Dictionary<int, IReadOnlyDictionary<string, object?>> IndexComparisonRows(IReadOnlyList<IReadOnlyDictionary<string, object?>> rows, uint expectedEntry, string side)
+    {
+        var indexed = new Dictionary<int, IReadOnlyDictionary<string, object?>>(); foreach (var row in rows) { var entry = Convert.ToUInt32(Value(row, "creature_entry"), CultureInfo.InvariantCulture); if (entry != expectedEntry) throw new InvalidDataException($"The {side} comparison contains creature {entry}, not requested creature {expectedEntry}."); var level = ToInt(Value(row, "level"), $"{side} level"); if (!indexed.TryAdd(level, row)) throw new InvalidDataException($"The {side} comparison contains duplicate level {level} rows."); } return indexed;
+    }
+
     private static decimal Factor(string column, PetLevelCurveScale scale) => column.ToLowerInvariant() switch
     {
         "hp" => scale.Health,
@@ -230,6 +298,9 @@ public sealed class PetLevelCurveService
     private static bool IsNumeric(DatabaseColumnCapability column) => column.DataType.ToLowerInvariant() is "tinyint" or "smallint" or "mediumint" or "int" or "integer" or "bigint" or "decimal" or "numeric" or "float" or "double" or "real";
     private static bool IsInteger(DatabaseColumnCapability column) => column.DataType.ToLowerInvariant() is "tinyint" or "smallint" or "mediumint" or "int" or "integer" or "bigint";
     private static int ToInt(object? value, string label) { try { return Convert.ToInt32(value, CultureInfo.InvariantCulture); } catch (Exception exception) { throw new InvalidDataException($"Invalid {label} value '{CellText(value)}'.", exception); } }
+    private static decimal? DecimalValue(object? value) { if (value is null) return null; try { return Convert.ToDecimal(value, CultureInfo.InvariantCulture); } catch { return null; } }
+    private static decimal? PercentDelta(decimal basis, decimal value) => basis == 0m ? value == 0m ? 0m : null : (value - basis) / Math.Abs(basis) * 100m;
+    private static string MetricDisplay(string column) => column.ToLowerInvariant() switch { "hp" => "Health", "mana" => "Mana", "armor" => "Armor", "str" => "Strength", "agi" => "Agility", "sta" => "Stamina", "inte" => "Intellect", "spi" => "Spirit", "min_dmg" => "Minimum damage", "max_dmg" => "Maximum damage", _ => column };
     private static object? Value(IReadOnlyDictionary<string, object?> row, string name) => TryValue(row, name, out var value) ? value : null;
     private static bool TryValue(IReadOnlyDictionary<string, object?> row, string name, out object? value) { foreach (var pair in row) if (pair.Key.Equals(name, StringComparison.OrdinalIgnoreCase)) { value = pair.Value; return true; } value = null; return false; }
     private static string CellText(object? value) => value switch { null => "<NULL>", byte[] bytes => "0x" + Convert.ToHexString(bytes), DateTime date => date.ToString("O", CultureInfo.InvariantCulture), IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture), _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty };

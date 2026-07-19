@@ -15,6 +15,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("project collision ids").FirstOrDefault()?.Command.Id != "workspace.projects" ||
     CrucibleCommandCatalog.Search("pet companion level stats").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("pet level curve scale").FirstOrDefault()?.Command.Id != "workspace.pets" ||
+    CrucibleCommandCatalog.Search("pet family growth compare graph").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.assets" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
@@ -1219,6 +1220,12 @@ if (curvePlan.Rows.Count != 3 || Convert.ToUInt32(curvePlan.Rows[0].Values["crea
 var preparedCurve = new PetLevelCurvePreparedPlan(curveRequest, curvePlan, "schema", new Dictionary<int, string?> { [1] = null, [2] = null, [3] = null }, 3);
 if (!curveService.PreviewSql(preparedCurve, PetLevelCurveWriteMode.InsertMissing).Contains("WHERE NOT EXISTS", StringComparison.Ordinal) || !curveService.PreviewSql(preparedCurve, PetLevelCurveWriteMode.UpdateExactRange).Contains("UPDATE `pet_levelstats` SET", StringComparison.Ordinal))
     throw new InvalidOperationException("Pet curve SQL previews no longer distinguish missing-only from explicit exact-range updates.");
+var curveComparison = curveService.CreateComparison(customPetStats, new(416, 990416, 1, 3), petCurveSource, curvePlan.Rows.Select(row => row.Values).ToArray()); var hpComparison = curveComparison.Metrics.Single(metric => metric.Column == "hp");
+if (curveComparison.Metrics.Count != 11 || hpComparison.Points.Count != 3 || hpComparison.PairedLevels != 3 || hpComparison.LeftGrowthPercent != 210m || decimal.Round(hpComparison.EndDeltaPercent ?? 0, 3) != 51.613m || curveComparison.MissingLeftLevels.Count != 0 || curveComparison.MissingRightLevels.Count != 0)
+    throw new InvalidOperationException("Pet family curve comparison lost numeric/custom metrics, per-level values, normalized growth, or coverage reporting.");
+var incompleteComparison = curveService.CreateComparison(customPetStats, new(416, 990416, 1, 3), petCurveSource, curvePlan.Rows.Take(2).Select(row => row.Values).ToArray());
+if (!incompleteComparison.MissingRightLevels.SequenceEqual([3]) || incompleteComparison.Metrics.Single(metric => metric.Column == "hp").EndDeltaPercent is not null)
+    throw new InvalidOperationException("Pet family comparison hid a missing endpoint or reported a fabricated end delta.");
 try { _ = curveService.CreateScaledPlan(customPetStats, curveRequest with { EndLevel = 4 }, petCurveSource); throw new InvalidOperationException("A pet curve with a missing source level was accepted."); }
 catch (InvalidDataException) { }
 try { var invalid = new Dictionary<string, object?>(petStatsValues, StringComparer.OrdinalIgnoreCase) { ["min_dmg"] = 459, ["max_dmg"] = 458 }; _ = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("pet-level-stats"), portablePetStats, invalid); throw new InvalidOperationException("Invalid pet damage range was accepted."); }

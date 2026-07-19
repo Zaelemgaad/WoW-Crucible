@@ -871,7 +871,7 @@ static int ServerHelp(int code = 0)
 
 static async Task<int> Database(string[] args, CancellationToken cancellationToken)
 {
-    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return DatabaseHelp();
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] [--password-env=NAME] [--ssl=Preferred]"); return DatabaseHelp(); }
     if (args[0].Equals("draft-template", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 3) return Fail("db draft-template requires a supported authoring domain and an output JSON path."); var options = args[3..]; var overwrite = options.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)); var unknown = options.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown draft-template option: {unknown[0]}");
@@ -994,6 +994,26 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
         Console.Error.WriteLine($"Prepared {prepared.Content.Rows.Count:N0} source-backed level row(s) for creature {targetCreature}: {existing:N0} existing, {missing:N0} missing. Policy: {mode}.");
         if (!apply) { Console.Error.WriteLine("Dry-run only. Re-run with --apply to insert missing rows; add --update-existing only when the reviewed range should replace exact existing levels."); return 0; }
         var result = await service.ApplyAsync(profile, prepared, mode, cancellationToken); Console.Error.WriteLine($"Committed pet curve transactionally: {result.Inserted:N0} inserted, {result.Updated:N0} updated, {result.Skipped:N0} preserved."); return 0;
+    }
+    if (operation.Equals("pet-compare", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 7 || args[5].StartsWith("--", StringComparison.Ordinal) || args[6].StartsWith("--", StringComparison.Ordinal)) return Fail("db pet-compare requires <left-creature> <right-creature> after the database name.");
+        if (!uint.TryParse(args[5], out var leftCreature) || leftCreature == 0 || !uint.TryParse(args[6], out var rightCreature) || rightCreature == 0) return Fail("Pet comparison creature entries must be positive unsigned integers.");
+        var options = args[7..]; var levels = Option(options, "--levels=") ?? "1-80"; var parts = levels.Split('-', 2, StringSplitOptions.TrimEntries); if (parts.Length != 2 || !byte.TryParse(parts[0], out var startLevel) || !byte.TryParse(parts[1], out var endLevel) || startLevel == 0 || endLevel < startLevel) return Fail("--levels must be an inclusive range such as 1-80 within 1-255.");
+        var metricName = Option(options, "--metric="); var output = Option(options, "--output="); var overwrite = options.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)); var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var unknown = options.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--levels=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--metric=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown pet-compare option: {unknown[0]}");
+        var comparison = await new PetLevelCurveService().CompareAsync(profile, new(leftCreature, rightCreature, startLevel, endLevel), cancellationToken); var selected = metricName is null ? null : comparison.Metrics.FirstOrDefault(metric => metric.Column.Equals(metricName, StringComparison.OrdinalIgnoreCase)); if (metricName is not null && selected is null) return Fail($"Unknown pet comparison metric '{metricName}'. Available: {string.Join(", ", comparison.Metrics.Select(metric => metric.Column))}");
+        static string PetPercent(decimal? value) => value is null ? "n/a" : value.Value.ToString("+0.###;-0.###;0", System.Globalization.CultureInfo.InvariantCulture) + "%"; static string PetNumber(decimal? value) => value?.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) ?? "missing";
+        string rendered;
+        if (json) { object payload = selected is null ? comparison : new { comparison.Request, Metric = selected, comparison.MissingLeftLevels, comparison.MissingRightLevels }; rendered = System.Text.Json.JsonSerializer.Serialize(payload, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }); }
+        else
+        {
+            var lines = new List<string> { $"COMPARE\t{leftCreature}\t{rightCreature}\t{startLevel}-{endLevel}\tleft-missing={comparison.MissingLeftLevels.Count}\tright-missing={comparison.MissingRightLevels.Count}" };
+            foreach (var metric in selected is null ? comparison.Metrics : [selected]) { lines.Add($"METRIC\t{metric.Column}\t{metric.Display}\tleft-growth={PetPercent(metric.LeftGrowthPercent)}\tright-growth={PetPercent(metric.RightGrowthPercent)}\tend-delta={PetPercent(metric.EndDeltaPercent)}\taverage-delta={PetPercent(metric.AverageDeltaPercent)}\tpaired={metric.PairedLevels}"); if (selected is not null) { lines.Add("LEVEL\tLEFT\tRIGHT\tRIGHT_VS_LEFT"); lines.AddRange(metric.Points.Select(point => $"{point.Level}\t{PetNumber(point.Left)}\t{PetNumber(point.Right)}\t{PetPercent(point.DeltaPercent)}")); } }
+            if (comparison.MissingLeftLevels.Count > 0) lines.Add($"MISSING_LEFT\t{string.Join(',', comparison.MissingLeftLevels)}"); if (comparison.MissingRightLevels.Count > 0) lines.Add($"MISSING_RIGHT\t{string.Join(',', comparison.MissingRightLevels)}"); rendered = string.Join(Environment.NewLine, lines);
+        }
+        Console.WriteLine(rendered); if (output is not null) { var path = Path.GetFullPath(output); if (File.Exists(path) && !overwrite) return Fail($"Pet comparison output already exists: {path}. Use --overwrite intentionally."); Directory.CreateDirectory(Path.GetDirectoryName(path)!); await File.WriteAllTextAsync(path, rendered + Environment.NewLine, cancellationToken); Console.Error.WriteLine($"Pet comparison: {path}"); }
+        Console.Error.WriteLine($"Compared {comparison.Metrics.Count:N0} numeric stat column(s), {comparison.MissingLeftLevels.Count:N0} left gap(s), and {comparison.MissingRightLevels.Count:N0} right gap(s)."); return comparison.MissingLeftLevels.Count == 0 && comparison.MissingRightLevels.Count == 0 ? 0 : 3;
     }
     if (operation.Equals("favorites", StringComparison.OrdinalIgnoreCase))
     {

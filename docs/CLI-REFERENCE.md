@@ -282,6 +282,7 @@ wowcrucible db dependency-snapshot <host> <port> <user> <database> <table> <outp
 wowcrucible db draft-template <domain> <output.json> [--overwrite]
 wowcrucible db content-plan <host> <port> <user> <database> <domain> <draft.json> [--output=plan.sql] [--overwrite] [--apply] [--update] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db pet-curve <host> <port> <user> <database> <source-creature> <target-creature> [--levels=1-80] [--health=1] [--mana=1] [--armor=1] [--attributes=1] [--damage=1] [--output=curve.sql] [--overwrite] [--format=text|json] [--apply] [--update-existing] --password-env=ENV_NAME [--ssl=Preferred]
+wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] --password-env=ENV_NAME [--ssl=Preferred]
 wowcrucible db snapshot <host> <port> <user> <database> <output.crucible-db-snapshot> [--password-env=ENV_NAME] [--ssl=Preferred] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
 wowcrucible db snapshot-inspect <snapshot-file> [--quick]
 wowcrucible db recovery-audit <legacy-snapshot> <output.crucible-db-audit> [--baseline=stock-snapshot] [--include=glob]... [--exclude=glob]... [--include-sensitive] [--overwrite]
@@ -352,6 +353,12 @@ The desktop exposes this under **Pets & companions → Bulk level curve…** wit
 
 ```powershell
 wowcrucible db pet-curve 127.0.0.1 3306 admin acore_world 416 900416 --levels=1-80 --health=1.25 --damage=1.1 --output=review-pet-curve.sql --password-env=WOW_CRUCIBLE_DB_PASSWORD
+```
+
+`db pet-compare` reads two curves without changing them. Every numeric live/custom column becomes a metric with exact per-level left/right values, start-to-end growth, end-level delta, average normalized delta, and paired-level count. Missing levels remain explicit and produce review exit code `3`; they are never interpolated. Omit `--metric` for all metric summaries, or select one raw column name for its complete level table. JSON preserves the same structured points and coverage lists. The desktop **Family comparison** tab renders the selected metric as a responsive static two-line plot beside the exact table.
+
+```powershell
+wowcrucible db pet-compare 127.0.0.1 3306 admin acore_world 416 17252 --levels=1-80 --metric=hp --format=json --output=imp-vs-felhunter.json --password-env=WOW_CRUCIBLE_DB_PASSWORD
 ```
 
 `db snapshot` is phase one of legacy SQL recovery. It issues only fixed metadata queries and `SELECT` statements, requests a consistent read-only transaction where the server supports one, streams base-table rows without loading the database into memory, and publishes the compressed artifact atomically. By default it verifies that the selected schema looks like a world database and excludes known auth/character runtime-state tables while retaining reusable definitions such as `mail_loot_template`, `instance_template`, `guild_rewards`, and `pet_levelstats`. Repeat `--include` or `--exclude` for table-name globs. `--include-sensitive` deliberately removes the runtime-state safety filter; those captured rows may themselves contain account secrets even though the live connection password is never serialized.
