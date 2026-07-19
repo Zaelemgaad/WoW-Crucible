@@ -329,7 +329,7 @@ public static class M2PreviewGeometryService
                     StageBlend(combiner.Name, stage));
             }
             var textureDefinitionIndex = stages.FirstOrDefault()?.TextureDefinitionIndex ?? -1;
-            var supported = combiner.Supported && stages.All(stage => stage.TextureDefinitionIndex >= 0 && stage.CoordinateSource is M2PreviewTextureCoordinateSource.Primary or M2PreviewTextureCoordinateSource.Secondary);
+            var supported = combiner.Supported && stages.All(stage => stage.TextureDefinitionIndex >= 0 && stage.CoordinateSource is M2PreviewTextureCoordinateSource.Primary or M2PreviewTextureCoordinateSource.Secondary or M2PreviewTextureCoordinateSource.Environment);
             if (supported != combiner.Supported) combiner = combiner with { Supported = false, Exact = false };
             result[index] = new(index, skin[item], unchecked((sbyte)skin[item + 1]), shaderId, ReadUShort(skin, item + 4), ReadUShort(skin, item + 6),
                 ReadShort(skin, item + 8), renderFlagsIndex, ReadUShort(skin, item + 12), stageCount, textureLookupIndex,

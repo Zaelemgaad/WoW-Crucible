@@ -770,9 +770,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var visibleGeosets = _loadedModelGeometry is null ? string.Empty : string.Join(" · ", M2GeosetCatalog.Describe(_loadedModelGeometry.Submeshes)
             .SelectMany(group => group.Variants.Where(variant => variant.Visible).Select(variant => $"{group.Name}={variant.Variant}")));
         var previewNote = _appearanceComposed
-            ? "Geometry, per-material textures, supported two-stage WotLK combiners with primary/secondary UV routing, the selected CharSections appearance, and animation playback are live. Environment/explicit/three-plus-stage shaders and particles remain fidelity stages; the visible/current pose can be exported above."
+            ? "Geometry, per-material textures, supported two-stage WotLK combiners with primary/secondary UV and view-space sphere-map routing, the selected CharSections appearance, and animation playback are live. Explicit/three-plus-stage shaders and particles remain fidelity stages; the visible/current pose can be exported above."
             : _resolvedModelTexturePath is not null
-            ? "Geometry, resolved per-material textures, supported two-stage WotLK combiners with primary/secondary UV routing, and animation playback are live. Unresolved replaceable slots, environment/explicit/three-plus-stage shaders, and particles remain fidelity stages."
+            ? "Geometry, resolved per-material textures, supported two-stage WotLK combiners with primary/secondary UV and view-space sphere-map routing, and animation playback are live. Unresolved replaceable slots, explicit/three-plus-stage shaders, and particles remain fidelity stages."
             : _modelOnlyDirectory
             ? "Geometry and animation are live. Replacement texture resolution and Character layer/CharSections composition remain incomplete until the appearance plan supplies every layer."
             : "Geometry, animation, and the selected PNG diagnostic override are live. The override is not treated as an invented WoW material binding.";

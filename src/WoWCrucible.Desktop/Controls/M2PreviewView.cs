@@ -307,7 +307,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
 
     private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, M2AnimationPose? pose, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, IReadOnlyList<MountedModel> mountedModels, Matrix4x4 sceneTransform, string? sceneTransformLabel, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex) : ICustomDrawOperation
     {
-        private sealed record SceneSource(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? ManualTexture, IReadOnlyDictionary<int, SKBitmap>? MaterialTextures, string Label, IReadOnlyList<Vector3>? PosedVertices, Vector3 Minimum, Vector3 Maximum);
+        private sealed record SceneSource(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? ManualTexture, IReadOnlyDictionary<int, SKBitmap>? MaterialTextures, string Label, IReadOnlyList<Vector3>? PosedVertices, IReadOnlyList<Vector3>? PosedNormals, Vector3 Minimum, Vector3 Maximum);
         public Rect Bounds => bounds;
         public bool HitTest(Avalonia.Point point) => Bounds.Contains(point);
         public bool Equals(ICustomDrawOperation? other) => false;
@@ -321,7 +321,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             var canvas = lease.SkCanvas;
             var width = (float)bounds.Width;
             var height = (float)bounds.Height;
-            var sources = new List<SceneSource>(mountedModels.Count + 1) { new(geometry, Matrix4x4.Identity, texture, materialTextures, Path.GetFileName(geometry.ModelPath), pose?.Vertices, pose?.Minimum ?? geometry.Minimum, pose?.Maximum ?? geometry.Maximum) };
+            var sources = new List<SceneSource>(mountedModels.Count + 1) { new(geometry, Matrix4x4.Identity, texture, materialTextures, Path.GetFileName(geometry.ModelPath), pose?.Vertices, pose?.Normals, pose?.Minimum ?? geometry.Minimum, pose?.Maximum ?? geometry.Maximum) };
             foreach (var model in mountedModels)
             {
                 var transform = model.Transform;
@@ -330,7 +330,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                     var attachment = geometry.Attachments[attachmentIndex];
                     transform = model.Transform * pose.BoneTransforms[attachment.BoneIndex];
                 }
-                sources.Add(new SceneSource(model.Geometry, transform, model.Texture, null, model.Label, null, model.Geometry.Minimum, model.Geometry.Maximum));
+                sources.Add(new SceneSource(model.Geometry, transform, model.Texture, null, model.Label, null, null, model.Geometry.Minimum, model.Geometry.Maximum));
             }
             var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity);
             foreach (var source in sources)
@@ -351,9 +351,14 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             var light = Vector3.Normalize(new Vector3(-0.35f, -0.65f, 0.9f));
             for (var sourceIndex = 0; sourceIndex < sources.Count; sourceIndex++)
             {
-                var source = sources[sourceIndex]; var sourceGeometry = source.Geometry; var sourceVertices = source.PosedVertices ?? sourceGeometry.Vertices; var transformed = new Vector3[sourceVertices.Count];
+                var source = sources[sourceIndex]; var sourceGeometry = source.Geometry; var sourceVertices = source.PosedVertices ?? sourceGeometry.Vertices; var sourceNormals = source.PosedNormals ?? sourceGeometry.Normals; var transformed = new Vector3[sourceVertices.Count]; var transformedNormals = new Vector3[sourceNormals.Count];
                 for (var index = 0; index < transformed.Length; index++)
                     transformed[index] = Vector3.Transform(Vector3.Transform(sourceVertices[index], source.Transform) - center, rotation);
+                for (var index = 0; index < transformedNormals.Length; index++)
+                {
+                    var normal = Vector3.TransformNormal(Vector3.TransformNormal(sourceNormals[index], source.Transform), rotation);
+                    transformedNormals[index] = normal.LengthSquared() > 0.0000001f && float.IsFinite(normal.X) && float.IsFinite(normal.Y) && float.IsFinite(normal.Z) ? Vector3.Normalize(normal) : Vector3.UnitZ;
+                }
                 IReadOnlyList<M2PreviewBatch> batches = sourceGeometry.Batches.Count == 0 ? [new M2PreviewBatch(0, 0, 0, sourceGeometry.TriangleIndices.Count, null, null)] : sourceGeometry.Batches;
                 var firstBatchBySubmesh = batches.GroupBy(batch => batch.SubmeshIndex).ToDictionary(group => group.Key, group => group.First());
                 var texturedSubmeshes = batches.Where(batch => ResolveTextureStages(source, batch).Count > 0).Select(batch => batch.SubmeshIndex).ToHashSet();
@@ -377,7 +382,9 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                         var normal = Vector3.Cross(b - a, c - a);
                         if (normal.LengthSquared() > 0.000001f) normal = Vector3.Normalize(normal);
                         var brightness = (batch.RenderFlags & 0x1) != 0 ? 1f : Math.Clamp(0.25f + 0.75f * Math.Abs(Vector3.Dot(normal, light)), 0.2f, 1f);
-                        faces.Add(new((a.Y + b.Y + c.Y) / 3f, passOrder, sourceIndex, batch.MaterialUnitIndex ?? -1, ia, ib, ic, ax, ay, bx, by, cx, cy, (byte)Math.Round(brightness * 15), activeStages, batch.BlendMode));
+                        faces.Add(new((a.Y + b.Y + c.Y) / 3f, passOrder, sourceIndex, batch.MaterialUnitIndex ?? -1, ia, ib, ic, ax, ay, bx, by, cx, cy,
+                            M2EnvironmentMapService.Coordinate(transformedNormals[ia]), M2EnvironmentMapService.Coordinate(transformedNormals[ib]), M2EnvironmentMapService.Coordinate(transformedNormals[ic]),
+                            (byte)Math.Round(brightness * 15), activeStages, batch.BlendMode));
                     }
                 }
             }
@@ -429,7 +436,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                     for (var index = 0; index < groupFaces.Length; index++)
                     {
                         var face = groupFaces[index]; var offset = index * 3;
-                        AddUv(offset, face.Ia); AddUv(offset + 1, face.Ib); AddUv(offset + 2, face.Ic);
+                        AddUv(offset, face.Ia, face.EnvironmentA); AddUv(offset + 1, face.Ib, face.EnvironmentB); AddUv(offset + 2, face.Ic, face.EnvironmentC);
                     }
                     using var shader = SKShader.CreateBitmap(stage.Texture, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat);
                     using var paint = new SKPaint { IsAntialias = true, Shader = shader, BlendMode = blend };
@@ -438,11 +445,14 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                     using var mesh = SKVertices.CreateCopy(SKVertexMode.Triangles, positions, coordinates, colors);
                     canvas.DrawVertices(mesh, SKBlendMode.Modulate, paint);
 
-                    void AddUv(int destination, int vertex)
+                    void AddUv(int destination, int vertex, Vector2 environment)
                     {
-                        var uv = stage.CoordinateSource == M2PreviewTextureCoordinateSource.Secondary && sourceGeometry.SecondaryTextureCoordinates.Count == sourceGeometry.Vertices.Count
-                            ? sourceGeometry.SecondaryTextureCoordinates[vertex]
-                            : sourceGeometry.TextureCoordinates[vertex];
+                        var uv = stage.CoordinateSource switch
+                        {
+                            M2PreviewTextureCoordinateSource.Environment => environment,
+                            M2PreviewTextureCoordinateSource.Secondary when sourceGeometry.SecondaryTextureCoordinates.Count == sourceGeometry.Vertices.Count => sourceGeometry.SecondaryTextureCoordinates[vertex],
+                            _ => sourceGeometry.TextureCoordinates[vertex]
+                        };
                         coordinates[destination] = new(uv.X * stage.Texture.Width, uv.Y * stage.Texture.Height);
                     }
                 }
@@ -481,13 +491,15 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             var multiTexture = multiTextureUnits == 0 ? string.Empty : $" · {multiTextureUnits:N0} multi-texture unit(s)";
             var approximateUnits = geometry.Batches.Count(batch => batch.TextureStages.Count > 1 && batch.Combiner.Supported && !batch.Combiner.Exact);
             var approximate = approximateUnits == 0 ? string.Empty : $" · {approximateUnits:N0} approximate";
-            var fallbackUnits = geometry.Batches.Count(batch => batch.TextureStages.Count > 1 && (!batch.Combiner.Supported || batch.TextureStages.Any(stage => stage.CoordinateSource is M2PreviewTextureCoordinateSource.Environment or M2PreviewTextureCoordinateSource.Unsupported)));
+            var environmentUnits = geometry.Batches.Count(batch => batch.TextureStages.Any(stage => stage.CoordinateSource == M2PreviewTextureCoordinateSource.Environment));
+            var environment = environmentUnits == 0 ? string.Empty : $" · {environmentUnits:N0} sphere-map unit(s)";
+            var fallbackUnits = geometry.Batches.Count(batch => batch.TextureStages.Count > 1 && (!batch.Combiner.Supported || batch.TextureStages.Any(stage => stage.CoordinateSource == M2PreviewTextureCoordinateSource.Unsupported)));
             var fallback = fallbackUnits == 0 ? string.Empty : $" · {fallbackUnits:N0} first-stage fallback(s)";
             var attachments = showAttachments ? $" · {geometry.Attachments.Count:N0} attachment point(s)" : string.Empty;
             var mounted = mountedModels.Count == 0 ? string.Empty : $" · {mountedModels.Count:N0} mounted model(s)";
             var animation = pose is null ? string.Empty : $" · animation {geometry.Sequences[pose.SequenceIndex].AnimationId:N0}:{geometry.Sequences[pose.SequenceIndex].SubAnimationId:N0}";
             var scene = sceneTransformLabel is null ? string.Empty : $" · {sceneTransformLabel}";
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount}{multiTexture}{approximate}{fallback} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount}{multiTexture}{environment}{approximate}{fallback} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }
@@ -503,7 +515,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             foreach (var stage in batch.TextureStages)
             {
                 if (stage.TextureDefinitionIndex < 0 || source.MaterialTextures is not { } textures || !textures.TryGetValue(stage.TextureDefinitionIndex, out var texture)) return result.Count == 0 ? [] : [result[0]];
-                if (stage.CoordinateSource is not (M2PreviewTextureCoordinateSource.Primary or M2PreviewTextureCoordinateSource.Secondary) || stage.Blend == M2PreviewTextureStageBlend.Unsupported)
+                if (stage.CoordinateSource == M2PreviewTextureCoordinateSource.Unsupported || stage.Blend == M2PreviewTextureStageBlend.Unsupported)
                     return result.Count == 0 ? [] : [result[0]];
                 result.Add(new(texture, stage.CoordinateSource, stage.Blend));
             }
@@ -526,6 +538,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
 
         private sealed record ResolvedTextureStage(SKBitmap Texture, M2PreviewTextureCoordinateSource CoordinateSource, M2PreviewTextureStageBlend Blend);
         private readonly record struct TextureGroup(int PassOrder, int SourceIndex, int MaterialKey, ushort BlendMode);
-        private readonly record struct Face(float Depth, int PassOrder, int SourceIndex, int MaterialKey, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy, byte Shade, IReadOnlyList<ResolvedTextureStage> TextureStages, ushort BlendMode);
+        private readonly record struct Face(float Depth, int PassOrder, int SourceIndex, int MaterialKey, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy,
+            Vector2 EnvironmentA, Vector2 EnvironmentB, Vector2 EnvironmentC, byte Shade, IReadOnlyList<ResolvedTextureStage> TextureStages, ushort BlendMode);
     }
 }
