@@ -17,6 +17,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _summary = Status("Drop M2/WMO files or folders here, or add them with the buttons above.");
     private readonly TextBlock _previewStatus = Status("Select a compatible Wrath M2 or version-17 WMO for a live geometry preview.");
     private readonly TextBox _details = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
+    private readonly TextBox _listfile = new() { PlaceholderText = "Optional FileDataID listfile (.csv/.txt) for modern external texture paths" };
     private readonly M2PreviewView _preview = new();
     private readonly WmoPreviewView _wmoPreview = new() { IsVisible = false };
     private readonly Grid _previewHost = new();
@@ -56,6 +57,8 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var convert = Accent("Convert selected verified static M2"); convert.Click += async (_, _) => await ConvertSelectedAsync();
         var convertEligible = new Button { Content = "Convert all eligible snapshots" }; convertEligible.Click += async (_, _) => await ConvertEligibleAsync();
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
+        var browseListfile = new Button { Content = "Choose listfile" }; browseListfile.Click += async (_, _) => await ChooseListfileAsync();
+        var clearListfile = new Button { Content = "Clear listfile" }; clearListfile.Click += (_, _) => _listfile.Text = string.Empty;
 
         var header = new Border
         {
@@ -78,6 +81,16 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             args.Handled = true;
         });
 
+        var listfileStrip = new Grid
+        {
+            ColumnDefinitions = new("Auto,*,Auto,Auto"), ColumnSpacing = 7, Margin = new Thickness(12, 7, 12, 0),
+            Children =
+            {
+                new TextBlock { Text = "External texture IDs", VerticalAlignment = VerticalAlignment.Center, Foreground = Brush.Parse("#9AA5B7") },
+                WithColumn(_listfile, 1), WithColumn(browseListfile, 2), WithColumn(clearListfile, 3)
+            }
+        };
+
         var left = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { _summary, WithRow(_assets, 1) } };
         var right = new Grid
         {
@@ -90,7 +103,17 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             }
         };
         var body = new ResponsiveSplitGrid(left, right, 1, 2) { Margin = new Thickness(12, 9, 12, 12) };
-        Content = new Grid { RowDefinitions = new("Auto,Auto,*"), Children = { header, WithRow(dropTarget, 1), WithRow(body, 2) } };
+        Content = new Grid { RowDefinitions = new("Auto,Auto,Auto,*"), Children = { header, WithRow(listfileStrip, 1), WithRow(dropTarget, 2), WithRow(body, 3) } };
+    }
+
+    private async Task ChooseListfileAsync()
+    {
+        var file = (await Storage().OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Choose a FileDataID-to-client-path listfile", AllowMultiple = false,
+            FileTypeFilter = [new FilePickerFileType("FileDataID listfiles") { Patterns = ["*.csv", "*.txt"] }]
+        })).FirstOrDefault()?.TryGetLocalPath();
+        if (file is not null) _listfile.Text = file;
     }
 
     private async Task AddFilesAsync()
@@ -181,21 +204,21 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
     {
         if (_workspace is null) { _summary.Text = "Create or open a verified workspace before conversion; loose originals are never mutated."; return; }
         if (_assets.SelectedItem is not AssetInspection asset || asset.Format != AssetFormat.M2 || asset.Magic != "MD21") { _summary.Text = "Select a modern MD21 M2 snapshot first."; return; }
-        var workspace = _workspace; var source = NativeAssetConversionService.ResolveSnapshotPath(workspace, asset); var skin = WorkspaceSkinSnapshot(asset, workspace);
+        var workspace = _workspace; var source = NativeAssetConversionService.ResolveSnapshotPath(workspace, asset); var skin = WorkspaceSkinSnapshot(asset, workspace); var listfile = SelectedListfile();
         var output = Path.Combine(workspace.RootPath, "converted", asset.Sha256[..12].ToUpperInvariant());
         var operation = BeginOperation("Planning and validating the selected immutable M2/SKIN snapshot…"); var token = operation.Token;
         try
         {
             var result = await Task.Run(() =>
             {
-                var plan = StaticM2DownportService.Plan(source, skin);
+                var plan = StaticM2DownportService.Plan(source, skin, listfile, token);
                 if (!plan.Ready) throw new InvalidOperationException("Static profile blocked this model:\n- " + string.Join("\n- ", plan.Blockers));
                 return StaticM2DownportService.Convert(plan, output, token);
             }, token);
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(result.OutputModelPath, result.OutputSkinPath, M2PreviewVisibilityMode.AllGeosets), token);
             _preview.IsVisible = true; _wmoPreview.IsVisible = false; _preview.SetGeometry(geometry);
             _previewStatus.Text = $"Converted and independently reloaded · {geometry.Vertices.Count:N0} vertices · {geometry.TotalTriangleIndices / 3:N0} triangles";
-            _details.Text = $"CONVERSION COMPLETE\n\nModel: {result.OutputModelPath}\nModel SHA-256: {result.OutputModelSha256}\nSKIN: {result.OutputSkinPath}\nSKIN SHA-256: {result.OutputSkinSha256}\nReceipt: {result.ReceiptPath}\n\nTRANSFORMATIONS\n{Lines(result.Plan.Transformations)}\n\nDECLARED LOSSES\n{Lines(result.Plan.Losses)}";
+            _details.Text = $"CONVERSION COMPLETE\n\nModel: {result.OutputModelPath}\nModel SHA-256: {result.OutputModelSha256}\nSKIN: {result.OutputSkinPath}\nSKIN SHA-256: {result.OutputSkinSha256}\nListfile: {result.Plan.SourceListfilePath ?? "not required"}\nReceipt: {result.ReceiptPath}\n\nRESOLVED TEXTURE PATHS\n{Lines(result.Plan.ResolvedTexturePaths.Select(value => $"slot {value.TextureIndex} · FileDataID {value.FileDataId} · {value.ClientPath}"))}\n\nTRANSFORMATIONS\n{Lines(result.Plan.Transformations)}\n\nDECLARED LOSSES\n{Lines(result.Plan.Losses)}";
             _summary.Text = $"Verified static M2 conversion published atomically · {result.OutputDirectory}";
             DesktopCrashLogger.Debug("CONVERT", "static-m2-downport-complete", ("source", asset.Path), ("output", result.OutputDirectory), ("vertices", result.ValidatedVertices), ("triangles", result.ValidatedTriangles));
         }
@@ -207,7 +230,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
     private async Task ConvertEligibleAsync()
     {
         if (_workspace is null) { _summary.Text = "Create or open a verified workspace before batch conversion."; return; }
-        var workspace = _workspace; var candidates = workspace.Assets.Where(asset => asset.Format == AssetFormat.M2 && asset.Magic == "MD21").ToArray();
+        var workspace = _workspace; var candidates = workspace.Assets.Where(asset => asset.Format == AssetFormat.M2 && asset.Magic == "MD21").ToArray(); var listfilePath = SelectedListfile();
         if (candidates.Length == 0) { _summary.Text = "This workspace has no modern MD21 M2 snapshots."; return; }
         var operation = BeginOperation($"Planning {candidates.Length:N0} immutable M2 snapshot(s)…"); var token = operation.Token;
         try
@@ -215,12 +238,14 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             var batch = await Task.Run(() =>
             {
                 var converted = new List<string>(); var skipped = new List<string>(); var blocked = new List<string>(); var failed = new List<string>();
+                var sources = candidates.ToDictionary(asset => asset, asset => NativeAssetConversionService.ResolveSnapshotPath(workspace, asset));
+                var listfile = listfilePath is null ? null : StaticM2DownportService.PrepareListfile(listfilePath, sources.Values, token);
                 foreach (var asset in candidates)
                 {
                     token.ThrowIfCancellationRequested();
                     try
                     {
-                        var source = NativeAssetConversionService.ResolveSnapshotPath(workspace, asset); var plan = StaticM2DownportService.Plan(source, WorkspaceSkinSnapshot(asset, workspace));
+                        var source = sources[asset]; var plan = listfile is null ? StaticM2DownportService.Plan(source, WorkspaceSkinSnapshot(asset, workspace), cancellationToken: token) : StaticM2DownportService.PlanWithListfileSnapshot(source, WorkspaceSkinSnapshot(asset, workspace), listfile, token);
                         if (!plan.Ready) { blocked.Add($"{asset.Path} :: {string.Join(" | ", plan.Blockers)}"); continue; }
                         var output = Path.Combine(workspace.RootPath, "converted", asset.Sha256[..12].ToUpperInvariant());
                         if (File.Exists(Path.Combine(output, "conversion-receipt.json"))) { skipped.Add($"{asset.Path} :: existing receipt {output}"); continue; }
@@ -267,9 +292,9 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             _previewStatus.Text = "Checking the loss-accounted static M2 conversion profile…";
             try
             {
-                var plan = await Task.Run(() => StaticM2DownportService.Plan(source, WorkspaceSkinSnapshot(asset)), previewToken);
+                var listfile = SelectedListfile(); var plan = await Task.Run(() => StaticM2DownportService.Plan(source, WorkspaceSkinSnapshot(asset), listfile, previewToken), previewToken);
                 if (generation != _previewGeneration) return;
-                _details.Text += $"\n\nSTATIC M2 DOWNPORT PLAN\nReady: {plan.Ready}\nOutput flags: 0x{plan.OutputFlags:X}\nGeometry: {plan.VertexCount:N0} vertices · {plan.TriangleCount:N0} triangles · {plan.SubmeshCount:N0} submeshes · {plan.MaterialCount:N0} materials\n\nTRANSFORMATIONS\n{Lines(plan.Transformations)}\n\nDECLARED LOSSES\n{Lines(plan.Losses)}\n\nBLOCKERS\n{Lines(plan.Blockers)}";
+                _details.Text += $"\n\nSTATIC M2 DOWNPORT PLAN\nReady: {plan.Ready}\nOutput flags: 0x{plan.OutputFlags:X}\nListfile: {plan.SourceListfilePath ?? "not required/supplied"}\nGeometry: {plan.VertexCount:N0} vertices · {plan.TriangleCount:N0} triangles · {plan.SubmeshCount:N0} submeshes · {plan.MaterialCount:N0} materials\n\nRESOLVED TEXTURE PATHS\n{Lines(plan.ResolvedTexturePaths.Select(value => $"slot {value.TextureIndex} · FileDataID {value.FileDataId} · {value.ClientPath}"))}\n\nTRANSFORMATIONS\n{Lines(plan.Transformations)}\n\nDECLARED LOSSES\n{Lines(plan.Losses)}\n\nBLOCKERS\n{Lines(plan.Blockers)}";
                 _previewStatus.Text = plan.Ready ? "Eligible for verified static M2 downport. Create/open a workspace, then use Convert selected." : $"Static profile blocked this model with {plan.Blockers.Count:N0} explicit finding(s).";
             }
             catch (OperationCanceledException) { }
@@ -334,6 +359,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var dependency = skins.FirstOrDefault(value => Path.GetFileName(value.Path).Equals(expected, StringComparison.OrdinalIgnoreCase)) ?? (skins.Length == 1 ? skins[0] : null);
         return dependency is null ? null : NativeAssetConversionService.ResolveDependencySnapshotPath(workspace, asset, dependency);
     }
+    private string? SelectedListfile() => string.IsNullOrWhiteSpace(_listfile.Text) ? null : Path.GetFullPath(_listfile.Text.Trim());
     private static string CompatibilityLabel(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "Wrath 3.3.5 ready", AssetCompatibility.RequiresNativeConversion => "native conversion required", AssetCompatibility.Unsupported => "unsupported layout", _ => "invalid asset" };
     private static string CompatibilityColor(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "#79C793", AssetCompatibility.RequiresNativeConversion => "#E5B768", _ => "#E27B7B" };
     private static Button Accent(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }

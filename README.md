@@ -106,9 +106,9 @@ See the complete copy-paste-oriented [CLI reference](docs/CLI-REFERENCE.md) for 
 
 ```text
 wowcrucible asset inspect modern-model.m2 [building.wmo ...]
-wowcrucible asset m2-downport-plan modern-static-model.m2 --format=json
-wowcrucible asset m2-downport-scan modern-assets-folder --format=json
-wowcrucible asset m2-downport modern-static-model.m2 new-output-folder
+wowcrucible asset m2-downport-plan modern-static-model.m2 --listfile=filedataid-paths.csv --format=json
+wowcrucible asset m2-downport-scan modern-assets-folder --listfile=filedataid-paths.csv --format=json
+wowcrucible asset m2-downport modern-static-model.m2 new-output-folder --listfile=filedataid-paths.csv
 wowcrucible asset preview-info extracted-wrath-model.m2
 wowcrucible asset model-export extracted-wrath-model.m2 visible-model.obj --animation=0 --time=500
 wowcrucible asset wmo-preview-info extracted-wrath-root.wmo --groups

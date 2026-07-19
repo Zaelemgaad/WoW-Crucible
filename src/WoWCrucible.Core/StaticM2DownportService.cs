@@ -12,6 +12,9 @@ public sealed record StaticM2DownportPlan(
     string SourceModelSha256,
     string? SourceSkinPath,
     string? SourceSkinSha256,
+    string? SourceListfilePath,
+    string? SourceListfileSha256,
+    IReadOnlyList<M2ResolvedTexturePath> ResolvedTexturePaths,
     uint SourceVersion,
     uint SourceFlags,
     uint OutputFlags,
@@ -26,6 +29,8 @@ public sealed record StaticM2DownportPlan(
 {
     public bool Ready => Blockers.Count == 0;
 }
+
+public sealed record M2ResolvedTexturePath(int TextureIndex, uint FileDataId, string ClientPath);
 
 public sealed record StaticM2DownportResult(
     int FormatVersion,
@@ -65,7 +70,7 @@ public sealed record StaticM2DownportScanResult(
 /// </summary>
 public static class StaticM2DownportService
 {
-    private const int PlanFormatVersion = 1;
+    private const int PlanFormatVersion = 2;
     private const int ReceiptFormatVersion = 1;
     private const uint ModernVersion = 274;
     private const uint WotlkVersion = 264;
@@ -75,14 +80,29 @@ public static class StaticM2DownportService
     private const int MaximumArrayCount = 20_000_000;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public static StaticM2DownportPlan Plan(string sourceModelPath, string? sourceSkinPath = null)
+    public static StaticM2DownportPlan Plan(string sourceModelPath, string? sourceSkinPath = null, string? listfilePath = null, CancellationToken cancellationToken = default)
+        => PlanCore(sourceModelPath, sourceSkinPath, listfilePath, null, cancellationToken);
+
+    public static FileDataIdListfileSnapshot PrepareListfile(string listfilePath, IEnumerable<string> modelPaths, CancellationToken cancellationToken = default)
     {
+        var ids = new HashSet<uint>();
+        foreach (var modelPath in modelPaths) { cancellationToken.ThrowIfCancellationRequested(); foreach (var id in ExternalTextureIds(modelPath)) ids.Add(id); }
+        return FileDataIdListfileService.Resolve(listfilePath, ids, cancellationToken);
+    }
+
+    public static StaticM2DownportPlan PlanWithListfileSnapshot(string sourceModelPath, string? sourceSkinPath, FileDataIdListfileSnapshot snapshot, CancellationToken cancellationToken = default)
+        => PlanCore(sourceModelPath, sourceSkinPath, snapshot.SourcePath, snapshot, cancellationToken);
+
+    private static StaticM2DownportPlan PlanCore(string sourceModelPath, string? sourceSkinPath, string? listfilePath, FileDataIdListfileSnapshot? preparedListfile, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         sourceModelPath = Path.GetFullPath(sourceModelPath);
         if (!File.Exists(sourceModelPath)) throw new FileNotFoundException("The modern M2 source does not exist.", sourceModelPath);
         var source = File.ReadAllBytes(sourceModelPath);
         var blockers = new List<string>(); var transformations = new List<string>(); var losses = new List<string>();
         var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0;
         byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false;
+        FileDataIdListfileSnapshot? listfile = null; var resolvedTextures = new List<M2ResolvedTexturePath>();
 
         if (source.Length < 8 || FourCc(source, 0) != "MD21") blockers.Add("Input is not a modern MD21 chunk container.");
         else
@@ -138,9 +158,6 @@ public static class StaticM2DownportService
                     var textureCount = Count(payload, 0x50, "texture", blockers);
                     ValidateArray(payload, 0x50, 0x54, 16, "textures", blockers);
                     var textureOffset = Offset(payload, 0x54, "textures", blockers);
-                    if (textureOffset >= 0)
-                        for (var index = 0; index < textureCount && textureOffset + index * 16 + 16 <= payload.Length; index++)
-                            if (U32(payload, textureOffset + index * 16) == 0) blockers.Add($"Texture {index:N0} uses an embedded filename; modern FileDataID-to-client-path reconstruction is not implemented yet.");
                     ValidateArray(payload, 0x70, 0x74, 4, "render flags", blockers);
                     var renderCount = Count(payload, 0x70, "render flag", blockers); var renderOffset = Offset(payload, 0x74, "render flags", blockers);
                     if (renderOffset >= 0)
@@ -148,13 +165,37 @@ public static class StaticM2DownportService
                             if (U16(payload, renderOffset + index * 4 + 2) > 7) blockers.Add($"Render flag {index:N0} uses unsupported blend mode {U16(payload, renderOffset + index * 4 + 2)}.");
                     ValidateArray(payload, 0x80, 0x84, 2, "texture lookup", blockers);
 
-                    var txid = chunks.Where(chunk => chunk.Id == "TXID").ToArray();
+                    var txid = chunks.Where(chunk => chunk.Id == "TXID").ToArray(); var textureIds = new uint[textureCount];
                     if (txid.Length != 1) blockers.Add($"Expected exactly one TXID chunk; found {txid.Length:N0}.");
                     else
                     {
                         if (txid[0].Size != checked((uint)textureCount * 4u)) blockers.Add($"TXID has {txid[0].Size / 4:N0} entries but the model has {textureCount:N0} texture definitions.");
-                        else for (long cursor = txid[0].DataOffset; cursor < txid[0].DataOffset + txid[0].Size; cursor += 4)
-                            if (U32(source, checked((int)cursor)) != 0) { blockers.Add("TXID contains nonzero external texture FileDataIDs that require a listfile/source mapping."); break; }
+                        else for (var index = 0; index < textureCount; index++) textureIds[index] = U32(source, checked((int)txid[0].DataOffset + index * 4));
+                    }
+                    var requiredIds = textureIds.Where(value => value != 0).Distinct().ToArray();
+                    if (requiredIds.Length > 0)
+                    {
+                        if (string.IsNullOrWhiteSpace(listfilePath)) blockers.Add($"TXID contains {requiredIds.Length:N0} external texture FileDataID(s); supply a semicolon/comma/tab id-to-path listfile.");
+                        else
+                        {
+                            listfile = preparedListfile ?? FileDataIdListfileService.Resolve(listfilePath, requiredIds, cancellationToken);
+                            var resolved = listfile.ResolvedById;
+                            foreach (var missing in requiredIds.Where(id => !resolved.ContainsKey(id) && !listfile.AmbiguousIds.ContainsKey(id)).Order()) blockers.Add($"FileDataID {missing} is missing from the selected listfile.");
+                            foreach (var ambiguous in requiredIds.Where(id => listfile.AmbiguousIds.ContainsKey(id)).Order()) blockers.Add($"FileDataID {ambiguous} maps to multiple distinct client paths: {string.Join(" | ", listfile.AmbiguousIds[ambiguous])}");
+                            for (var index = 0; index < textureIds.Length; index++) if (textureIds[index] != 0 && resolved.TryGetValue(textureIds[index], out var clientPath)) resolvedTextures.Add(new(index, textureIds[index], clientPath));
+                        }
+                    }
+                    if (textureOffset >= 0)
+                    {
+                        for (var index = 0; index < textureCount && textureOffset + index * 16 + 16 <= payload.Length; index++)
+                        {
+                            var item = textureOffset + index * 16; var type = U32(payload, item); var nameLength = U32(payload, item + 8); var nameOffset = U32(payload, item + 12); var fileDataId = textureIds[index];
+                            if (type != 0 && fileDataId != 0) blockers.Add($"Texture {index:N0} is replaceable type {type} but also carries FileDataID {fileDataId}; this mixed binding is not translated automatically.");
+                            if (type != 0) continue;
+                            if (fileDataId != 0) continue;
+                            if (nameLength == 0) { blockers.Add($"Hardcoded texture {index:N0} has neither an embedded filename nor a FileDataID mapping."); continue; }
+                            if (nameOffset > int.MaxValue || nameLength > int.MaxValue || nameOffset + (ulong)nameLength > (ulong)payload.Length) blockers.Add($"Embedded texture {index:N0} filename range is invalid.");
+                        }
                     }
                     var sfid = chunks.Where(chunk => chunk.Id == "SFID").ToArray();
                     if (sfid.Length != 1 || sfid[0].Size != 4) blockers.Add("Static profile requires one four-byte SFID skin reference.");
@@ -178,16 +219,17 @@ public static class StaticM2DownportService
 
         transformations.Add("Unwrap the MD21 container into its embedded MD20 payload.");
         transformations.Add($"Translate M2 version {ModernVersion} to Wrath version {WotlkVersion} after structural validation.");
-        transformations.Add("Clear verified modern FileDataID/LOD flags only after proving TXID values are zero and exactly one SKIN is present.");
+        transformations.Add("Clear verified modern FileDataID/LOD flags only after resolving every external texture ID and proving exactly one SKIN is present.");
         if ((flags & NewExporterLayoutFlag) != 0) transformations.Add("Clear the newer-exporter layout flag after validating every translated array by its absolute offset; physical record order is not copied into Wrath semantics.");
         transformations.Add("Append the missing primary-UV texture-coordinate lookup used by the verified single-stage SKIN batches.");
+        if (resolvedTextures.Count > 0) transformations.Add($"Embed {resolvedTextures.Count:N0} listfile-resolved texture path(s) into the Wrath M2 payload and remove the external FileDataID dependency.");
         transformations.Add("Repack modern SKIN v3 common arrays into the Wrath SKIN v2 header without changing their contents.");
         if (omittedEmptyTxac) transformations.Add("Omit the proven zero-filled TXAC extension chunk; it contains no texture-animation values to translate.");
-        return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, version, flags,
+        return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, listfile?.SourcePath, listfile?.SourceSha256, resolvedTextures, version, flags,
             flags & ~SupportedModernFlagMask, vertices, triangles, submeshes, materials, shadows, transformations, losses, blockers.Distinct().ToArray());
     }
 
-    public static StaticM2DownportScanResult Scan(IEnumerable<string> inputs, CancellationToken cancellationToken = default)
+    public static StaticM2DownportScanResult Scan(IEnumerable<string> inputs, string? listfilePath = null, CancellationToken cancellationToken = default)
     {
         var normalizedInputs = inputs.Where(value => !string.IsNullOrWhiteSpace(value)).Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (normalizedInputs.Length == 0) throw new ArgumentException("Add at least one M2 file or folder to scan.", nameof(inputs));
@@ -207,6 +249,8 @@ public static class StaticM2DownportService
             }
         }
         if (files.Count == 0) throw new InvalidOperationException("The selected input contains no M2 files.");
+        FileDataIdListfileSnapshot? listfile = null;
+        if (!string.IsNullOrWhiteSpace(listfilePath)) listfile = PrepareListfile(listfilePath, files, cancellationToken);
         var entries = new List<StaticM2DownportScanEntry>(files.Count);
         foreach (var file in files)
         {
@@ -214,7 +258,7 @@ public static class StaticM2DownportService
             try
             {
                 if (IsWotlkM2(file)) { entries.Add(new(file, StaticM2DownportScanStatus.AlreadyWotlk335, null, null)); continue; }
-                var plan = Plan(file); entries.Add(new(file, plan.Ready ? StaticM2DownportScanStatus.ConversionReady : StaticM2DownportScanStatus.Blocked, plan, null));
+                var plan = listfile is null ? Plan(file, cancellationToken: cancellationToken) : PlanWithListfileSnapshot(file, null, listfile, cancellationToken); entries.Add(new(file, plan.Ready ? StaticM2DownportScanStatus.ConversionReady : StaticM2DownportScanStatus.Blocked, plan, null));
             }
             catch (Exception exception) { entries.Add(new(file, StaticM2DownportScanStatus.Failed, null, exception.Message)); }
         }
@@ -226,10 +270,11 @@ public static class StaticM2DownportService
     {
         if (plan.FormatVersion != PlanFormatVersion) throw new InvalidDataException($"Unsupported static M2 plan version {plan.FormatVersion}.");
         cancellationToken.ThrowIfCancellationRequested();
-        var current = Plan(plan.SourceModelPath, plan.SourceSkinPath);
+        var current = Plan(plan.SourceModelPath, plan.SourceSkinPath, plan.SourceListfilePath, cancellationToken);
         if (!current.SourceModelSha256.Equals(plan.SourceModelSha256, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(current.SourceSkinSha256, plan.SourceSkinSha256, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("Source M2 or SKIN changed after planning; create a fresh conversion plan.");
+            !string.Equals(current.SourceSkinSha256, plan.SourceSkinSha256, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(current.SourceListfileSha256, plan.SourceListfileSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Source M2, SKIN, or FileDataID listfile changed after planning; create a fresh conversion plan.");
         if (!current.Ready) throw new InvalidOperationException("Static M2 downport is blocked:\n- " + string.Join("\n- ", current.Blockers));
         if (current.SourceSkinPath is null) throw new InvalidOperationException("Conversion plan has no companion SKIN.");
 
@@ -245,6 +290,12 @@ public static class StaticM2DownportService
             BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), WotlkVersion); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x10, 4), current.OutputFlags);
             var coordinateOffset = Align(payload.Length, 2); Array.Resize(ref payload, coordinateOffset + 2); BinaryPrimitives.WriteInt16LittleEndian(payload.AsSpan(coordinateOffset, 2), 0);
             BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x88, 4), 1); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x8C, 4), checked((uint)coordinateOffset));
+            var textureOffset = checked((int)U32(payload, 0x54));
+            foreach (var resolved in current.ResolvedTexturePaths)
+            {
+                var bytes = Encoding.UTF8.GetBytes(resolved.ClientPath + "\0"); var pathOffset = payload.Length; Array.Resize(ref payload, checked(payload.Length + bytes.Length)); bytes.CopyTo(payload, pathOffset);
+                var item = checked(textureOffset + resolved.TextureIndex * 16); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(item + 8, 4), checked((uint)bytes.Length)); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(item + 12, 4), checked((uint)pathOffset));
+            }
 
             var skinSource = File.ReadAllBytes(current.SourceSkinPath); var skin = ParseModernSkin(skinSource, []) ?? throw new InvalidDataException("Companion SKIN changed into an invalid layout.");
             var outputSkin = BuildWotlkSkin(skinSource, skin);
@@ -257,6 +308,10 @@ public static class StaticM2DownportService
             var geometry = M2PreviewGeometryService.Load(stagedModel, stagedSkin, M2PreviewVisibilityMode.AllGeosets);
             if (geometry.Vertices.Count != current.VertexCount || geometry.TotalTriangleIndices / 3 != current.TriangleCount || geometry.Submeshes.Count != current.SubmeshCount || geometry.MaterialUnits.Count != current.MaterialCount)
                 throw new InvalidDataException("Converted M2/SKIN geometry or material counts differ from the immutable plan.");
+            var slots = M2PreviewGeometryService.InspectTextureSlots(stagedModel);
+            foreach (var resolved in current.ResolvedTexturePaths)
+                if (resolved.TextureIndex >= slots.Count || !string.Equals(PatchInputMapper.NormalizeArchivePath(slots[resolved.TextureIndex].EmbeddedPath ?? string.Empty), resolved.ClientPath, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException($"Converted texture slot {resolved.TextureIndex:N0} did not retain its resolved client path.");
 
             var finalModel = Path.Combine(outputDirectory, modelName); var finalSkin = Path.Combine(outputDirectory, skinName); var receipt = Path.Combine(outputDirectory, "conversion-receipt.json");
             var result = new StaticM2DownportResult(ReceiptFormatVersion, DateTimeOffset.UtcNow, current, outputDirectory, finalModel, Hash(payload), finalSkin, Hash(outputSkin), receipt,
@@ -357,6 +412,16 @@ public static class StaticM2DownportService
         }
         var expected = Path.GetFileNameWithoutExtension(modelPath) + "00.skin";
         return Directory.EnumerateFiles(Path.GetDirectoryName(modelPath)!, "*.skin", SearchOption.TopDirectoryOnly).FirstOrDefault(path => Path.GetFileName(path).Equals(expected, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static IReadOnlyList<uint> ExternalTextureIds(string modelPath)
+    {
+        modelPath = Path.GetFullPath(modelPath); if (!File.Exists(modelPath)) throw new FileNotFoundException("The M2 source does not exist.", modelPath);
+        var data = File.ReadAllBytes(modelPath); if (data.Length < 8 || FourCc(data, 0) != "MD21") return [];
+        var chunks = ReadChunks(data, []); var txid = chunks.SingleOrDefault(chunk => chunk.Id == "TXID");
+        if (txid is null || txid.Size % 4 != 0 || txid.Size > int.MaxValue) return [];
+        var result = new List<uint>(); for (long cursor = txid.DataOffset; cursor < txid.DataOffset + txid.Size; cursor += 4) { var id = U32(data, checked((int)cursor)); if (id != 0) result.Add(id); }
+        return result;
     }
 
     private static bool IsWotlkM2(string path)

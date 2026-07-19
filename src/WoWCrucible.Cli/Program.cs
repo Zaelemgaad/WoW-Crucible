@@ -605,14 +605,15 @@ static int Asset(string[] args)
     }
     if (args is ["m2-downport-plan", var downportPlanModelPath, .. var downportPlanOptions])
     {
-        var json = downportPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var skinPath = Option(downportPlanOptions, "--skin=");
-        var unknown = downportPlanOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var json = downportPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var skinPath = Option(downportPlanOptions, "--skin="); var listfilePath = Option(downportPlanOptions, "--listfile=");
+        var unknown = downportPlanOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown m2-downport-plan option: {unknown[0]}");
-        var plan = StaticM2DownportService.Plan(downportPlanModelPath, skinPath);
+        var plan = StaticM2DownportService.Plan(downportPlanModelPath, skinPath, listfilePath);
         if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         else
         {
-            Console.WriteLine($"READY\t{plan.Ready}\nMODEL\t{plan.SourceModelPath}\nMODEL_SHA256\t{plan.SourceModelSha256}\nSKIN\t{plan.SourceSkinPath ?? "<missing>"}\nSOURCE\tversion={plan.SourceVersion}\tflags=0x{plan.SourceFlags:X}\nOUTPUT\tversion=264\tflags=0x{plan.OutputFlags:X}\nGEOMETRY\tvertices={plan.VertexCount:N0}\ttriangles={plan.TriangleCount:N0}\tsubmeshes={plan.SubmeshCount:N0}\tmaterials={plan.MaterialCount:N0}\nSHADOW_BATCHES\t{plan.ShadowBatchCount:N0}");
+            Console.WriteLine($"READY\t{plan.Ready}\nMODEL\t{plan.SourceModelPath}\nMODEL_SHA256\t{plan.SourceModelSha256}\nSKIN\t{plan.SourceSkinPath ?? "<missing>"}\nLISTFILE\t{plan.SourceListfilePath ?? "<not required/supplied>"}\nSOURCE\tversion={plan.SourceVersion}\tflags=0x{plan.SourceFlags:X}\nOUTPUT\tversion=264\tflags=0x{plan.OutputFlags:X}\nGEOMETRY\tvertices={plan.VertexCount:N0}\ttriangles={plan.TriangleCount:N0}\tsubmeshes={plan.SubmeshCount:N0}\tmaterials={plan.MaterialCount:N0}\nSHADOW_BATCHES\t{plan.ShadowBatchCount:N0}");
+            foreach (var value in plan.ResolvedTexturePaths) Console.WriteLine($"TEXTURE_PATH\tindex={value.TextureIndex}\tfileDataId={value.FileDataId}\t{value.ClientPath}");
             foreach (var value in plan.Transformations) Console.WriteLine($"TRANSFORM\t{value}");
             foreach (var value in plan.Losses) Console.WriteLine($"LOSS\t{value}");
             foreach (var value in plan.Blockers) Console.WriteLine($"BLOCKER\t{value}");
@@ -622,10 +623,10 @@ static int Asset(string[] args)
     if (args.Length > 1 && args[0].Equals("m2-downport-scan", StringComparison.OrdinalIgnoreCase))
     {
         var scanOptions = args[1..].Where(value => value.StartsWith("--", StringComparison.Ordinal)).ToArray(); var scanInputs = args[1..].Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
-        var json = scanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var unknown = scanOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var json = scanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var listfilePath = Option(scanOptions, "--listfile="); var unknown = scanOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown m2-downport-scan option: {unknown[0]}");
         if (scanInputs.Length == 0) return Fail("m2-downport-scan requires at least one M2 file or folder.");
-        var scan = StaticM2DownportService.Scan(scanInputs);
+        var scan = StaticM2DownportService.Scan(scanInputs, listfilePath);
         if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(scan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         else
         {
@@ -641,9 +642,9 @@ static int Asset(string[] args)
     }
     if (args is ["m2-downport", var downportModelPath, var downportOutput, .. var downportOptions])
     {
-        var skinPath = Option(downportOptions, "--skin="); var unknown = downportOptions.Where(option => !option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var skinPath = Option(downportOptions, "--skin="); var listfilePath = Option(downportOptions, "--listfile="); var unknown = downportOptions.Where(option => !option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown m2-downport option: {unknown[0]}");
-        var plan = StaticM2DownportService.Plan(downportModelPath, skinPath);
+        var plan = StaticM2DownportService.Plan(downportModelPath, skinPath, listfilePath);
         if (!plan.Ready) { Console.Error.WriteLine("BLOCKED:\n- " + string.Join("\n- ", plan.Blockers)); return 3; }
         var result = StaticM2DownportService.Convert(plan, downportOutput);
         Console.WriteLine($"MODEL\t{result.OutputModelPath}\nMODEL_SHA256\t{result.OutputModelSha256}\nSKIN\t{result.OutputSkinPath}\nSKIN_SHA256\t{result.OutputSkinSha256}\nRECEIPT\t{result.ReceiptPath}\nVALIDATED\tvertices={result.ValidatedVertices:N0}\ttriangles={result.ValidatedTriangles:N0}\tsubmeshes={result.ValidatedSubmeshes:N0}\tmaterials={result.ValidatedMaterials:N0}");
@@ -878,9 +879,9 @@ Usage:
   wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
   wowcrucible asset texture-validate <file-or-folder> [--recursive]
   wowcrucible asset inspect <model.m2|building.wmo>...
-  wowcrucible asset m2-downport-plan <modern.m2> [--skin=file.skin] [--format=text|json]
-  wowcrucible asset m2-downport-scan <file-or-folder>... [--format=text|json]
-  wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin]
+  wowcrucible asset m2-downport-plan <modern.m2> [--skin=file.skin] [--listfile=id-path.csv] [--format=text|json]
+  wowcrucible asset m2-downport-scan <file-or-folder>... [--listfile=id-path.csv] [--format=text|json]
+  wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin] [--listfile=id-path.csv]
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
   wowcrucible asset creature-appearances <model-client-path> [--dbc=folder] [--schema=file] [--library=folder --provenance=name] [--format=text|json]
   wowcrucible asset preview-info <wrath-model.m2> [--skin=file.skin] [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
