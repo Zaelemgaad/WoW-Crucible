@@ -11,6 +11,7 @@ if (args.Length != 2)
 if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(command => command.Id).Distinct(StringComparer.Ordinal).Count() != CrucibleCommandCatalog.All.Count ||
     CrucibleCommandCatalog.Search("heidi favorites").FirstOrDefault()?.Command.Id != "workspace.sql" ||
     CrucibleCommandCatalog.Search("mpq merge").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
+    CrucibleCommandCatalog.Search("casc later client extract").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
     CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.items" ||
     CrucibleCommandCatalog.Search("project collision ids").FirstOrDefault()?.Command.Id != "workspace.projects" ||
     CrucibleCommandCatalog.Search("pet companion level stats").FirstOrDefault()?.Command.Id != "workspace.pets" ||
@@ -21,6 +22,11 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("wiki field help").FirstOrDefault()?.Command.Id != "workspace.knowledge" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
+
+if (Environment.Is64BitProcess && CascArchiveService.NativeFindDataSize != 344)
+    throw new InvalidOperationException($"CascLib x64 find-data ABI regressed: expected 344 bytes, found {CascArchiveService.NativeFindDataSize}.");
+if (OperatingSystem.IsWindows() && Environment.Is64BitProcess && !CascArchiveService.IsNativeProviderAvailable())
+    throw new InvalidOperationException("The pinned CascLib native provider could not be loaded from the test output.");
 
 var designTable = new DatabaseTableCapability("fixture_table",
 [

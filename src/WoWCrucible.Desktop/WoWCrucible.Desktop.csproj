@@ -27,6 +27,10 @@
           Link="StormLib.dll"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\third_party\CascLib\win-x64\CascLib.dll"
+          Link="CascLib.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\docs\CLI-REFERENCE.md"
           Link="docs\CLI-REFERENCE.md"
           CopyToOutputDirectory="PreserveNewest"

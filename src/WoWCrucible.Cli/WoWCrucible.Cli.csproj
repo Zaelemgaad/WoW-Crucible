@@ -11,5 +11,6 @@
   <ItemGroup>
     <ProjectReference Include="../WoWCrucible.Core/WoWCrucible.Core.csproj" />
     <None Include="../../third_party/StormLib/win-x64/StormLib.dll" Link="StormLib.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="../../third_party/CascLib/win-x64/CascLib.dll" Link="CascLib.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

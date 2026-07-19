@@ -238,6 +238,17 @@ Standalone list/tree/extract commands and the desktop archive browser share comp
 
 `merge` treats every source MPQ as immutable. Repeated internal paths are SHA-256 checked and then compared byte-for-byte; exact copies are stored once. Different bytes at the same internal path block output by default. `--conflicts=earlier` or `--conflicts=later` is an explicit global precedence choice. Hash-only `File000...` names and duplicate locale variants are blocked unless their real paths can be resolved safely. Merge payloads use short flat temporary names while logical archive paths remain separate, so deeply nested project/output locations do not exceed StormLib's Windows destination-path limit.
 
+## Read-only CASC browsing and extraction
+
+```text
+wowcrucible casc list <storage-folder> [filter] [--local-only] [--format=text|json] [--listfile=paths.txt]
+wowcrucible casc tree <storage-folder> [internal-folder] [--local-only] [--format=text|json] [--listfile=paths.txt]
+wowcrucible casc extract <storage-folder> <destination> [filter] [--quiet|--progress=N] [--listfile=paths.txt]
+wowcrucible casc extract-folder <storage-folder> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]
+```
+
+The desktop exposes the same provider beside MPQ in **MPQ & CASC archives**. CASC storage is always opened read-only. Enumeration preserves synthetic FileDataId, content-key, and encoded-key names when a real path is unavailable; an external listfile is only a path hint. Extraction selects one locally available locale row for each path, writes through a sibling temporary file, and never downloads absent CDN content implicitly.
+
 ## Manifest-first patches
 
 ```text

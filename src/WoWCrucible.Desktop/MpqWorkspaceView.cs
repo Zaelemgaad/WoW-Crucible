@@ -58,6 +58,16 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _browserStatus = StatusText("Open an MPQ to browse it.");
     private IReadOnlyList<MpqFileEntry> _allArchiveEntries = [];
     private string _treeFolder = string.Empty;
+    private readonly TextBox _cascStoragePath = new() { PlaceholderText = "CASC client/storage folder" };
+    private readonly TextBox _cascListfile = new() { PlaceholderText = "Optional external CASC listfile" };
+    private readonly TextBox _cascSearch = new() { PlaceholderText = "Global CASC path search (* and ? supported)…" };
+    private readonly ListBox _cascItems = new() { SelectionMode = SelectionMode.Multiple };
+    private readonly ListBox _cascTreeItems = new() { SelectionMode = SelectionMode.Multiple };
+    private readonly WrapPanel _cascBreadcrumb = new() { VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock _cascStatus = StatusText("Choose a later-client CASC storage. Crucible opens it read-only.");
+    private IReadOnlyList<CascFileEntry> _allCascEntries = [];
+    private IReadOnlyList<MpqFileEntry> _cascTreeEntries = [];
+    private string _cascTreeFolder = string.Empty;
     private readonly ListBox _mergeInputs = new() { SelectionMode = SelectionMode.Multiple };
     private readonly List<string> _mergePaths = [];
     private readonly ComboBox _mergePolicy = new() { ItemsSource = Enum.GetValues<MpqMergeConflictPolicy>(), SelectedItem = MpqMergeConflictPolicy.BlockDifferentEntries };
@@ -93,14 +103,28 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
             }
         });
         _treeItems.DoubleTapped += (_, _) => OpenSelectedTreeFolder();
+        _cascItems.ItemTemplate = new FuncDataTemplate<CascFileEntry>((entry, _) => entry is null ? new Grid() : new Grid
+        {
+            ColumnDefinitions = new("*,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(3, 2), Children =
+            {
+                new TextBlock { Text = entry.ArchivePath, TextTrimming = TextTrimming.CharacterEllipsis },
+                WithColumn(new TextBlock { Text = FormatBytes(entry.Size) }, 1),
+                WithColumn(new TextBlock { Text = entry.FileDataId == uint.MaxValue ? "—" : entry.FileDataId.ToString() }, 2),
+                WithColumn(new TextBlock { Text = entry.IsAvailableLocally ? entry.NameType.ToString() : $"remote · {entry.NameType}" }, 3)
+            }
+        });
+        _cascTreeItems.ItemTemplate = _treeItems.ItemTemplate;
+        _cascTreeItems.DoubleTapped += (_, _) => OpenSelectedCascTreeFolder();
+        _cascSearch.TextChanged += (_, _) => FilterCasc();
         _dependencyNodes.ItemTemplate = new FuncDataTemplate<ClientAssetDependencyNode>((node, _) => node is null ? new Grid() : BuildDependencyRow(node));
         _dependencyNodes.SelectionChanged += (_, _) => _dependencyCandidates.ItemsSource = (_dependencyNodes.SelectedItem as ClientAssetDependencyNode)?.Candidates;
 
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
-        var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12,8), Children = { back, WithColumn(new TextBlock { Text = "MPQ PATCHES & ARCHIVES", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, 1) } };
+        var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12,8), Children = { back, WithColumn(new TextBlock { Text = "MPQ & CASC ARCHIVES", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, 1) } };
         _tabs.Items.Add(new TabItem { Header = "Patch builder", Content = BuildBuilderPage() });
         _tabs.Items.Add(new TabItem { Header = "Dependency closure", Content = BuildDependencyPage() });
         _tabs.Items.Add(new TabItem { Header = "Archive browser", Content = BuildBrowserPage() });
+        _tabs.Items.Add(new TabItem { Header = "CASC browser", Content = BuildCascBrowserPage() });
         _tabs.Items.Add(new TabItem { Header = "Merge small patches", Content = BuildMergePage() });
         _tabs.Items.Add(new TabItem { Header = "Client deployment", Content = BuildDeploymentPage() });
         Content = new Grid { RowDefinitions = new("Auto,*"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,0,1), Child = heading }, WithRow(_tabs, 1) } };
@@ -275,6 +299,37 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         var extractSelected = new Button { Content = "Extract selected" }; extractSelected.Click += async (_, _) => await ExtractAsync(_browserItems.SelectedItems?.OfType<MpqFileEntry>().ToArray() ?? []);
         var extractAll = AccentButton("Extract all visible"); extractAll.Click += async (_, _) => await ExtractAsync((_browserItems.ItemsSource as IEnumerable<MpqFileEntry>)?.ToArray() ?? []);
         return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 6, Children = { new WrapPanel { Children = { extractSelected, extractAll, new TextBlock { Text = "The search box above filters this global path list. Folder mode stays at its current location.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _browserItems }, 1) } };
+    }
+
+    private Control BuildCascBrowserPage()
+    {
+        var open = new Button { Content = "Open CASC storage" }; open.Click += async (_, _) => await ChooseCascStorageAsync();
+        var listfile = new Button { Content = "External listfile…" }; listfile.Click += async (_, _) => await ChooseCascListfileAsync();
+        var cancel = new Button { Content = "Cancel operation" }; cancel.Click += (_, _) => _operation?.Cancel();
+        var provider = new TextBlock { Text = CascArchiveService.IsNativeProviderAvailable() ? "Native provider ready" : "Native provider missing from this development build", Foreground = Brush.Parse(CascArchiveService.IsNativeProviderAvailable() ? "#76B78B" : "#D7A15D"), VerticalAlignment = VerticalAlignment.Center };
+        var toolbar = new WrapPanel { Children = { open, listfile, cancel, provider } };
+        var paths = new Grid { ColumnDefinitions = new("2*,*,2*"), ColumnSpacing = 8, Children = { _cascStoragePath, WithColumn(_cascListfile, 1), WithColumn(_cascSearch, 2) } };
+        var modes = new TabControl { Items = { new TabItem { Header = "Folders", Content = BuildCascFolderBrowser() }, new TabItem { Header = "Flat search", Content = BuildCascFlatBrowser() } } };
+        var explanation = new TextBlock { Text = "CASC support is intentionally read-only: list, search, browse, and extract. It never downloads missing CDN data and never mutates the client storage.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
+        return new Grid { RowDefinitions = new("Auto,Auto,Auto,*,Auto"), Margin = new Thickness(8), RowSpacing = 8, Children = { toolbar, WithRow(paths, 1), WithRow(explanation, 2), WithRow(modes, 3), WithRow(_cascStatus, 4) } };
+    }
+
+    private Control BuildCascFolderBrowser()
+    {
+        var root = new Button { Content = "Root" }; root.Click += (_, _) => NavigateCascTree(string.Empty);
+        var up = new Button { Content = "↑ Up" }; up.Click += (_, _) => NavigateCascTree(MpqArchiveBrowser.Parent(_cascTreeFolder));
+        var open = new Button { Content = "Open selected folder" }; open.Click += (_, _) => OpenSelectedCascTreeFolder();
+        var extractSelected = new Button { Content = "Extract selected files/folders" }; extractSelected.Click += async (_, _) => await ExtractCascAsync(SelectCascTree(_cascTreeItems.SelectedItems?.OfType<MpqBrowserNode>() ?? []));
+        var extractFolder = AccentButton("Extract current folder recursively"); extractFolder.Click += async (_, _) => await ExtractCascAsync(SelectCascFolder(_cascTreeFolder));
+        var controls = new WrapPanel { Children = { root, up, open, extractSelected, extractFolder, _cascBreadcrumb } };
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 6, Children = { controls, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _cascTreeItems }, 1) } };
+    }
+
+    private Control BuildCascFlatBrowser()
+    {
+        var extractSelected = new Button { Content = "Extract selected" }; extractSelected.Click += async (_, _) => await ExtractCascAsync(_cascItems.SelectedItems?.OfType<CascFileEntry>().ToArray() ?? []);
+        var extractAll = AccentButton("Extract all visible"); extractAll.Click += async (_, _) => await ExtractCascAsync((_cascItems.ItemsSource as IEnumerable<CascFileEntry>)?.ToArray() ?? []);
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 6, Children = { new WrapPanel { Children = { extractSelected, extractAll, new TextBlock { Text = "FileDataId/key-only rows remain visible so unknown names are not silently discarded.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _cascItems }, 1) } };
     }
 
     private Control BuildMergePage()
@@ -455,6 +510,98 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         try { var archivePath = _archivePath.Text ?? string.Empty; var progress = new Progress<(int Done, int Total, string Path)>(value => _browserStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}"); await Task.Run(() => new PatchArchiveService().Extract(archivePath, destination, entries, progress, _operation!.Token)); _browserStatus.Text = $"Extracted {entries.Count:N0} entries to {destination}."; }
         catch (OperationCanceledException) { _browserStatus.Text = "Extraction cancelled."; }
         catch (Exception exception) { _browserStatus.Text = $"Extraction failed: {exception.Message}"; DesktopCrashLogger.Log("MPQ extraction failed", exception); }
+    }
+
+    private async Task ChooseCascStorageAsync()
+    {
+        var path = await PickFolderAsync("Select a CASC client or storage folder");
+        if (path is null) return;
+        _cascStoragePath.Text = path;
+        await LoadCascAsync();
+    }
+
+    private async Task ChooseCascListfileAsync()
+    {
+        var path = await PickFileAsync("Select an external CASC listfile", ["*.txt", "*"]);
+        if (path is null) return;
+        _cascListfile.Text = path;
+        if (Directory.Exists(_cascStoragePath.Text)) await LoadCascAsync();
+    }
+
+    private async Task LoadCascAsync()
+    {
+        BeginOperation();
+        try
+        {
+            _cascStatus.Text = "Opening CASC storage read-only and enumerating its root…";
+            var root = _cascStoragePath.Text ?? string.Empty;
+            var listfile = string.IsNullOrWhiteSpace(_cascListfile.Text) ? null : _cascListfile.Text;
+            _allCascEntries = await Task.Run(() => new CascArchiveService().ListFiles(root, "*", listfile, _operation!.Token), _operation!.Token);
+            _cascTreeEntries = _allCascEntries.GroupBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).Select(group => BestCascEntry(group)).Select(entry => new MpqFileEntry(entry.ArchivePath, entry.Size, entry.Size, entry.ContentFlags, entry.Locale)).ToArray();
+            FilterCasc(); NavigateCascTree(string.Empty);
+            var unavailable = _allCascEntries.Count(entry => !entry.IsAvailableLocally); var synthetic = _allCascEntries.Count(entry => entry.NameType != CascEntryNameType.FullPath);
+            _cascStatus.Text = $"Loaded {_allCascEntries.Count:N0} CASC row(s) · {_cascTreeEntries.Count:N0} unique path(s) · {synthetic:N0} synthetic FileDataId/key name(s) · {unavailable:N0} not stored locally. Storage was not modified.";
+        }
+        catch (OperationCanceledException) { _cascStatus.Text = "CASC enumeration cancelled."; }
+        catch (Exception exception) { _cascStatus.Text = $"CASC open failed: {exception.Message}"; DesktopCrashLogger.Log("CASC open failed", exception); }
+    }
+
+    private void FilterCasc()
+    {
+        var filtered = _allCascEntries.Where(entry => MpqPathFilter.Matches(entry.ArchivePath, _cascSearch.Text)).ToArray();
+        _cascItems.ItemsSource = filtered;
+        if (_allCascEntries.Count > 0) _cascStatus.Text = $"Showing {filtered.Length:N0} of {_allCascEntries.Count:N0} CASC rows.";
+    }
+
+    private void NavigateCascTree(string folder)
+    {
+        try
+        {
+            var page = MpqArchiveBrowser.Browse(_cascTreeEntries, folder); _cascTreeFolder = page.CurrentFolder; _cascTreeItems.ItemsSource = page.Nodes; BuildCascBreadcrumb(page);
+            _cascStatus.Text = $"{(page.CurrentFolder.Length == 0 ? "CASC root" : page.CurrentFolder)} · {page.Nodes.Count:N0} direct node(s) · {page.RecursiveFiles:N0} recursive file(s) · {FormatBytes(page.RecursiveBytes)}.";
+        }
+        catch (Exception exception) { _cascStatus.Text = $"CASC folder navigation failed: {exception.Message}"; }
+    }
+
+    private void OpenSelectedCascTreeFolder()
+    {
+        if (_cascTreeItems.SelectedItem is MpqBrowserNode { IsFolder: true } folder) NavigateCascTree(folder.ArchivePath);
+    }
+
+    private void BuildCascBreadcrumb(MpqFolderPage page)
+    {
+        _cascBreadcrumb.Children.Clear(); var root = new Button { Content = "CASC" }; root.Click += (_, _) => NavigateCascTree(string.Empty); _cascBreadcrumb.Children.Add(root);
+        foreach (var path in page.Breadcrumbs) { _cascBreadcrumb.Children.Add(new TextBlock { Text = "›", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(3, 0) }); var button = new Button { Content = path.Split('\\')[^1] }; button.Click += (_, _) => NavigateCascTree(path); _cascBreadcrumb.Children.Add(button); }
+    }
+
+    private IReadOnlyList<CascFileEntry> SelectCascTree(IEnumerable<MpqBrowserNode> nodes)
+    {
+        var paths = MpqArchiveBrowser.Select(_cascTreeEntries, nodes).Select(entry => entry.ArchivePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return _allCascEntries.Where(entry => paths.Contains(entry.ArchivePath)).GroupBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).Select(BestCascEntry).ToArray();
+    }
+
+    private IReadOnlyList<CascFileEntry> SelectCascFolder(string folder)
+    {
+        var paths = MpqArchiveBrowser.SelectFolder(_cascTreeEntries, folder).Select(entry => entry.ArchivePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return _allCascEntries.Where(entry => paths.Contains(entry.ArchivePath)).GroupBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).Select(BestCascEntry).ToArray();
+    }
+
+    private static CascFileEntry BestCascEntry(IEnumerable<CascFileEntry> entries) => entries.OrderByDescending(entry => entry.IsAvailableLocally).ThenBy(entry => entry.NameType).ThenBy(entry => entry.Locale == 0x2 ? 0 : 1).First();
+
+    private async Task ExtractCascAsync(IReadOnlyList<CascFileEntry> entries)
+    {
+        if (entries.Count == 0) { _cascStatus.Text = "Select at least one CASC entry."; return; }
+        var available = entries.Where(entry => entry.IsAvailableLocally).ToArray(); var skipped = entries.Count - available.Length;
+        if (available.Length == 0) { _cascStatus.Text = "The selected CASC entries are not stored locally. Crucible will not download CDN data implicitly."; return; }
+        var destination = await PickFolderAsync("Select CASC extraction destination"); if (destination is null) return; BeginOperation();
+        try
+        {
+            var root = _cascStoragePath.Text ?? string.Empty; var progress = new Progress<(int Done, int Total, string Path)>(value => _cascStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}");
+            await Task.Run(() => new CascArchiveService().Extract(root, destination, available, progress, _operation!.Token), _operation!.Token);
+            _cascStatus.Text = $"Extracted {available.Length:N0} CASC file(s) to {destination}.{(skipped == 0 ? string.Empty : $" Skipped {skipped:N0} entry/entries not stored locally; no download was attempted.")}";
+        }
+        catch (OperationCanceledException) { _cascStatus.Text = "CASC extraction cancelled."; }
+        catch (Exception exception) { _cascStatus.Text = $"CASC extraction failed: {exception.Message}"; DesktopCrashLogger.Log("CASC extraction failed", exception); }
     }
 
     private void BeginOperation() { _operation?.Cancel(); _operation?.Dispose(); _operation = new(); }
