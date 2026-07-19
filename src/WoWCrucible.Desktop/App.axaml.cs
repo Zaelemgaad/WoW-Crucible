@@ -34,6 +34,7 @@ public partial class App : Application
             else if (arguments.Any(argument => IsOption(argument, "--projects"))) window.Opened += (_, _) => window.OpenProjectWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--maps"))) window.Opened += (_, _) => window.OpenMapWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--items"))) window.Opened += (_, _) => window.OpenItemWorkbench();
+            else if (arguments.Any(argument => IsOption(argument, "--creatures"))) window.Opened += (_, _) => window.OpenCreatureWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--textures"))) window.Opened += (_, _) => window.OpenTextureWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--gameobjects"))) window.Opened += (_, _) => window.OpenGameObjectWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--quests"))) window.Opened += (_, _) => window.OpenQuestWorkspace();

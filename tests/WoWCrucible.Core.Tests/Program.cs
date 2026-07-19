@@ -878,11 +878,16 @@ var raceOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentId
 var customOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Custom, null, null, null, null, [7u, 9u]);
 var incompleteItemOccupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.Item, null, null, null, null);
 var reservedRace = CrucibleContentProjectService.ReserveVerifiedIds(contentProjectRoot, raceOccupancy, 1, null, "fixture race").Reservation.Values.Single();
+static ContentIdOccupancyReport CompleteSqlOccupancy(ContentIdDomain domain, string table) => new(domain, ContentIdDomainCatalog.RegistryNamespace(domain), DateTimeOffset.UnixEpoch, [100_000u], [new("SQL", table, "fixture", 1, true, "fixture")], true, []);
+var reservedCreature = CrucibleContentProjectService.ReserveVerifiedIds(contentProjectRoot, CompleteSqlOccupancy(ContentIdDomain.CreatureTemplate, "creature_template.entry"), 1, null, "fixture creature").Reservation.Values.Single();
+var reservedGameObject = CrucibleContentProjectService.ReserveVerifiedIds(contentProjectRoot, CompleteSqlOccupancy(ContentIdDomain.GameObject, "gameobject_template.entry"), 1, null, "fixture gameobject").Reservation.Values.Single();
+var reservedQuest = CrucibleContentProjectService.ReserveVerifiedIds(contentProjectRoot, CompleteSqlOccupancy(ContentIdDomain.Quest, "quest_template.ID"), 1, null, "fixture quest").Reservation.Values.Single();
 if (defaultContentProject.TargetProfile != TargetProfileCatalog.DefaultProfileId || TargetProfileCatalog.Find(targetProfiles, defaultContentProject.TargetProfile).Id != TargetProfileCatalog.DefaultProfileId ||
     !firstIds.SequenceEqual([101u, 103u, 104u]) || !secondIds.SequenceEqual([105u, 106u]) || !mountIds.SequenceEqual([100_000u]) || !spellIdsAfterMount.SequenceEqual([100_001u]) ||
     !raceOccupancy.Complete || raceOccupancy.RegistryNamespace != ContentIdDomain.Race || raceOccupancy.OccupiedIds.Count < 10 || raceOccupancy.OccupiedIds.Contains(reservedRace) || reservedRace is < 1 or > 31 ||
     !customOccupancy.Complete || !customOccupancy.OccupiedIds.SequenceEqual([7u, 9u]) || incompleteItemOccupancy.Complete ||
-    CrucibleContentProjectService.LoadRegistry(contentProjectRoot).Reservations.Count != 5 || !Directory.Exists(Path.Combine(contentProjectRoot, "Staging")))
+    reservedCreature != 100_001 || reservedGameObject != 100_001 || reservedQuest != 100_001 ||
+    CrucibleContentProjectService.LoadRegistry(contentProjectRoot).Reservations.Count != 8 || !Directory.Exists(Path.Combine(contentProjectRoot, "Staging")))
     throw new InvalidOperationException("Portable content-project ID reservations collided with occupied or previously reserved IDs.");
 try { _ = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.Class, 1, 32, [], "invalid class"); throw new InvalidOperationException("A WotLK class reservation exceeded the 32-bit class-mask range."); }
 catch (ArgumentOutOfRangeException) { }

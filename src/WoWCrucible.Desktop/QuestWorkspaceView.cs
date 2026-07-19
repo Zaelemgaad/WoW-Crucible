@@ -20,6 +20,7 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _status = Status("Offline portable quest schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _commit = AccentButton("Insert into connected world database"); private WorldContentWritePlan? _pendingPlan; private uint? _loadedId; private IReadOnlyDictionary<string, object?>? _loadedValues; private bool _syncingSemantics;
     public event EventHandler? BackRequested;
+    public event EventHandler? ProjectWorkspaceRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public QuestWorkspaceView(DesktopWorkspaceSession session)
@@ -32,9 +33,23 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
         var editor = new TabControl { Items = { new TabItem { Header = "Quest fields", Content = _fieldTabs }, new TabItem { Header = "Starters & enders", Content = LinksPage() } } };
         var preview = new TabControl { Items = { new TabItem { Header = "Decoded summary", Content = new ScrollViewer { Content = new Border { Padding = new Thickness(16), BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _summary } } }, new TabItem { Header = "SQL change plan", Content = _sql } } };
         var workspace = new Grid { ColumnDefinitions = new("3*,Auto,2*"), Children = { editor, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(preview, 2) } };
-        var export = new Button { Content = "Export SQL…" }; export.Click += async (_, _) => await ExportAsync(); var exportDraft = new Button { Content = "Export portable draft…" }; exportDraft.Click += async (_, _) => await ExportDraftAsync(); _commit.Click += (_, _) => PrepareCommit();
-        Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(new WrapPanel { Children = { export, exportDraft, _commit, _status } }, 2), WithRow(_confirmation, 3) } };
+        var reserveId = AccentButton("Reserve project ID"); reserveId.Click += async (_, _) => await ReserveProjectIdAsync(reserveId); var export = new Button { Content = "Export SQL…" }; export.Click += async (_, _) => await ExportAsync(); var exportDraft = new Button { Content = "Export portable draft…" }; exportDraft.Click += async (_, _) => await ExportDraftAsync(); _commit.Click += (_, _) => PrepareCommit();
+        Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(new WrapPanel { Children = { reserveId, export, exportDraft, _commit, _status } }, 2), WithRow(_confirmation, 3) } };
         RebuildFields(); RefreshSchemaStatus();
+    }
+
+    private async Task ReserveProjectIdAsync(Button button)
+    {
+        if (string.IsNullOrWhiteSpace(_session.Settings.ActiveProjectPath)) { _status.Text = "Opening Projects & shared IDs to create or choose a project…"; ProjectWorkspaceRequested?.Invoke(this, EventArgs.Empty); return; }
+        try
+        {
+            button.IsEnabled = false; var current = Values(); var prior = ToUInt(Value(current, "ID")); var title = Convert.ToString(Value(current, "LogTitle"), CultureInfo.InvariantCulture) ?? "New quest";
+            var purpose = _loadedId is null ? $"New quest: {title}" : $"Quest variant of {prior}: {title}"; var reserved = await ProjectIdReservationBridge.ReserveNextAsync(_session, ContentIdDomain.Quest, purpose);
+            if (!_editors.TryGetValue("ID", out var idEditor)) throw new InvalidOperationException("The active quest schema has no editable ID field."); idEditor.Null.IsChecked = false; idEditor.Text.Text = reserved.SingleId.ToString(CultureInfo.InvariantCulture); _loadedId = null; _loadedValues = Values(); _commit.Content = "Insert into connected world database"; RefreshPreview();
+            _status.Text = $"Reserved quest ID {reserved.SingleId:N0} in {reserved.ProjectName}. The current decoded fields are now a new INSERT draft; no SQL was written.";
+        }
+        catch (Exception exception) { _status.Text = $"Quest ID reservation failed: {exception.Message}"; DesktopCrashLogger.Log("Quest ID reservation failed", exception); }
+        finally { button.IsEnabled = true; }
     }
 
     public void OpenQuestRow(IReadOnlyDictionary<string, object?> row) { _loadedValues = new Dictionary<string, object?>(row, StringComparer.OrdinalIgnoreCase); _loadedId = ToUInt(Value(row, "ID")); _commit.Content = "Apply decoded fields to existing quest"; RebuildFields(); _status.Text = $"Loaded quest {_loadedId}. Existing custom columns are preserved and newly staged starter/ender links remain additive."; }

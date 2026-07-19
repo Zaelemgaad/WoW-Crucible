@@ -66,6 +66,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     private uint? _loadedEntry;
 
     public event EventHandler? BackRequested;
+    public event EventHandler? ProjectWorkspaceRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public CreatureWorkspaceView(DesktopWorkspaceSession session)
@@ -101,14 +102,28 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         };
         var workspace = new Grid { ColumnDefinitions = new("3*,Auto,2*"), Children = { editor, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(preview, 2) } };
         var export = new Button { Content = "Export SQL…" }; export.Click += async (_, _) => await ExportAsync();
+        var reserveId = AccentButton("Reserve project ID"); reserveId.Click += async (_, _) => await ReserveProjectIdAsync(reserveId);
         _commit.Click += (_, _) => PrepareInsert();
-        var actions = new WrapPanel { Children = { export, _commit, _status } };
+        var actions = new WrapPanel { Children = { reserveId, export, _commit, _status } };
         Content = new Grid
         {
             RowDefinitions = new("Auto,*,Auto,Auto"),
             Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(actions, 2), WithRow(_confirmation, 3) }
         };
         RefreshPreview(); RefreshSchemaStatus();
+    }
+
+    private async Task ReserveProjectIdAsync(Button button)
+    {
+        if (string.IsNullOrWhiteSpace(_session.Settings.ActiveProjectPath)) { _status.Text = "Opening Projects & shared IDs to create or choose a project…"; ProjectWorkspaceRequested?.Invoke(this, EventArgs.Empty); return; }
+        try
+        {
+            button.IsEnabled = false; var prior = (uint)(_entry.Value ?? 0); var purpose = _loadedEntry is null ? $"New creature: {_name.Text}" : $"Creature variant of {prior}: {_name.Text}";
+            var reserved = await ProjectIdReservationBridge.ReserveNextAsync(_session, ContentIdDomain.CreatureTemplate, purpose); _entry.Value = reserved.SingleId; _loadedEntry = null; _commit.Content = "Insert into connected world database"; RefreshPreview();
+            _status.Text = $"Reserved creature ID {reserved.SingleId:N0} in {reserved.ProjectName}. The current decoded fields are now a new INSERT draft; no SQL was written.";
+        }
+        catch (Exception exception) { _status.Text = $"Creature ID reservation failed: {exception.Message}"; DesktopCrashLogger.Log("Creature ID reservation failed", exception); }
+        finally { button.IsEnabled = true; }
     }
 
     public void OpenCreatureRow(IReadOnlyDictionary<string, object?> row)
