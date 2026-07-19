@@ -871,7 +871,7 @@ static int ServerHelp(int code = 0)
 
 static async Task<int> Database(string[] args, CancellationToken cancellationToken)
 {
-    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db pet-preview <host> <port> <user> <database> <creature-entry> --dbc=folder [--schema=definitions.xml] [--library=processed-assets] [--format=text|json]"); return DatabaseHelp(); }
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db pet-preview <host> <port> <user> <database> <creature-entry> --dbc=folder [--schema=definitions.xml] [--library=processed-assets] [--format=text|json]\n  wowcrucible db pet-graph <host> <port> <user> <database> <creature-entry> --dbc=folder --schema=definitions.xml [--format=text|json]"); return DatabaseHelp(); }
     if (args[0].Equals("draft-template", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 3) return Fail("db draft-template requires a supported authoring domain and an output JSON path."); var options = args[3..]; var overwrite = options.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)); var unknown = options.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown draft-template option: {unknown[0]}");
@@ -978,6 +978,27 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
     if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
     if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
     var profile = new DatabaseConnectionProfile(host, port, user, password, database, ssl);
+    if (operation.Equals("pet-graph", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 6 || !uint.TryParse(args[5], out var creatureEntry) || creatureEntry == 0) return Fail("db pet-graph requires a positive creature entry after the database name.");
+        var options = args[6..]; var dbc = Option(options, "--dbc="); var schema = Option(options, "--schema="); var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var unknown = options.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--schema=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown pet-graph option: {unknown[0]}");
+        if (string.IsNullOrWhiteSpace(dbc) || !Directory.Exists(dbc)) return Fail("--dbc must point to the server DBC folder.");
+        if (string.IsNullOrWhiteSpace(schema) || !File.Exists(schema)) return Fail("--schema must point to the WotLK 3.3.5a (12340) definitions XML.");
+        var graph = await new PetAbilityGraphService().BuildAsync(profile, dbc, schema, creatureEntry, cancellationToken);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(graph, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"CREATURE\t{graph.CreatureEntry}\t{graph.CreatureName}\tfamily={graph.FamilyId}\tfamily-name={graph.FamilyName}\tpet-talent-type={graph.PetTalentType}");
+            foreach (var node in graph.Nodes) Console.WriteLine($"NODE\t{node.Id}\t{node.Kind}\t{node.NumericId}\t{node.Label}\t{node.Detail}\ttier={node.Tier?.ToString() ?? "-"}\tcolumn={node.Column?.ToString() ?? "-"}");
+            foreach (var edge in graph.Edges) Console.WriteLine($"EDGE\t{edge.From}\t{edge.Relation}\t{edge.To}\t{edge.Evidence}");
+            foreach (var finding in graph.Findings) Console.WriteLine($"FINDING\t{finding}");
+        }
+        var spellCount = graph.Nodes.Count(node => node.Kind == PetAbilityNodeKind.Spell);
+        Console.Error.WriteLine($"Resolved {graph.Nodes.Count:N0} graph node(s), {spellCount:N0} unique spell(s), and {graph.Edges.Count:N0} evidence edge(s) for creature {creatureEntry:N0}.");
+        return spellCount == 0 ? 3 : 0;
+    }
     if (operation.Equals("pet-preview", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 6 || !uint.TryParse(args[5], out var creatureEntry) || creatureEntry == 0) return Fail("db pet-preview requires a positive creature entry after the database name.");

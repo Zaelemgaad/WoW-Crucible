@@ -46,6 +46,7 @@ public partial class MainWindow : Window
     private QuestWorkspaceView? _questWorkspaceView;
     private BehaviorWorkspaceView? _behaviorWorkspaceView;
     private PetLevelCurveView? _petLevelCurveView;
+    private PetAbilityGraphView? _petAbilityGraphView;
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
     private SqlWorkspaceView? _sqlWorkspaceView;
     private readonly Stack<(Control Workspace, string Title)> _featureHistory = new();
@@ -739,6 +740,7 @@ public partial class MainWindow : Window
         _behaviorWorkspaceView = new BehaviorWorkspaceView(_workspaceSession);
         _behaviorWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
         _behaviorWorkspaceView.PetCurveRequested += (_, _) => OpenPetLevelCurveWorkspace();
+        _behaviorWorkspaceView.PetAbilityGraphRequested += (_, _) => OpenPetAbilityGraphWorkspace();
         _behaviorWorkspaceView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         return _behaviorWorkspaceView;
     }
@@ -751,6 +753,16 @@ public partial class MainWindow : Window
             _petLevelCurveView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
         }
         OpenFeatureWorkspace(_petLevelCurveView, "Pet level curve");
+    }
+    public void OpenPetAbilityGraphWorkspace()
+    {
+        if (_petAbilityGraphView is null)
+        {
+            _petAbilityGraphView = new PetAbilityGraphView(_workspaceSession);
+            _petAbilityGraphView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _petAbilityGraphView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
+        }
+        OpenFeatureWorkspace(_petAbilityGraphView, "Pet talents & abilities");
     }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
     private void OpenNativeConversionClick(object? sender, RoutedEventArgs e) => OpenNativeConversionWorkspace();
