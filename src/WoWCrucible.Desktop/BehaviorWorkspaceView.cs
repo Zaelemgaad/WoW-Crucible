@@ -25,12 +25,13 @@ internal sealed class BehaviorWorkspaceView : UserControl, IDisposable
     private WorldContentWritePlan? _pendingPlan;
     private bool _syncing;
     public event EventHandler? BackRequested;
+    public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
 
     public BehaviorWorkspaceView(DesktopWorkspaceSession session)
     {
         _session = session; _session.Changed += SessionChanged; _domain.SelectedItem = BehaviorDomainCatalog.All[0]; _domain.SelectionChanged += (_, _) => { if (_syncing) return; ResetNew(); };
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty); var create = new Button { Content = "New row" }; create.Click += (_, _) => ResetNew();
-        var heading = new Grid { ColumnDefinitions = new("Auto,*,2*,Auto"), Margin = new Thickness(12, 8), ColumnSpacing = 10, Children = { back, WithColumn(new TextBlock { Text = "BEHAVIORS & DIALOGUE", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center }, 1), WithColumn(_domain, 2), WithColumn(create, 3) } };
+        var heading = new Grid { ColumnDefinitions = new("Auto,*,2*,Auto"), Margin = new Thickness(12, 8), ColumnSpacing = 10, Children = { back, WithColumn(new TextBlock { Text = "WORLD DATA EDITORS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center }, 1), WithColumn(_domain, 2), WithColumn(create, 3) } };
         var preview = new TabControl { Items = { new TabItem { Header = "Decoded summary", Content = new ScrollViewer { Content = new Border { Padding = new Thickness(16), BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _summary } } }, new TabItem { Header = "SQL change plan", Content = _sql } } };
         var workspace = new Grid { ColumnDefinitions = new("3*,Auto,2*"), Children = { _fieldTabs, WithColumn(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }, 1), WithColumn(preview, 2) } };
         var import = new Button { Content = "Open portable draft…" }; import.Click += async (_, _) => await ImportDraftAsync(); var exportDraft = new Button { Content = "Export portable draft…" }; exportDraft.Click += async (_, _) => await ExportDraftAsync(); var exportSql = new Button { Content = "Export SQL…" }; exportSql.Click += async (_, _) => await ExportSqlAsync(); _commit.Click += (_, _) => PrepareCommit();
@@ -41,6 +42,11 @@ internal sealed class BehaviorWorkspaceView : UserControl, IDisposable
     public void OpenRow(string tableName, IReadOnlyDictionary<string, object?> row)
     {
         var domain = BehaviorDomainCatalog.Find(tableName); _syncing = true; _domain.SelectedItem = domain; _syncing = false; _initialValues = new Dictionary<string, object?>(row, StringComparer.OrdinalIgnoreCase); var table = Table(); _loadedKey = table.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase)).ToDictionary(column => column.Name, column => Value(row, column.Name), StringComparer.OrdinalIgnoreCase); _commit.Content = "Apply complete row to connected database"; RebuildFields(); _status.Text = $"Loaded {table.Name} row · primary identity is locked · every live column remains editable.";
+    }
+
+    public void SelectDomain(string idOrTable)
+    {
+        var domain = BehaviorDomainCatalog.Find(idOrTable); _syncing = true; _domain.SelectedItem = domain; _syncing = false; ResetNew();
     }
 
     private void ResetNew() { _initialValues = null; _loadedKey = null; _commit.Content = "Insert into connected world database"; RebuildFields(); RefreshSchemaStatus(); }
@@ -57,7 +63,13 @@ internal sealed class BehaviorWorkspaceView : UserControl, IDisposable
                 var nullBox = new CheckBox { Content = "NULL", IsChecked = value is null, IsEnabled = column.Nullable && !text.IsReadOnly }; text.IsEnabled = value is not null; nullBox.IsCheckedChanged += (_, _) => { text.IsEnabled = nullBox.IsChecked != true; RefreshPreview(); };
                 var choices = BehaviorSemanticCatalog.Choices(table.Name, column.Name); ComboBox? decoded = null; if (choices.Count > 0) { decoded = new ComboBox { ItemsSource = choices, SelectedItem = Choice(choices, value) }; var captured = decoded; captured.SelectionChanged += (_, _) => { if (_syncing || captured.SelectedItem is not SemanticValue choice) return; _syncing = true; text.Text = choice.Value.ToString(CultureInfo.InvariantCulture); _syncing = false; RefreshPreview(); }; }
                 var description = BehaviorSemanticCatalog.Describe(table.Name, column.Name); var label = new TextBlock { Text = $"{column.Name} · {column.ColumnType}{(column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase) ? " · PRIMARY KEY" : string.Empty)}{(description.Length == 0 ? string.Empty : $"\n{description}")}", TextWrapping = TextWrapping.Wrap, Foreground = description.Length == 0 ? null : Brush.Parse("#B7C2D5") };
-                var decodedControl = (Control?)decoded ?? new TextBlock { Text = "raw", Foreground = Brush.Parse("#667085"), VerticalAlignment = VerticalAlignment.Center }; panel.Children.Add(new Grid { ColumnDefinitions = new("2*,2*,3*,Auto"), ColumnSpacing = 9, Children = { label, WithColumn(decodedControl, 1), WithColumn(text, 2), WithColumn(nullBox, 3) } }); var editor = new FieldEditor(column, text, nullBox, decoded, choices); _editors[column.Name] = editor;
+                var decodedControl = (Control?)decoded ?? new TextBlock { Text = "raw", Foreground = Brush.Parse("#667085"), VerticalAlignment = VerticalAlignment.Center };
+                var decodedAndLookup = new WrapPanel { Children = { decodedControl } }; var reference = ReferenceFor(table.Name, column.Name);
+                if (reference is not null)
+                {
+                    var find = new Button { Content = "Find name…" }; find.Click += (_, _) => ReferenceLookupRequested?.Invoke(this, new(reference.Value, $"{table.Name}.{column.Name}", ParseId(text.Text), selected => text.Text = selected.ToString(CultureInfo.InvariantCulture))); decodedAndLookup.Children.Add(find);
+                }
+                panel.Children.Add(new Grid { ColumnDefinitions = new("2*,2*,3*,Auto"), ColumnSpacing = 9, Children = { label, WithColumn(decodedAndLookup, 1), WithColumn(text, 2), WithColumn(nullBox, 3) } }); var editor = new FieldEditor(column, text, nullBox, decoded, choices); _editors[column.Name] = editor;
                 text.TextChanged += (_, _) => { if (!_syncing && editor.Decoded is not null) { _syncing = true; editor.Decoded.SelectedItem = Choice(editor.Choices, text.Text); _syncing = false; } RefreshPreview(); };
             }
             tabs.Add(new TabItem { Header = group.Key, Content = new ScrollViewer { Content = panel } });
@@ -127,6 +139,21 @@ internal sealed class BehaviorWorkspaceView : UserControl, IDisposable
     private static SemanticValue? Choice(IReadOnlyList<SemanticValue> choices, object? value) { try { var number = Convert.ToInt64(value, CultureInfo.InvariantCulture); return choices.FirstOrDefault(choice => choice.Value == number); } catch { return null; } }
     private static bool SameKey(IReadOnlyDictionary<string, object?> left, IReadOnlyDictionary<string, object?> right) => left.Count == right.Count && left.All(pair => right.TryGetValue(pair.Key, out var value) && CellText(pair.Value).Equals(CellText(value), StringComparison.Ordinal));
     private static object? ParseCell(DatabaseColumnCapability column, string? text) { text ??= string.Empty; if (column.DataType.Contains("binary", StringComparison.OrdinalIgnoreCase) || column.DataType.Contains("blob", StringComparison.OrdinalIgnoreCase)) return text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? Convert.FromHexString(text[2..]) : System.Text.Encoding.UTF8.GetBytes(text); return text; }
+    private static uint ParseId(string? text) => uint.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
+    private static ReferenceDomain? ReferenceFor(string table, string column)
+    {
+        if (table.Equals("pet_levelstats", StringComparison.OrdinalIgnoreCase) && column.Equals("creature_entry", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Creature;
+        if ((table.Equals("pet_name_generation", StringComparison.OrdinalIgnoreCase) || table.Equals("pet_name_generation_locale", StringComparison.OrdinalIgnoreCase)) && column.Equals("entry", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Creature;
+        if (table.Equals("spell_pet_auras", StringComparison.OrdinalIgnoreCase))
+        {
+            if (column.Equals("spell", StringComparison.OrdinalIgnoreCase) || column.Equals("aura", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Spell;
+            if (column.Equals("pet", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Creature;
+        }
+        if (table.Equals("trainer_spell", StringComparison.OrdinalIgnoreCase) && (column.Equals("SpellId", StringComparison.OrdinalIgnoreCase) || column.StartsWith("ReqAbility", StringComparison.OrdinalIgnoreCase))) return ReferenceDomain.Spell;
+        if (table.Equals("npc_trainer", StringComparison.OrdinalIgnoreCase) && (column.Equals("SpellID", StringComparison.OrdinalIgnoreCase) || column.Equals("ReqSpell", StringComparison.OrdinalIgnoreCase))) return ReferenceDomain.Spell;
+        if (table.Equals("creature_default_trainer", StringComparison.OrdinalIgnoreCase) && column.Equals("CreatureId", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Creature;
+        return null;
+    }
     private static string CellText(object? value) => value switch { null => string.Empty, byte[] bytes => "0x" + Convert.ToHexString(bytes), DateTime date => date.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture), IFormattable format => format.ToString(null, CultureInfo.InvariantCulture), _ => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty };
     private static bool IsText(DatabaseColumnCapability column) => column.DataType.Contains("text", StringComparison.OrdinalIgnoreCase) || column.DataType.Contains("char", StringComparison.OrdinalIgnoreCase);
     private static object? Value(IReadOnlyDictionary<string, object?> row, string name) => row.FirstOrDefault(pair => pair.Key.Equals(name, StringComparison.OrdinalIgnoreCase)).Value;

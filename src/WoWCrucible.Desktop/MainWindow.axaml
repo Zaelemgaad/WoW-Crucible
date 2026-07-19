@@ -51,6 +51,7 @@
                         <Button HorizontalContentAlignment="Left" Click="OpenCreatureWorkspaceClick"><TextBlock Text="♟  Creatures &amp; NPCs" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenGameObjectWorkspaceClick"><TextBlock Text="▱  Gameobjects" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenQuestWorkspaceClick"><TextBlock Text="✦  Quests" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenPetWorkspaceClick"><TextBlock Text="♞  Pets &amp; companions" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenBehaviorWorkspaceClick"><TextBlock Text="⌘  Behaviors &amp; dialogue" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenMpqWorkspaceClick"><TextBlock Text="◇  MPQ patches" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenClientWorkspaceClick"><TextBlock Text="▣  Client workshop" TextWrapping="Wrap" /></Button>

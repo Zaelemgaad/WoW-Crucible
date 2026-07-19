@@ -25,6 +25,10 @@ public static class BehaviorDomainCatalog
         new("trainer-spell", "Trainer spell", "trainer_spell", "Add a spell and its skill, ability, level, and money requirements."),
         new("trainer-creature", "Creature trainer link", "creature_default_trainer", "Assign a normalized trainer definition to a creature template."),
         new("legacy-trainer-spell", "Legacy NPC trainer spell", "npc_trainer", "Edit the older per-creature trainer layout used by legacy cores."),
+        new("pet-level-stats", "Pet level stats", "pet_levelstats", "Author complete health, power, armor, attributes, and damage for one pet creature at one level."),
+        new("pet-name-part", "Pet generated name part", "pet_name_generation", "Add a first or second generated name fragment for a specific pet creature template."),
+        new("pet-name-locale", "Localized pet name part", "pet_name_generation_locale", "Translate one generated pet-name fragment for an exact locale."),
+        new("spell-pet-aura", "Spell pet aura", "spell_pet_auras", "Map one dummy spell effect and pet template to the aura applied to that pet."),
         new("condition", "Condition", "conditions", "Gate loot, gossip, quests, vendors, SmartAI, and other content."),
         new("smartai", "SmartAI rule", "smart_scripts", "Define a complete event → action → target SmartAI row without hiding raw parameters.")
     ];
@@ -41,6 +45,7 @@ public static class BehaviorSemanticCatalog
         ("gossip_menu_option", "optionicon") => GossipIcons,
         ("gossip_menu_option", "optiontype") => GossipOptions,
         ("trainer", "type") => TrainerTypes,
+        ("pet_name_generation", "half") or ("pet_name_generation_locale", "half") => PetNameHalves,
         ("conditions", "sourcetypeorreferenceid") => ConditionSources,
         ("conditions", "conditiontypeorreference") => ConditionTypes,
         ("smart_scripts", "source_type") => SmartSources,
@@ -59,6 +64,27 @@ public static class BehaviorSemanticCatalog
         ("gossip_menu_option", "optionnpcflag") => "Required creature npcflag bitmask for this service option.",
         ("trainer", "requirement") => "Class ID for class trainers or skill-line ID for profession trainers.",
         ("trainer_spell", "reqability1") or ("trainer_spell", "reqability2") or ("trainer_spell", "reqability3") => "A prerequisite spell; zero means unused.",
+        ("pet_levelstats", "creature_entry") => "Creature template ID whose summoned/tamed pet stats this row overrides.",
+        ("pet_levelstats", "level") => "Exact pet level. AzerothCore ignores zero and levels above its configured supported maximum.",
+        ("pet_levelstats", "hp") => "Base health at this exact level.",
+        ("pet_levelstats", "mana") => "Base mana at this exact level; zero is valid for non-mana pets.",
+        ("pet_levelstats", "armor") => "Base armor at this exact level.",
+        ("pet_levelstats", "str") => "Base Strength.",
+        ("pet_levelstats", "agi") => "Base Agility.",
+        ("pet_levelstats", "sta") => "Base Stamina.",
+        ("pet_levelstats", "inte") => "Base Intellect.",
+        ("pet_levelstats", "spi") => "Base Spirit.",
+        ("pet_levelstats", "min_dmg") => "Minimum base damage before runtime scaling.",
+        ("pet_levelstats", "max_dmg") => "Maximum base damage before runtime scaling; must not be below min_dmg.",
+        ("pet_name_generation", "id") or ("pet_name_generation_locale", "id") => "Stable row identity. Locale rows reuse the base name-part ID.",
+        ("pet_name_generation", "word") or ("pet_name_generation_locale", "word") => "One generated name fragment; first and second halves are concatenated by the core.",
+        ("pet_name_generation", "entry") or ("pet_name_generation_locale", "entry") => "Creature template receiving this generated-name fragment.",
+        ("pet_name_generation", "half") or ("pet_name_generation_locale", "half") => "0 is the first name fragment; 1 is the second fragment.",
+        ("pet_name_generation_locale", "locale") => "Four-character client locale such as deDE, esES, frFR, or ruRU.",
+        ("spell_pet_auras", "spell") => "Dummy spell containing the effect that controls the pet aura.",
+        ("spell_pet_auras", "effectid") => "Zero-based Spell.dbc effect slot (0, 1, or 2).",
+        ("spell_pet_auras", "pet") => "Pet creature-template ID; zero applies the mapping to every pet.",
+        ("spell_pet_auras", "aura") => "Aura spell applied to the selected pet.",
         ("conditions", "elsegroup") => "Rows in the same ElseGroup are ANDed; different ElseGroup values form OR branches.",
         ("conditions", "negativecondition") => "1 reverses the result of this condition.",
         ("smart_scripts", "entryorguid") => "Positive template entry, negative spawn GUID, or action-list ID depending on source_type.",
@@ -71,6 +97,12 @@ public static class BehaviorSemanticCatalog
         _ when column.StartsWith("target_param", StringComparison.OrdinalIgnoreCase) => "Meaning depends on the selected target type; the decoded target tooltip lists its parameter order.",
         _ => string.Empty
     };
+
+    public static IReadOnlyList<SemanticValue> PetNameHalves { get; } =
+    [
+        new(0, "First half", "Prefix/first fragment of the generated pet name"),
+        new(1, "Second half", "Suffix/second fragment of the generated pet name")
+    ];
 
     public static IReadOnlyList<SemanticValue> GossipIcons { get; } = Parse("""
 0|Chat bubble|White chat bubble
@@ -580,6 +612,10 @@ public static class BehaviorAuthoringAdapter
             case "trainer_spell": Set(values, table, "TrainerId", 900000); Set(values, table, "SpellId", 1); break;
             case "creature_default_trainer": Set(values, table, "CreatureId", 900000); Set(values, table, "TrainerId", 900000); break;
             case "npc_trainer": Set(values, table, "ID", 900000); Set(values, table, "SpellID", 1); break;
+            case "pet_levelstats": Set(values, table, "creature_entry", 1); Set(values, table, "level", 1); Set(values, table, "hp", 1); Set(values, table, "min_dmg", 1); Set(values, table, "max_dmg", 1); break;
+            case "pet_name_generation": Set(values, table, "id", 900000); Set(values, table, "word", "New"); Set(values, table, "entry", 1); Set(values, table, "half", 0); break;
+            case "pet_name_generation_locale": Set(values, table, "ID", 900000); Set(values, table, "Locale", "enUS"); Set(values, table, "Word", "New"); Set(values, table, "Entry", 1); Set(values, table, "Half", 0); break;
+            case "spell_pet_auras": Set(values, table, "spell", 1); Set(values, table, "effectId", 0); Set(values, table, "pet", 0); Set(values, table, "aura", 1); break;
             case "conditions": Set(values, table, "SourceTypeOrReferenceId", 22); Set(values, table, "SourceEntry", 900000); Set(values, table, "ConditionTypeOrReference", 15); Set(values, table, "ConditionValue1", 1); Set(values, table, "Comment", "New Crucible condition"); break;
             case "smart_scripts": Set(values, table, "entryorguid", 900000); Set(values, table, "event_type", 4); Set(values, table, "target_type", 1); Set(values, table, "comment", "New Crucible SmartAI rule"); break;
         }
@@ -599,6 +635,9 @@ public static class BehaviorAuthoringAdapter
     {
         if (table.Equals("smart_scripts", StringComparison.OrdinalIgnoreCase)) return column.StartsWith("event_", StringComparison.OrdinalIgnoreCase) ? "Event" : column.StartsWith("action_", StringComparison.OrdinalIgnoreCase) ? "Action" : column.StartsWith("target_", StringComparison.OrdinalIgnoreCase) ? "Target" : "Identity";
         if (table.Equals("npc_text", StringComparison.OrdinalIgnoreCase) && column.Length > 4) { var digit = column.FirstOrDefault(char.IsDigit); if (digit != default) return $"Variant {digit}"; }
+        if (table.Equals("pet_levelstats", StringComparison.OrdinalIgnoreCase)) return column.Equals("creature_entry", StringComparison.OrdinalIgnoreCase) || column.Equals("level", StringComparison.OrdinalIgnoreCase) ? "Identity" : column.Equals("hp", StringComparison.OrdinalIgnoreCase) || column.Equals("mana", StringComparison.OrdinalIgnoreCase) || column.Equals("armor", StringComparison.OrdinalIgnoreCase) || column.Equals("min_dmg", StringComparison.OrdinalIgnoreCase) || column.Equals("max_dmg", StringComparison.OrdinalIgnoreCase) ? "Combat" : "Attributes";
+        if (table.Equals("pet_name_generation", StringComparison.OrdinalIgnoreCase) || table.Equals("pet_name_generation_locale", StringComparison.OrdinalIgnoreCase)) return column.Equals("word", StringComparison.OrdinalIgnoreCase) ? "Name fragment" : "Identity & target";
+        if (table.Equals("spell_pet_auras", StringComparison.OrdinalIgnoreCase)) return column.Equals("aura", StringComparison.OrdinalIgnoreCase) ? "Applied aura" : "Trigger identity";
         return "Complete row";
     }
 
@@ -615,6 +654,10 @@ public static class BehaviorAuthoringAdapter
             "trainer_spell" => T(name, C("TrainerId", key: "PRI"), C("SpellId", key: "PRI"), C("MoneyCost"), C("ReqSkillLine"), C("ReqSkillRank"), C("ReqAbility1"), C("ReqAbility2"), C("ReqAbility3"), C("ReqLevel", "tinyint"), C("VerifiedBuild", nullable: true)),
             "creature_default_trainer" => T(name, C("CreatureId", key: "PRI"), C("TrainerId")),
             "npc_trainer" => T(name, C("ID", key: "PRI"), C("SpellID", key: "PRI"), C("MoneyCost"), C("ReqSkillLine"), C("ReqSkillRank"), C("ReqLevel", "tinyint"), C("ReqSpell")),
+            "pet_levelstats" => T(name, C("creature_entry", key: "PRI"), C("level", "tinyint", key: "PRI"), C("hp"), C("mana"), C("armor"), C("str"), C("agi"), C("sta"), C("inte"), C("spi"), C("min_dmg"), C("max_dmg")),
+            "pet_name_generation" => T(name, C("id", key: "PRI"), C("word", "tinytext", value: ""), C("entry"), C("half", "tinyint")),
+            "pet_name_generation_locale" => T(name, C("ID", key: "PRI"), C("Locale", "varchar", value: "enUS", key: "PRI"), C("Word", "tinytext", value: ""), C("Entry"), C("Half", "tinyint")),
+            "spell_pet_auras" => T(name, C("spell", key: "PRI"), C("effectId", "tinyint", key: "PRI"), C("pet", key: "PRI"), C("aura")),
             "conditions" => T(name, C("SourceTypeOrReferenceId", key: "PRI"), C("SourceGroup", key: "PRI"), C("SourceEntry", key: "PRI"), C("SourceId", key: "PRI"), C("ElseGroup", key: "PRI"), C("ConditionTypeOrReference", key: "PRI"), C("ConditionTarget", "tinyint", key: "PRI"), C("ConditionValue1", key: "PRI"), C("ConditionValue2", key: "PRI"), C("ConditionValue3", key: "PRI"), C("NegativeCondition", "tinyint"), C("ErrorType"), C("ErrorTextId"), C("ScriptName", "varchar", value: ""), C("Comment", "varchar", true, null)),
             "smart_scripts" => SmartScripts(name, C, T),
             _ => throw new NotSupportedException($"No portable behavior schema exists for {name}.")
@@ -643,6 +686,16 @@ public static class BehaviorAuthoringAdapter
         if (table.Equals("conditions", StringComparison.OrdinalIgnoreCase) && Number("NegativeCondition") is < 0 or > 1) throw new InvalidDataException("NegativeCondition must be 0 or 1.");
         if (table.Equals("gossip_menu_option", StringComparison.OrdinalIgnoreCase) && Number("OptionIcon") is < 0 or > 20) throw new InvalidDataException("WotLK gossip OptionIcon must be from 0 to 20.");
         if (table.Equals("gossip_menu_option", StringComparison.OrdinalIgnoreCase) && Number("OptionType") is < 0 or > 20) throw new InvalidDataException("WotLK gossip OptionType must be from 0 to 20.");
+        if (table.Equals("pet_levelstats", StringComparison.OrdinalIgnoreCase) && Number("creature_entry") <= 0) throw new InvalidDataException("Pet creature_entry must be positive.");
+        if (table.Equals("pet_levelstats", StringComparison.OrdinalIgnoreCase) && Number("level") <= 0) throw new InvalidDataException("Pet level must be at least 1.");
+        if (table.Equals("pet_levelstats", StringComparison.OrdinalIgnoreCase) && Number("min_dmg") > Number("max_dmg")) throw new InvalidDataException("Pet min_dmg cannot exceed max_dmg.");
+        if ((table.Equals("pet_name_generation", StringComparison.OrdinalIgnoreCase) || table.Equals("pet_name_generation_locale", StringComparison.OrdinalIgnoreCase)) && Number("half") is < 0 or > 1) throw new InvalidDataException("Pet generated-name half must be 0 (first) or 1 (second).");
+        if (table.Equals("pet_name_generation", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(Convert.ToString(values.FirstOrDefault(pair => pair.Key.Equals("word", StringComparison.OrdinalIgnoreCase)).Value, CultureInfo.InvariantCulture))) throw new InvalidDataException("A generated pet-name word is required.");
+        if (table.Equals("pet_name_generation_locale", StringComparison.OrdinalIgnoreCase) && Convert.ToString(values.FirstOrDefault(pair => pair.Key.Equals("locale", StringComparison.OrdinalIgnoreCase)).Value, CultureInfo.InvariantCulture)?.Trim().Length != 4) throw new InvalidDataException("A pet-name locale must be a four-character client locale such as deDE.");
+        if (table.Equals("pet_name_generation_locale", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(Convert.ToString(values.FirstOrDefault(pair => pair.Key.Equals("word", StringComparison.OrdinalIgnoreCase)).Value, CultureInfo.InvariantCulture))) throw new InvalidDataException("A localized pet-name word is required.");
+        if (table.Equals("spell_pet_auras", StringComparison.OrdinalIgnoreCase) && Number("spell") <= 0) throw new InvalidDataException("Spell pet aura trigger spell must be positive.");
+        if (table.Equals("spell_pet_auras", StringComparison.OrdinalIgnoreCase) && Number("effectId") is < 0 or > 2) throw new InvalidDataException("Spell pet aura effectId must be 0, 1, or 2 for WotLK's three effect slots.");
+        if (table.Equals("spell_pet_auras", StringComparison.OrdinalIgnoreCase) && Number("aura") <= 0) throw new InvalidDataException("Spell pet aura applied aura must be positive.");
     }
 
     private static bool IsText(DatabaseColumnCapability column) => column.DataType.Contains("char", StringComparison.OrdinalIgnoreCase) || column.DataType.Contains("text", StringComparison.OrdinalIgnoreCase) || column.DataType.Contains("blob", StringComparison.OrdinalIgnoreCase);

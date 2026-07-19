@@ -725,12 +725,20 @@ public partial class MainWindow : Window
     private void OpenBehaviorWorkspaceClick(object? sender, RoutedEventArgs e) => OpenBehaviorWorkspace();
     public void OpenBehaviorWorkspace()
     {
-        if (_behaviorWorkspaceView is null)
-        {
-            _behaviorWorkspaceView = new BehaviorWorkspaceView(_workspaceSession);
-            _behaviorWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
-        }
-        OpenFeatureWorkspace(_behaviorWorkspaceView, "Behaviors & dialogue");
+        OpenFeatureWorkspace(EnsureWorldDataWorkspace(), "Behaviors & dialogue");
+    }
+    private void OpenPetWorkspaceClick(object? sender, RoutedEventArgs e) => OpenPetWorkspace();
+    public void OpenPetWorkspace()
+    {
+        var view = EnsureWorldDataWorkspace(); view.SelectDomain("pet-level-stats"); OpenFeatureWorkspace(view, "Pets & companions");
+    }
+    private BehaviorWorkspaceView EnsureWorldDataWorkspace()
+    {
+        if (_behaviorWorkspaceView is not null) return _behaviorWorkspaceView;
+        _behaviorWorkspaceView = new BehaviorWorkspaceView(_workspaceSession);
+        _behaviorWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        _behaviorWorkspaceView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
+        return _behaviorWorkspaceView;
     }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
     private void OpenNativeConversionClick(object? sender, RoutedEventArgs e) => OpenNativeConversionWorkspace();
@@ -914,8 +922,9 @@ public partial class MainWindow : Window
         }
         else if (BehaviorDomainCatalog.All.Any(domain => domain.TableName.Equals(request.Table, StringComparison.OrdinalIgnoreCase)))
         {
-            if (_behaviorWorkspaceView is null) { _behaviorWorkspaceView = new BehaviorWorkspaceView(_workspaceSession); _behaviorWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
-            _behaviorWorkspaceView.OpenRow(request.Table, request.Row); OpenFeatureWorkspace(_behaviorWorkspaceView, "Behaviors & dialogue");
+            var view = EnsureWorldDataWorkspace(); view.OpenRow(request.Table, request.Row);
+            var title = request.Table.StartsWith("pet_", StringComparison.OrdinalIgnoreCase) || request.Table.Equals("spell_pet_auras", StringComparison.OrdinalIgnoreCase) ? "Pets & companions" : "Behaviors & dialogue";
+            OpenFeatureWorkspace(view, title);
         }
     }
 
@@ -1079,6 +1088,7 @@ public partial class MainWindow : Window
             ["workspace.creatures"] = Done(OpenCreatureWorkspace),
             ["workspace.gameobjects"] = Done(OpenGameObjectWorkspace),
             ["workspace.quests"] = Done(OpenQuestWorkspace),
+            ["workspace.pets"] = Done(OpenPetWorkspace),
             ["workspace.behaviors"] = Done(OpenBehaviorWorkspace),
             ["workspace.mpq"] = Done(OpenMpqWorkspace),
             ["workspace.client"] = Done(() => OpenClientWorkspaceClick(null, new RoutedEventArgs())),

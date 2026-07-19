@@ -12,6 +12,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("mpq merge").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
     CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.items" ||
     CrucibleCommandCatalog.Search("project collision ids").FirstOrDefault()?.Command.Id != "workspace.projects" ||
+    CrucibleCommandCatalog.Search("pet companion level stats").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.assets" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
@@ -1190,8 +1191,22 @@ var portableGossipOption = BehaviorAuthoringAdapter.PortableTable("gossip_menu_o
 var portableNpcText = BehaviorAuthoringAdapter.PortableTable("npc_text");
 var portableCondition = BehaviorAuthoringAdapter.PortableTable("conditions");
 var portableSmart = BehaviorAuthoringAdapter.PortableTable("smart_scripts");
-if (behaviorDomains.Count != 9 || portableGossipOption.Columns.Count != 14 || portableNpcText.Columns.Count != 90 || portableCondition.Columns.Count != 15 || portableSmart.Columns.Count != 31)
+var portablePetStats = BehaviorAuthoringAdapter.PortableTable("pet_levelstats");
+var portablePetNames = BehaviorAuthoringAdapter.PortableTable("pet_name_generation");
+var portablePetNameLocales = BehaviorAuthoringAdapter.PortableTable("pet_name_generation_locale");
+var portablePetAuras = BehaviorAuthoringAdapter.PortableTable("spell_pet_auras");
+if (behaviorDomains.Count != 13 || portableGossipOption.Columns.Count != 14 || portableNpcText.Columns.Count != 90 || portableCondition.Columns.Count != 15 || portableSmart.Columns.Count != 31 || portablePetStats.Columns.Count != 12 || portablePetNames.Columns.Count != 4 || portablePetNameLocales.Columns.Count != 5 || portablePetAuras.Columns.Count != 4)
     throw new InvalidOperationException("Behavior portable schema coverage drifted from the current WotLK world tables.");
+var petStatsValues = new Dictionary<string, object?>(BehaviorAuthoringAdapter.Defaults(portablePetStats), StringComparer.OrdinalIgnoreCase) { ["creature_entry"] = 416, ["level"] = 80, ["hp"] = 10000, ["min_dmg"] = 305, ["max_dmg"] = 458 };
+var petStatsPlan = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("pet-level-stats"), portablePetStats, petStatsValues);
+var petAuraValues = new Dictionary<string, object?>(BehaviorAuthoringAdapter.Defaults(portablePetAuras), StringComparer.OrdinalIgnoreCase) { ["spell"] = 35691, ["effectId"] = 0, ["pet"] = 17252, ["aura"] = 35696 };
+var petAuraPlan = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("spell-pet-aura"), portablePetAuras, petAuraValues);
+if (petStatsPlan.Rows[0].Key.Count != 2 || petAuraPlan.Rows[0].Key.Count != 3 || BehaviorSemanticCatalog.PetNameHalves.Single(choice => choice.Value == 1).Name != "Second half" || !petAuraPlan.PreviewSql().Contains("35696", StringComparison.Ordinal))
+    throw new InvalidOperationException("Pet complete-field planning, composite identities, decoded name halves, or SQL preview failed.");
+try { var invalid = new Dictionary<string, object?>(petStatsValues, StringComparer.OrdinalIgnoreCase) { ["min_dmg"] = 459, ["max_dmg"] = 458 }; _ = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("pet-level-stats"), portablePetStats, invalid); throw new InvalidOperationException("Invalid pet damage range was accepted."); }
+catch (InvalidDataException) { }
+try { var invalid = new Dictionary<string, object?>(petAuraValues, StringComparer.OrdinalIgnoreCase) { ["effectId"] = 3 }; _ = BehaviorAuthoringAdapter.CreatePlan(BehaviorDomainCatalog.Find("spell-pet-aura"), portablePetAuras, invalid); throw new InvalidOperationException("Invalid fourth WotLK pet-aura effect slot was accepted."); }
+catch (InvalidDataException) { }
 if (BehaviorSemanticCatalog.SmartActions.Single(choice => choice.Value == 242).Name != "Increment data" || BehaviorSemanticCatalog.SmartEvents.Single(choice => choice.Value == 110).Name != "In melee range" || BehaviorSemanticCatalog.SmartTargets.Single(choice => choice.Value == 206).Name != "Formation" || BehaviorSemanticCatalog.ConditionTypes.Single(choice => choice.Value == 48).Name != "Quest objective progress")
     throw new InvalidOperationException("Behavior enum decoding no longer covers the current AzerothCore constants.");
 var smartValues = new Dictionary<string, object?>(BehaviorAuthoringAdapter.Defaults(portableSmart), StringComparer.OrdinalIgnoreCase) { ["entryorguid"] = 900100, ["source_type"] = 0, ["id"] = 0, ["link"] = 0, ["event_type"] = 4, ["action_type"] = 11, ["action_param1"] = 133, ["target_type"] = 2, ["comment"] = "Crucible's SmartAI test" };
