@@ -23,6 +23,7 @@ public sealed record StaticM2DownportPlan(
     int SubmeshCount,
     int MaterialCount,
     int ShadowBatchCount,
+    int ConstantColorTrackCount,
     IReadOnlyList<string> Transformations,
     IReadOnlyList<string> Losses,
     IReadOnlyList<string> Blockers)
@@ -101,7 +102,7 @@ public static class StaticM2DownportService
         var source = File.ReadAllBytes(sourceModelPath);
         var blockers = new List<string>(); var transformations = new List<string>(); var losses = new List<string>();
         var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0;
-        byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false;
+        byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false; var constantColorTracks = 0;
         FileDataIdListfileSnapshot? listfile = null; var resolvedTextures = new List<M2ResolvedTexturePath>();
 
         if (source.Length < 8 || FourCc(source, 0) != "MD21") blockers.Add("Input is not a modern MD21 chunk container.");
@@ -145,7 +146,8 @@ public static class StaticM2DownportService
                             blockers.Add($"Static profile accepts only animation ID 0 (Stand); found {U16(payload, animationOffset)}.");
                     }
                     ValidateArray(payload, 0x2C, 0x30, 88, "bones", blockers);
-                    RequireZero(payload, 0x48, "color tracks", blockers);
+                    var colorCount = Count(payload, 0x48, "color track", blockers);
+                    if (colorCount > 0 && ValidateConstantColorTracks(payload, colorCount, blockers)) constantColorTracks = colorCount;
                     RequireZero(payload, 0x60, "texture transforms", blockers);
                     RequireZero(payload, 0xF0, "attachments", blockers);
                     RequireZero(payload, 0x100, "events", blockers);
@@ -222,11 +224,12 @@ public static class StaticM2DownportService
         transformations.Add("Clear verified modern FileDataID/LOD flags only after resolving every external texture ID and proving exactly one SKIN is present.");
         if ((flags & NewExporterLayoutFlag) != 0) transformations.Add("Clear the newer-exporter layout flag after validating every translated array by its absolute offset; physical record order is not copied into Wrath semantics.");
         transformations.Add("Append the missing primary-UV texture-coordinate lookup used by the verified single-stage SKIN batches.");
+        if (constantColorTracks > 0) transformations.Add($"Preserve {constantColorTracks:N0} single-key constant color track(s) after validating both nested RGB and opacity series.");
         if (resolvedTextures.Count > 0) transformations.Add($"Embed {resolvedTextures.Count:N0} listfile-resolved texture path(s) into the Wrath M2 payload and remove the external FileDataID dependency.");
         transformations.Add("Repack modern SKIN v3 common arrays into the Wrath SKIN v2 header without changing their contents.");
         if (omittedEmptyTxac) transformations.Add("Omit the proven zero-filled TXAC extension chunk; it contains no texture-animation values to translate.");
         return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, listfile?.SourcePath, listfile?.SourceSha256, resolvedTextures, version, flags,
-            flags & ~SupportedModernFlagMask, vertices, triangles, submeshes, materials, shadows, transformations, losses, blockers.Distinct().ToArray());
+            flags & ~SupportedModernFlagMask, vertices, triangles, submeshes, materials, shadows, constantColorTracks, transformations, losses, blockers.Distinct().ToArray());
     }
 
     public static StaticM2DownportScanResult Scan(IEnumerable<string> inputs, string? listfilePath = null, CancellationToken cancellationToken = default)
@@ -296,6 +299,9 @@ public static class StaticM2DownportService
                 var bytes = Encoding.UTF8.GetBytes(resolved.ClientPath + "\0"); var pathOffset = payload.Length; Array.Resize(ref payload, checked(payload.Length + bytes.Length)); bytes.CopyTo(payload, pathOffset);
                 var item = checked(textureOffset + resolved.TextureIndex * 16); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(item + 8, 4), checked((uint)bytes.Length)); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(item + 12, 4), checked((uint)pathOffset));
             }
+            var outputColorBlockers = new List<string>(); var outputColorCount = Count(payload, 0x48, "output color track", outputColorBlockers);
+            if (outputColorCount != current.ConstantColorTrackCount || (outputColorCount > 0 && !ValidateConstantColorTracks(payload, outputColorCount, outputColorBlockers)))
+                throw new InvalidDataException("Converted M2 color tracks failed independent constant-track validation: " + string.Join("; ", outputColorBlockers));
 
             var skinSource = File.ReadAllBytes(current.SourceSkinPath); var skin = ParseModernSkin(skinSource, []) ?? throw new InvalidDataException("Companion SKIN changed into an invalid layout.");
             var outputSkin = BuildWotlkSkin(skinSource, skin);
@@ -431,6 +437,36 @@ public static class StaticM2DownportService
     }
 
     private static void RequireZero(byte[] data, int countOffset, string label, List<string> blockers) { var count = Count(data, countOffset, label, blockers); if (count != 0) blockers.Add($"Static profile requires zero {label}; found {count:N0}."); }
+    private static bool ValidateConstantColorTracks(byte[] data, int count, List<string> blockers)
+    {
+        var valid = true; var offset = Offset(data, 0x4C, "color tracks", blockers);
+        if (!HasRange(data, offset, count, 40)) { blockers.Add($"Color-track range ({count:N0} × 40 bytes at {offset:N0}) exceeds the containing model."); return false; }
+        for (var index = 0; index < count; index++)
+        {
+            valid &= ValidateConstantTrack(data, offset + index * 40, 12, $"Color track {index:N0} RGB", blockers);
+            valid &= ValidateConstantTrack(data, offset + index * 40 + 20, 2, $"Color track {index:N0} opacity", blockers);
+        }
+        return valid;
+    }
+    private static bool ValidateConstantTrack(byte[] data, int offset, int valueStride, string label, List<string> blockers)
+    {
+        if (!HasRange(data, offset, 1, 20)) { blockers.Add($"{label} header is truncated."); return false; }
+        var interpolation = U16(data, offset); var globalSequence = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(offset + 2, 2));
+        var timeSeriesCount = U32(data, offset + 4); var timeSeriesOffset = U32(data, offset + 8); var valueSeriesCount = U32(data, offset + 12); var valueSeriesOffset = U32(data, offset + 16);
+        if (interpolation != 0 || globalSequence != -1 || timeSeriesCount != 1 || valueSeriesCount != 1)
+        {
+            blockers.Add($"{label} is not a standalone single-series constant (interpolation {interpolation}, global sequence {globalSequence}, timestamp series {timeSeriesCount}, value series {valueSeriesCount})."); return false;
+        }
+        if (timeSeriesOffset > int.MaxValue || valueSeriesOffset > int.MaxValue || !HasRange(data, (int)timeSeriesOffset, 1, 8) || !HasRange(data, (int)valueSeriesOffset, 1, 8))
+        { blockers.Add($"{label} nested series array is outside the containing model."); return false; }
+        var timeCount = U32(data, (int)timeSeriesOffset); var timeOffset = U32(data, (int)timeSeriesOffset + 4); var valueCount = U32(data, (int)valueSeriesOffset); var valueOffset = U32(data, (int)valueSeriesOffset + 4);
+        if (timeCount != 1 || valueCount != 1 || timeOffset > int.MaxValue || valueOffset > int.MaxValue || !HasRange(data, (int)timeOffset, 1, 4) || !HasRange(data, (int)valueOffset, 1, valueStride))
+        { blockers.Add($"{label} must contain exactly one in-file timestamp/value key."); return false; }
+        if (U32(data, (int)timeOffset) != 0) { blockers.Add($"{label} constant key must be at timestamp zero."); return false; }
+        if (valueStride == 12)
+            for (var component = 0; component < 3; component++) if (!float.IsFinite(BitConverter.ToSingle(data, (int)valueOffset + component * 4))) { blockers.Add($"{label} contains a non-finite component."); return false; }
+        return true;
+    }
     private static void ValidateArray(byte[] data, int countOffset, int offsetOffset, int stride, string label, List<string> blockers) => ValidateRange(data, Offset(data, offsetOffset, label, blockers), Count(data, countOffset, label, blockers), stride, label, blockers);
     private static void ValidateRange(byte[] data, int offset, int count, int stride, string label, List<string> blockers)
     {
@@ -448,6 +484,7 @@ public static class StaticM2DownportService
         var value = U32(data, offset); if (value > int.MaxValue) { blockers.Add($"{label} offset exceeds the supported file range."); return -1; } return checked((int)value);
     }
     private static bool RangesValid(ModernSkin skin, int length) => new[] { (skin.LookupOffset, skin.LookupCount, 2), (skin.TriangleOffset, skin.TriangleIndexCount, 2), (skin.PropertyOffset, skin.PropertyCount, 4), (skin.SubmeshOffset, skin.SubmeshCount, 48), (skin.MaterialOffset, skin.MaterialCount, 24), (skin.ShadowOffset, skin.ShadowCount, 12) }.All(value => value.Item1 >= 0 && (long)value.Item1 + (long)value.Item2 * value.Item3 <= length);
+    private static bool HasRange(byte[] data, int offset, int count, int stride) => offset >= 0 && count >= 0 && (long)offset + (long)count * stride <= data.LongLength;
     private static uint U32(byte[] data, int offset) => BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset, 4));
     private static ushort U16(byte[] data, int offset) => BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset, 2));
     private static string FourCc(byte[] data, int offset) => Encoding.ASCII.GetString(data, offset, 4);

@@ -612,7 +612,7 @@ static int Asset(string[] args)
         if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         else
         {
-            Console.WriteLine($"READY\t{plan.Ready}\nMODEL\t{plan.SourceModelPath}\nMODEL_SHA256\t{plan.SourceModelSha256}\nSKIN\t{plan.SourceSkinPath ?? "<missing>"}\nLISTFILE\t{plan.SourceListfilePath ?? "<not required/supplied>"}\nSOURCE\tversion={plan.SourceVersion}\tflags=0x{plan.SourceFlags:X}\nOUTPUT\tversion=264\tflags=0x{plan.OutputFlags:X}\nGEOMETRY\tvertices={plan.VertexCount:N0}\ttriangles={plan.TriangleCount:N0}\tsubmeshes={plan.SubmeshCount:N0}\tmaterials={plan.MaterialCount:N0}\nSHADOW_BATCHES\t{plan.ShadowBatchCount:N0}");
+            Console.WriteLine($"READY\t{plan.Ready}\nMODEL\t{plan.SourceModelPath}\nMODEL_SHA256\t{plan.SourceModelSha256}\nSKIN\t{plan.SourceSkinPath ?? "<missing>"}\nLISTFILE\t{plan.SourceListfilePath ?? "<not required/supplied>"}\nSOURCE\tversion={plan.SourceVersion}\tflags=0x{plan.SourceFlags:X}\nOUTPUT\tversion=264\tflags=0x{plan.OutputFlags:X}\nGEOMETRY\tvertices={plan.VertexCount:N0}\ttriangles={plan.TriangleCount:N0}\tsubmeshes={plan.SubmeshCount:N0}\tmaterials={plan.MaterialCount:N0}\nCONSTANT_COLOR_TRACKS\t{plan.ConstantColorTrackCount:N0}\nSHADOW_BATCHES\t{plan.ShadowBatchCount:N0}");
             foreach (var value in plan.ResolvedTexturePaths) Console.WriteLine($"TEXTURE_PATH\tindex={value.TextureIndex}\tfileDataId={value.FileDataId}\t{value.ClientPath}");
             foreach (var value in plan.Transformations) Console.WriteLine($"TRANSFORM\t{value}");
             foreach (var value in plan.Losses) Console.WriteLine($"LOSS\t{value}");
