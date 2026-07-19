@@ -726,6 +726,24 @@ static int Asset(string[] args)
         foreach (var texture in result.TexturePaths) Console.WriteLine($"TEXTURE\t{texture}");
         return 0;
     }
+    if (args is ["creature-display-catalog", var creatureCatalogDbc, .. var creatureCatalogOptions])
+    {
+        var schema = Option(creatureCatalogOptions, "--schema="); var search = Option(creatureCatalogOptions, "--search="); var limitText = Option(creatureCatalogOptions, "--limit="); var json = creatureCatalogOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var unknown = creatureCatalogOptions.Where(option => !option.StartsWith("--schema=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--search=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--limit=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown creature-display-catalog option: {unknown[0]}");
+        if (!Directory.Exists(creatureCatalogDbc)) return Fail($"Creature DBC folder does not exist: {Path.GetFullPath(creatureCatalogDbc)}");
+        if (schema is not null && !File.Exists(schema)) return Fail($"Creature appearance schema does not exist: {Path.GetFullPath(schema)}");
+        if (limitText is not null && (!int.TryParse(limitText, out var parsedLimit) || parsedLimit < 0)) return Fail("--limit must be zero (all rows) or a positive integer.");
+        var limit = limitText is null ? 0 : int.Parse(limitText, System.Globalization.CultureInfo.InvariantCulture); var catalog = new CreatureDisplayPreviewService().LoadCatalog(creatureCatalogDbc, schema);
+        var matches = catalog.Entries.Where(entry => entry.Matches(search)).ToArray(); var selected = limit == 0 ? matches : matches.Take(limit).ToArray();
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Catalog = catalog with { Entries = Array.Empty<CreatureDisplayCatalogEntry>() }, Search = search, Matches = matches.Length, Returned = selected.Length, Entries = selected }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"DBC_ROOT\t{catalog.DbcRoot}\nTOTAL\t{catalog.Entries.Count:N0}\nUSABLE\t{catalog.UsableEntries:N0}\nMISSING_MODEL\t{catalog.MissingModelEntries:N0}\nINVALID\t{catalog.InvalidEntries:N0}\nMATCHES\t{matches.Length:N0}\nRETURNED\t{selected.Length:N0}");
+            foreach (var entry in selected) Console.WriteLine($"DISPLAY\t{entry.DisplayId}\tmodel={entry.ModelId}\tpath={entry.ModelClientPath}\tdisplay-scale={entry.DisplayScale:0.###}\tmodel-scale={entry.ModelScale:0.###}\ttextures={string.Join('|', entry.TextureVariations)}\t{(entry.Usable ? "USABLE" : entry.Finding)}");
+        }
+        return matches.Length == 0 ? 3 : 0;
+    }
     if (args is ["creature-appearances", var creatureModelClientPath, .. var creatureAppearanceOptions])
     {
         var dbc = Option(creatureAppearanceOptions, "--dbc="); var schema = Option(creatureAppearanceOptions, "--schema="); var library = Option(creatureAppearanceOptions, "--library="); var sourceProvenance = Option(creatureAppearanceOptions, "--provenance="); var json = creatureAppearanceOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
@@ -883,6 +901,7 @@ Usage:
   wowcrucible asset m2-downport-scan <file-or-folder>... [--listfile=id-path.csv] [--format=text|json]
   wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin] [--listfile=id-path.csv]
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
+  wowcrucible asset creature-display-catalog <dbc-folder> [--schema=file] [--search=terms] [--limit=N] [--format=text|json]
   wowcrucible asset creature-appearances <model-client-path> [--dbc=folder] [--schema=file] [--library=folder --provenance=name] [--format=text|json]
   wowcrucible asset preview-info <wrath-model.m2> [--skin=file.skin] [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
   wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--naked|--groups=group:variant,...|--all-geosets] [--overwrite]

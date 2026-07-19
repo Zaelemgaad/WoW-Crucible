@@ -1,8 +1,11 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
+using System.Numerics;
 using WoWCrucible.Core;
 using WoWCrucible.Desktop.Controls;
 
@@ -61,6 +64,15 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _modelStatus = Status("Load an extracted M2/SKIN to preview the chosen creature appearance geometry.");
     private readonly CheckBox _showAttachments = new() { Content = "Show attachment points" };
     private readonly ComboBox _attachmentPicker = new() { PlaceholderText = "No attachment points loaded" };
+    private readonly TextBox _appearanceSearch = new() { PlaceholderText = "Search display ID, model ID, path, texture, or problem…" };
+    private readonly ListBox _appearanceResults = new();
+    private readonly ComboBox _appearanceSlot = Choices((0, "Display slot 1"), (1, "Display slot 2"), (2, "Display slot 3"), (3, "Display slot 4"));
+    private readonly TextBlock _appearanceStatus = Status("Load the configured target DBC catalog to browse every creature appearance.");
+    private CreatureDisplayCatalog? _appearanceCatalog;
+    private string? _appearanceCatalogRoot;
+    private CancellationTokenSource? _appearanceLoadOperation;
+    private CancellationTokenSource? _appearanceFilterOperation;
+    private CancellationTokenSource? _appearancePreviewOperation;
     private WorldContentWritePlan? _pendingPlan;
     private readonly Button _commit = AccentButton("Insert into connected world database");
     private uint? _loadedEntry;
@@ -73,6 +85,9 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     {
         _session = session; _session.Changed += SessionChanged;
         HookPreviewEvents();
+        _appearanceResults.ItemTemplate = new FuncDataTemplate<CreatureDisplayCatalogEntry>((entry, _) => AppearanceCard(entry));
+        _appearanceSearch.TextChanged += async (_, _) => await FilterAppearancesAsync();
+        _appearanceResults.SelectionChanged += (_, _) => DescribeSelectedAppearance();
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "CREATURES & NPCs", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1) } };
         var editor = new TabControl
@@ -80,6 +95,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
             Items =
             {
                 new TabItem { Header = "Identity & appearance", Content = new ScrollViewer { Content = IdentityForm() } },
+                new TabItem { Header = "DBC appearance catalog", Content = AppearanceCatalogPage() },
                 new TabItem { Header = "Interaction", Content = new ScrollViewer { Content = InteractionForm() } },
                 new TabItem { Header = "Combat & movement", Content = new ScrollViewer { Content = CombatForm() } },
                 new TabItem { Header = "Loot IDs & scripting", Content = new ScrollViewer { Content = LootForm() } },
@@ -88,7 +104,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
             }
         };
         var loadModel = new Button { Content = "Load extracted M2…" }; loadModel.Click += async (_, _) => await LoadModelAsync();
-        var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _attachmentPicker.ItemsSource = null; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
+        var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _model.ClearGeometry(); _model.SetDecodedTextures(new Dictionary<int, RgbaTexture>()); _model.SetSceneTransform(Matrix4x4.Identity); _attachmentPicker.ItemsSource = null; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
         _showAttachments.Click += (_, _) => ApplyAttachmentOverlay(); _attachmentPicker.SelectionChanged += (_, _) => ApplyAttachmentOverlay();
         var modelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new WrapPanel { Children = { loadModel, clearModel, _showAttachments, _attachmentPicker } }, WithRow(new Border { Background = Brush.Parse("#090D14"), Child = _model }, 1), WithRow(_modelStatus, 2) } };
         var preview = new TabControl
@@ -111,6 +127,121 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
             Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(actions, 2), WithRow(_confirmation, 3) }
         };
         RefreshPreview(); RefreshSchemaStatus();
+        if (Directory.Exists(_session.Settings.CoreDbcPath)) Dispatcher.UIThread.Post(async () => await LoadAppearanceCatalogAsync(false), DispatcherPriority.Background);
+    }
+
+    private Control AppearanceCatalogPage()
+    {
+        var reload = new Button { Content = "Load / refresh target DBCs" }; reload.Click += async (_, _) => await LoadAppearanceCatalogAsync(true);
+        var apply = AccentButton("Use selected display"); apply.Click += (_, _) => ApplySelectedAppearance();
+        var preview = new Button { Content = "Preview selected model" }; preview.Click += async (_, _) => await PreviewSelectedAppearanceAsync();
+        return new Grid
+        {
+            RowDefinitions = new("Auto,*,Auto"), Margin = new Thickness(10), RowSpacing = 8,
+            Children =
+            {
+                new StackPanel
+                {
+                    Spacing = 7,
+                    Children =
+                    {
+                        new TextBlock { Text = "Every CreatureDisplayInfo row", FontSize = 17, FontWeight = FontWeight.SemiBold },
+                        new TextBlock { Text = "Search the target/server DBCs by readable model path or exact ID. Applying a row changes only the chosen creature display slot; preview resolves its exact M2, SKIN, embedded textures, and creature texture variations from one processed provenance.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") },
+                        new WrapPanel { Children = { reload, _appearanceSearch, _appearanceSlot, apply, preview } }
+                    }
+                },
+                WithRow(_appearanceResults, 1),
+                WithRow(_appearanceStatus, 2)
+            }
+        };
+    }
+
+    private static Control AppearanceCard(CreatureDisplayCatalogEntry entry) => new Border
+    {
+        BorderBrush = Brush.Parse(entry.Usable ? "#293347" : "#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(9), Margin = new Thickness(0, 0, 0, 6),
+        Child = new StackPanel
+        {
+            Spacing = 3,
+            Children =
+            {
+                new TextBlock { Text = $"Display {entry.DisplayId:N0} · Model {entry.ModelId:N0} · scale {entry.DisplayScale * entry.ModelScale:0.###}", FontWeight = FontWeight.SemiBold },
+                new TextBlock { Text = string.IsNullOrWhiteSpace(entry.ModelClientPath) ? "No model path" : entry.ModelClientPath, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#AAB4C4") },
+                new TextBlock { Text = entry.Usable ? $"Textures: {string.Join(" · ", entry.TextureVariations.Where(path => !string.IsNullOrWhiteSpace(path)).DefaultIfEmpty("none / embedded"))}" : entry.Finding, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse(entry.Usable ? "#8492A8" : "#E5B768") }
+            }
+        }
+    };
+
+    private async Task LoadAppearanceCatalogAsync(bool announce)
+    {
+        _appearanceLoadOperation?.Cancel(); _appearanceLoadOperation?.Dispose(); var operation = _appearanceLoadOperation = new CancellationTokenSource(); var dbc = _session.Settings.CoreDbcPath; var schema = string.IsNullOrWhiteSpace(_session.Settings.SchemaDefinitionPath) ? null : _session.Settings.SchemaDefinitionPath;
+        if (string.IsNullOrWhiteSpace(dbc) || !Directory.Exists(dbc)) { _appearanceCatalog = null; _appearanceResults.ItemsSource = null; _appearanceStatus.Text = "Configure the server/core DBC folder in Server & SQL first."; return; }
+        try
+        {
+            _appearanceStatus.Text = announce ? "Loading CreatureDisplayInfo and CreatureModelData…" : "Loading configured creature appearance catalog…";
+            var catalog = await Task.Run(() => new CreatureDisplayPreviewService().LoadCatalog(dbc, schema, operation.Token), operation.Token); operation.Token.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(_appearanceLoadOperation, operation)) return; _appearanceCatalog = catalog; _appearanceCatalogRoot = catalog.DbcRoot; await FilterAppearancesAsync(false);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { if (ReferenceEquals(_appearanceLoadOperation, operation)) { _appearanceCatalog = null; _appearanceResults.ItemsSource = null; _appearanceStatus.Text = $"Appearance catalog failed: {exception.Message}"; DesktopCrashLogger.Log("Creature appearance catalog failed", exception); } }
+    }
+
+    private async Task FilterAppearancesAsync(bool debounce = true)
+    {
+        _appearanceFilterOperation?.Cancel(); _appearanceFilterOperation?.Dispose(); var operation = _appearanceFilterOperation = new CancellationTokenSource(); var catalog = _appearanceCatalog; if (catalog is null) return; var query = _appearanceSearch.Text;
+        try
+        {
+            if (debounce) await Task.Delay(140, operation.Token);
+            var filtered = await Task.Run(() => catalog.Entries.Where(entry => entry.Matches(query)).ToArray(), operation.Token); operation.Token.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(_appearanceFilterOperation, operation) || !ReferenceEquals(_appearanceCatalog, catalog)) return; _appearanceResults.ItemsSource = filtered;
+            _appearanceStatus.Text = $"{filtered.Length:N0} matching of {catalog.Entries.Count:N0} total displays · {catalog.UsableEntries:N0} usable · {catalog.MissingModelEntries:N0} missing model records · {catalog.InvalidEntries:N0} invalid · {catalog.DbcRoot}";
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private void DescribeSelectedAppearance()
+    {
+        if (_appearanceResults.SelectedItem is not CreatureDisplayCatalogEntry entry) return;
+        _appearanceStatus.Text = entry.Usable
+            ? $"Selected display {entry.DisplayId:N0} → model {entry.ModelId:N0} · {entry.ModelClientPath} · combined scale {entry.DisplayScale * entry.ModelScale:0.###}. Choose a slot, apply it, or preview its exact processed source."
+            : $"Display {entry.DisplayId:N0} cannot be assigned safely: {entry.Finding}";
+    }
+
+    private void ApplySelectedAppearance()
+    {
+        if (_appearanceResults.SelectedItem is not CreatureDisplayCatalogEntry entry) { _appearanceStatus.Text = "Select a creature display first."; return; }
+        if (!entry.Usable) { _appearanceStatus.Text = $"Display {entry.DisplayId:N0} is not assignable: {entry.Finding}"; return; }
+        var slot = Math.Clamp(Selected(_appearanceSlot), 0, _displayIds.Length - 1); _displayIds[slot].Value = entry.DisplayId; RefreshPreview();
+        _appearanceStatus.Text = $"Applied display {entry.DisplayId:N0} to creature display slot {slot + 1}. The change remains an in-memory draft until you explicitly export or confirm the SQL plan.";
+    }
+
+    private async Task PreviewSelectedAppearanceAsync()
+    {
+        if (_appearanceResults.SelectedItem is not CreatureDisplayCatalogEntry entry) { _appearanceStatus.Text = "Select a creature display first."; return; }
+        if (!entry.Usable) { _appearanceStatus.Text = $"Display {entry.DisplayId:N0} cannot be previewed: {entry.Finding}"; return; }
+        _appearancePreviewOperation?.Cancel(); _appearancePreviewOperation?.Dispose(); var operation = _appearancePreviewOperation = new CancellationTokenSource(); var dbc = _appearanceCatalogRoot ?? _session.Settings.CoreDbcPath; var schema = string.IsNullOrWhiteSpace(_session.Settings.SchemaDefinitionPath) ? null : _session.Settings.SchemaDefinitionPath; var library = _session.Settings.ProcessedAssetLibraryPath;
+        try
+        {
+            _appearanceStatus.Text = $"Resolving display {entry.DisplayId:N0} and its same-provenance assets…";
+            var display = await Task.Run(() => new CreatureDisplayPreviewService().ResolveDisplay(dbc, schema, entry.DisplayId, library, operation.Token), operation.Token); var source = display.Sources.FirstOrDefault(value => value.Ready) ?? throw new FileNotFoundException($"{display.Finding} Configure the processed asset library in Client workshop or Assets & compare.");
+            var loaded = await Task.Run(() =>
+            {
+                var geometry = M2PreviewGeometryService.Load(source.ModelPath, source.SkinPath, M2PreviewVisibilityMode.BaseAppearance); var used = geometry.UsedTextureDefinitionIndices.ToHashSet(); var textures = new Dictionary<int, RgbaTexture>();
+                foreach (var slot in geometry.TextureSlots.Where(slot => used.Contains(slot.Index)))
+                {
+                    operation.Token.ThrowIfCancellationRequested(); string? texturePath = slot.Type switch
+                    {
+                        0 when !string.IsNullOrWhiteSpace(slot.EmbeddedPath) => CreatureDisplayPreviewService.ResolveSameProvenanceAsset(library, source.Provenance, slot.EmbeddedPath!),
+                        11 => source.CreatureTextures.GetValueOrDefault(0), 12 => source.CreatureTextures.GetValueOrDefault(1), 13 => source.CreatureTextures.GetValueOrDefault(2), _ => null
+                    };
+                    if (texturePath is null) continue; try { textures[slot.Index] = BlpTextureService.Decode(texturePath); } catch (Exception exception) { DesktopCrashLogger.Log($"Creature appearance texture decode failed: {texturePath}", exception); }
+                }
+                return (geometry, textures, used.Count);
+            }, operation.Token); operation.Token.ThrowIfCancellationRequested(); if (!ReferenceEquals(_appearancePreviewOperation, operation)) return;
+            _model.SetGeometry(loaded.geometry); _model.SetDecodedTextures(loaded.textures); _model.SetSceneTransform(Matrix4x4.CreateScale(display.DisplayScale * display.ModelScale), $"display {display.DisplayId:N0} scale"); RefreshAttachmentPoints(loaded.geometry);
+            _appearanceStatus.Text = $"Previewing display {display.DisplayId:N0} from {source.Provenance} · {loaded.geometry.TriangleIndices.Count / 3:N0} triangles · {loaded.textures.Count:N0}/{loaded.Item3:N0} used texture definitions resolved. Open the 3D model tab on the right to inspect it.";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { if (ReferenceEquals(_appearancePreviewOperation, operation)) { _appearanceStatus.Text = $"Appearance preview failed: {exception.Message}"; DesktopCrashLogger.Log("Creature appearance preview failed", exception); } }
     }
 
     private async Task ReserveProjectIdAsync(Button button)
@@ -291,7 +422,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         {
             var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose an extracted WotLK creature M2", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WotLK M2") { Patterns = ["*.m2"] }] });
             var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _modelStatus.Text = "Loading model…";
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); _model.SetGeometry(geometry); RefreshAttachmentPoints(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} base geosets · {geometry.TriangleIndices.Count / 3:N0} triangles · {geometry.Attachments.Count:N0} attachment points";
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); _model.SetGeometry(geometry); _model.SetDecodedTextures(new Dictionary<int, RgbaTexture>()); _model.SetSceneTransform(Matrix4x4.Identity); RefreshAttachmentPoints(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} base geosets · {geometry.TriangleIndices.Count / 3:N0} triangles · {geometry.Attachments.Count:N0} attachment points";
         }
         catch (Exception exception) { _modelStatus.Text = $"Model load failed: {exception.Message}"; }
     }
@@ -304,9 +435,22 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
 
     private void ApplyAttachmentOverlay() => _model.SetAttachmentOverlay(_showAttachments.IsChecked == true, (_attachmentPicker.SelectedItem as M2PreviewAttachment)?.Index);
 
-    private void SessionChanged(object? sender, EventArgs e) { RefreshSchemaStatus(); RefreshPreview(); }
+    private void SessionChanged(object? sender, EventArgs e)
+    {
+        RefreshSchemaStatus(); RefreshPreview();
+        var configured = _session.Settings.CoreDbcPath;
+        if (_appearanceCatalogRoot is null || !configured.Equals(_appearanceCatalogRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            _appearanceCatalog = null; _appearanceCatalogRoot = null; _appearanceResults.ItemsSource = null;
+            if (Directory.Exists(configured)) Dispatcher.UIThread.Post(async () => await LoadAppearanceCatalogAsync(false), DispatcherPriority.Background);
+            else _appearanceStatus.Text = "Configure the server/core DBC folder in Server & SQL first.";
+        }
+    }
     private void RefreshSchemaStatus() { var capabilities = _session.DatabaseCapabilities; _status.Text = capabilities?.FindTable("creature_template") is { } table ? $"Live creature schema ready · {capabilities.Database}.creature_template · {table.Columns.Count:N0} columns · models {(capabilities.FindTable("creature_template_model") is null ? "embedded/legacy" : "normalized/current")}" : "Offline current-core schema ready · connect Server & SQL for live deployment."; }
-    public void Dispose() => _session.Changed -= SessionChanged;
+    public void Dispose()
+    {
+        _session.Changed -= SessionChanged; _appearanceLoadOperation?.Cancel(); _appearanceLoadOperation?.Dispose(); _appearanceFilterOperation?.Cancel(); _appearanceFilterOperation?.Dispose(); _appearancePreviewOperation?.Cancel(); _appearancePreviewOperation?.Dispose();
+    }
     private IStorageProvider Storage() => TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("Creature workspace is not attached to the main window.");
     private IEnumerable<NumericUpDown> Numbers() => new[] { _entry, _minLevel, _maxLevel, _family, _scale, _walk, _run, _health, _mana, _armor, _damage, _baseAttack, _rangeAttack, _unitFlags, _unitFlags2, _dynamicFlags, _typeFlags, _loot, _pickpocket, _skinLoot, _minGold, _maxGold }.Concat(_displayIds);
     private static Grid Form(params (string Label, Control Input)[] rows) { var grid = new Grid { ColumnDefinitions = new("Auto,*"), RowSpacing = 7, ColumnSpacing = 10, Margin = new Thickness(12) }; for (var row = 0; row < rows.Length; row++) { grid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); var label = new TextBlock { Text = rows[row].Label, VerticalAlignment = VerticalAlignment.Center }; Grid.SetRow(label, row); grid.Children.Add(label); Grid.SetRow(rows[row].Input, row); Grid.SetColumn(rows[row].Input, 1); grid.Children.Add(rows[row].Input); } return grid; }

@@ -1469,6 +1469,10 @@ var availableCreatureModels = Enumerable.Range(0, creatureModelFile.RowCount).Se
 var creatureDisplayRow = Enumerable.Range(0, creatureDisplayFile.RowCount).First(row => availableCreatureModels.Contains(creatureDisplayFile.GetRaw(row, creatureDisplayModelColumn)));
 var creatureDisplayId = creatureDisplayFile.GetRaw(creatureDisplayRow, creatureDisplayIdColumn);
 var creatureDisplayService = new CreatureDisplayPreviewService();
+var creatureDisplayCatalog = creatureDisplayService.LoadCatalog(args[1], args[0]);
+var catalogDisplay = creatureDisplayCatalog.Entries.Single(entry => entry.DisplayId == creatureDisplayId);
+if (creatureDisplayCatalog.Entries.Count != creatureDisplayFile.RowCount || creatureDisplayCatalog.UsableEntries + creatureDisplayCatalog.MissingModelEntries + creatureDisplayCatalog.InvalidEntries != creatureDisplayCatalog.Entries.Count || !catalogDisplay.Usable || catalogDisplay.ModelId != creatureDisplayFile.GetRaw(creatureDisplayRow, creatureDisplayModelColumn) || !catalogDisplay.Matches($"{creatureDisplayId} {Path.GetFileNameWithoutExtension(catalogDisplay.ModelClientPath)}") || catalogDisplay.Matches("definitely-not-a-real-creature-display-search-term"))
+    throw new InvalidOperationException("Creature appearance catalog omitted DBC rows, misclassified model readiness, or failed multi-term ID/path search.");
 var creatureDisplay = creatureDisplayService.ResolveDisplay(args[1], args[0], creatureDisplayId);
 if (creatureDisplay.DisplayId != creatureDisplayId || creatureDisplay.ModelId == 0 || !creatureDisplay.ModelClientPath.EndsWith(".m2", StringComparison.OrdinalIgnoreCase) || creatureDisplay.TextureVariations.Count != 3)
     throw new InvalidOperationException("Creature display preview did not resolve the build-12340 display/model/texture chain.");

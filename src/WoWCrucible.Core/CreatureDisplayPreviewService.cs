@@ -34,8 +34,69 @@ public sealed record CreatureModelDisplayLookup(
     public bool FromProcessedProvenance { get; init; }
 }
 
+public sealed record CreatureDisplayCatalogEntry(
+    uint DisplayId,
+    uint ModelId,
+    string ModelClientPath,
+    float DisplayScale,
+    float ModelScale,
+    IReadOnlyList<string> TextureVariations,
+    string Finding)
+{
+    public bool Usable => DisplayId != 0 && ModelId != 0 && !string.IsNullOrWhiteSpace(ModelClientPath) && string.IsNullOrWhiteSpace(Finding);
+
+    public bool Matches(string? query)
+    {
+        var terms = (query ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (terms.Length == 0) return true;
+        var searchable = $"{DisplayId} {ModelId} {ModelClientPath} {string.Join(' ', TextureVariations)} {Finding}";
+        return terms.All(term => searchable.Contains(term, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public override string ToString() => $"Display {DisplayId:N0} · Model {ModelId:N0} · {(string.IsNullOrWhiteSpace(ModelClientPath) ? "<missing model path>" : ModelClientPath)}";
+}
+
+public sealed record CreatureDisplayCatalog(
+    string DbcRoot,
+    IReadOnlyList<CreatureDisplayCatalogEntry> Entries,
+    int UsableEntries,
+    int MissingModelEntries,
+    int InvalidEntries);
+
 public sealed class CreatureDisplayPreviewService
 {
+    public CreatureDisplayCatalog LoadCatalog(string dbcRoot, string? schemaPath = null, CancellationToken cancellationToken = default)
+    {
+        dbcRoot = Path.GetFullPath(dbcRoot);
+        var display = LoadTable(RequiredTablePath(dbcRoot, "CreatureDisplayInfo.dbc"), "CreatureDisplayInfo", schemaPath, CreatureDisplayColumns(), 16);
+        var model = LoadTable(RequiredTablePath(dbcRoot, "CreatureModelData.dbc"), "CreatureModelData", schemaPath, CreatureModelColumns(), 28);
+        var modelIdColumn = Column(model.Columns, "ID"); var modelNameColumn = Column(model.Columns, "ModelName"); var modelScaleColumn = Column(model.Columns, "ModelScale");
+        var models = new Dictionary<uint, (string Path, float Scale)>();
+        for (var row = 0; row < model.File.RowCount; row++)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); var id = model.File.GetRaw(row, modelIdColumn); if (models.ContainsKey(id)) continue;
+            var rawPath = Convert.ToString(model.File.GetDisplayValue(row, modelNameColumn)) ?? string.Empty;
+            var path = string.IsNullOrWhiteSpace(rawPath) ? string.Empty : NormalizeModel(rawPath); var scale = ReadFloat(model.File, row, modelScaleColumn);
+            models[id] = (path, float.IsFinite(scale) && scale > 0 ? scale : 1f);
+        }
+
+        var displayIdColumn = Column(display.Columns, "ID"); var displayModelColumn = Column(display.Columns, "ModelID"); var displayScaleColumn = Column(display.Columns, "CreatureModelScale");
+        var textureColumns = Enumerable.Range(0, 3).Select(index => Column(display.Columns, $"TextureVariation[{index}]")).ToArray();
+        var entries = new List<CreatureDisplayCatalogEntry>(display.File.RowCount); var usable = 0; var missingModel = 0; var invalid = 0;
+        for (var row = 0; row < display.File.RowCount; row++)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); var displayId = display.File.GetRaw(row, displayIdColumn); var modelId = display.File.GetRaw(row, displayModelColumn);
+            var displayScale = ReadFloat(display.File, row, displayScaleColumn); if (!float.IsFinite(displayScale) || displayScale <= 0) displayScale = 1f;
+            string modelPath; float modelScale; string finding;
+            if (!models.TryGetValue(modelId, out var modelValue)) { modelPath = string.Empty; modelScale = 1f; finding = $"CreatureModelData.dbc has no model ID {modelId:N0}."; missingModel++; }
+            else if (string.IsNullOrWhiteSpace(modelValue.Path)) { modelPath = string.Empty; modelScale = modelValue.Scale; finding = $"CreatureModelData {modelId:N0} has no model path."; invalid++; }
+            else { modelPath = modelValue.Path; modelScale = modelValue.Scale; finding = displayId == 0 ? "Display ID 0 cannot be assigned to a creature template." : string.Empty; if (displayId == 0) invalid++; else usable++; }
+            var textures = textureColumns.Select(column => CreatureTexturePath(modelPath, Convert.ToString(display.File.GetDisplayValue(row, column)) ?? string.Empty)).ToArray();
+            entries.Add(new(displayId, modelId, modelPath, displayScale, modelScale, textures, finding));
+        }
+        return new(dbcRoot, entries.OrderBy(entry => entry.DisplayId).ToArray(), usable, missingModel, invalid);
+    }
+
     public async Task<IReadOnlyList<CreatureTemplatePreview>> ResolveCreaturesAsync(DatabaseConnectionProfile profile, string dbcRoot, string? schemaPath,
         string? processedAssetLibrary, IEnumerable<uint> creatureEntries, CancellationToken cancellationToken = default)
     {
