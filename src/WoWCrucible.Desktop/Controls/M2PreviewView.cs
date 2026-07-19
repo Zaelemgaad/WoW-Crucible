@@ -446,7 +446,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                         var lighting = (batch.RenderFlags & 0x1) != 0 ? Vector3.One : SceneLighting(normal, (viewA + viewB + viewC) / 3f, activeLights);
                         faces.Add(new((a.Y + b.Y + c.Y) / 3f, passOrder, sourceIndex, batch.MaterialUnitIndex ?? -1, ia, ib, ic, ax, ay, bx, by, cx, cy,
                             M2EnvironmentMapService.Coordinate(transformedNormals[ia]), M2EnvironmentMapService.Coordinate(transformedNormals[ib]), M2EnvironmentMapService.Coordinate(transformedNormals[ic]),
-                            lighting, activeStages, batch.BlendMode));
+                            lighting, activeStages, batch.Combiner.Kind, batch.BlendMode));
                     }
                 }
             }
@@ -486,8 +486,9 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                         groupFaces.Max(face => Math.Max(face.Ax, Math.Max(face.Bx, face.Cx))) + 1,
                         groupFaces.Max(face => Math.Max(face.Ay, Math.Max(face.By, face.Cy))) + 1);
                     canvas.SaveLayer(layerBounds, composite);
-                    DrawStage(stages[0], SKBlendMode.SrcOver, shadedColors);
-                    foreach (var stage in stages.Skip(1)) DrawStage(stage, StageBlendMode(stage.Blend), whiteColors);
+                    var materialBatch = sourceGeometry.Batches.First(batch => (batch.MaterialUnitIndex ?? -1) == group.Key.MaterialKey);
+                    foreach (var pass in M2TextureCombinerRenderPlanService.Build(materialBatch.Combiner, materialBatch.TextureStages))
+                        DrawStage(stages[pass.StageIndex], RenderPassBlendMode(pass.Blend), pass.UseLighting ? shadedColors : whiteColors);
                     canvas.Restore();
                 }
 
@@ -706,10 +707,11 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             return batch.Combiner.Supported ? result : result.Count == 0 ? [] : [result[0]];
         }
 
-        private static SKBlendMode StageBlendMode(M2PreviewTextureStageBlend blend) => blend switch
+        private static SKBlendMode RenderPassBlendMode(M2TextureRenderPassBlend blend) => blend switch
         {
-            M2PreviewTextureStageBlend.Modulate or M2PreviewTextureStageBlend.Modulate2X => SKBlendMode.Modulate,
-            M2PreviewTextureStageBlend.Add or M2PreviewTextureStageBlend.AddNoAlpha => SKBlendMode.Plus,
+            M2TextureRenderPassBlend.Modulate => SKBlendMode.Modulate,
+            M2TextureRenderPassBlend.Add or M2TextureRenderPassBlend.AddNoAlpha => SKBlendMode.Plus,
+            M2TextureRenderPassBlend.DestinationOut => SKBlendMode.DstOut,
             _ => SKBlendMode.SrcOver
         };
 
@@ -751,6 +753,6 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         private readonly record struct ProjectedParticle(float Depth, float X, float Y, float Radius, int SourceIndex, M2PreviewParticleSprite Sprite);
         private readonly record struct TextureGroup(int PassOrder, int SourceIndex, int MaterialKey, ushort BlendMode);
         private readonly record struct Face(float Depth, int PassOrder, int SourceIndex, int MaterialKey, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy,
-            Vector2 EnvironmentA, Vector2 EnvironmentB, Vector2 EnvironmentC, Vector3 Lighting, IReadOnlyList<ResolvedTextureStage> TextureStages, ushort BlendMode);
+            Vector2 EnvironmentA, Vector2 EnvironmentB, Vector2 EnvironmentC, Vector3 Lighting, IReadOnlyList<ResolvedTextureStage> TextureStages, M2PreviewTextureCombinerKind CombinerKind, ushort BlendMode);
     }
 }

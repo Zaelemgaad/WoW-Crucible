@@ -49,12 +49,14 @@ public sealed record M2PreviewRibbonEmitter(int Index, int BoneIndex, Vector3 Po
 public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
 public enum M2PreviewTextureCoordinateSource { Primary, Secondary, Environment, Unsupported }
 public enum M2PreviewTextureStageBlend { Source, Modulate, Modulate2X, Add, AddNoAlpha, Unsupported }
+public enum M2PreviewTextureCombinerKind { Standard, ExplicitOpaqueMod2xNaAlpha, ExplicitOpaqueAddAlpha, ExplicitModAddAlpha, Unsupported }
 public sealed record M2PreviewTextureStage(int StageIndex, int TextureLookupIndex, int TextureDefinitionIndex,
     short TextureCoordinateLookup, M2PreviewTextureCoordinateSource CoordinateSource,
     int? TransparencyDefinitionIndex, int? TextureAnimationDefinitionIndex, M2PreviewTextureStageBlend Blend);
 public sealed record M2PreviewTextureCombiner(string Name, bool Supported, bool Exact)
 {
     public static M2PreviewTextureCombiner None { get; } = new("No textures", true, true);
+    public M2PreviewTextureCombinerKind Kind { get; init; } = M2PreviewTextureCombinerKind.Standard;
 }
 public sealed record M2GeosetSelection(IReadOnlyDictionary<int, int> GroupVariants, string Source);
 public sealed record M2PreviewSubmesh(int Index, ushort GeosetId, ushort Level, int VertexStart, int VertexCount, int TriangleStart, int TriangleIndexCount, bool Visible)
@@ -362,6 +364,7 @@ public static class M2PreviewGeometryService
                     -1 => M2PreviewTextureCoordinateSource.Environment,
                     _ => M2PreviewTextureCoordinateSource.Unsupported
                 };
+                source = ExplicitCoordinateSource(combiner.Kind, stage, source);
                 int? transparencyIndex = transparencyLookupIndex + stage < transparencyLookup.Count && transparencyLookup[transparencyLookupIndex + stage] != ushort.MaxValue
                     ? transparencyLookup[transparencyLookupIndex + stage]
                     : null;
@@ -369,7 +372,7 @@ public static class M2PreviewGeometryService
                     ? textureAnimationLookup[textureAnimationLookupIndex + stage]
                     : null;
                 stages[stage] = new(stage, lookupIndex, definitionIndex, coordinate, source, transparencyIndex, animationIndex,
-                    StageBlend(combiner.Name, stage));
+                    StageBlend(combiner, stage));
             }
             var textureDefinitionIndex = stages.FirstOrDefault()?.TextureDefinitionIndex ?? -1;
             var supported = combiner.Supported && stages.All(stage => stage.TextureDefinitionIndex >= 0 && stage.CoordinateSource is M2PreviewTextureCoordinateSource.Primary or M2PreviewTextureCoordinateSource.Secondary or M2PreviewTextureCoordinateSource.Environment);
@@ -388,7 +391,18 @@ public static class M2PreviewGeometryService
     internal static M2PreviewTextureCombiner DescribeCombiner(ushort shaderId, int textureCount)
     {
         if (textureCount <= 0) return M2PreviewTextureCombiner.None;
-        if ((shaderId & 0x8000) != 0) return new($"Explicit shader {shaderId & 0x7FFF}", false, false);
+        if ((shaderId & 0x8000) != 0)
+        {
+            if (textureCount == 2)
+                return (shaderId & 0x7FFF) switch
+                {
+                    0 => new("Opaque_Mod2xNA_Alpha", true, false) { Kind = M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlpha },
+                    1 => new("Opaque_AddAlpha", true, false) { Kind = M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha },
+                    6 => new("Mod_AddAlpha", true, false) { Kind = M2PreviewTextureCombinerKind.ExplicitModAddAlpha },
+                    _ => new($"Explicit shader {shaderId & 0x7FFF}", false, false) { Kind = M2PreviewTextureCombinerKind.Unsupported }
+                };
+            return new($"Explicit shader {shaderId & 0x7FFF} ({textureCount:N0} stages)", false, false) { Kind = M2PreviewTextureCombinerKind.Unsupported };
+        }
         var first = (shaderId & 0x70) != 0 ? "Mod" : "Opaque";
         if (textureCount == 1) return new(first, true, true);
         if (textureCount != 2) return new($"{first} + {textureCount - 1:N0} legacy stage(s)", false, false);
@@ -408,11 +422,20 @@ public static class M2PreviewGeometryService
         return new($"{first}_{second}", true, false);
     }
 
-    private static M2PreviewTextureStageBlend StageBlend(string combiner, int stage)
+    private static M2PreviewTextureCoordinateSource ExplicitCoordinateSource(M2PreviewTextureCombinerKind kind, int stage, M2PreviewTextureCoordinateSource fallback) => kind switch
+    {
+        M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlpha or M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha => stage == 0 ? M2PreviewTextureCoordinateSource.Primary : M2PreviewTextureCoordinateSource.Environment,
+        M2PreviewTextureCombinerKind.ExplicitModAddAlpha => M2PreviewTextureCoordinateSource.Primary,
+        _ => fallback
+    };
+
+    private static M2PreviewTextureStageBlend StageBlend(M2PreviewTextureCombiner combiner, int stage)
     {
         if (stage == 0) return M2PreviewTextureStageBlend.Source;
         if (stage > 1) return M2PreviewTextureStageBlend.Unsupported;
-        var suffix = combiner[(combiner.LastIndexOf('_') + 1)..];
+        if (combiner.Kind == M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlpha) return M2PreviewTextureStageBlend.Modulate2X;
+        if (combiner.Kind is M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha or M2PreviewTextureCombinerKind.ExplicitModAddAlpha) return M2PreviewTextureStageBlend.Add;
+        var suffix = combiner.Name[(combiner.Name.LastIndexOf('_') + 1)..];
         return suffix switch
         {
             "Opaque" or "Mod" => M2PreviewTextureStageBlend.Modulate,
