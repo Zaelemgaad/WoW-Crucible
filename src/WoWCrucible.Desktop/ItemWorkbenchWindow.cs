@@ -42,6 +42,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBlock _auditSummary = new() { TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _inspection = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#AEB8C8")) };
     private ItemAcquisitionAudit? _audit;
+    private IReadOnlyDictionary<uint, ItemCatalogEntry> _auditById = new Dictionary<uint, ItemCatalogEntry>();
     private bool _auditLoading;
     private string _auditIdentity = string.Empty;
     private readonly TextBox _cloneSource = new() { PlaceholderText = "Source item ID" };
@@ -202,6 +203,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         {
             var profile = Profile();
             _audit = await new ItemCatalogService().AuditAsync(profile, EmptyNull(_acquisitionDbc.Text));
+            _auditById = _audit.AllItems.ToDictionary(item => item.Entry);
             _auditIdentity = AuditIdentity(profile);
             ApplyAuditFilter();
             var manual = _audit.NoKnownAcquisitionPath.Count(item => item.ReviewGroup == ItemAcquisitionReviewGroup.OtherManualReview);
@@ -224,7 +226,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             var profile = Profile();
             if (_audit is null || !_auditIdentity.Equals(AuditIdentity(profile), StringComparison.Ordinal)) await AuditAsync();
             if (_audit is null) return;
-            var item = _audit.AllItems.FirstOrDefault(candidate => candidate.Entry == entry);
+            _auditById.TryGetValue(entry, out var item);
             if (item is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _inspection.Text = $"Item {entry:N0} does not exist in item_template."; _status.Text = "Exact item inspection complete."; return; }
             var evidence = item.HasKnownAcquisitionPath
                 ? item.AcquisitionSources.Select(value => $"Accepted · {value}")
@@ -318,7 +320,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         }
         if (TryParseItemId(query, out var exactId))
         {
-            var exact = _audit.AllItems.FirstOrDefault(item => item.Entry == exactId);
+            _auditById.TryGetValue(exactId, out var exact);
             if (exact is null)
             {
                 _items.ItemsSource = Array.Empty<ItemCatalogEntry>();
@@ -364,9 +366,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     {
         if (_audit is null) return;
         var requested = entries.Distinct().ToArray();
-        var byId = _audit.AllItems.ToDictionary(item => item.Entry);
-        var rows = requested.Where(byId.ContainsKey).Select(entry => byId[entry]).ToArray();
-        var missing = requested.Where(entry => !byId.ContainsKey(entry)).ToArray();
+        var rows = requested.Where(_auditById.ContainsKey).Select(entry => _auditById[entry]).ToArray();
+        var missing = requested.Where(entry => !_auditById.ContainsKey(entry)).ToArray();
         _items.ItemsSource = rows;
         if (rows.Length > 0)
         {
@@ -507,7 +508,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     {
         if (_audit is null || _auditLoading) return;
         if (_auditIdentity.Equals(AuditIdentity(Profile()), StringComparison.Ordinal)) return;
-        _audit = null; _auditIdentity = string.Empty; _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _auditSummary.Text = "Target changed · refresh required";
+        _audit = null; _auditById = new Dictionary<uint, ItemCatalogEntry>(); _auditIdentity = string.Empty; _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _auditSummary.Text = "Target changed · refresh required";
         _status.Text = "The database or DBC target changed. Reopen this tab or press Scan acquisition paths to load fresh evidence.";
     }
     private async Task ConnectDatabaseAsync(bool openStudio)

@@ -16,9 +16,10 @@ public sealed record ItemCatalogEntry(uint Entry, string Name, int Quality, int 
 {
     public bool HasKnownAcquisitionPath => AcquisitionSources.Count > 0;
     public IReadOnlyList<string> NoPathReview => ReviewNotes ?? [];
-    public ItemAcquisitionReviewGroup ReviewGroup => ClassifyReviewGroup(Name, HasKnownAcquisitionPath);
+    public ItemAcquisitionReviewGroup ReviewGroup => ClassifyReviewGroup(Name, HasKnownAcquisitionPath, Quality, NoPathReview);
 
-    public static ItemAcquisitionReviewGroup ClassifyReviewGroup(string? name, bool hasKnownAcquisitionPath)
+    public static ItemAcquisitionReviewGroup ClassifyReviewGroup(string? name, bool hasKnownAcquisitionPath, int quality = 0,
+        IReadOnlyList<string>? reviewEvidence = null)
     {
         if (hasKnownAcquisitionPath) return ItemAcquisitionReviewGroup.KnownAcquisition;
         var value = name?.Trim() ?? string.Empty;
@@ -32,10 +33,18 @@ public sealed record ItemCatalogEntry(uint Entry, string Name, int Quality, int 
             value.Contains("unused", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("obsolete", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("gamemaster", StringComparison.OrdinalIgnoreCase) ||
-            value.StartsWith("Admin ", StringComparison.OrdinalIgnoreCase))
+            value.StartsWith("Admin ", StringComparison.OrdinalIgnoreCase) ||
+            quality == 6 ||
+            (reviewEvidence?.Any(IsDeveloperOrDeprecatedEvidence) ?? false))
             return ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper;
         return ItemAcquisitionReviewGroup.OtherManualReview;
     }
+
+    private static bool IsDeveloperOrDeprecatedEvidence(string evidence)
+        => evidence.Contains("deprecated", StringComparison.OrdinalIgnoreCase) ||
+           evidence.Contains("developer", StringComparison.OrdinalIgnoreCase) ||
+           evidence.Contains("gamemaster", StringComparison.OrdinalIgnoreCase) ||
+           evidence.Contains("internal/test", StringComparison.OrdinalIgnoreCase);
 }
 public sealed record ItemAcquisitionAudit(string Database, DateTimeOffset AuditedUtc, IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources,
     int TotalItems, int ObtainableItems, IReadOnlyList<ItemCatalogEntry> NoKnownAcquisitionPath,
@@ -177,10 +186,14 @@ public sealed class ItemCatalogService
             while (await reader.ReadAsync(cancellationToken))
             {
                 var entry = Convert.ToUInt32(reader.GetValue(0)); var sources = acquired.TryGetValue(entry, out var found) ? found.Order(StringComparer.OrdinalIgnoreCase).ToArray() : [];
+                var quality = Convert.ToInt32(reader.GetValue(2));
                 var review = sources.Length > 0 ? [] : rejected.TryGetValue(entry, out var rejectedFindings)
                     ? rejectedFindings.Order(StringComparer.OrdinalIgnoreCase).ToArray()
                     : [NoEvidenceMessage];
-                items.Add(new(entry, Convert.ToString(reader.GetValue(1)) ?? string.Empty, Convert.ToInt32(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3)), Convert.ToUInt32(reader.GetValue(4)), sources, review));
+                if (sources.Length == 0 && quality == 6)
+                    review = review.Append("Review signal · WotLK Artifact quality (6) is used by stock internal/test/cut rows; confirm intentional custom use.")
+                        .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                items.Add(new(entry, Convert.ToString(reader.GetValue(1)) ?? string.Empty, quality, Convert.ToInt32(reader.GetValue(3)), Convert.ToUInt32(reader.GetValue(4)), sources, review));
             }
         return new(items, rejected,
             checkedSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(),

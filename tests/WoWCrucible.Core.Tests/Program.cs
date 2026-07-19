@@ -1105,11 +1105,12 @@ var sourcedCreatureDisplay = creatureDisplayService.ResolveDisplay(args[1], args
 if (sourcedCreatureDisplay.Sources.Count != 1 || !sourcedCreatureDisplay.Sources[0].Ready || sourcedCreatureDisplay.Sources[0].Provenance != creatureProvenance)
     throw new InvalidOperationException("Creature display preview did not preserve same-provenance M2/SKIN source resolution.");
 Directory.Delete(creatureLibrary, true);
-if (ItemCatalogEntry.ClassifyReviewGroup("Martin Fury", false) != ItemAcquisitionReviewGroup.OtherManualReview ||
-    ItemCatalogEntry.ClassifyReviewGroup("Thunderfury, Blessed Blade of the Windseeker?", false) != ItemAcquisitionReviewGroup.OtherManualReview ||
+if (ItemCatalogEntry.ClassifyReviewGroup("Martin Fury", false, 6) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||
+    ItemCatalogEntry.ClassifyReviewGroup("Thunderfury, Blessed Blade of the Windseeker?", false, 7, ["Ignored · quest 7561 is disabled (Deprecated quest)."] ) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||
+    ItemCatalogEntry.ClassifyReviewGroup("Unfamiliar custom item", false, 4, ["No accepted acquisition row was found."]) != ItemAcquisitionReviewGroup.OtherManualReview ||
     ItemCatalogEntry.ClassifyReviewGroup("NPC Equip 50505", false) != ItemAcquisitionReviewGroup.NpcOrMonsterEquipment ||
     ItemCatalogEntry.ClassifyReviewGroup("Deprecated Old Belt", false) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||
-    ItemCatalogEntry.ClassifyReviewGroup("Anything", true) != ItemAcquisitionReviewGroup.KnownAcquisition)
+    ItemCatalogEntry.ClassifyReviewGroup("Anything", true, 6, ["developer"]) != ItemAcquisitionReviewGroup.KnownAcquisition)
     throw new InvalidOperationException("No-path item review grouping hid or mislabeled exact developer/cut-item regression cases.");
 var spellCreation = ItemCatalogService.ReadSpellCreationGraph(Path.Combine(args[1], "Spell.dbc"));
 if (!spellCreation.TryGetValue(597, out var conjureFood) || !conjureFood.CreatedItems.Contains(1113u) || spellCreation.Count < 1_000)
