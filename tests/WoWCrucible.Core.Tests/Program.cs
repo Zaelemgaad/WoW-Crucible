@@ -11,6 +11,7 @@ if (args.Length != 2)
 
 if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(command => command.Id).Distinct(StringComparer.Ordinal).Count() != CrucibleCommandCatalog.All.Count ||
     CrucibleCommandCatalog.Search("heidi favorites").FirstOrDefault()?.Command.Id != "workspace.sql" ||
+    CrucibleCommandCatalog.Search("foreign key constraint").FirstOrDefault()?.Command.Id != "workspace.sql" ||
     CrucibleCommandCatalog.Search("mpq merge").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
     CrucibleCommandCatalog.Search("casc later client extract").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
     CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.items" ||
@@ -41,26 +42,53 @@ CREATE TABLE `fixture_table` (
   `kind` enum('a','b') NOT NULL DEFAULT 'a',
   `note` varchar(64) DEFAULT NULL COMMENT 'hello,world',
   PRIMARY KEY (`id`),
-  KEY `ix_kind` (`kind`)
+  KEY `ix_kind` (`kind`),
+  CONSTRAINT `fk_fixture_kind` FOREIGN KEY (`kind`) REFERENCES `kind_catalog` (`code`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `chk_fixture_note` CHECK (((`note` is null) or (char_length(`note`) <= 64)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """;
 var designColumns = SqlTableDesignerService.ParseColumns(designCreate, designTable);
 if (designColumns.Count != 3 || designColumns[1].Definition != "enum('a','b') NOT NULL DEFAULT 'a'" || !designColumns[2].Definition.Contains("hello,world", StringComparison.Ordinal))
     throw new InvalidOperationException("Exact SHOW CREATE TABLE column parsing lost enum members, defaults, comments, or ordering.");
+var designForeignKeys = SqlTableDesignerService.ParseForeignKeys(designCreate);
+var designChecks = SqlTableDesignerService.ParseCheckConstraints(designCreate);
+if (designForeignKeys.Count != 1 || designForeignKeys[0].Name != "fk_fixture_kind" || designForeignKeys[0].Columns.Count != 1 || designForeignKeys[0].ReferencedTable != "kind_catalog" || designForeignKeys[0].DeleteRule != "RESTRICT" || designForeignKeys[0].UpdateRule != "CASCADE" ||
+    designChecks.Count != 1 || designChecks[0].Name != "chk_fixture_note" || !designChecks[0].Expression.Contains("char_length", StringComparison.OrdinalIgnoreCase) || !designChecks[0].Enforced)
+    throw new InvalidOperationException("Exact SHOW CREATE TABLE constraint parsing lost a foreign-key column/rule or nested CHECK expression.");
+var designReferenceTable = new DatabaseTableCapability("kind_catalog", [new("code", "enum", "enum('a','b')", false, null, "PRI", "", 1)]);
+var designTables = new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [designTable.Name] = designTable, [designReferenceTable.Name] = designReferenceTable };
 var designSnapshot = new SqlTableDesignSnapshot("fixture_db", "fixture_table", designCreate, "fixture-hash", designColumns,
-    [new("ix_kind", false, "BTREE", ["kind"], 2, "")], []);
+    [new("ix_kind", false, "BTREE", ["kind"], 2, "")], [], designTables, designForeignKeys, designChecks, "MySQL 8.4");
 var designProfile = new DatabaseConnectionProfile("127.0.0.1", 3306, "tester", "", "fixture_db");
 var designService = new SqlTableDesignerService();
 var addColumnPlan = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.AddColumn, NewName: "flags", Definition: "int unsigned NOT NULL DEFAULT '0'", Placement: SqlColumnPlacement.After, AfterColumn: "kind"));
 var renameColumnPlan = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.RenameColumn, ColumnName: "kind", NewName: "category", Definition: designColumns[1].Definition));
 if (addColumnPlan.Sql != "ALTER TABLE `fixture_table` ADD COLUMN `flags` int unsigned NOT NULL DEFAULT '0' AFTER `kind`;" ||
     !renameColumnPlan.Sql.StartsWith("ALTER TABLE `fixture_table` CHANGE COLUMN `kind` `category`", StringComparison.Ordinal) ||
-    !renameColumnPlan.Warnings.Any(warning => warning.Contains("ix_kind", StringComparison.Ordinal)))
+    !renameColumnPlan.Warnings.Any(warning => warning.Contains("ix_kind", StringComparison.Ordinal)) || !renameColumnPlan.Warnings.Any(warning => warning.Contains("fk_fixture_kind", StringComparison.Ordinal)))
     throw new InvalidOperationException("Stale-bound table designer did not produce exact ADD/RENAME DDL or dependency warnings.");
+var addForeignKeyPlan = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.AddForeignKey, NewName: "fk_fixture_kind_2", Columns: ["kind"], ReferencedTable: "kind_catalog", ReferencedColumns: ["code"], DeleteRule: "NO ACTION", UpdateRule: "CASCADE"));
+var dropForeignKeyPlan = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.DropForeignKey, ColumnName: "fk_fixture_kind"));
+var addCheckPlan = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.AddCheckConstraint, NewName: "chk_fixture_id", CheckExpression: "`id` > 0 AND (`note` IS NULL OR char_length(`note`) <= 64)"));
+var dropCheckPlan = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.DropCheckConstraint, ColumnName: "chk_fixture_note"));
+var mariaDropCheckPlan = designService.Prepare(designProfile, designSnapshot with { ServerVersion = "10.11.8-MariaDB" }, new(SqlTableDesignOperation.DropCheckConstraint, ColumnName: "chk_fixture_note"));
+if (addForeignKeyPlan.Sql != "ALTER TABLE `fixture_table` ADD CONSTRAINT `fk_fixture_kind_2` FOREIGN KEY (`kind`) REFERENCES `kind_catalog` (`code`) ON DELETE NO ACTION ON UPDATE CASCADE;" ||
+    dropForeignKeyPlan.Sql != "ALTER TABLE `fixture_table` DROP FOREIGN KEY `fk_fixture_kind`;" ||
+    addCheckPlan.Sql != "ALTER TABLE `fixture_table` ADD CONSTRAINT `chk_fixture_id` CHECK (`id` > 0 AND (`note` IS NULL OR char_length(`note`) <= 64));" ||
+    dropCheckPlan.Sql != "ALTER TABLE `fixture_table` DROP CHECK `chk_fixture_note`;" || mariaDropCheckPlan.Sql != "ALTER TABLE `fixture_table` DROP CONSTRAINT `chk_fixture_note`;")
+    throw new InvalidOperationException("Reviewed foreign-key/CHECK plans lost exact identifiers, column order, actions, or MySQL/MariaDB drop syntax.");
 try { _ = SqlTableDesignerService.ValidateDefinition("int NOT NULL; DROP TABLE item_template"); throw new InvalidOperationException("Guided column definition accepted a second statement."); }
 catch (ArgumentException) { }
 try { _ = SqlTableDesignerService.ValidateDefinition("int NOT NULL, DROP COLUMN id"); throw new InvalidOperationException("Guided column definition accepted a second ALTER clause."); }
 catch (ArgumentException) { }
+try { _ = SqlTableDesignerService.ValidateCheckExpression("`id` > 0); DROP TABLE item_template;"); throw new InvalidOperationException("Guided CHECK expression accepted a second statement."); }
+catch (ArgumentException) { }
+try { _ = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.AddForeignKey, NewName: "fk_bad", Columns: ["note"], ReferencedTable: "kind_catalog", ReferencedColumns: ["missing"])); throw new InvalidOperationException("Foreign-key planning accepted an unknown referenced column."); }
+catch (ArgumentException) { }
+try { _ = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.AddForeignKey, NewName: "fk_null_bad", Columns: ["kind"], ReferencedTable: "kind_catalog", ReferencedColumns: ["code"], DeleteRule: "SET NULL")); throw new InvalidOperationException("Foreign-key planning accepted SET NULL for a non-nullable source column."); }
+catch (ArgumentException exception) when (exception.Message.Contains("nullable", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = designService.Prepare(designProfile, designSnapshot, new(SqlTableDesignOperation.AddCheckConstraint, NewName: "chk_fixture_note", CheckExpression: "`id` > 0")); throw new InvalidOperationException("Constraint planning accepted a duplicate identity."); }
+catch (ArgumentException exception) when (exception.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase)) { }
 
 var itemDisplayPath = Path.Combine(args[1], "ItemDisplayInfo.dbc");
 var dbdFixture=Path.Combine(Path.GetTempPath(),$"crucible-dbd-{Guid.NewGuid():N}.dbd");

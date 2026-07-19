@@ -950,7 +950,7 @@ static int ServerHelp(int code = 0)
 
 static async Task<int> Database(string[] args, CancellationToken cancellationToken)
 {
-    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db pet-preview <host> <port> <user> <database> <creature-entry> --dbc=folder [--schema=definitions.xml] [--library=processed-assets] [--format=text|json]\n  wowcrucible db pet-graph <host> <port> <user> <database> <creature-entry> --dbc=folder --schema=definitions.xml [--format=text|json]\n  wowcrucible db table-design <host> <port> <user> <database> <table> <add|modify|rename|drop|clone|rename-table> [column] [--name=value] [--definition=clause] [--first|--after=column] [--apply] [--format=text|json]"); return DatabaseHelp(); }
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { Console.WriteLine("  wowcrucible db pet-compare <host> <port> <user> <database> <left-creature> <right-creature> [--levels=1-80] [--metric=hp] [--output=report] [--overwrite] [--format=text|json] [--password-env=NAME] [--ssl=Preferred]\n  wowcrucible db pet-preview <host> <port> <user> <database> <creature-entry> --dbc=folder [--schema=definitions.xml] [--library=processed-assets] [--format=text|json]\n  wowcrucible db pet-graph <host> <port> <user> <database> <creature-entry> --dbc=folder --schema=definitions.xml [--format=text|json]\n  wowcrucible db table-design <host> <port> <user> <database> <table> <add|modify|rename|drop|clone|rename-table|add-fk|drop-fk|add-check|drop-check> [column-or-constraint] [options] [--apply] [--format=text|json]"); return DatabaseHelp(); }
     if (args[0].Equals("draft-template", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 3) return Fail("db draft-template requires a supported authoring domain and an output JSON path."); var options = args[3..]; var overwrite = options.Any(option => option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)); var unknown = options.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown draft-template option: {unknown[0]}");
@@ -1061,16 +1061,17 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
     {
         if (args.Length < 7 || args[5].StartsWith("--", StringComparison.Ordinal) || args[6].StartsWith("--", StringComparison.Ordinal)) return Fail("db table-design requires <table> <operation> after the database name.");
         var tableName = args[5]; var action = args[6].ToLowerInvariant();
-        var needsColumn = action is "add" or "modify" or "rename" or "drop";
-        var columnName = needsColumn && args.Length > 7 && !args[7].StartsWith("--", StringComparison.Ordinal) ? args[7] : null;
-        if (needsColumn && string.IsNullOrWhiteSpace(columnName)) return Fail($"db table-design {action} requires a column name.");
+        var needsIdentity = action is "add" or "modify" or "rename" or "drop" or "add-fk" or "drop-fk" or "add-check" or "drop-check";
+        var columnName = needsIdentity && args.Length > 7 && !args[7].StartsWith("--", StringComparison.Ordinal) ? args[7] : null;
+        if (needsIdentity && string.IsNullOrWhiteSpace(columnName)) return Fail($"db table-design {action} requires a column or constraint name.");
         var optionStart = columnName is null ? 7 : 8; var options = args[optionStart..];
         var name = Option(options, "--name="); var definition = Option(options, "--definition="); var after = Option(options, "--after=");
+        var columns = Option(options, "--columns="); var references = Option(options, "--references="); var referenceColumns = Option(options, "--reference-columns="); var deleteRule = Option(options, "--delete="); var updateRule = Option(options, "--update="); var expression = Option(options, "--expression=");
         var first = options.Any(option => option.Equals("--first", StringComparison.OrdinalIgnoreCase)); var apply = options.Any(option => option.Equals("--apply", StringComparison.OrdinalIgnoreCase)); var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
-        var unknown = options.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--name=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--definition=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--after=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--first", StringComparison.OrdinalIgnoreCase) && !option.Equals("--apply", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var unknown = options.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--name=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--definition=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--after=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--columns=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--references=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--reference-columns=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--delete=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--update=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--expression=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--first", StringComparison.OrdinalIgnoreCase) && !option.Equals("--apply", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown table-design option: {unknown[0]}");
         if (first && after is not null) return Fail("Choose either --first or --after, not both.");
-        var kind = action switch { "add" => SqlTableDesignOperation.AddColumn, "modify" => SqlTableDesignOperation.ModifyColumn, "rename" => SqlTableDesignOperation.RenameColumn, "drop" => SqlTableDesignOperation.DropColumn, "clone" => SqlTableDesignOperation.CloneStructure, "rename-table" => SqlTableDesignOperation.RenameTable, _ => throw new ArgumentException("table-design operation must be add, modify, rename, drop, clone, or rename-table.") };
+        var kind = action switch { "add" => SqlTableDesignOperation.AddColumn, "modify" => SqlTableDesignOperation.ModifyColumn, "rename" => SqlTableDesignOperation.RenameColumn, "drop" => SqlTableDesignOperation.DropColumn, "clone" => SqlTableDesignOperation.CloneStructure, "rename-table" => SqlTableDesignOperation.RenameTable, "add-fk" => SqlTableDesignOperation.AddForeignKey, "drop-fk" => SqlTableDesignOperation.DropForeignKey, "add-check" => SqlTableDesignOperation.AddCheckConstraint, "drop-check" => SqlTableDesignOperation.DropCheckConstraint, _ => throw new ArgumentException("table-design operation must be add, modify, rename, drop, clone, rename-table, add-fk, drop-fk, add-check, or drop-check.") };
         var placement = first ? SqlColumnPlacement.First : after is not null ? SqlColumnPlacement.After : SqlColumnPlacement.End;
         var request = kind switch
         {
@@ -1078,6 +1079,10 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
             SqlTableDesignOperation.ModifyColumn => new SqlTableDesignRequest(kind, ColumnName: columnName, Definition: definition, Placement: placement, AfterColumn: after),
             SqlTableDesignOperation.RenameColumn => new SqlTableDesignRequest(kind, ColumnName: columnName, NewName: name, Definition: definition, Placement: placement, AfterColumn: after),
             SqlTableDesignOperation.DropColumn => new SqlTableDesignRequest(kind, ColumnName: columnName),
+            SqlTableDesignOperation.AddForeignKey => new SqlTableDesignRequest(kind, NewName: columnName, Columns: ParseList(columns), ReferencedTable: references, ReferencedColumns: ParseList(referenceColumns), DeleteRule: deleteRule, UpdateRule: updateRule),
+            SqlTableDesignOperation.DropForeignKey => new SqlTableDesignRequest(kind, ColumnName: columnName),
+            SqlTableDesignOperation.AddCheckConstraint => new SqlTableDesignRequest(kind, NewName: columnName, CheckExpression: expression),
+            SqlTableDesignOperation.DropCheckConstraint => new SqlTableDesignRequest(kind, ColumnName: columnName),
             _ => new SqlTableDesignRequest(kind, NewName: name)
         };
         var service = new SqlTableDesignerService(); var plan = await service.PrepareAsync(profile, tableName, request, cancellationToken);
@@ -2095,6 +2100,7 @@ static int Help()
 static int Fail(string message) { Console.Error.WriteLine(message); return 2; }
 
 static string? Option(IEnumerable<string> options, string prefix) => options.FirstOrDefault(option => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))?[prefix.Length..];
+static IReadOnlyList<string> ParseList(string? value) => (value ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 static int ParseIntOption(IEnumerable<string> options, string prefix, int fallback)
 {
     var value = options.FirstOrDefault(option => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));

@@ -59,6 +59,16 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _structureTableName = new() { PlaceholderText = "New table name" };
     private readonly TextBlock _structureStatus = Status("Load the selected table to edit its exact server-normalized column definitions.");
     private SqlTableDesignSnapshot? _structureSnapshot;
+    private readonly ListBox _foreignKeys = new();
+    private readonly ListBox _checkConstraints = new();
+    private readonly TextBox _constraintName = new() { PlaceholderText = "Constraint name" };
+    private readonly TextBox _constraintColumns = new() { PlaceholderText = "Source columns in order: column1, column2" };
+    private readonly ComboBox _constraintReferenceTable = new() { PlaceholderText = "Referenced table" };
+    private readonly TextBox _constraintReferenceColumns = new() { PlaceholderText = "Referenced columns in matching order" };
+    private readonly ComboBox _constraintDeleteRule = new() { ItemsSource = new[] { "RESTRICT", "CASCADE", "SET NULL", "NO ACTION" }, SelectedIndex = 0 };
+    private readonly ComboBox _constraintUpdateRule = new() { ItemsSource = new[] { "RESTRICT", "CASCADE", "SET NULL", "NO ACTION" }, SelectedIndex = 0 };
+    private readonly TextBox _checkExpression = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, PlaceholderText = "Boolean expression, for example: `minlevel` <= `maxlevel`" };
+    private readonly TextBlock _constraintStatus = Status("Load the selected table to inspect and design exact foreign-key and CHECK constraints.");
     private readonly ListBox _processes = new();
     private readonly TextBox _processDetail = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
     private readonly ListBox _databaseUsers = new();
@@ -156,6 +166,9 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _databaseObjectType.SelectionChanged += (_, _) => FilterDatabaseObjects();
         _databaseObjects.SelectionChanged += async (_, _) => await LoadSelectedDatabaseObjectAsync();
         _structureColumns.SelectionChanged += (_, _) => SelectStructureColumn();
+        _foreignKeys.SelectionChanged += (_, _) => SelectForeignKey();
+        _checkConstraints.SelectionChanged += (_, _) => SelectCheckConstraint();
+        _constraintReferenceTable.SelectionChanged += (_, _) => UpdateConstraintReferenceColumns();
         _favoriteSearch.TextChanged += (_, _) => ApplyFavoriteFilter();
         _favoriteState.SelectionChanged += (_, _) => ApplyFavoriteFilter();
         _favorites.SelectionChanged += (_, _) => SelectFavorite();
@@ -296,7 +309,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _databaseUsers.ItemTemplate = new FuncDataTemplate<SqlUserAccountInfo>((account, _) => new TextBlock { Text = account?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
         _databaseObjects.ItemTemplate = new FuncDataTemplate<SqlDatabaseObjectInfo>((item, _) => item is null ? new TextBlock() : new StackPanel { Margin = new Thickness(4, 3), Children = { new TextBlock { Text = item.Display, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap }, new TextBlock { Text = $"Definer {item.Definer}{(item.Modified is null ? string.Empty : $" · modified {item.Modified:yyyy-MM-dd HH:mm:ss}")}", Foreground = Brush.Parse("#8995A9"), TextWrapping = TextWrapping.Wrap } } });
         _structureColumns.ItemTemplate = new FuncDataTemplate<SqlTableColumnDefinition>((column, _) => new TextBlock { Text = column?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
-        var pages = new TabControl { Items = { new TabItem { Header = "Table DDL & indexes", Content = TableAdministrationPage() }, new TabItem { Header = "Columns & table changes", Content = TableDesignerPage() }, new TabItem { Header = "Database objects", Content = DatabaseObjectsPage() }, new TabItem { Header = "Processes", Content = ProcessAdministrationPage() }, new TabItem { Header = "Database users", Content = UserAdministrationPage() }, new TabItem { Header = "Visual joins", Content = JoinDesignerPage() } } };
+        var pages = new TabControl { Items = { new TabItem { Header = "Table DDL & indexes", Content = TableAdministrationPage() }, new TabItem { Header = "Columns & table changes", Content = TableDesignerPage() }, new TabItem { Header = "Foreign keys & checks", Content = ConstraintDesignerPage() }, new TabItem { Header = "Database objects", Content = DatabaseObjectsPage() }, new TabItem { Header = "Processes", Content = ProcessAdministrationPage() }, new TabItem { Header = "Database users", Content = UserAdministrationPage() }, new TabItem { Header = "Visual joins", Content = JoinDesignerPage() } } };
         return new Grid { RowDefinitions = new("*,Auto"), RowSpacing = 7, Children = { pages, WithRow(_administrationStatus, 1) } };
     }
 
@@ -334,6 +347,55 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         } };
         var body = new ResponsiveSplitGrid(_structureColumns, new ScrollViewer { Content = editor }, 1, 2);
         return new Grid { RowDefinitions = new("Auto,*,Auto"), RowSpacing = 7, Children = { top, WithRow(body, 1), WithRow(_structureStatus, 2) } };
+    }
+
+    private Control ConstraintDesignerPage()
+    {
+        _foreignKeys.ItemTemplate = new FuncDataTemplate<SqlForeignKeyDefinition>((constraint, _) => new TextBlock { Text = constraint?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
+        _checkConstraints.ItemTemplate = new FuncDataTemplate<SqlCheckConstraintDefinition>((constraint, _) => new TextBlock { Text = constraint?.Display ?? string.Empty, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4) });
+        var load = AccentButton("Load selected table constraints"); load.Click += async (_, _) => await LoadConstraintsAsync(load);
+        var addForeign = AccentButton("Review ADD foreign key"); addForeign.Click += (_, _) => PrepareConstraintDesign(SqlTableDesignOperation.AddForeignKey);
+        var dropForeign = new Button { Content = "Review DROP selected foreign key" }; dropForeign.Click += (_, _) => PrepareConstraintDesign(SqlTableDesignOperation.DropForeignKey);
+        var addCheck = AccentButton("Review ADD check"); addCheck.Click += (_, _) => PrepareConstraintDesign(SqlTableDesignOperation.AddCheckConstraint);
+        var dropCheck = new Button { Content = "Review DROP selected check" }; dropCheck.Click += (_, _) => PrepareConstraintDesign(SqlTableDesignOperation.DropCheckConstraint);
+        var inventories = new TabControl
+        {
+            Items =
+            {
+                new TabItem { Header = "Foreign keys", Content = _foreignKeys },
+                new TabItem { Header = "CHECK constraints", Content = _checkConstraints }
+            }
+        };
+        var foreignEditor = new StackPanel
+        {
+            Spacing = 6,
+            Children =
+            {
+                new TextBlock { Text = "Foreign-key draft", FontWeight = FontWeight.SemiBold },
+                _constraintName,
+                _constraintColumns,
+                _constraintReferenceTable,
+                _constraintReferenceColumns,
+                new StackPanel { Spacing = 4, Children = { new TextBlock { Text = "ON DELETE", Foreground = Brush.Parse("#9AA5B7") }, _constraintDeleteRule } },
+                new StackPanel { Spacing = 4, Children = { new TextBlock { Text = "ON UPDATE", Foreground = Brush.Parse("#9AA5B7") }, _constraintUpdateRule } },
+                new WrapPanel { Children = { addForeign, dropForeign } },
+                new TextBlock { Text = "Composite keys preserve the typed column order. SET NULL is blocked unless every source column is nullable. MySQL validates existing rows and may create a supporting source index.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") }
+            }
+        };
+        var checkEditor = new StackPanel
+        {
+            Spacing = 6,
+            Children =
+            {
+                new TextBlock { Text = "CHECK constraint draft", FontWeight = FontWeight.SemiBold },
+                _checkExpression,
+                new WrapPanel { Children = { addCheck, dropCheck } },
+                new TextBlock { Text = "The expression is preserved exactly after delimiter/comment/balance validation. The server remains authoritative for supported functions and validates every existing row.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") }
+            }
+        };
+        var editors = new TabControl { Items = { new TabItem { Header = "Foreign-key editor", Content = new ScrollViewer { Content = foreignEditor } }, new TabItem { Header = "CHECK editor", Content = new ScrollViewer { Content = checkEditor } } } };
+        var body = new ResponsiveSplitGrid(inventories, editors, 1, 2);
+        return new Grid { RowDefinitions = new("Auto,*,Auto"), RowSpacing = 7, Children = { new WrapPanel { Children = { load, new TextBlock { Text = "Every plan is bound to the exact current SHOW CREATE TABLE hash and produces a before/after schema receipt.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(body, 1), WithRow(_constraintStatus, 2) } };
     }
 
     private Control DatabaseObjectsPage()
@@ -655,6 +717,57 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         finally { button.IsEnabled = true; End(); }
     }
 
+    private async Task LoadConstraintsAsync(Button button)
+    {
+        if (_profile is null || _tables.SelectedItem is not TableChoice selected) { _constraintStatus.Text = "Select a table in Tables & rows first."; return; }
+        try
+        {
+            button.IsEnabled = false; Begin($"Reading exact constraints for {selected.Table.Name}…");
+            _structureSnapshot = await new SqlTableDesignerService().InspectAsync(_profile, selected.Table.Name, _operation!.Token);
+            RefreshConstraintControls();
+            _constraintStatus.Text = $"{_structureSnapshot.Database}.{_structureSnapshot.Table} · {(_structureSnapshot.ForeignKeys ?? []).Count:N0} foreign key(s) · {(_structureSnapshot.CheckConstraints ?? []).Count:N0} CHECK constraint(s) · server {_structureSnapshot.ServerVersion}.";
+        }
+        catch (OperationCanceledException) { _constraintStatus.Text = "Constraint inspection cancelled."; }
+        catch (Exception exception) { Fail("Constraint inspection failed", exception); _constraintStatus.Text = exception.Message; }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private void RefreshConstraintControls()
+    {
+        _foreignKeys.ItemsSource = _structureSnapshot?.ForeignKeys ?? [];
+        _checkConstraints.ItemsSource = _structureSnapshot?.CheckConstraints ?? [];
+        _constraintColumns.PlaceholderText = _structureSnapshot is null ? "Source columns in order" : $"Available source columns: {string.Join(", ", _structureSnapshot.Columns.Select(column => column.Name))}";
+        var tables = (_structureSnapshot?.Tables?.Values ?? []).OrderBy(table => table.Name, StringComparer.OrdinalIgnoreCase).Select(table => table.Name).ToArray();
+        var selectedTarget = _constraintReferenceTable.SelectedItem as string;
+        _constraintReferenceTable.ItemsSource = tables;
+        _constraintReferenceTable.SelectedItem = selectedTarget is not null ? tables.FirstOrDefault(table => table.Equals(selectedTarget, StringComparison.OrdinalIgnoreCase)) : null;
+        UpdateConstraintReferenceColumns();
+    }
+
+    private void SelectForeignKey()
+    {
+        if (_foreignKeys.SelectedItem is not SqlForeignKeyDefinition constraint) return;
+        _constraintName.Text = constraint.Name; _constraintColumns.Text = string.Join(", ", constraint.Columns);
+        _constraintReferenceTable.SelectedItem = (_constraintReferenceTable.ItemsSource as IEnumerable<string>)?.FirstOrDefault(table => table.Equals(constraint.ReferencedTable, StringComparison.OrdinalIgnoreCase));
+        _constraintReferenceColumns.Text = string.Join(", ", constraint.ReferencedColumns);
+        _constraintDeleteRule.SelectedItem = constraint.DeleteRule; _constraintUpdateRule.SelectedItem = constraint.UpdateRule;
+        _constraintStatus.Text = $"Loaded exact foreign key {constraint.Name}. Change the name before creating a variant, or drop this selected identity explicitly.";
+    }
+
+    private void SelectCheckConstraint()
+    {
+        if (_checkConstraints.SelectedItem is not SqlCheckConstraintDefinition constraint) return;
+        _constraintName.Text = constraint.Name; _checkExpression.Text = constraint.Expression;
+        _constraintStatus.Text = $"Loaded exact CHECK constraint {constraint.Name} · {(constraint.Enforced ? "enforced" : "not enforced")}. Change the name before creating a variant, or drop this selected identity explicitly.";
+    }
+
+    private void UpdateConstraintReferenceColumns()
+    {
+        var tableName = _constraintReferenceTable.SelectedItem as string;
+        var table = tableName is null ? null : _structureSnapshot?.Tables?.Values.FirstOrDefault(candidate => candidate.Name.Equals(tableName, StringComparison.OrdinalIgnoreCase));
+        _constraintReferenceColumns.PlaceholderText = table is null ? "Referenced columns in matching order" : $"Available on {table.Name}: {string.Join(", ", table.Columns.Select(column => column.Name))}";
+    }
+
     private void SelectStructureColumn()
     {
         if (_structureColumns.SelectedItem is not SqlTableColumnDefinition column) return;
@@ -702,6 +815,30 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         catch (Exception exception) { _structureStatus.Text = $"Cannot prepare table change: {exception.Message}"; }
     }
 
+    private void PrepareConstraintDesign(SqlTableDesignOperation operation)
+    {
+        if (_profile is null || _structureSnapshot is null) { _constraintStatus.Text = "Load the selected table constraints first."; return; }
+        try
+        {
+            SqlTableDesignRequest request = operation switch
+            {
+                SqlTableDesignOperation.AddForeignKey => new(operation, NewName: _constraintName.Text, Columns: ParseColumnList(_constraintColumns.Text), ReferencedTable: _constraintReferenceTable.SelectedItem as string, ReferencedColumns: ParseColumnList(_constraintReferenceColumns.Text), DeleteRule: _constraintDeleteRule.SelectedItem as string, UpdateRule: _constraintUpdateRule.SelectedItem as string),
+                SqlTableDesignOperation.DropForeignKey => new(operation, ColumnName: (_foreignKeys.SelectedItem as SqlForeignKeyDefinition)?.Name),
+                SqlTableDesignOperation.AddCheckConstraint => new(operation, NewName: _constraintName.Text, CheckExpression: _checkExpression.Text),
+                SqlTableDesignOperation.DropCheckConstraint => new(operation, ColumnName: (_checkConstraints.SelectedItem as SqlCheckConstraintDefinition)?.Name),
+                _ => throw new ArgumentOutOfRangeException(nameof(operation))
+            };
+            var plan = new SqlTableDesignerService().Prepare(_profile, _structureSnapshot, request);
+            var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;
+            var confirm = plan.Destructive ? new Button { Content = $"Execute {operation}" } : AccentButton($"Execute {operation}");
+            confirm.Click += async (_, _) => await ApplyTableDesignAsync(confirm, plan);
+            var warning = string.Join("\n", plan.Warnings.Select(value => $"• {value}"));
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"{(plan.Destructive ? "ENFORCEMENT-REMOVING DDL" : "SCHEMA-CHANGING DDL")}\n{plan.Sql}\n\n{warning}\n\nThe plan is bound to the current SHOW CREATE TABLE hash. A changed table is refused. Successful apply saves the exact before/after DDL receipt under {CruciblePaths.SqlSchemaBackupDirectory}.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } };
+            _confirmation.IsVisible = true; _constraintStatus.Text = $"Prepared {operation}; review the exact DDL and every warning below SQL Studio.";
+        }
+        catch (Exception exception) { _constraintStatus.Text = $"Cannot prepare constraint change: {exception.Message}"; }
+    }
+
     private async Task ApplyTableDesignAsync(Button button, SqlTableDesignPlan plan)
     {
         if (_profile is null) return;
@@ -713,16 +850,17 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             await _session.RefreshDatabaseAsync(CancellationToken.None);
             _profile = _session.DatabaseProfile; _capabilities = _session.DatabaseCapabilities;
             PopulateTables();
-            _structureStatus.Text = $"Applied {plan.Request.Operation}. Exact before/after receipt: {result.ReceiptPath}";
-            _status.Text = _structureStatus.Text;
+            var resultText = $"Applied {plan.Request.Operation}. Exact before/after receipt: {result.ReceiptPath}";
+            _structureStatus.Text = resultText; _constraintStatus.Text = resultText; _status.Text = resultText;
             if (_profile is not null) _structureSnapshot = await new SqlTableDesignerService().InspectAsync(_profile, plan.ResultTable, CancellationToken.None);
             _structureColumns.ItemsSource = _structureSnapshot?.Columns;
             _structureAfter.ItemsSource = _structureSnapshot?.Columns.Select(column => column.Name).ToArray();
             _structureColumns.SelectedIndex = _structureSnapshot?.Columns.Count > 0 ? 0 : -1;
+            RefreshConstraintControls();
             _tables.SelectedItem = (_tables.ItemsSource as IEnumerable<TableChoice>)?.FirstOrDefault(choice => choice.Table.Name.Equals(plan.ResultTable, StringComparison.OrdinalIgnoreCase));
         }
-        catch (OperationCanceledException) { _structureStatus.Text = "Table change cancelled before completion or refresh."; }
-        catch (Exception exception) { Fail("Table design apply failed", exception); _structureStatus.Text = exception.Message; }
+        catch (OperationCanceledException) { _structureStatus.Text = _constraintStatus.Text = "Table change cancelled before completion or refresh."; }
+        catch (Exception exception) { Fail("Table design apply failed", exception); _structureStatus.Text = _constraintStatus.Text = exception.Message; }
         finally { button.IsEnabled = true; End(); }
     }
 

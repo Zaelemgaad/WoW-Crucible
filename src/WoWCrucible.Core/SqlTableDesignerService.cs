@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using MySqlConnector;
 
 namespace WoWCrucible.Core;
@@ -12,7 +13,11 @@ public enum SqlTableDesignOperation
     RenameColumn,
     DropColumn,
     CloneStructure,
-    RenameTable
+    RenameTable,
+    AddForeignKey,
+    DropForeignKey,
+    AddCheckConstraint,
+    DropCheckConstraint
 }
 
 public enum SqlColumnPlacement
@@ -27,6 +32,22 @@ public sealed record SqlTableColumnDefinition(string Name, string Definition, in
     public string Display => $"{Ordinal:N0} · {Name} · {Definition}{(string.IsNullOrWhiteSpace(Key) ? string.Empty : $" · {Key}")}";
 }
 
+public sealed record SqlForeignKeyDefinition(
+    string Name,
+    IReadOnlyList<string> Columns,
+    string ReferencedTable,
+    IReadOnlyList<string> ReferencedColumns,
+    string DeleteRule,
+    string UpdateRule)
+{
+    public string Display => $"{Name} · ({string.Join(", ", Columns)}) → {ReferencedTable}({string.Join(", ", ReferencedColumns)}) · DELETE {DeleteRule} · UPDATE {UpdateRule}";
+}
+
+public sealed record SqlCheckConstraintDefinition(string Name, string Expression, bool Enforced)
+{
+    public string Display => $"{Name} · CHECK ({Expression}) · {(Enforced ? "ENFORCED" : "NOT ENFORCED")}";
+}
+
 public sealed record SqlTableDesignSnapshot(
     string Database,
     string Table,
@@ -34,7 +55,11 @@ public sealed record SqlTableDesignSnapshot(
     string CreateSqlSha256,
     IReadOnlyList<SqlTableColumnDefinition> Columns,
     IReadOnlyList<SqlIndexInfo> Indexes,
-    IReadOnlyList<DatabaseRelationCapability> Relations);
+    IReadOnlyList<DatabaseRelationCapability> Relations,
+    IReadOnlyDictionary<string, DatabaseTableCapability>? Tables = null,
+    IReadOnlyList<SqlForeignKeyDefinition>? ForeignKeys = null,
+    IReadOnlyList<SqlCheckConstraintDefinition>? CheckConstraints = null,
+    string ServerVersion = "");
 
 public sealed record SqlTableDesignRequest(
     SqlTableDesignOperation Operation,
@@ -42,7 +67,13 @@ public sealed record SqlTableDesignRequest(
     string? NewName = null,
     string? Definition = null,
     SqlColumnPlacement Placement = SqlColumnPlacement.End,
-    string? AfterColumn = null);
+    string? AfterColumn = null,
+    IReadOnlyList<string>? Columns = null,
+    string? ReferencedTable = null,
+    IReadOnlyList<string>? ReferencedColumns = null,
+    string? DeleteRule = null,
+    string? UpdateRule = null,
+    string? CheckExpression = null);
 
 public sealed record SqlTableDesignPlan(
     string Format,
@@ -106,7 +137,8 @@ public sealed class SqlTableDesignerService
         var columns = ParseColumns(createSql, table);
         var indexes = await administration.ReadIndexesAsync(profile, table, cancellationToken);
         var relations = capabilities.Relationships.Where(relation => relation.Declared && relation.Touches(table.Name)).ToArray();
-        return new(profile.Database, table.Name, createSql, Sha256(createSql), columns, indexes, relations);
+        return new(profile.Database, table.Name, createSql, Sha256(createSql), columns, indexes, relations,
+            capabilities.Tables, ParseForeignKeys(createSql), ParseCheckConstraints(createSql), capabilities.ServerVersion);
     }
 
     public async Task<SqlTableDesignPlan> PrepareAsync(DatabaseConnectionProfile profile, string tableName,
@@ -179,6 +211,58 @@ public sealed class SqlTableDesignerService
                 destructive = true;
                 warnings.Add("Code, scripts, views, triggers, and undeclared application relationships may still refer to the old table name.");
                 foreach (var relation in snapshot.Relations) warnings.Add($"Declared relationship {relation.Name}: {relation.FromTable}.{relation.FromColumn} → {relation.ToTable}.{relation.ToColumn}.");
+                break;
+            }
+            case SqlTableDesignOperation.AddForeignKey:
+            {
+                var name = ValidateNewConstraint(snapshot, request.NewName ?? request.ColumnName);
+                var columns = ExistingColumns(snapshot, request.Columns, "source");
+                var referencedTableName = ValidateIdentifier(request.ReferencedTable, "referenced table");
+                var tables = snapshot.Tables ?? throw new InvalidOperationException("Reload the live table structure before designing a foreign key; the inspected table catalog is unavailable.");
+                var sourceTable = tables.Values.FirstOrDefault(table => table.Name.Equals(snapshot.Table, StringComparison.OrdinalIgnoreCase))
+                    ?? throw new InvalidOperationException($"The inspected catalog no longer contains source table {snapshot.Table}.");
+                var referencedTable = tables.Values.FirstOrDefault(table => table.Name.Equals(referencedTableName, StringComparison.OrdinalIgnoreCase))
+                    ?? throw new ArgumentException($"The active database has no referenced table {referencedTableName}.");
+                var referencedColumns = ExistingColumns(referencedTable, request.ReferencedColumns, "referenced");
+                if (columns.Count != referencedColumns.Count) throw new ArgumentException("A foreign key needs the same number of source and referenced columns, in matching order.");
+                var deleteRule = ValidateForeignKeyRule(request.DeleteRule);
+                var updateRule = ValidateForeignKeyRule(request.UpdateRule);
+                if ((deleteRule == "SET NULL" || updateRule == "SET NULL") && columns.Any(column => sourceTable.Find(column)?.Nullable != true))
+                    throw new ArgumentException("SET NULL requires every source column to be nullable.");
+                for (var index = 0; index < columns.Count; index++)
+                {
+                    var sourceColumn = sourceTable.Find(columns[index]);
+                    var targetColumn = referencedTable.Find(referencedColumns[index]);
+                    if (sourceColumn is not null && targetColumn is not null && !sourceColumn.ColumnType.Equals(targetColumn.ColumnType, StringComparison.OrdinalIgnoreCase))
+                        warnings.Add($"Column type review: {snapshot.Table}.{sourceColumn.Name} is {sourceColumn.ColumnType}, while {referencedTable.Name}.{targetColumn.Name} is {targetColumn.ColumnType}.");
+                }
+                sql = $"ALTER TABLE {Quote(source)} ADD CONSTRAINT {Quote(name)} FOREIGN KEY ({QuoteList(columns)}) REFERENCES {Quote(referencedTable.Name)} ({QuoteList(referencedColumns)}) ON DELETE {deleteRule} ON UPDATE {updateRule};";
+                warnings.Add("Creating a foreign key validates existing rows, may scan or lock both tables, and may create a supporting source index.");
+                break;
+            }
+            case SqlTableDesignOperation.DropForeignKey:
+            {
+                var constraint = ExistingForeignKey(snapshot, request.ColumnName ?? request.NewName);
+                sql = $"ALTER TABLE {Quote(source)} DROP FOREIGN KEY {Quote(constraint.Name)};";
+                destructive = true;
+                warnings.Add($"Removing {constraint.Name} stops database enforcement of {snapshot.Table} → {constraint.ReferencedTable}; it does not remove an automatically created supporting index.");
+                break;
+            }
+            case SqlTableDesignOperation.AddCheckConstraint:
+            {
+                var name = ValidateNewConstraint(snapshot, request.NewName ?? request.ColumnName);
+                var expression = ValidateCheckExpression(request.CheckExpression ?? request.Definition);
+                sql = $"ALTER TABLE {Quote(source)} ADD CONSTRAINT {Quote(name)} CHECK ({expression});";
+                warnings.Add("Creating a CHECK constraint validates existing rows and can fail if any current row violates the expression.");
+                break;
+            }
+            case SqlTableDesignOperation.DropCheckConstraint:
+            {
+                var constraint = ExistingCheckConstraint(snapshot, request.ColumnName ?? request.NewName);
+                var keyword = snapshot.ServerVersion.Contains("MariaDB", StringComparison.OrdinalIgnoreCase) ? "CONSTRAINT" : "CHECK";
+                sql = $"ALTER TABLE {Quote(source)} DROP {keyword} {Quote(constraint.Name)};";
+                destructive = true;
+                warnings.Add($"Removing {constraint.Name} immediately stops database enforcement of its CHECK expression; existing row data is not changed.");
                 break;
             }
             default: throw new ArgumentOutOfRangeException(nameof(request));
@@ -274,6 +358,68 @@ public sealed class SqlTableDesignerService
         return value;
     }
 
+    public static string ValidateCheckExpression(string? value)
+    {
+        value = value?.Trim() ?? string.Empty;
+        if (value.Length is < 1 or > 8192) throw new ArgumentException("A CHECK expression must contain 1–8,192 characters.");
+        var depth = 0; char quote = '\0'; var escaped = false;
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (quote != '\0')
+            {
+                if (escaped) { escaped = false; continue; }
+                if (character == '\\' && quote != '`') { escaped = true; continue; }
+                if (character == quote)
+                {
+                    if (index + 1 < value.Length && value[index + 1] == quote) { index++; continue; }
+                    quote = '\0';
+                }
+                continue;
+            }
+            if (character is '\'' or '"' or '`') { quote = character; continue; }
+            if (character == '(') { depth++; continue; }
+            if (character == ')') { if (--depth < 0) throw new ArgumentException("The CHECK expression has an unmatched closing parenthesis."); continue; }
+            if (character == ';') throw new ArgumentException("A CHECK expression cannot contain a statement delimiter.");
+            if (character == '#' || character == '-' && index + 1 < value.Length && value[index + 1] == '-' || character == '/' && index + 1 < value.Length && value[index + 1] == '*')
+                throw new ArgumentException("SQL comments are not allowed inside a guided CHECK expression.");
+            if (char.IsControl(character) && character is not '\t' and not '\r' and not '\n') throw new ArgumentException("The CHECK expression contains a control character.");
+        }
+        if (quote != '\0' || depth != 0) throw new ArgumentException("The CHECK expression has an unterminated quote or unbalanced parentheses.");
+        return value;
+    }
+
+    public static IReadOnlyList<SqlForeignKeyDefinition> ParseForeignKeys(string createSql)
+    {
+        var result = new List<SqlForeignKeyDefinition>();
+        foreach (var definition in SplitCreateDefinitions(createSql))
+        {
+            var match = Regex.Match(definition, @"^\s*CONSTRAINT\s+`(?<name>(?:``|[^`])+)`\s+FOREIGN\s+KEY\s*\((?<columns>[^)]*)\)\s+REFERENCES\s+(?:(?:`(?:``|[^`])+`\.)?`(?<table>(?:``|[^`])+)`)\s*\((?<referenced>[^)]*)\)(?<tail>.*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+            if (!match.Success) continue;
+            var columns = ParseIdentifierList(match.Groups["columns"].Value); var referenced = ParseIdentifierList(match.Groups["referenced"].Value);
+            if (columns.Count == 0 || columns.Count != referenced.Count) continue;
+            var tail = match.Groups["tail"].Value;
+            result.Add(new(UnescapeIdentifier(match.Groups["name"].Value), columns, UnescapeIdentifier(match.Groups["table"].Value), referenced,
+                ParseRule(tail, "DELETE"), ParseRule(tail, "UPDATE")));
+        }
+        return result;
+    }
+
+    public static IReadOnlyList<SqlCheckConstraintDefinition> ParseCheckConstraints(string createSql)
+    {
+        var result = new List<SqlCheckConstraintDefinition>();
+        foreach (var definition in SplitCreateDefinitions(createSql))
+        {
+            var match = Regex.Match(definition, @"^\s*CONSTRAINT\s+`(?<name>(?:``|[^`])+)`\s+CHECK\s*", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!match.Success) continue;
+            var open = definition.IndexOf('(', match.Index + match.Length);
+            if (open < 0 || !TryReadParenthesized(definition, open, out var expression, out var close)) continue;
+            var tail = definition[(close + 1)..];
+            result.Add(new(UnescapeIdentifier(match.Groups["name"].Value), expression.Trim(), !tail.Contains("NOT ENFORCED", StringComparison.OrdinalIgnoreCase)));
+        }
+        return result;
+    }
+
     private static string Placement(SqlTableDesignSnapshot snapshot, SqlTableDesignRequest request, string editedColumn)
     {
         return request.Placement switch
@@ -292,6 +438,43 @@ public sealed class SqlTableDesignerService
         if (column is null || (excluded is not null && column.Name.Equals(excluded, StringComparison.OrdinalIgnoreCase)))
             throw new ArgumentException($"Select an existing column{(excluded is null ? string.Empty : " other than the edited column")}.");
         return column;
+    }
+
+    private static IReadOnlyList<string> ExistingColumns(SqlTableDesignSnapshot snapshot, IReadOnlyList<string>? names, string label)
+    {
+        names = NormalizeNames(names); if (names.Count == 0) throw new ArgumentException($"Select at least one {label} column.");
+        foreach (var name in names) if (!snapshot.Columns.Any(column => column.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) throw new ArgumentException($"{snapshot.Table} has no {label} column {name}.");
+        return names.Select(name => snapshot.Columns.First(column => column.Name.Equals(name, StringComparison.OrdinalIgnoreCase)).Name).ToArray();
+    }
+
+    private static IReadOnlyList<string> ExistingColumns(DatabaseTableCapability table, IReadOnlyList<string>? names, string label)
+    {
+        names = NormalizeNames(names); if (names.Count == 0) throw new ArgumentException($"Select at least one {label} column.");
+        foreach (var name in names) if (table.Find(name) is null) throw new ArgumentException($"{table.Name} has no {label} column {name}.");
+        return names.Select(name => table.Find(name)!.Name).ToArray();
+    }
+
+    private static IReadOnlyList<string> NormalizeNames(IReadOnlyList<string>? names)
+        => (names ?? []).Select(name => name?.Trim() ?? string.Empty).Where(name => name.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+    private static SqlForeignKeyDefinition ExistingForeignKey(SqlTableDesignSnapshot snapshot, string? name)
+        => (snapshot.ForeignKeys ?? []).FirstOrDefault(item => item.Name.Equals(name?.Trim(), StringComparison.OrdinalIgnoreCase)) ?? throw new ArgumentException("Select an existing foreign key.");
+
+    private static SqlCheckConstraintDefinition ExistingCheckConstraint(SqlTableDesignSnapshot snapshot, string? name)
+        => (snapshot.CheckConstraints ?? []).FirstOrDefault(item => item.Name.Equals(name?.Trim(), StringComparison.OrdinalIgnoreCase)) ?? throw new ArgumentException("Select an existing CHECK constraint.");
+
+    private static string ValidateNewConstraint(SqlTableDesignSnapshot snapshot, string? name)
+    {
+        name = ValidateIdentifier(name, "constraint");
+        if ((snapshot.ForeignKeys ?? []).Any(item => item.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) || (snapshot.CheckConstraints ?? []).Any(item => item.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException($"Constraint {name} already exists on {snapshot.Table}.");
+        return name;
+    }
+
+    private static string ValidateForeignKeyRule(string? rule)
+    {
+        rule = Regex.Replace(rule?.Trim().ToUpperInvariant() ?? "RESTRICT", @"\s+", " ");
+        return rule is "RESTRICT" or "CASCADE" or "SET NULL" or "NO ACTION" ? rule : throw new ArgumentException($"Unsupported foreign-key action {rule}. Choose RESTRICT, CASCADE, SET NULL, or NO ACTION.");
     }
 
     private static string ValidateNewColumn(SqlTableDesignSnapshot snapshot, string? name, string? except = null)
@@ -317,7 +500,76 @@ public sealed class SqlTableDesignerService
                      relation.FromTable.Equals(snapshot.Table, StringComparison.OrdinalIgnoreCase) && relation.FromColumn.Equals(column, StringComparison.OrdinalIgnoreCase) ||
                      relation.ToTable.Equals(snapshot.Table, StringComparison.OrdinalIgnoreCase) && relation.ToColumn.Equals(column, StringComparison.OrdinalIgnoreCase)))
             warnings.Add($"Declared relationship {relation.Name}: {relation.FromTable}.{relation.FromColumn} → {relation.ToTable}.{relation.ToColumn}.");
+        foreach (var constraint in (snapshot.ForeignKeys ?? []).Where(item => item.Columns.Contains(column, StringComparer.OrdinalIgnoreCase))) warnings.Add($"Foreign key {constraint.Name} includes {column}.");
+        foreach (var constraint in (snapshot.CheckConstraints ?? []).Where(item => Regex.IsMatch(item.Expression, $@"(?<![A-Za-z0-9_])`?{Regex.Escape(column)}`?(?![A-Za-z0-9_])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))) warnings.Add($"CHECK constraint {constraint.Name} may reference {column}: {constraint.Expression}.");
     }
+
+    private static IReadOnlyList<string> SplitCreateDefinitions(string createSql)
+    {
+        var open = createSql.IndexOf('('); if (open < 0) return [];
+        var result = new List<string>(); var builder = new StringBuilder(); var depth = 1; char quote = '\0'; var escaped = false;
+        for (var index = open + 1; index < createSql.Length; index++)
+        {
+            var character = createSql[index];
+            if (quote != '\0')
+            {
+                builder.Append(character);
+                if (escaped) { escaped = false; continue; }
+                if (character == '\\' && quote != '`') { escaped = true; continue; }
+                if (character == quote)
+                {
+                    if (index + 1 < createSql.Length && createSql[index + 1] == quote) { builder.Append(createSql[++index]); continue; }
+                    quote = '\0';
+                }
+                continue;
+            }
+            if (character is '\'' or '"' or '`') { quote = character; builder.Append(character); continue; }
+            if (character == '(') { depth++; builder.Append(character); continue; }
+            if (character == ')')
+            {
+                depth--; if (depth == 0) { if (builder.ToString().Trim() is { Length: > 0 } final) result.Add(final); break; }
+                builder.Append(character); continue;
+            }
+            if (character == ',' && depth == 1) { if (builder.ToString().Trim() is { Length: > 0 } item) result.Add(item); builder.Clear(); continue; }
+            builder.Append(character);
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<string> ParseIdentifierList(string value)
+        => Regex.Matches(value, @"`(?<name>(?:``|[^`])+)`", RegexOptions.CultureInvariant).Select(match => UnescapeIdentifier(match.Groups["name"].Value)).ToArray();
+
+    private static string ParseRule(string tail, string kind)
+    {
+        var match = Regex.Match(tail, $@"\bON\s+{kind}\s+(?<rule>RESTRICT|CASCADE|SET\s+NULL|NO\s+ACTION|SET\s+DEFAULT)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return match.Success ? Regex.Replace(match.Groups["rule"].Value.Trim().ToUpperInvariant(), @"\s+", " ") : "RESTRICT";
+    }
+
+    private static bool TryReadParenthesized(string value, int open, out string content, out int close)
+    {
+        var depth = 0; char quote = '\0'; var escaped = false;
+        for (var index = open; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (quote != '\0')
+            {
+                if (escaped) { escaped = false; continue; }
+                if (character == '\\' && quote != '`') { escaped = true; continue; }
+                if (character == quote) { if (index + 1 < value.Length && value[index + 1] == quote) { index++; continue; } quote = '\0'; }
+                continue;
+            }
+            if (character is '\'' or '"' or '`') { quote = character; continue; }
+            if (character == '(') { depth++; continue; }
+            if (character != ')') continue;
+            if (--depth != 0) continue;
+            content = value[(open + 1)..index]; close = index; return true;
+        }
+        content = string.Empty; close = -1; return false;
+    }
+
+    private static string UnescapeIdentifier(string value) => value.Replace("``", "`", StringComparison.Ordinal);
+
+    private static string QuoteList(IEnumerable<string> names) => string.Join(", ", names.Select(Quote));
 
     private static int FindIdentifierEnd(string line)
     {
