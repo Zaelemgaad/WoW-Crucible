@@ -75,6 +75,18 @@ try
     catch (KeyNotFoundException) { }
     try { _ = CacheServerPlanService.Create(table, new("fixture", "world", new Dictionary<string, DatabaseTableCapability>())); throw new InvalidOperationException("Cache server planning fell back to an obsolete table."); }
     catch (NotSupportedException) { }
+    var executionService = new CacheServerExecutionService(); var executionTarget = new CacheServerTarget("127.0.0.1", 3306, "acore", "acore_world", "fixture-current-core", CacheServerPlanService.SchemaFingerprint(cacheTargetTable));
+    var executionField = new CacheServerLiveField("Name", "name", "varChar", CacheServerExecutionService.Encode("Old Marshal"), CacheServerExecutionService.Encode("Marshal McBride"));
+    var executionRecord = new CacheServerLiveRecord(197, "creature_template", "entry", CacheServerRecordStatus.Ready, "fixture", [executionField], ["Scale"]);
+    var executionPlan = CacheServerExecutionService.CreatePlan(table, executionTarget, [executionRecord], ["review"]); var executionPath = Path.Combine(cacheFixtureRoot, "execution-plan.json");
+    await executionService.SavePlanAsync(executionPlan, executionPath); var reloadedExecution = await executionService.LoadPlanAsync(executionPath);
+    if (reloadedExecution.Ready != 1 || reloadedExecution.ContentSha256 != executionPlan.ContentSha256 || !CacheServerExecutionService.Equal(executionField.Before, CacheServerExecutionService.Encode("Old Marshal")) || CacheServerExecutionService.Equal(executionField.Before, executionField.After))
+        throw new InvalidOperationException("Cache execution plan hashing, persistence, status, or typed preimage comparison regressed.");
+    try { await executionService.SavePlanAsync(executionPlan with { SourceSha256 = "tampered" }, Path.Combine(cacheFixtureRoot, "tampered.json")); throw new InvalidOperationException("A tampered cache execution plan was accepted."); }
+    catch (InvalidDataException) { }
+    var executionReceipt = CacheServerExecutionService.CreateReceipt("PLAN-SHA", executionTarget, [executionRecord]);
+    if (executionReceipt.Format != CacheServerExecutionService.ReceiptFormat || executionReceipt.AppliedRecords.Single().Fields.Single().Before.Value != "Old Marshal")
+        throw new InvalidOperationException("Cache execution receipt lost its exact applied preimage.");
     var legacyPath = Path.Combine(cacheFixtureRoot, "itemcache-schema.xml");
     File.WriteAllText(legacyPath, """
 <wdbDef><wdbId name="itemcache"><wdbElement name="Entry" type="uinteger" key="yes"/><wdbElement type="size"/><wdbElement name="Name" type="varChar"/><wdbElement name="Stats" type="struct" maxcount="10"><structElement name="Type" type="integer"/><structElement name="Value" type="integer"/></wdbElement></wdbId></wdbDef>

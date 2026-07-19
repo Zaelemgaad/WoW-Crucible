@@ -43,6 +43,8 @@ The same-window **Offline knowledge & field reference** route exposes the identi
 ```text
 wowcrucible cache info <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--format=text|json]
 wowcrucible cache server-plan <file.wdb> <host> <port> <user> <database> [--definitions=WDB.xml] [--ids=17,17802] [--output=plan.json] [--sql=preview.sql] [--overwrite]
+wowcrucible cache server-apply <plan.json> <host> <port> <user> <database> <receipt.json> [--apply] [--overwrite]
+wowcrucible cache server-rollback <receipt.json> <host> <port> <user> <database> [--apply]
 wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]
 wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]
 ```
@@ -51,7 +53,7 @@ Cache reads are bounded and source files are always read-only. Crucible validate
 
 The desktop **Client cache tables** workspace is the same provider in the main window: open or drag a `.wdb`/`.adb`, search all decoded values, inspect field/payload offsets and raw remainders, and export without changing the cache. When the shared tool corpus is available, Crucible prefers its exact build-12340 `WDB.xml` for WDB and 4.3.x `adb-definitions.xml` for ADB; a different schema can be selected explicitly.
 
-`cache server-plan` and the desktop **Plan selected → server** action require a verified live SQL profile and a decoded WDB definition. They bind the source SHA-256 and the target table schema fingerprint into a portable review artifact, map only fields proven for modern `item_template`, `creature_template`, `gameobject_template`, or `quest_template`, and emit `UPDATE ... WHERE <primary key>` review SQL. Unmapped/client-only fields stay explicit. The command never applies SQL, never creates incomplete rows, and never reproduces the obsolete ArcEmu table targets from old WDB converters. The password comes from `WOW_CRUCIBLE_DB_PASSWORD` unless another environment variable is selected.
+`cache server-plan` and the desktop **Plan selected → server** action require a verified live SQL profile and a decoded WDB definition. They bind the source SHA-256, exact live preimages, target identity, and table-schema fingerprint into a portable review artifact; map only fields proven for modern `item_template`, `creature_template`, `gameobject_template`, or `quest_template`; and emit preimage-guarded update previews. Unmapped/client-only fields stay explicit, and a missing server identity blocks apply rather than creating an incomplete template. `server-apply` is dry-run unless `--apply` is explicit, locks and rechecks every selected row inside one transaction, and writes a content-hashed rollback receipt before commit. `server-rollback` is also dry-run unless `--apply` is present and refuses the complete rollback if any applied field changed afterward. The desktop exposes the same actions through inline confirmation in the cache workspace, storing plans and receipts beneath the running app folder. None of these paths reproduce obsolete ArcEmu converter targets. Passwords come from `WOW_CRUCIBLE_DB_PASSWORD` unless another environment variable is selected.
 
 ## Portable content projects and ID reservations
 

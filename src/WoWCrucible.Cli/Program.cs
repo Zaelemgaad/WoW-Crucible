@@ -56,6 +56,8 @@ static async Task<int> Cache(string[] args, CancellationToken cancellationToken)
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return CacheHelp();
     var operation = args[0].ToLowerInvariant(); var options = args[1..];
     if (operation == "server-plan") return await CacheServerPlan(options, cancellationToken);
+    if (operation == "server-apply") return await CacheServerApply(options, cancellationToken);
+    if (operation == "server-rollback") return await CacheServerRollback(options, cancellationToken);
     var operands = options.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray();
     var definitionPaths = options.Where(option => option.StartsWith("--definitions=", StringComparison.OrdinalIgnoreCase)).Select(option => option[(option.IndexOf('=') + 1)..]).ToArray();
     var definitionName = Option(options, "--definition="); var json = options.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
@@ -133,23 +135,52 @@ static async Task<int> CacheServerPlan(string[] args, CancellationToken cancella
     var table = WowCacheTableService.LoadWdb(cachePath, definition);
     var profile = new DatabaseConnectionProfile(operands[1], port, operands[3], password, operands[4], ssl);
     var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, cancellationToken);
-    var plan = CacheServerPlanService.Create(table, capabilities, ids); var overwrite = args.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
-    var output = Option(args, "--output="); if (output is not null) CacheServerPlanService.Save(plan, output, overwrite);
+    var service = new CacheServerExecutionService(); var plan = await service.BuildAsync(table, profile, capabilities, ids, cancellationToken); var overwrite = args.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
+    var output = Option(args, "--output="); if (output is not null) await service.SavePlanAsync(plan, output, overwrite, cancellationToken);
     var sqlPath = Option(args, "--sql="); if (sqlPath is not null)
     {
         sqlPath = Path.GetFullPath(sqlPath); if (File.Exists(sqlPath) && !overwrite) return Fail($"SQL preview already exists: {sqlPath}");
         Directory.CreateDirectory(Path.GetDirectoryName(sqlPath)!); var temporary = sqlPath + $".{Guid.NewGuid():N}.tmp";
-        try { File.WriteAllText(temporary, plan.PreviewSql(), new System.Text.UTF8Encoding(false)); File.Move(temporary, sqlPath, overwrite); }
+        try { await File.WriteAllTextAsync(temporary, plan.PreviewSql(), new System.Text.UTF8Encoding(false), cancellationToken); File.Move(temporary, sqlPath, overwrite); }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
     if (args.Contains("--format=json", StringComparer.OrdinalIgnoreCase)) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
     else
     {
         Console.WriteLine(plan.PreviewSql());
-        Console.Error.WriteLine($"Cache server review plan: {plan.Records.Count:N0} record(s), {plan.Records.Sum(record => record.Fields.Count):N0} proven field mapping(s), {plan.Records.Sum(record => record.UnmappedSourceFields.Count):N0} unmapped source field(s). No SQL was executed.");
+        Console.Error.WriteLine($"Live cache server plan: {plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already equal · {plan.Missing:N0} missing target · {plan.Blocked:N0} blocked · {plan.Records.Sum(record => record.Fields.Count):N0} changed field(s). No SQL was executed.");
         if (output is not null) Console.Error.WriteLine($"Plan: {Path.GetFullPath(output)}"); if (sqlPath is not null) Console.Error.WriteLine($"SQL preview: {sqlPath}");
     }
-    return plan.Records.Any(record => record.Warnings.Count > 0) ? 3 : 0;
+    return plan.Missing != 0 || plan.Blocked != 0 ? 3 : 0;
+}
+
+static async Task<int> CacheServerApply(string[] args, CancellationToken cancellationToken)
+{
+    var operands = args.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray(); if (operands.Length != 6) return Fail("cache server-apply requires <plan.json> <host> <port> <user> <database> <receipt.json>.");
+    var allowed = new[] { "--password-env=", "--ssl=", "--apply", "--overwrite" }; var unknown = args.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !allowed.Any(prefix => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))).ToArray(); if (unknown.Length > 0) return Fail($"Unknown cache server-apply option: {unknown[0]}");
+    var service = new CacheServerExecutionService(); var plan = await service.LoadPlanAsync(operands[0], cancellationToken); Console.WriteLine(plan.PreviewSql());
+    if (!args.Contains("--apply", StringComparer.OrdinalIgnoreCase)) { Console.Error.WriteLine($"Dry-run only: {plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already equal · {plan.Missing:N0} missing · {plan.Blocked:N0} blocked. Re-run with --apply after reviewing the exact preimages."); return plan.Missing != 0 || plan.Blocked != 0 ? 3 : 0; }
+    var profile = CacheProfile(operands[1], operands[2], operands[3], operands[4], args); var result = await service.ApplyAsync(operands[0], profile, operands[5], args.Contains("--overwrite", StringComparer.OrdinalIgnoreCase), cancellationToken);
+    Console.Error.WriteLine($"Applied {result.UpdatedFields:N0} cache-derived field(s) across {result.UpdatedRecords:N0} existing row(s); {result.AlreadyAppliedRecords:N0} row(s) were already equal. Receipt: {result.ReceiptPath}"); return 0;
+}
+
+static async Task<int> CacheServerRollback(string[] args, CancellationToken cancellationToken)
+{
+    var operands = args.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray(); if (operands.Length != 5) return Fail("cache server-rollback requires <receipt.json> <host> <port> <user> <database>.");
+    var allowed = new[] { "--password-env=", "--ssl=", "--apply" }; var unknown = args.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !allowed.Any(prefix => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))).ToArray(); if (unknown.Length > 0) return Fail($"Unknown cache server-rollback option: {unknown[0]}");
+    var service = new CacheServerExecutionService(); var receipt = await service.LoadReceiptAsync(operands[0], cancellationToken);
+    Console.WriteLine($"Receipt\t{Path.GetFullPath(operands[0])}\nTarget\t{receipt.Target.User}@{receipt.Target.Host}:{receipt.Target.Port}/{receipt.Target.Database}\nAppliedUtc\t{receipt.AppliedUtc:O}\nRecords\t{receipt.AppliedRecords.Count:N0}\nFields\t{receipt.AppliedRecords.Sum(record => record.Fields.Count):N0}");
+    if (!args.Contains("--apply", StringComparer.OrdinalIgnoreCase)) { Console.Error.WriteLine("Dry-run only. Rollback will require every applied field to still equal its receipt after-value. Re-run with --apply to restore exact preimages transactionally."); return 0; }
+    var profile = CacheProfile(operands[1], operands[2], operands[3], operands[4], args); var result = await service.RollbackAsync(operands[0], profile, cancellationToken);
+    Console.Error.WriteLine($"Restored {result.RestoredFields:N0} field(s) across {result.RestoredRecords:N0} row(s). Receipt marked rolled back: {result.ReceiptPath}"); return 0;
+}
+
+static DatabaseConnectionProfile CacheProfile(string host, string portText, string user, string database, string[] options)
+{
+    if (!uint.TryParse(portText, out var port) || port is 0 or > 65535) throw new FormatException("Database port must be from 1 to 65535.");
+    var environment = Option(options, "--password-env=") ?? "WOW_CRUCIBLE_DB_PASSWORD"; var password = Environment.GetEnvironmentVariable(environment) ?? throw new InvalidOperationException($"Set the {environment} environment variable for this process. Passwords are not accepted on the command line.");
+    var sslText = Option(options, "--ssl=") ?? "Preferred"; if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) throw new FormatException($"Unknown SSL mode: {sslText}");
+    return new(host, port, user, password, database, ssl);
 }
 
 static int CacheAdb(string operation, string[] options, string[] operands, string[] definitionPaths, string? definitionName, bool json, string cachePath)
@@ -2209,7 +2240,7 @@ static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <f
 static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]", code);
 static int CascHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible casc list <storage-folder> [filter] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc tree <storage-folder> [folder] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc extract <storage-folder> <destination> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible casc extract-folder <storage-folder> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n\nCASC operations are read-only and local-only. Crucible never mutates the storage and never downloads missing CDN payloads implicitly.", code);
 static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools commands [search words...] [--format=text|json]\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n\nThe command catalog is shared with the desktop Ctrl+K palette, so scripts and the UI use the same searchable vocabulary. A command search with no matches returns exit code 3.\n\nWithout an inventory path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage.", code);
-static int CacheHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible cache info <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--format=text|json]\n  wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]\n  wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]\n  wowcrucible cache server-plan <file.wdb> <host> <port> <user> <database> [--definitions=WDB.xml] [--ids=1,2] [--output=plan.json] [--sql=preview.sql] [--overwrite]\n\nWDB and Cataclysm WCH2 ADB reads are bounded and read-only. Version-aware headers and record framing are always inspected; when no matching schema is available, Crucible reports raw record metadata instead of guessing field types. Selected WDBX or Adb_Wdb_Parser schema XML is parsed as data by Crucible's own provider. Later WCH5/WCH7/WCH8 ADB is rejected rather than guessed because it requires matching DB2 layout metadata. Export is atomic and never overwrites without --overwrite. server-plan binds selected decoded WDB rows to the live modern item_template, creature_template, gameobject_template, or quest_template schema, produces UPDATE-existing review SQL only, and never executes it or falls back to obsolete ArcEmu table names. Database passwords come from WOW_CRUCIBLE_DB_PASSWORD by default.", code);
+static int CacheHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible cache info <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--format=text|json]\n  wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]\n  wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]\n  wowcrucible cache server-plan <file.wdb> <host> <port> <user> <database> [--definitions=WDB.xml] [--ids=1,2] [--output=plan.json] [--sql=preview.sql] [--overwrite]\n  wowcrucible cache server-apply <plan.json> <host> <port> <user> <database> <receipt.json> [--apply] [--overwrite]\n  wowcrucible cache server-rollback <receipt.json> <host> <port> <user> <database> [--apply]\n\nWDB and Cataclysm WCH2 ADB reads are bounded and read-only. Version-aware headers and record framing are always inspected; when no matching schema is available, Crucible reports raw record metadata instead of guessing field types. Selected WDBX or Adb_Wdb_Parser schema XML is parsed as data by Crucible's own provider. Later WCH5/WCH7/WCH8 ADB is rejected rather than guessed because it requires matching DB2 layout metadata. Export is atomic and never overwrites without --overwrite. server-plan binds selected decoded WDB rows to exact live modern-core preimages and never invents missing rows or obsolete ArcEmu targets. Apply and rollback are dry-run unless --apply is explicit; apply rechecks source/schema/preimages under row locks and writes a receipt before commit, while rollback refuses later-edited fields. Database passwords come from WOW_CRUCIBLE_DB_PASSWORD by default.", code);
 static int KnowledgeHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible knowledge search <terms...> [--root=wiki-folder] [--locale=en] [--limit=100] [--format=text|json]\n  wowcrucible knowledge show <relative-markdown-path> [--root=wiki-folder] [--section=N]\n\nSearch builds a local in-memory index over Markdown only; it never executes the wiki site generator, scripts, HTML, or remote links. Without --root, Crucible searches upward from the executable for the shared wiki folder. The desktop exposes the same provider under Offline knowledge & field reference, and F1 opens it using the selected DBC table and field as context.", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
 {

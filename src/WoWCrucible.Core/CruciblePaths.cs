@@ -18,6 +18,8 @@ public static class CruciblePaths
     public static string CacheDirectory => Path.Combine(DataRoot, "Cache");
     public static string MpqIndexCacheDirectory => Path.Combine(CacheDirectory, "MPQ");
     public static string SqlSchemaBackupDirectory => Path.Combine(DataRoot, "Backups", "SqlSchema");
+    public static string CacheServerPlanDirectory => Path.Combine(DataRoot, "Plans", "CacheServer");
+    public static string CacheServerReceiptDirectory => Path.Combine(DataRoot, "Receipts", "CacheServer");
     public static string LegacySettingsFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), ProductFolder, "settings.json");
 
     public static string SettingsFileForRead => File.Exists(SettingsFile) ? SettingsFile : LegacySettingsFile;
