@@ -39,6 +39,7 @@ public partial class MainWindow : Window
     private MapWorkspaceView? _mapWorkspaceView;
     private LayeredDbcWorkspaceView? _layeredDbcWorkspaceView;
     private DbdSchemaAuditView? _dbdSchemaAuditView;
+    private CacheTableWorkspaceView? _cacheTableWorkspaceView;
     private ProjectWorkspaceView? _projectWorkspaceView;
     private DbcExportWorkspaceView? _dbcExportWorkspaceView;
     private DbcImportWorkspaceView? _dbcImportWorkspaceView;
@@ -126,8 +127,10 @@ public partial class MainWindow : Window
                 : extension.Equals(".blp", StringComparison.OrdinalIgnoreCase)
                     ? OpenTextureWorkspaceAsync(path)
                     : extension.Equals(".adt", StringComparison.OrdinalIgnoreCase) || extension.Equals(".wdt", StringComparison.OrdinalIgnoreCase) || extension.Equals(".wdl", StringComparison.OrdinalIgnoreCase)
-                        ? OpenMapWorkspaceAsync(path)
-            : ShowErrorAsync("Unsupported file", "The desktop opens DBC, WDB2 DB2, M2, BLP, ADT, WDT, and WDL files directly.");
+                    ? OpenMapWorkspaceAsync(path)
+                    : extension.Equals(".wdb", StringComparison.OrdinalIgnoreCase)
+                        ? OpenCacheTableAsync(path)
+            : ShowErrorAsync("Unsupported file", "The desktop opens DBC, WDB2 DB2, WDB client caches, M2, BLP, ADT, WDT, and WDL files directly.");
     }
 
     private async void OpenDbcClick(object? sender, RoutedEventArgs e)
@@ -812,6 +815,21 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_dbdSchemaAuditView, "DBD Schemas & Audit");
     }
+    private void OpenCacheTablesClick(object? sender, RoutedEventArgs e) => OpenCacheTableWorkspace();
+    public void OpenCacheTableWorkspace()
+    {
+        if (_cacheTableWorkspaceView is null)
+        {
+            _cacheTableWorkspaceView = new CacheTableWorkspaceView();
+            _cacheTableWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_cacheTableWorkspaceView, "Client Cache Tables");
+    }
+    public async Task OpenCacheTableAsync(string path)
+    {
+        OpenCacheTableWorkspace();
+        await _cacheTableWorkspaceView!.LoadAsync(path);
+    }
     private void OpenProjectWorkspaceClick(object? sender, RoutedEventArgs e) => OpenProjectWorkspace();
     public void OpenProjectWorkspace()
     {
@@ -1117,6 +1135,7 @@ public partial class MainWindow : Window
             ["workspace.dbc"] = Done(CloseAllFeatureWorkspaces),
             ["workspace.dbc-layers"] = Done(() => OpenLayeredDbcsClick(null, new RoutedEventArgs())),
             ["workspace.dbd"] = Done(OpenDbdSchemaAudit),
+            ["workspace.cache"] = Done(OpenCacheTableWorkspace),
             ["workspace.projects"] = Done(OpenProjectWorkspace),
             ["workspace.items"] = Done(OpenItemWorkbench),
             ["workspace.creatures"] = Done(OpenCreatureWorkspace),

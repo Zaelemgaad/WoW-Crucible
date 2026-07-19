@@ -22,8 +22,58 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("pet talent ability evidence graph").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.assets" ||
     CrucibleCommandCatalog.Search("wiki field help").FirstOrDefault()?.Command.Id != "workspace.knowledge" ||
+    CrucibleCommandCatalog.Search("wdb cache parser").FirstOrDefault()?.Command.Id != "workspace.cache" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
+
+var cacheFixtureRoot = Path.Combine(Path.GetTempPath(), $"crucible-cache-{Guid.NewGuid():N}");
+Directory.CreateDirectory(cacheFixtureRoot);
+try
+{
+    var definitionPath = Path.Combine(cacheFixtureRoot, "WDB.xml");
+    File.WriteAllText(definitionPath, """
+<?xml version="1.0" encoding="UTF-8"?>
+<Definition>
+  <Table Name="CreatureCache" Build="12340">
+    <Field Name="Entry" Type="int" IsIndex="true" />
+    <Field Name="Name" Type="string" />
+    <Field Name="Flags" Type="uint" />
+    <Field Name="Scale" Type="float" />
+  </Table>
+</Definition>
+""");
+    var wdbPath = Path.Combine(cacheFixtureRoot, "creaturecache.wdb");
+    using (var stream = File.Create(wdbPath))
+    using (var writer = new BinaryWriter(stream))
+    {
+        writer.Write(System.Text.Encoding.ASCII.GetBytes("BOMW")); writer.Write(12340u); writer.Write(System.Text.Encoding.ASCII.GetBytes("SUne")); writer.Write(64u); writer.Write(1); writer.Write(17);
+        using var payload = new MemoryStream(); using (var fields = new BinaryWriter(payload, System.Text.Encoding.UTF8, leaveOpen: true)) { fields.Write(System.Text.Encoding.UTF8.GetBytes("Marshal McBride")); fields.Write((byte)0); fields.Write(7u); fields.Write(1.5f); }
+        writer.Write(197u); writer.Write((uint)payload.Length); writer.Write(payload.ToArray()); writer.Write(0u); writer.Write(0u);
+    }
+    var catalog = WowCacheDefinitionCatalog.Load(definitionPath); var definition = catalog.Resolve(wdbPath, WowCacheDefinitionKind.Wdb) ?? throw new InvalidOperationException("Synthetic WDBX cache definition did not resolve case-insensitively.");
+    var table = WowCacheTableService.LoadWdb(wdbPath, definition); var record = table.Records.Single();
+    if (table.Header.Magic != "WMOB" || table.Header.Locale != "enUS" || table.Header.Build != 12340 || table.Header.RecordVersion != 1 || table.Header.CacheVersion != 17 || !table.HasTerminator || table.TrailingBytes != 0 || record.Id != 197 || record.UnconsumedBytes != 0 || record.DecodeError is not null || record.Values.Single(value => value.Name == "Name").DisplayValue != "Marshal McBride" || record.Values.Single(value => value.Name == "Flags").DisplayValue != "7" || record.Values.Single(value => value.Name == "Scale").DisplayValue != "1.5")
+        throw new InvalidOperationException("Bounded WDB header, record framing, WDBX schema decoding, or four-character reversal regressed.");
+    var csv = Path.Combine(cacheFixtureRoot, "records.csv"); var jsonl = Path.Combine(cacheFixtureRoot, "records.jsonl"); WowCacheTableService.Export(table, csv, "csv", false); WowCacheTableService.Export(table, jsonl, "jsonl", false);
+    if (!File.ReadAllText(csv).Contains("Marshal McBride", StringComparison.Ordinal) || File.ReadLines(jsonl).Count() != 1 || !File.ReadAllText(jsonl).Contains("\"Id\":197", StringComparison.Ordinal)) throw new InvalidOperationException("Atomic WDB CSV/JSONL export regressed.");
+    var legacyPath = Path.Combine(cacheFixtureRoot, "itemcache-schema.xml");
+    File.WriteAllText(legacyPath, """
+<wdbDef><wdbId name="itemcache"><wdbElement name="Entry" type="uinteger" key="yes"/><wdbElement type="size"/><wdbElement name="Name" type="varChar"/><wdbElement name="Stats" type="struct" maxcount="10"><structElement name="Type" type="integer"/><structElement name="Value" type="integer"/></wdbElement></wdbId></wdbDef>
+""");
+    var itemPath = Path.Combine(cacheFixtureRoot, "itemcache.wdb");
+    using (var stream = File.Create(itemPath)) using (var writer = new BinaryWriter(stream))
+    {
+        writer.Write(System.Text.Encoding.ASCII.GetBytes("BDIW")); writer.Write(12340u); writer.Write(System.Text.Encoding.ASCII.GetBytes("SUne")); writer.Write(64u); writer.Write(5); writer.Write(17);
+        using var payload = new MemoryStream(); using (var fields = new BinaryWriter(payload, System.Text.Encoding.UTF8, leaveOpen: true)) { fields.Write(System.Text.Encoding.UTF8.GetBytes("Variant")); fields.Write((byte)0); fields.Write(2u); fields.Write(3); fields.Write(10); fields.Write(4); fields.Write(20); }
+        writer.Write(17802u); writer.Write((uint)payload.Length); writer.Write(payload.ToArray()); writer.Write(0u); writer.Write(0u);
+    }
+    var itemDefinition = WowCacheDefinitionCatalog.Load(legacyPath).Resolve(itemPath, WowCacheDefinitionKind.Wdb)!; var itemRecord = WowCacheTableService.LoadWdb(itemPath, itemDefinition).Records.Single();
+    if (itemRecord.DecodeError is not null || itemRecord.UnconsumedBytes != 0 || itemRecord.Values.Single(value => value.Name == "Stats.Count").DisplayValue != "2" || itemRecord.Values.Single(value => value.Name == "Value[2]").DisplayValue != "20") throw new InvalidOperationException("Legacy Adb_Wdb_Parser schema or bounded variable struct decoding regressed.");
+    var corrupt = File.ReadAllBytes(wdbPath); BitConverter.GetBytes(uint.MaxValue).CopyTo(corrupt, 28); var corruptPath = Path.Combine(cacheFixtureRoot, "corrupt.wdb"); File.WriteAllBytes(corruptPath, corrupt);
+    try { _ = WowCacheTableService.LoadWdb(corruptPath); throw new InvalidOperationException("WDB reader accepted an oversized record declaration."); }
+    catch (InvalidDataException) { }
+}
+finally { if (Directory.Exists(cacheFixtureRoot)) Directory.Delete(cacheFixtureRoot, recursive: true); }
 
 if (Environment.Is64BitProcess && CascArchiveService.NativeFindDataSize != 344)
     throw new InvalidOperationException($"CascLib x64 find-data ABI regressed: expected 344 bytes, found {CascArchiveService.NativeFindDataSize}.");

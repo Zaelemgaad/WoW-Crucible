@@ -38,6 +38,18 @@ The provider indexes local Markdown headings and text only. It does not run Jeky
 
 The same-window **Offline knowledge & field reference** route exposes the identical index with responsive result/article splitters and source reveal/copy. Press F1 while a DBC cell is selected to search its table and field automatically; SQL Studio's help action passes the selected table plus whichever complete-row field currently has focus. Use `--knowledge` for direct desktop launch, or find it through `Ctrl+K` with terms such as `wiki field help`.
 
+## Client WDB cache tables
+
+```text
+wowcrucible cache info <file.wdb> [--definitions=WDB.xml] [--definition=name] [--format=text|json]
+wowcrucible cache rows <file.wdb> [--definitions=WDB.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]
+wowcrucible cache export <file.wdb> <output.csv|jsonl> [--definitions=WDB.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]
+```
+
+Cache reads are bounded and source files are always read-only. Crucible validates the version-aware 16/20/24-byte header (24 bytes at build 12340), record ID/length framing, declared payload boundaries, and a two-million-record/64-MiB-per-record safety ceiling. It natively loads WDBX `Definition/Table/Field` XML and the older `wdbDef/wdbId/wdbElement` dialect, including variable ItemCache stat structures. A build-tagged schema must match the cache header. Without a matching schema it still lists exact record IDs, sizes, offsets, and raw bytes instead of predicting types. CSV and streaming JSON Lines exports are atomic and require `--overwrite` when the destination exists.
+
+The desktop **Client cache tables** workspace is the same provider in the main window: open or drag a `.wdb`, search all decoded values, inspect field/payload offsets and raw remainders, and export without changing the cache. When the shared tool corpus is available, Crucible prefers its exact build-12340 `WDB.xml`; a different schema can be selected explicitly.
+
 ## Portable content projects and ID reservations
 
 ```text

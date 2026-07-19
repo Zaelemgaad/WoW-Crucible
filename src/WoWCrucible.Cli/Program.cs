@@ -25,6 +25,7 @@ try
         "project" => Project(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "tools" => Tooling(commandArguments[1..]),
         "knowledge" => Knowledge(commandArguments[1..]),
+        "cache" => Cache(commandArguments[1..]),
         "mpq" => Mpq(commandArguments[1..]),
         "casc" => Casc(commandArguments[1..], cancellation.Token),
         "manifest" => Manifest(commandArguments[1..]),
@@ -49,6 +50,59 @@ finally
 
 devbug?.Complete(exitCode);
 return exitCode;
+
+static int Cache(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return CacheHelp();
+    var operation = args[0].ToLowerInvariant(); var options = args[1..];
+    var operands = options.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    var definitionPaths = options.Where(option => option.StartsWith("--definitions=", StringComparison.OrdinalIgnoreCase)).Select(option => option[(option.IndexOf('=') + 1)..]).ToArray();
+    var definitionName = Option(options, "--definition="); var json = options.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+    var allowed = new[] { "--definitions=", "--definition=", "--format=", "--limit=", "--search=", "--overwrite" };
+    var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !allowed.Any(prefix => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))).ToArray();
+    if (unknown.Length > 0) return Fail($"Unknown cache option: {unknown[0]}");
+    if (operands.Length < 1) return Fail($"cache {operation} requires a WDB file path.");
+    var cachePath = Path.GetFullPath(operands[0]);
+    WowCacheTableDefinition? definition = null;
+    if (definitionPaths.Length > 0)
+    {
+        var catalog = WowCacheDefinitionCatalog.Load(definitionPaths); definition = catalog.Resolve(cachePath, WowCacheDefinitionKind.Wdb, definitionName);
+        if (definition is null) return Fail($"No WDB definition named '{definitionName ?? Path.GetFileNameWithoutExtension(cachePath)}' exists in the selected definition file(s).");
+    }
+    else
+    {
+        var discoveredPaths = WowCacheDefinitionCatalog.Discover(cachePath);
+        var discovered = discoveredPaths.FirstOrDefault(path => Path.GetFileName(path).Equals("WDB.xml", StringComparison.OrdinalIgnoreCase))
+                         ?? discoveredPaths.FirstOrDefault(path => path.Contains("Adb_Wdb_Parser 1.0.0", StringComparison.OrdinalIgnoreCase) && !path.Contains("4.3", StringComparison.OrdinalIgnoreCase) && Path.GetFileName(path).Equals("wdb-definitions.xml", StringComparison.OrdinalIgnoreCase));
+        if (discovered is not null) definition = WowCacheDefinitionCatalog.Load(discovered).Resolve(cachePath, WowCacheDefinitionKind.Wdb, definitionName);
+    }
+    var table = WowCacheTableService.LoadWdb(cachePath, definition);
+    if (operation == "info")
+    {
+        if (operands.Length != 1) return Fail("cache info accepts exactly one WDB file path.");
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { table.SourcePath, table.Sha256, table.Header, Definition = table.Definition?.Name, DefinitionSource = table.Definition?.SourcePath, Records = table.Records.Count, Decoded = table.Records.Count(record => record.Decoded), DecodeFailures = table.Records.Count(record => record.DecodeError is not null), UnconsumedRecords = table.Records.Count(record => record.UnconsumedBytes != 0), table.HasTerminator, table.TrailingBytes }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else Console.WriteLine($"Path\t{table.SourcePath}\nSHA256\t{table.Sha256}\nMagic\t{table.Header.Magic} ({table.Header.RawMagic} on disk)\nBuild\t{table.Header.Build:N0}\nLocale\t{(table.Header.Locale.Length == 0 ? "-" : table.Header.Locale)}\nHeaderSize\t{table.Header.HeaderSize:N0}\nRecordVersion\t{table.Header.RecordVersion}\nCacheVersion\t{table.Header.CacheVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "-"}\nMaximumRecordSize\t{table.Header.MaximumRecordSize:N0}\nDefinition\t{table.Definition?.Name ?? "RAW (no matching schema)"}\nDefinitionSource\t{table.Definition?.SourcePath ?? "-"}\nRecords\t{table.Records.Count:N0}\nDecoded\t{table.Records.Count(record => record.Decoded):N0}\nDecodeFailures\t{table.Records.Count(record => record.DecodeError is not null):N0}\nUnconsumedRecords\t{table.Records.Count(record => record.UnconsumedBytes != 0):N0}\nTerminator\t{table.HasTerminator}\nTrailingBytes\t{table.TrailingBytes:N0}");
+        return table.Records.Any(record => record.DecodeError is not null) ? 3 : 0;
+    }
+    if (operation == "rows")
+    {
+        if (operands.Length != 1) return Fail("cache rows accepts exactly one WDB file path.");
+        var limitText = Option(options, "--limit="); var limit = limitText is null ? 100 : int.TryParse(limitText, out var parsed) && parsed is > 0 and <= 100_000 ? parsed : throw new FormatException("--limit must be 1–100000.");
+        var search = Option(options, "--search=")?.Trim();
+        var rows = table.Records.Where(record => string.IsNullOrEmpty(search) || record.Id.ToString().Contains(search, StringComparison.OrdinalIgnoreCase) || record.Values.Any(value => value.Name.Contains(search, StringComparison.OrdinalIgnoreCase) || value.DisplayValue.Contains(search, StringComparison.OrdinalIgnoreCase))).Take(limit).ToArray();
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(rows.Select(record => new { record.Id, record.PayloadSize, record.FileOffset, Values = record.Values.ToDictionary(value => value.Name, value => value.Value), record.UnconsumedBytes, record.DecodeError }), new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else foreach (var record in rows) Console.WriteLine($"{record.Id}\t{record.PayloadSize}\t{(record.DecodeError is null ? string.Join(" · ", record.Values.Take(8).Select(value => $"{value.Name}={value.DisplayValue}")) : "DECODE ERROR: " + record.DecodeError)}\tremaining={record.UnconsumedBytes}");
+        return rows.Length > 0 ? 0 : 3;
+    }
+    if (operation == "export")
+    {
+        if (operands.Length != 2) return Fail("cache export requires <file.wdb> <output.csv|jsonl>.");
+        var format = Option(options, "--format=") ?? Path.GetExtension(operands[1]).TrimStart('.'); if (format.Equals("json", StringComparison.OrdinalIgnoreCase)) return Fail("Cache row export supports CSV or streaming JSON Lines (jsonl), not a monolithic JSON array.");
+        WowCacheTableService.Export(table, operands[1], format, options.Contains("--overwrite", StringComparer.OrdinalIgnoreCase));
+        Console.Error.WriteLine($"Exported {table.Records.Count:N0} cache record(s) to {Path.GetFullPath(operands[1])}"); return 0;
+    }
+    return Fail($"Unknown cache operation: {operation}");
+}
 
 static int Tooling(string[] args)
 {
@@ -2070,6 +2124,7 @@ static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <f
 static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...>\n  wowcrucible mpq update <archive.mpq> <files/folders...>\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]", code);
 static int CascHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible casc list <storage-folder> [filter] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc tree <storage-folder> [folder] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc extract <storage-folder> <destination> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible casc extract-folder <storage-folder> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n\nCASC operations are read-only and local-only. Crucible never mutates the storage and never downloads missing CDN payloads implicitly.", code);
 static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools commands [search words...] [--format=text|json]\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n\nThe command catalog is shared with the desktop Ctrl+K palette, so scripts and the UI use the same searchable vocabulary. A command search with no matches returns exit code 3.\n\nWithout an inventory path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage.", code);
+static int CacheHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible cache info <file.wdb> [--definitions=wdb-definitions.xml] [--definition=name] [--format=text|json]\n  wowcrucible cache rows <file.wdb> [--definitions=wdb-definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]\n  wowcrucible cache export <file.wdb> <output.csv|jsonl> [--definitions=wdb-definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]\n\nWDB reads are bounded and read-only. Version-aware headers and record framing are always inspected; when no matching schema is available, Crucible reports raw record metadata instead of guessing field types. Selected WDBX or Adb_Wdb_Parser schema XML is parsed as data by Crucible's own provider. Export is atomic and never overwrites without --overwrite.", code);
 static int KnowledgeHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible knowledge search <terms...> [--root=wiki-folder] [--locale=en] [--limit=100] [--format=text|json]\n  wowcrucible knowledge show <relative-markdown-path> [--root=wiki-folder] [--section=N]\n\nSearch builds a local in-memory index over Markdown only; it never executes the wiki site generator, scripts, HTML, or remote links. Without --root, Crucible searches upward from the executable for the shared wiki folder. The desktop exposes the same provider under Offline knowledge & field reference, and F1 opens it using the selected DBC table and field as context.", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
 {
@@ -2097,7 +2152,7 @@ static int GroupHelp(string message, int code)
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  tools     search native commands and inventory the local legacy-tool corpus\n  knowledge search the local wiki for fields, flags, commands, and systems\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  casc      browse and extract later-client CASC storage read-only\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible casc list \"D:\\World of Warcraft\" \"**\\*.m2\" --local-only\n  wowcrucible tools commands \"cut items\"\n  wowcrucible knowledge search item_template flags\n  wowcrucible tools inventory --unassigned-only\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
+    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  tools     search native commands and inventory the local legacy-tool corpus\n  knowledge search the local wiki for fields, flags, commands, and systems\n  cache     inspect and export WDB client cache tables without mutating them\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  casc      browse and extract later-client CASC storage read-only\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible cache info creaturecache.wdb --definitions=wdb-definitions.xml\n  wowcrucible casc list \"D:\\World of Warcraft\" \"**\\*.m2\" --local-only\n  wowcrucible tools commands \"cut items\"\n  wowcrucible knowledge search item_template flags\n  wowcrucible tools inventory --unassigned-only\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 

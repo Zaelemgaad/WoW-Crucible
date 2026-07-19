@@ -47,6 +47,7 @@
                         <Button HorizontalContentAlignment="Left" Click="OpenEditorWorkspaceClick"><TextBlock Text="▦  DBC tables" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenLayeredDbcsClick"><TextBlock Text="◫  DBC layers &amp; promotion" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenDbdSchemasClick"><TextBlock Text="≣  DBD schemas &amp; audit" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenCacheTablesClick"><TextBlock Text="▥  Client cache tables" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenProjectWorkspaceClick"><TextBlock Text="◆  Projects &amp; shared IDs" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenItemWorkbenchClick"><TextBlock Text="◈  Items &amp; sets" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenCreatureWorkspaceClick"><TextBlock Text="♟  Creatures &amp; NPCs" TextWrapping="Wrap" /></Button>
