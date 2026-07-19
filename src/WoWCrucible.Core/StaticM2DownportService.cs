@@ -29,6 +29,13 @@ public sealed record StaticM2DownportPlan(
     IReadOnlyList<string> Blockers)
 {
     public bool Ready => Blockers.Count == 0;
+    public IReadOnlyList<short> OutputTextureCoordinateLookup { get; init; } = [];
+    public IReadOnlyList<ushort> OutputBlendOverrides { get; init; } = [];
+    public IReadOnlyList<ushort> OutputMaterialShaderIds { get; init; } = [];
+    public IReadOnlyList<ushort> OutputTransparencyLookup { get; init; } = [];
+    public IReadOnlyList<ushort> OutputTextureAnimationLookup { get; init; } = [];
+    public IReadOnlyList<string> OutputMaterialCombiners { get; init; } = [];
+    public bool UsesBlendOverrides => OutputBlendOverrides.Count > 0;
 }
 
 public sealed record M2ResolvedTexturePath(int TextureIndex, uint FileDataId, string ClientPath);
@@ -71,7 +78,7 @@ public sealed record StaticM2DownportScanResult(
 /// </summary>
 public static class StaticM2DownportService
 {
-    private const int PlanFormatVersion = 2;
+    private const int PlanFormatVersion = 3;
     private const int ReceiptFormatVersion = 1;
     private const uint ModernVersion = 274;
     private const uint WotlkVersion = 264;
@@ -103,6 +110,7 @@ public static class StaticM2DownportService
         var blockers = new List<string>(); var transformations = new List<string>(); var losses = new List<string>();
         var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0;
         byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false; var constantColorTracks = 0;
+        var materialTranslation = MaterialTranslation.None;
         FileDataIdListfileSnapshot? listfile = null; var resolvedTextures = new List<M2ResolvedTexturePath>();
 
         if (source.Length < 8 || FourCc(source, 0) != "MD21") blockers.Add("Input is not a modern MD21 chunk container.");
@@ -159,6 +167,7 @@ public static class StaticM2DownportService
 
                     var textureCount = Count(payload, 0x50, "texture", blockers);
                     ValidateArray(payload, 0x50, 0x54, 16, "textures", blockers);
+                    ValidateArray(payload, 0x58, 0x5C, 20, "transparency tracks", blockers);
                     var textureOffset = Offset(payload, 0x54, "textures", blockers);
                     ValidateArray(payload, 0x70, 0x74, 4, "render flags", blockers);
                     var renderCount = Count(payload, 0x70, "render flag", blockers); var renderOffset = Offset(payload, 0x74, "render flags", blockers);
@@ -214,7 +223,7 @@ public static class StaticM2DownportService
             if (skin is not null)
             {
                 triangles = skin.TriangleIndexCount / 3; submeshes = skin.SubmeshCount; materials = skin.MaterialCount; shadows = skin.ShadowCount;
-                if (payload is not null && vertices > 0) ValidateSkinReferences(skin, skinBytes, payload, vertices, blockers);
+                if (payload is not null && vertices > 0) materialTranslation = ValidateSkinReferences(skin, skinBytes, payload, vertices, blockers);
                 if (shadows > 0) losses.Add($"Wrath SKIN v2 has no shadow-batch array; {shadows:N0} modern shadow-batch record(s) will be omitted. Vertex, triangle, submesh, and material arrays remain byte-preserved.");
             }
         }
@@ -223,13 +232,31 @@ public static class StaticM2DownportService
         transformations.Add($"Translate M2 version {ModernVersion} to Wrath version {WotlkVersion} after structural validation.");
         transformations.Add("Clear verified modern FileDataID/LOD flags only after resolving every external texture ID and proving exactly one SKIN is present.");
         if ((flags & NewExporterLayoutFlag) != 0) transformations.Add("Clear the newer-exporter layout flag after validating every translated array by its absolute offset; physical record order is not copied into Wrath semantics.");
-        transformations.Add("Append the missing primary-UV texture-coordinate lookup used by the verified single-stage SKIN batches.");
+        transformations.Add(materialTranslation.Enabled
+            ? "Synthesize primary/environment texture-coordinate routes and a WotLK global blend-override table for verified packed shader-14 materials."
+            : "Append the missing primary-UV texture-coordinate lookup used by the verified single-stage SKIN batches.");
+        if (materialTranslation.Enabled)
+        {
+            transformations.Add("Relocate the model-name bytes that occupy the WotLK blend-override header fields, after proving no other live array overlaps those bytes.");
+            transformations.Add($"Rewrite {materialTranslation.MaterialShaderIds.Count:N0} SKIN shader index(es) against {materialTranslation.BlendOverrides.Count:N0} explicit blend-stage entries.");
+            transformations.Add("Pad material transparency/texture-animation lookup spans with explicit none values; dangling references to absent definitions are canonicalized to none.");
+        }
         if (constantColorTracks > 0) transformations.Add($"Preserve {constantColorTracks:N0} single-key constant color track(s) after validating both nested RGB and opacity series.");
         if (resolvedTextures.Count > 0) transformations.Add($"Embed {resolvedTextures.Count:N0} listfile-resolved texture path(s) into the Wrath M2 payload and remove the external FileDataID dependency.");
         transformations.Add("Repack modern SKIN v3 common arrays into the Wrath SKIN v2 header without changing their contents.");
         if (omittedEmptyTxac) transformations.Add("Omit the proven zero-filled TXAC extension chunk; it contains no texture-animation values to translate.");
+        var outputFlags = flags & ~SupportedModernFlagMask;
+        if (materialTranslation.Enabled) outputFlags |= 0x8;
         return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, listfile?.SourcePath, listfile?.SourceSha256, resolvedTextures, version, flags,
-            flags & ~SupportedModernFlagMask, vertices, triangles, submeshes, materials, shadows, constantColorTracks, transformations, losses, blockers.Distinct().ToArray());
+            outputFlags, vertices, triangles, submeshes, materials, shadows, constantColorTracks, transformations, losses, blockers.Distinct().ToArray())
+        {
+            OutputTextureCoordinateLookup = materialTranslation.TextureCoordinates,
+            OutputBlendOverrides = materialTranslation.BlendOverrides,
+            OutputMaterialShaderIds = materialTranslation.MaterialShaderIds,
+            OutputTransparencyLookup = materialTranslation.TransparencyLookup,
+            OutputTextureAnimationLookup = materialTranslation.TextureAnimationLookup,
+            OutputMaterialCombiners = materialTranslation.MaterialCombiners
+        };
     }
 
     public static StaticM2DownportScanResult Scan(IEnumerable<string> inputs, string? listfilePath = null, CancellationToken cancellationToken = default)
@@ -290,9 +317,15 @@ public static class StaticM2DownportService
             cancellationToken.ThrowIfCancellationRequested();
             var modelSource = File.ReadAllBytes(current.SourceModelPath); var chunks = ReadChunks(modelSource, []); var md21 = chunks.Single(chunk => chunk.Id == "MD21");
             var payload = modelSource.AsSpan(checked((int)md21.DataOffset), checked((int)md21.Size)).ToArray();
+            if (current.UsesBlendOverrides) RelocateBlendOverrideHeaderName(ref payload);
             BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), WotlkVersion); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x10, 4), current.OutputFlags);
-            var coordinateOffset = Align(payload.Length, 2); Array.Resize(ref payload, coordinateOffset + 2); BinaryPrimitives.WriteInt16LittleEndian(payload.AsSpan(coordinateOffset, 2), 0);
-            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x88, 4), 1); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x8C, 4), checked((uint)coordinateOffset));
+            AppendSignedLookup(ref payload, 0x88, 0x8C, current.OutputTextureCoordinateLookup);
+            if (current.UsesBlendOverrides)
+            {
+                AppendUnsignedLookup(ref payload, 0x90, 0x94, current.OutputTransparencyLookup);
+                AppendUnsignedLookup(ref payload, 0x98, 0x9C, current.OutputTextureAnimationLookup);
+                AppendUnsignedLookup(ref payload, 0x130, 0x134, current.OutputBlendOverrides);
+            }
             var textureOffset = checked((int)U32(payload, 0x54));
             foreach (var resolved in current.ResolvedTexturePaths)
             {
@@ -304,7 +337,7 @@ public static class StaticM2DownportService
                 throw new InvalidDataException("Converted M2 color tracks failed independent constant-track validation: " + string.Join("; ", outputColorBlockers));
 
             var skinSource = File.ReadAllBytes(current.SourceSkinPath); var skin = ParseModernSkin(skinSource, []) ?? throw new InvalidDataException("Companion SKIN changed into an invalid layout.");
-            var outputSkin = BuildWotlkSkin(skinSource, skin);
+            var outputSkin = BuildWotlkSkin(skinSource, skin, current.OutputMaterialShaderIds);
             var modelName = Path.GetFileName(current.SourceModelPath); var skinName = Path.GetFileNameWithoutExtension(current.SourceModelPath) + "00.skin";
             var stagedModel = Path.Combine(staging, modelName); var stagedSkin = Path.Combine(staging, skinName); File.WriteAllBytes(stagedModel, payload); File.WriteAllBytes(stagedSkin, outputSkin);
             cancellationToken.ThrowIfCancellationRequested();
@@ -314,6 +347,8 @@ public static class StaticM2DownportService
             var geometry = M2PreviewGeometryService.Load(stagedModel, stagedSkin, M2PreviewVisibilityMode.AllGeosets);
             if (geometry.Vertices.Count != current.VertexCount || geometry.TotalTriangleIndices / 3 != current.TriangleCount || geometry.Submeshes.Count != current.SubmeshCount || geometry.MaterialUnits.Count != current.MaterialCount)
                 throw new InvalidDataException("Converted M2/SKIN geometry or material counts differ from the immutable plan.");
+            if (current.OutputMaterialCombiners.Count > 0 && !geometry.MaterialUnits.Select(material => material.Combiner.Name).SequenceEqual(current.OutputMaterialCombiners))
+                throw new InvalidDataException($"Converted material combiners differ from the immutable plan. Expected {string.Join(", ", current.OutputMaterialCombiners)}; found {string.Join(", ", geometry.MaterialUnits.Select(material => material.Combiner.Name))}.");
             var slots = M2PreviewGeometryService.InspectTextureSlots(stagedModel);
             foreach (var resolved in current.ResolvedTexturePaths)
                 if (resolved.TextureIndex >= slots.Count || !string.Equals(PatchInputMapper.NormalizeArchivePath(slots[resolved.TextureIndex].EmbeddedPath ?? string.Empty), resolved.ClientPath, StringComparison.OrdinalIgnoreCase))
@@ -351,9 +386,9 @@ public static class StaticM2DownportService
         return result;
     }
 
-    private static void ValidateSkinReferences(ModernSkin skin, byte[] data, byte[] model, int vertexCount, List<string> blockers)
+    private static MaterialTranslation ValidateSkinReferences(ModernSkin skin, byte[] data, byte[] model, int vertexCount, List<string> blockers)
     {
-        if (!RangesValid(skin, data.Length)) return;
+        if (!RangesValid(skin, data.Length)) return MaterialTranslation.None;
         for (var index = 0; index < skin.LookupCount; index++) if (U16(data, skin.LookupOffset + index * 2) >= vertexCount) { blockers.Add($"SKIN vertex lookup {index:N0} exceeds the model's {vertexCount:N0} vertices."); break; }
         for (var index = 0; index < skin.TriangleIndexCount; index++) if (U16(data, skin.TriangleOffset + index * 2) >= skin.LookupCount) { blockers.Add($"SKIN triangle index {index:N0} exceeds the {skin.LookupCount:N0} vertex-lookup entries."); break; }
         for (var index = 0; index < skin.SubmeshCount; index++)
@@ -363,19 +398,96 @@ public static class StaticM2DownportService
             if (triangleStart + triangleCount > skin.TriangleIndexCount) blockers.Add($"SKIN submesh {index:N0} triangle range exceeds the triangle table.");
         }
         var renderCount = Count(model, 0x70, "render flag", blockers); var textureLookupCount = Count(model, 0x80, "texture lookup", blockers);
+        var materials = new List<MaterialSource>(skin.MaterialCount); var useBlendOverrides = false; var requiredTransparency = 0; var requiredAnimation = 0;
         for (var index = 0; index < skin.MaterialCount; index++)
         {
-            var offset = skin.MaterialOffset + index * 24; var shader = U16(data, offset + 2); var submesh = U16(data, offset + 4); var submesh2 = U16(data, offset + 6); var render = U16(data, offset + 10); var stages = U16(data, offset + 14); var textureCombo = U16(data, offset + 16); var coordinateCombo = U16(data, offset + 18);
-            if (shader is not 0 and not 16) blockers.Add($"SKIN material {index:N0} uses shader {shader}; the static profile accepts verified single-stage packed shaders 0 (Opaque) and 16 (Mod) only.");
+            var offset = skin.MaterialOffset + index * 24; var shader = U16(data, offset + 2); var submesh = U16(data, offset + 4); var submesh2 = U16(data, offset + 6); var render = U16(data, offset + 10); var stages = U16(data, offset + 14); var textureCombo = U16(data, offset + 16); var coordinateCombo = U16(data, offset + 18); var transparencyCombo = U16(data, offset + 20); var animationCombo = U16(data, offset + 22);
+            var supportedMaterial = shader switch
+            {
+                0 when stages == 1 => true,
+                16 when stages == 1 => true,
+                14 when stages == 2 => useBlendOverrides = true,
+                _ => false
+            };
+            if (!supportedMaterial) blockers.Add($"SKIN material {index:N0} uses shader {shader} with {stages:N0} stage(s); verified static translation supports shader 0/16 with one stage and packed shader 14 (Opaque_Mod2xNA) with two stages.");
             if (submesh >= skin.SubmeshCount || submesh2 >= skin.SubmeshCount) blockers.Add($"SKIN material {index:N0} references a missing submesh.");
             if (render >= renderCount) blockers.Add($"SKIN material {index:N0} references missing render flag {render:N0}.");
-            if (stages != 1) blockers.Add($"SKIN material {index:N0} declares {stages:N0} texture stages; the first static profile requires one.");
-            if (textureCombo >= textureLookupCount) blockers.Add($"SKIN material {index:N0} references missing texture lookup {textureCombo:N0}.");
-            if (coordinateCombo != 0) blockers.Add($"SKIN material {index:N0} references texture-coordinate lookup {coordinateCombo:N0}; only the synthesized primary-UV entry 0 is supported.");
+            if ((long)textureCombo + stages > textureLookupCount) blockers.Add($"SKIN material {index:N0} texture span {textureCombo:N0} + {stages:N0} exceeds the {textureLookupCount:N0}-entry texture lookup.");
+            if (coordinateCombo != 0) blockers.Add($"SKIN material {index:N0} references texture-coordinate lookup {coordinateCombo:N0}; verified static routes begin at synthesized entry 0.");
+            requiredTransparency = Math.Max(requiredTransparency, checked(transparencyCombo + stages)); requiredAnimation = Math.Max(requiredAnimation, checked(animationCombo + stages));
+            materials.Add(new(shader, stages, transparencyCombo, animationCombo));
+        }
+        if (!useBlendOverrides) return MaterialTranslation.None;
+
+        ValidateBlendOverrideHeaderSpace(model, blockers);
+        var transparencyDefinitions = Count(model, 0x58, "transparency track", blockers); var animationDefinitions = Count(model, 0x60, "texture transform", blockers);
+        var sourceTransparency = ReadUnsignedArray(model, 0x90, 0x94, "transparency lookup", blockers);
+        var sourceAnimation = ReadUnsignedArray(model, 0x98, 0x9C, "texture-animation lookup", blockers);
+        var outputTransparency = CanonicalizeOptionalLookup(sourceTransparency, requiredTransparency, transparencyDefinitions, "transparency", blockers);
+        var outputAnimation = CanonicalizeOptionalLookup(sourceAnimation, requiredAnimation, animationDefinitions, "texture-animation", blockers);
+        var blends = new List<ushort>(); var shaderIds = new List<ushort>(materials.Count); var combiners = new List<string>(materials.Count);
+        foreach (var material in materials)
+        {
+            if (blends.Count > ushort.MaxValue) { blockers.Add("Global blend-override shader indices exceed the 16-bit SKIN material field."); break; }
+            shaderIds.Add(checked((ushort)blends.Count));
+            switch (material.Shader)
+            {
+                case 0: blends.Add(0); combiners.Add("Opaque"); break;
+                case 16: blends.Add(1); combiners.Add("Mod"); break;
+                case 14: blends.Add(0); blends.Add(6); combiners.Add("Opaque_Mod2xNA"); break;
+            }
+        }
+        if (blends.Count > ushort.MaxValue + 1L) blockers.Add($"Global blend-override table requires {blends.Count:N0} entries; the verified maximum is {ushort.MaxValue + 1:N0}.");
+        return new(true, [0, -1], blends.ToArray(), shaderIds.ToArray(), outputTransparency, outputAnimation, combiners.ToArray());
+    }
+
+    private static ushort[] CanonicalizeOptionalLookup(IReadOnlyList<ushort> source, int requiredCount, int definitionCount, string label, List<string> blockers)
+    {
+        var result = Enumerable.Repeat(ushort.MaxValue, Math.Max(requiredCount, source.Count)).ToArray();
+        for (var index = 0; index < source.Count; index++)
+        {
+            var value = source[index];
+            if (value == ushort.MaxValue || definitionCount == 0) continue;
+            if (value >= definitionCount) blockers.Add($"M2 {label} lookup {index:N0} references definition {value:N0}, but only {definitionCount:N0} exist.");
+            else result[index] = value;
+        }
+        return result;
+    }
+
+    private static ushort[] ReadUnsignedArray(byte[] model, int countOffset, int offsetOffset, string label, List<string> blockers)
+    {
+        var count = Count(model, countOffset, label, blockers); var offset = Offset(model, offsetOffset, label, blockers);
+        if (!HasRange(model, offset, count, 2)) { blockers.Add($"{label} range ({count:N0} × 2 bytes at {offset:N0}) exceeds the containing model."); return []; }
+        var result = new ushort[count]; for (var index = 0; index < count; index++) result[index] = U16(model, offset + index * 2); return result;
+    }
+
+    private static void ValidateBlendOverrideHeaderSpace(byte[] model, List<string> blockers)
+    {
+        if (model.Length < 0x138) { blockers.Add("Global blend-override translation requires room for the complete 0x138-byte WotLK extended header."); return; }
+        var nameCount = checked((int)U32(model, 0x08)); var nameOffset = checked((int)U32(model, 0x0C));
+        if (nameCount > 0 && !HasRange(model, nameOffset, nameCount, 1)) blockers.Add("Model-name range is invalid and cannot be relocated away from the blend-override header.");
+        var liveArrays = new (int CountOffset, int OffsetOffset, int Stride, string Name)[]
+        {
+            (0x14,0x18,4,"global sequences"),(0x1C,0x20,64,"animations"),(0x24,0x28,2,"animation lookup"),(0x2C,0x30,88,"bones"),(0x34,0x38,2,"key-bone lookup"),(0x3C,0x40,48,"vertices"),
+            (0x48,0x4C,40,"colors"),(0x50,0x54,16,"textures"),(0x58,0x5C,20,"transparencies"),(0x60,0x64,20,"texture transforms"),(0x68,0x6C,2,"texture replacement lookup"),(0x70,0x74,4,"render flags"),
+            (0x78,0x7C,2,"bone lookup"),(0x80,0x84,2,"texture lookup"),(0x88,0x8C,2,"texture-coordinate lookup"),(0x90,0x94,2,"transparency lookup"),(0x98,0x9C,2,"texture-animation lookup"),
+            (0xA0,0xA4,2,"bounding triangles"),(0xA8,0xAC,12,"bounding vertices"),(0xB0,0xB4,12,"bounding normals"),(0xF0,0xF4,40,"attachments"),(0xF8,0xFC,2,"attachment lookup"),
+            (0x100,0x104,36,"events"),(0x108,0x10C,156,"lights"),(0x110,0x114,124,"cameras"),(0x118,0x11C,2,"camera lookup"),(0x120,0x124,176,"ribbons"),(0x128,0x12C,492,"particles")
+        };
+        foreach (var array in liveArrays)
+        {
+            var count = U32(model, array.CountOffset); if (count == 0) continue; var offset = U32(model, array.OffsetOffset);
+            var byteLength = (ulong)count * (uint)array.Stride;
+            if (RangesOverlap(offset, byteLength, 0x130, 8)) blockers.Add($"Live {array.Name} data overlaps WotLK blend-override header bytes 0x130–0x137; conversion will not move that structure implicitly.");
+        }
+        for (var offset = 0x130; offset < 0x138; offset++)
+        {
+            var ownedByName = nameCount > 0 && offset >= nameOffset && offset < (long)nameOffset + nameCount;
+            if (!ownedByName && model[offset] != 0) blockers.Add($"Byte 0x{offset:X} is nonzero outside the relocatable model-name range; blend-override translation refuses to overwrite it.");
         }
     }
 
-    private static byte[] BuildWotlkSkin(byte[] source, ModernSkin skin)
+    private static byte[] BuildWotlkSkin(byte[] source, ModernSkin skin, IReadOnlyList<ushort> materialShaderIds)
     {
         using var stream = new MemoryStream(); stream.Write(new byte[48]);
         var lookup = CopySection(stream, source, skin.LookupOffset, checked(skin.LookupCount * 2));
@@ -386,7 +498,39 @@ public static class StaticM2DownportService
         var result = stream.ToArray(); Encoding.ASCII.GetBytes("SKIN").CopyTo(result, 0);
         WritePair(result, 4, skin.LookupCount, lookup); WritePair(result, 12, skin.TriangleIndexCount, triangles); WritePair(result, 20, skin.PropertyCount, properties);
         WritePair(result, 28, skin.SubmeshCount, submeshes); WritePair(result, 36, skin.MaterialCount, materials); BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(44, 4), skin.BoneCountMax);
+        if (materialShaderIds.Count > 0)
+        {
+            if (materialShaderIds.Count != skin.MaterialCount) throw new InvalidDataException($"Material translation contains {materialShaderIds.Count:N0} shader IDs for {skin.MaterialCount:N0} SKIN materials.");
+            for (var index = 0; index < materialShaderIds.Count; index++) BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(materials + index * 24 + 2, 2), materialShaderIds[index]);
+        }
         return result;
+    }
+
+    private static void RelocateBlendOverrideHeaderName(ref byte[] payload)
+    {
+        if (payload.Length < 0x138) throw new InvalidDataException("Blend-override output requires a complete 0x138-byte WotLK extended header.");
+        var nameLength = checked((int)U32(payload, 0x08)); var nameOffset = checked((int)U32(payload, 0x0C));
+        if (nameLength > 0 && RangesOverlap(nameOffset, nameLength, 0x130, 8))
+        {
+            if (!HasRange(payload, nameOffset, nameLength, 1)) throw new InvalidDataException("Model-name bytes moved outside the source after planning.");
+            var copy = payload.AsSpan(nameOffset, nameLength).ToArray(); var relocated = payload.Length; Array.Resize(ref payload, checked(payload.Length + copy.Length)); copy.CopyTo(payload, relocated);
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x0C, 4), checked((uint)relocated));
+        }
+        payload.AsSpan(0x130, 8).Clear();
+    }
+
+    private static void AppendSignedLookup(ref byte[] payload, int countOffset, int dataOffset, IReadOnlyList<short> values)
+    {
+        var offset = Align(payload.Length, 2); Array.Resize(ref payload, checked(offset + values.Count * 2));
+        for (var index = 0; index < values.Count; index++) BinaryPrimitives.WriteInt16LittleEndian(payload.AsSpan(offset + index * 2, 2), values[index]);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(countOffset, 4), checked((uint)values.Count)); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(dataOffset, 4), values.Count == 0 ? 0u : checked((uint)offset));
+    }
+
+    private static void AppendUnsignedLookup(ref byte[] payload, int countOffset, int dataOffset, IReadOnlyList<ushort> values)
+    {
+        var offset = Align(payload.Length, 2); Array.Resize(ref payload, checked(offset + values.Count * 2));
+        for (var index = 0; index < values.Count; index++) BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(offset + index * 2, 2), values[index]);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(countOffset, 4), checked((uint)values.Count)); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(dataOffset, 4), values.Count == 0 ? 0u : checked((uint)offset));
     }
 
     private static int CopySection(MemoryStream destination, byte[] source, int offset, int length)
@@ -485,6 +629,8 @@ public static class StaticM2DownportService
     }
     private static bool RangesValid(ModernSkin skin, int length) => new[] { (skin.LookupOffset, skin.LookupCount, 2), (skin.TriangleOffset, skin.TriangleIndexCount, 2), (skin.PropertyOffset, skin.PropertyCount, 4), (skin.SubmeshOffset, skin.SubmeshCount, 48), (skin.MaterialOffset, skin.MaterialCount, 24), (skin.ShadowOffset, skin.ShadowCount, 12) }.All(value => value.Item1 >= 0 && (long)value.Item1 + (long)value.Item2 * value.Item3 <= length);
     private static bool HasRange(byte[] data, int offset, int count, int stride) => offset >= 0 && count >= 0 && (long)offset + (long)count * stride <= data.LongLength;
+    private static bool RangesOverlap(int firstOffset, int firstLength, int secondOffset, int secondLength) => (long)firstOffset < (long)secondOffset + secondLength && (long)secondOffset < (long)firstOffset + firstLength;
+    private static bool RangesOverlap(uint firstOffset, ulong firstLength, uint secondOffset, uint secondLength) => (ulong)firstOffset < (ulong)secondOffset + secondLength && (ulong)secondOffset < (ulong)firstOffset + firstLength;
     private static uint U32(byte[] data, int offset) => BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(offset, 4));
     private static ushort U16(byte[] data, int offset) => BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(offset, 2));
     private static string FourCc(byte[] data, int offset) => Encoding.ASCII.GetString(data, offset, 4);
@@ -492,6 +638,13 @@ public static class StaticM2DownportService
     private static int Align(int value, int alignment) => checked((value + alignment - 1) / alignment * alignment);
 
     private sealed record Chunk(string Id, long Offset, long DataOffset, uint Size);
+    private sealed record MaterialSource(ushort Shader, ushort Stages, ushort TransparencyCombo, ushort AnimationCombo);
+    private sealed record MaterialTranslation(bool Enabled, IReadOnlyList<short> TextureCoordinates, IReadOnlyList<ushort> BlendOverrides,
+        IReadOnlyList<ushort> MaterialShaderIds, IReadOnlyList<ushort> TransparencyLookup, IReadOnlyList<ushort> TextureAnimationLookup,
+        IReadOnlyList<string> MaterialCombiners)
+    {
+        public static MaterialTranslation None { get; } = new(false, [0], [], [], [], [], []);
+    }
     private sealed record ModernSkin(int LookupCount, int LookupOffset, int TriangleIndexCount, int TriangleOffset, int PropertyCount, int PropertyOffset,
         int SubmeshCount, int SubmeshOffset, int MaterialCount, int MaterialOffset, uint BoneCountMax, int ShadowCount, int ShadowOffset);
 }
