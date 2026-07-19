@@ -1253,6 +1253,9 @@ var creatureDisplayService = new CreatureDisplayPreviewService();
 var creatureDisplay = creatureDisplayService.ResolveDisplay(args[1], args[0], creatureDisplayId);
 if (creatureDisplay.DisplayId != creatureDisplayId || creatureDisplay.ModelId == 0 || !creatureDisplay.ModelClientPath.EndsWith(".m2", StringComparison.OrdinalIgnoreCase) || creatureDisplay.TextureVariations.Count != 3)
     throw new InvalidOperationException("Creature display preview did not resolve the build-12340 display/model/texture chain.");
+var modelCreatureDisplays = creatureDisplayService.ResolveModelDisplays(args[1], args[0], Path.ChangeExtension(creatureDisplay.ModelClientPath, ".mdx"));
+if (!modelCreatureDisplays.Any(display => display.DisplayId == creatureDisplayId) || modelCreatureDisplays.Any(display => !display.ModelClientPath.Equals(creatureDisplay.ModelClientPath, StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("Creature model-path appearance lookup did not normalize MDX/M2 paths and return every matching display record.");
 var creatureLibrary = Path.Combine(Path.GetTempPath(), $"crucible-creature-display-{Guid.NewGuid():N}");
 var creatureProvenance = "fixture-source";
 var creatureModelDirectory = Path.Combine(creatureLibrary, "Archives", "Content", Path.GetDirectoryName(creatureDisplay.ModelClientPath) ?? string.Empty, creatureProvenance);
@@ -1267,6 +1270,24 @@ foreach (var texture in creatureDisplay.TextureVariations.Where(path => !string.
 var sourcedCreatureDisplay = creatureDisplayService.ResolveDisplay(args[1], args[0], creatureDisplayId, creatureLibrary);
 if (sourcedCreatureDisplay.Sources.Count != 1 || !sourcedCreatureDisplay.Sources[0].Ready || sourcedCreatureDisplay.Sources[0].Provenance != creatureProvenance)
     throw new InvalidOperationException("Creature display preview did not preserve same-provenance M2/SKIN source resolution.");
+var sourcedModelDisplays = creatureDisplayService.ResolveModelDisplays(args[1], args[0], creatureDisplay.ModelClientPath, creatureLibrary);
+if (sourcedModelDisplays.Single(display => display.DisplayId == creatureDisplayId).Sources.Single().CreatureTextures.Count != creatureDisplay.TextureVariations.Count(path => !string.IsNullOrWhiteSpace(path)))
+    throw new InvalidOperationException("Creature model-path appearance lookup did not retain same-provenance texture variations.");
+var provenanceDbcRoot = Path.Combine(creatureLibrary, "Archives", "Content", "DBFilesClient", creatureProvenance);
+Directory.CreateDirectory(provenanceDbcRoot);
+File.Copy(Path.Combine(args[1], "CreatureDisplayInfo.dbc"), Path.Combine(provenanceDbcRoot, "creaturedisplayinfo.dbc"));
+File.Copy(Path.Combine(args[1], "CreatureModelData.dbc"), Path.Combine(provenanceDbcRoot, "creaturemodeldata.dbc"));
+var emptyTargetDbcRoot = Path.Combine(creatureLibrary, "empty-target-dbc"); Directory.CreateDirectory(emptyTargetDbcRoot);
+var provenanceLookup = creatureDisplayService.ResolveModelDisplaysForProvenance(emptyTargetDbcRoot, args[0], creatureDisplay.ModelClientPath, creatureLibrary, creatureProvenance);
+if (!provenanceLookup.FromProcessedProvenance || provenanceLookup.Displays.All(display => display.DisplayId != creatureDisplayId) || provenanceLookup.DbcRoot is null)
+    throw new InvalidOperationException("Creature appearance lookup did not fall back to the selected model's exact processed provenance DBC pair.");
+var invalidTargetDbcRoot = Path.Combine(creatureLibrary, "invalid-target-dbc"); Directory.CreateDirectory(invalidTargetDbcRoot);
+File.Copy(Path.Combine(args[1], "CreatureDisplayInfo.dbc"), Path.Combine(invalidTargetDbcRoot, "CreatureDisplayInfo.dbc"));
+var invalidTargetModelPath = Path.Combine(invalidTargetDbcRoot, "CreatureModelData.dbc"); File.Copy(Path.Combine(args[1], "CreatureModelData.dbc"), invalidTargetModelPath);
+var invalidTargetModel = File.ReadAllBytes(invalidTargetModelPath); BitConverter.GetBytes(27u).CopyTo(invalidTargetModel, 8); File.WriteAllBytes(invalidTargetModelPath, invalidTargetModel);
+var invalidTargetLookup = creatureDisplayService.ResolveModelDisplaysForProvenance(invalidTargetDbcRoot, args[0], creatureDisplay.ModelClientPath, creatureLibrary, creatureProvenance);
+if (!invalidTargetLookup.FromProcessedProvenance || invalidTargetLookup.Displays.All(display => display.DisplayId != creatureDisplayId) || !invalidTargetLookup.Finding.Contains("not compatible", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("An incompatible target creature DBC prevented safe exact-provenance source fallback or lost its diagnostic.");
 Directory.Delete(creatureLibrary, true);
 if (ItemCatalogEntry.ClassifyReviewGroup("Martin Fury", false, 6) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||
     ItemCatalogEntry.ClassifyReviewGroup("Thunderfury, Blessed Blade of the Windseeker?", false, 7, ["Ignored · quest 7561 is disabled (Deprecated quest)."] ) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||

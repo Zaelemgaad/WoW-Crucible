@@ -28,6 +28,11 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         IReadOnlyList<CharacterSection> Faces, CharacterSection? SelectedFace, IReadOnlyList<CharacterSection> FacialHair, CharacterSection? SelectedFacialHair,
         IReadOnlyList<CharacterSection> Hair, CharacterSection? SelectedHair, CharacterSection? Underwear,
         IReadOnlyList<AppearanceSourceChoice> Sources, AppearanceSourceChoice? SelectedSource, CharacterAppearanceGeosetPlan? Geosets, string Message, CharacterAppearancePreviewPlan? CorePlan = null);
+    private sealed record CreatureAppearanceChoice(CreatureDisplayPreview Display, CreatureModelSource Source)
+    {
+        public override string ToString() => $"Display {Display.DisplayId:N0} · {Source.CreatureTextures.Count:N0}/3 texture(s) · scale {Display.DisplayScale * Display.ModelScale:0.###}";
+    }
+    private sealed record CreatureAppearancePlan(bool Applicable, IReadOnlyList<CreatureAppearanceChoice> Choices, CreatureAppearanceChoice? Selected, string Message);
     private readonly TextBox _library = new() { Text = Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty };
     private readonly TextBox _directorySearch = new() { PlaceholderText = "Filter content paths…" };
     private readonly ListBox _directories = new();
@@ -56,6 +61,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly ComboBox _hairPicker = new() { PlaceholderText = "No hair layers" };
     private readonly ComboBox _appearanceSourcePicker = new() { PlaceholderText = "Choose the texture provenance…" };
     private readonly TextBlock _appearanceStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), FontSize = 11 };
+    private readonly ComboBox _creatureAppearancePicker = new() { PlaceholderText = "Choose a CreatureDisplayInfo skin…", HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly TextBlock _creatureAppearanceStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), FontSize = 11 };
+    private readonly StackPanel _creatureAppearancePanel = new() { Spacing = 6, IsVisible = false };
     private readonly TextBox _assetCategory = new() { Text = "Unsorted", PlaceholderText = "Category" };
     private readonly TextBox _assetNotes = new() { PlaceholderText = "Optional decision notes" };
     private readonly TextBlock _projectStatus = new() { Foreground = Brush.Parse("#99A5B8"), VerticalAlignment = VerticalAlignment.Center };
@@ -77,10 +85,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private IReadOnlyDictionary<string, AssetComparisonDuplicateGroup> _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, int> _manualGeosetVariants = [];
     private IReadOnlyList<AssetComparisonModel> _allModels = []; private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private Control? _imageDirectoryTools; private Control? _imageCardScroller; private Control? _imagePager; private Control? _modelOnlyCatalogNotice; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
-    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath; private string? _geosetInspectorModel; private int _resolvedModelTextureCount; private bool _appearanceComposed;
+    private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath; private string? _geosetInspectorModel; private int _resolvedModelTextureCount; private bool _appearanceComposed; private bool _creatureAppearanceBound;
     private IReadOnlyDictionary<int, RgbaTexture> _loadedModelTextures = new Dictionary<int, RgbaTexture>();
     private Task? _modelDiscoveryTask;
-    private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _suppressModelSkinSelection; private bool _suppressAppearanceSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
+    private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _suppressModelSkinSelection; private bool _suppressAppearanceSelection; private bool _suppressCreatureAppearanceSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
 
     public event EventHandler? BackRequested;
 
@@ -113,6 +121,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _facialHairPicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-facial-hair-change", LoadSelectedModelAsync); };
         _hairPicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-hair-change", LoadSelectedModelAsync); };
         _appearanceSourcePicker.SelectionChanged += async (_, _) => { if (!_suppressAppearanceSelection) await RunUiActionAsync("appearance-source-change", LoadSelectedModelAsync); };
+        _creatureAppearancePicker.SelectionChanged += async (_, _) => { if (!_suppressCreatureAppearanceSelection) await RunUiActionAsync("creature-appearance-change", LoadSelectedModelAsync); };
         _modelSearch.TextChanged += (_, _) => FilterModels(); _modelFilter.SelectionChanged += (_, _) => FilterModels();
         for (var index = 0; index < 2; index++) { var slot = index; _slotButtons[index].Click += (_, _) => SetActiveSlot(slot); }
         KeyDown += async (_, e) => await RunUiActionAsync("decision-shortcut", () => HandleDecisionKeyAsync(e)); SetActiveSlot(0); Content = BuildLayout();
@@ -229,6 +238,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var modelFilters = new Grid { ColumnDefinitions = new("2*,*,Auto,Auto"), ColumnSpacing = 8, Children = { _modelSearch, WithColumn(_modelFilter, 1), WithColumn(previousModel, 2), WithColumn(nextModel, 3) } };
         var appearanceHeader = new TextBlock { Text = "CHARSECTIONS BASE APPEARANCE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") };
         var appearancePickers = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Children = { _skinPicker, WithColumn(_appearanceSourcePicker, 1), WithCell(_facePicker, 1, 0), WithCell(_facialHairPicker, 1, 1), WithCell(_hairPicker, 2, 0) } };
+        _creatureAppearancePanel.Children.Add(new TextBlock { Text = "CREATURE DISPLAY APPEARANCE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") });
+        _creatureAppearancePanel.Children.Add(_creatureAppearancePicker); _creatureAppearancePanel.Children.Add(_creatureAppearanceStatus);
         var geosetInspector = new Expander
         {
             Header = "Exact geoset inspector",
@@ -261,7 +272,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var exportModel = new Button { Content = "Export visible/current-pose OBJ…" }; exportModel.Click += async (_, _) => await RunUiActionAsync("model-export", ExportModelAsync);
         var modelActions = new WrapPanel { Orientation = Orientation.Horizontal, Children = { exportModel } };
         var modelSkinRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 8, Children = { new TextBlock { Text = "SKIN VIEW / LOD", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, WithColumn(_modelSkinPicker, 1) } };
-        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, modelSkinRow, _geosetMode, modelActions, geosetInspector, attachmentInspector, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
+        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, modelSkinRow, _geosetMode, modelActions, geosetInspector, attachmentInspector, _creatureAppearancePanel, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
         var modelHeaderScroll = new ScrollViewer { Content = modelHeader, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
         var modelPane = new Grid { RowDefinitions = new("2*,Auto,3*"), IsVisible = false, Children = { modelHeaderScroll } };
         var modelSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }; Grid.SetRow(modelSplitter, 1); modelPane.Children.Add(modelSplitter);
@@ -357,7 +368,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         if (_index is null || _directories.SelectedItem is not AssetComparisonDirectory directory) { _directoryReady = false; _selectedDirectory = null; return; }
         var index = _index;
         var modelOnly = IsModelOnlyDirectory(directory);
-        _directoryReady = false; _modelsDiscovered = false; _folderEntries = []; _filteredEntries = []; _selectedTexture = null; _resolvedModelTexturePath = null; _resolvedModelTextureCount = 0; _appearanceComposed = false;
+        _directoryReady = false; _modelsDiscovered = false; _folderEntries = []; _filteredEntries = []; _selectedTexture = null; _resolvedModelTexturePath = null; _resolvedModelTextureCount = 0; _appearanceComposed = false; _creatureAppearanceBound = false; ApplyCreatureAppearancePlan(new(false, [], null, string.Empty));
         _modelDiscoveryTask = null;
         _allModels = []; _folderModels = []; _modelDiscoveryScope = directory.LogicalPath; _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>(); _modelDependencyGraph = null;
         _modelView.ClearGeometry(); _modelView.SetTexture(null); ApplyDirectoryPresentation(directory, modelOnly); FilterModels(requestModelLoad: false);
@@ -542,7 +553,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _modelCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token, directoryToken); var token = _modelCancellation.Token;
         if (_modelPicker.SelectedItem is not AssetComparisonModel model)
         {
-            _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>();
+            _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>(); _creatureAppearanceBound = false;
+            ApplyCreatureAppearancePlan(new(false, [], null, string.Empty));
             ClearGeosetInspector("Choose a compatible M2 to inspect its geosets.");
             ClearAttachmentInspector("Choose a compatible M2 to inspect its attachment points.");
             _modelStatus.Text = _allModels.Count == 0
@@ -551,13 +563,13 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             return;
         }
         var selectedSkinPath = _modelSkinPicker.SelectedItem as string ?? model.SkinPath;
-        if (model.Compatibility != AssetModelCompatibility.Ready || selectedSkinPath is null) { _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>(); _modelDependencyGraph = null; _modelView.ClearGeometry(); ClearGeosetInspector("This model has no compatible M2/SKIN geometry to inspect."); ClearAttachmentInspector("This model has no compatible attachment data to inspect."); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
+        if (model.Compatibility != AssetModelCompatibility.Ready || selectedSkinPath is null) { _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>(); _modelDependencyGraph = null; _creatureAppearanceBound = false; _modelView.ClearGeometry(); ApplyCreatureAppearancePlan(new(false, [], null, string.Empty)); ClearGeosetInspector("This model has no compatible M2/SKIN geometry to inspect."); ClearAttachmentInspector("This model has no compatible attachment data to inspect."); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
         _modelStatus.Text = $"Loading {model.FileName}…";
         var stopwatch = Stopwatch.StartNew();
         DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", selectedSkinPath));
         try
         {
-            var requestedSkin = _skinPicker.SelectedItem as CharacterBaseSkin; var requestedFace = _facePicker.SelectedItem as CharacterSection; var requestedFacialHair = _facialHairPicker.SelectedItem as CharacterSection; var requestedHair = _hairPicker.SelectedItem as CharacterSection; var requestedSource = (_appearanceSourcePicker.SelectedItem as AppearanceSourceChoice)?.FullPath;
+            var requestedSkin = _skinPicker.SelectedItem as CharacterBaseSkin; var requestedFace = _facePicker.SelectedItem as CharacterSection; var requestedFacialHair = _facialHairPicker.SelectedItem as CharacterSection; var requestedHair = _hairPicker.SelectedItem as CharacterSection; var requestedSource = (_appearanceSourcePicker.SelectedItem as AppearanceSourceChoice)?.FullPath; var requestedCreatureDisplayId = (_creatureAppearancePicker.SelectedItem as CreatureAppearanceChoice)?.Display.DisplayId;
             var appearance = await Task.Run(() => BuildAppearancePlan(model, requestedSkin, requestedFace, requestedFacialHair, requestedHair, requestedSource, token), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             var geosetMode = _geosetMode.SelectedIndex;
             var visibilityMode = geosetMode == 3 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
@@ -569,11 +581,13 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                 _ => null
             };
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, selectedSkinPath, visibilityMode, geosetSelection), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+            var creatureAppearance = await Task.Run(() => BuildCreatureAppearancePlan(model, geometry, requestedCreatureDisplayId, token), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             var selectedModel = model with { SkinPath = selectedSkinPath };
             var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, selectedModel), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             ApplyAppearancePlan(appearance);
+            ApplyCreatureAppearancePlan(creatureAppearance);
             var embeddedTextures = new Dictionary<int, RgbaTexture>(); string? embeddedTexturePath = null;
-            _appearanceComposed = false;
+            _appearanceComposed = false; _creatureAppearanceBound = false;
             if (_selectedTexture is null)
             {
                 var usedTextureDefinitions = geometry.UsedTextureDefinitionIndices.ToHashSet();
@@ -607,6 +621,24 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                     catch (Exception exception) when (exception is not OperationCanceledException) { DesktopCrashLogger.Log($"Character appearance composition failed: {appearance.SelectedSource.FullPath}", exception); }
                     if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
                 }
+                if (creatureAppearance.Selected is { } creatureChoice)
+                {
+                    var missing = new List<string>(); var decodedVariations = new Dictionary<int, RgbaTexture>();
+                    foreach (var slot in geometry.TextureSlots.Where(slot => usedTextureDefinitions.Contains(slot.Index) && slot.Type is >= 11 and <= 13))
+                    {
+                        var variation = checked((int)slot.Type - 11);
+                        if (!creatureChoice.Source.CreatureTextures.TryGetValue(variation, out var texturePath)) { missing.Add($"variation {variation + 1:N0}"); continue; }
+                        try
+                        {
+                            if (!decodedVariations.TryGetValue(variation, out var decoded)) { decoded = await Task.Run(() => BlpTextureService.Decode(texturePath), token); decodedVariations[variation] = decoded; }
+                            embeddedTextures[slot.Index] = decoded; embeddedTexturePath ??= texturePath;
+                        }
+                        catch (Exception exception) when (exception is not OperationCanceledException) { missing.Add(Path.GetFileName(texturePath)); DesktopCrashLogger.Log($"Creature appearance texture decode failed: {texturePath}", exception); }
+                        if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
+                    }
+                    _creatureAppearanceBound = decodedVariations.Count > 0;
+                    if (missing.Count > 0) _creatureAppearanceStatus.Text += $" Missing: {string.Join(", ", missing.Distinct(StringComparer.OrdinalIgnoreCase))}.";
+                }
             }
             _loadedModelGeometry = geometry; _loadedModelTextures = new Dictionary<int, RgbaTexture>(embeddedTextures); _modelDependencyGraph = graph; _resolvedModelTexturePath = embeddedTexturePath; _resolvedModelTextureCount = embeddedTextures.Count; RefreshGeosetInspector(geometry); RefreshAttachmentInspector(geometry); _modelView.SetGeometry(geometry); ApplyAttachmentOverlay();
             if (_selectedTexture is null) _modelView.SetDecodedTextures(embeddedTextures);
@@ -618,6 +650,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         {
             if (!IsCurrent(token, activity) || request != _modelRequest) return;
             _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>();
+            _creatureAppearanceBound = false; ApplyCreatureAppearancePlan(new(false, [], null, string.Empty));
             DesktopCrashLogger.Log($"Comparison model preview failed: {model.ModelPath}", exception); ClearGeosetInspector("Model loading failed before the geoset table could be inspected."); ClearAttachmentInspector("Model loading failed before attachment points could be inspected.");
             _modelStatus.Text = $"Could not load {model.FileName}: {exception.Message}";
         }
@@ -647,6 +680,38 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             _appearanceStatus.Text = plan.Message;
         }
         finally { _suppressAppearanceSelection = false; }
+    }
+
+    private CreatureAppearancePlan BuildCreatureAppearancePlan(AssetComparisonModel model, M2PreviewGeometry geometry, uint? requestedDisplayId, CancellationToken token)
+    {
+        var replaceable = geometry.TextureSlots.Where(slot => slot.Type is >= 11 and <= 13).Select(slot => slot.Type).Distinct().Order().ToArray();
+        if (replaceable.Length == 0) return new(false, [], null, string.Empty);
+        var dbcRoot = _session.Settings.CoreDbcPath;
+        if (_index is null) return new(true, [], null, "Creature texture slots are present, but the processed asset index is unavailable.");
+        var clientPath = PatchInputMapper.NormalizeArchivePath(Path.Combine(model.LogicalPath, model.FileName));
+        var schema = string.IsNullOrWhiteSpace(_session.Settings.SchemaDefinitionPath) ? null : _session.Settings.SchemaDefinitionPath;
+        var lookup = new CreatureDisplayPreviewService().ResolveModelDisplaysForProvenance(dbcRoot, schema, clientPath, _index.LibraryRoot, model.Provenance, token);
+        var displays = lookup.Displays;
+        var choices = displays.SelectMany(display => display.Sources.Where(source => source.Provenance.Equals(model.Provenance, StringComparison.OrdinalIgnoreCase) && Path.GetFullPath(source.ModelPath).Equals(Path.GetFullPath(model.ModelPath), StringComparison.OrdinalIgnoreCase)).Select(source => new CreatureAppearanceChoice(display, source)))
+            .OrderByDescending(choice => choice.Source.CreatureTextures.Count).ThenBy(choice => choice.Display.DisplayId).ToArray();
+        if (choices.Length == 0) return new(true, [], null, displays.Count == 0
+            ? lookup.Finding
+            : $"Found {displays.Count:N0} creature display record(s), but none has an exact '{model.Provenance}' model source. Cross-provenance texture borrowing is blocked.");
+        var selected = requestedDisplayId is { } requested ? choices.FirstOrDefault(choice => choice.Display.DisplayId == requested) : null;
+        selected ??= choices[0];
+        var missing = replaceable.Count(type => !selected.Source.CreatureTextures.ContainsKey(checked((int)type - 11)));
+        var message = $"{lookup.Finding} Resolved {choices.Length:N0} same-provenance appearance(s). Display {selected.Display.DisplayId:N0} supplies {selected.Source.CreatureTextures.Count:N0}/3 texture variation(s){(missing == 0 ? "." : $"; {missing:N0} used slot(s) remain missing.")}";
+        return new(true, choices, selected, message);
+    }
+
+    private void ApplyCreatureAppearancePlan(CreatureAppearancePlan plan)
+    {
+        _suppressCreatureAppearanceSelection = true;
+        try
+        {
+            _creatureAppearancePanel.IsVisible = plan.Applicable; _creatureAppearancePicker.ItemsSource = plan.Choices; _creatureAppearancePicker.SelectedItem = plan.Selected; _creatureAppearancePicker.IsEnabled = plan.Choices.Count > 0; _creatureAppearanceStatus.Text = plan.Message;
+        }
+        finally { _suppressCreatureAppearanceSelection = false; }
     }
 
     private static AppearancePlan EmptyAppearance(CharacterAppearanceIdentity? identity, string message) => new(identity, [], null, [], null, [], null, [], null, null, [], null, null, message);
@@ -777,6 +842,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             .SelectMany(group => group.Variants.Where(variant => variant.Visible).Select(variant => $"{group.Name}={variant.Variant}")));
         var previewNote = _appearanceComposed
             ? "Geometry, per-material textures, supported legacy and explicit two/three-stage WotLK combiners with primary/secondary UV and view-space sphere-map routing, the selected CharSections appearance, and animation playback are live. Unhandled explicit/other three-plus-stage shaders and remaining particle variants stay visibly labeled; the visible/current pose can be exported above."
+            : _creatureAppearanceBound
+            ? "Geometry, same-provenance CreatureDisplayInfo texture variations, supported legacy and explicit WotLK combiners including view-angle edge fade, and animation playback are live. Missing variations and unsupported shader families remain visibly labeled rather than borrowed from another mod layer."
             : _resolvedModelTexturePath is not null
             ? "Geometry, resolved per-material textures, supported legacy and explicit two/three-stage WotLK combiners with primary/secondary UV and view-space sphere-map routing, and animation playback are live. Unresolved replaceable slots, unhandled explicit/other three-plus-stage shaders, and remaining particle variants stay visibly labeled."
             : _modelOnlyDirectory

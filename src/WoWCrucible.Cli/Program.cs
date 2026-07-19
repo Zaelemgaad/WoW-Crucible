@@ -508,6 +508,29 @@ static int Asset(string[] args)
         foreach (var texture in result.TexturePaths) Console.WriteLine($"TEXTURE\t{texture}");
         return 0;
     }
+    if (args is ["creature-appearances", var creatureModelClientPath, .. var creatureAppearanceOptions])
+    {
+        var dbc = Option(creatureAppearanceOptions, "--dbc="); var schema = Option(creatureAppearanceOptions, "--schema="); var library = Option(creatureAppearanceOptions, "--library="); var sourceProvenance = Option(creatureAppearanceOptions, "--provenance="); var json = creatureAppearanceOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var unknown = creatureAppearanceOptions.Where(option => !option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--schema=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--library=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--provenance=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown creature-appearances option: {unknown[0]}");
+        if ((string.IsNullOrWhiteSpace(dbc) || !Directory.Exists(dbc)) && string.IsNullOrWhiteSpace(sourceProvenance)) return Fail("--dbc must point to the target/server DBC folder unless --library and --provenance select an extracted source layer.");
+        if (schema is not null && !File.Exists(schema)) return Fail($"Creature appearance schema does not exist: {Path.GetFullPath(schema)}");
+        if (library is not null && !Directory.Exists(library)) return Fail($"Processed asset library does not exist: {Path.GetFullPath(library)}");
+        if (!string.IsNullOrWhiteSpace(sourceProvenance) && string.IsNullOrWhiteSpace(library)) return Fail("--provenance requires --library so its exact source DBC and model layer can be resolved.");
+        var service = new CreatureDisplayPreviewService();
+        var lookup = string.IsNullOrWhiteSpace(sourceProvenance)
+            ? new CreatureModelDisplayLookup(service.ResolveModelDisplays(dbc!, schema, creatureModelClientPath, library, CancellationToken.None), Path.GetFullPath(dbc!), "Resolved from the configured target/server DBCs.")
+            : service.ResolveModelDisplaysForProvenance(dbc, schema, creatureModelClientPath, library, sourceProvenance, CancellationToken.None);
+        var displays = lookup.Displays;
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(displays, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else foreach (var display in displays)
+        {
+            Console.WriteLine($"DISPLAY\t{display.DisplayId}\tmodel={display.ModelId}\tpath={display.ModelClientPath}\tdisplay-scale={display.DisplayScale:0.###}\tmodel-scale={display.ModelScale:0.###}\ttextures={string.Join('|', display.TextureVariations)}");
+            foreach (var source in display.Sources) Console.WriteLine($"SOURCE\tdisplay={display.DisplayId}\t{(source.Ready ? "READY" : "MISSING_SKIN")}\t{source.Provenance}\t{source.ModelPath}\t{source.SkinPath}\ttextures={source.CreatureTextures.Count}");
+        }
+        var ready = displays.Sum(display => display.Sources.Count(source => source.Ready)); Console.Error.WriteLine($"{lookup.Finding} Resolved {displays.Count:N0} CreatureDisplayInfo appearance(s) and {ready:N0} ready same-provenance source(s) for {PatchInputMapper.NormalizeArchivePath(creatureModelClientPath)}.");
+        return displays.Count == 0 || library is not null && ready == 0 ? 3 : 0;
+    }
     if (args is ["preview-info", var previewModelPath, .. var previewOptions])
     {
         var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.Equals("--naked", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -639,6 +662,7 @@ Usage:
   wowcrucible asset texture-validate <file-or-folder> [--recursive]
   wowcrucible asset inspect <model.m2|building.wmo>...
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
+  wowcrucible asset creature-appearances <model-client-path> [--dbc=folder] [--schema=file] [--library=folder --provenance=name] [--format=text|json]
   wowcrucible asset preview-info <wrath-model.m2> [--skin=file.skin] [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
   wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--naked|--groups=group:variant,...|--all-geosets] [--overwrite]
   wowcrucible asset wmo-preview-info <root-or-group.wmo> [--groups] [--content-root=folder] [--format=text|json]

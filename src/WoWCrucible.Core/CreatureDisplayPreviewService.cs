@@ -26,12 +26,20 @@ public sealed record CreatureTemplatePreview(
     IReadOnlyList<CreatureDisplayPreview> Displays,
     string Finding);
 
+public sealed record CreatureModelDisplayLookup(
+    IReadOnlyList<CreatureDisplayPreview> Displays,
+    string? DbcRoot,
+    string Finding)
+{
+    public bool FromProcessedProvenance { get; init; }
+}
+
 public sealed class CreatureDisplayPreviewService
 {
     public async Task<IReadOnlyList<CreatureTemplatePreview>> ResolveCreaturesAsync(DatabaseConnectionProfile profile, string dbcRoot, string? schemaPath,
         string? processedAssetLibrary, IEnumerable<uint> creatureEntries, CancellationToken cancellationToken = default)
     {
-        dbcRoot = Path.GetFullPath(dbcRoot); var displayPath = Path.Combine(dbcRoot, "CreatureDisplayInfo.dbc"); var modelPath = Path.Combine(dbcRoot, "CreatureModelData.dbc");
+        dbcRoot = Path.GetFullPath(dbcRoot); var displayPath = RequiredTablePath(dbcRoot, "CreatureDisplayInfo.dbc"); var modelPath = RequiredTablePath(dbcRoot, "CreatureModelData.dbc");
         if (!File.Exists(displayPath) || !File.Exists(modelPath)) throw new FileNotFoundException("Creature preview requires CreatureDisplayInfo.dbc and CreatureModelData.dbc in the configured server DBC folder.");
         var displays = LoadTable(displayPath, "CreatureDisplayInfo", schemaPath, CreatureDisplayColumns(), 16); var models = LoadTable(modelPath, "CreatureModelData", schemaPath, CreatureModelColumns(), 28);
         var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, cancellationToken); var template = capabilities.FindTable("creature_template") ?? throw new NotSupportedException("The connected world database has no creature_template table."); var entryColumn = template.Find("entry") ?? template.Find("Entry") ?? throw new NotSupportedException("creature_template has no entry identity column.");
@@ -65,8 +73,64 @@ public sealed class CreatureDisplayPreviewService
 
     public CreatureDisplayPreview ResolveDisplay(string dbcRoot, string? schemaPath, uint displayId, string? processedAssetLibrary = null, CancellationToken cancellationToken = default)
     {
-        dbcRoot = Path.GetFullPath(dbcRoot); var display = LoadTable(Path.Combine(dbcRoot, "CreatureDisplayInfo.dbc"), "CreatureDisplayInfo", schemaPath, CreatureDisplayColumns(), 16); var model = LoadTable(Path.Combine(dbcRoot, "CreatureModelData.dbc"), "CreatureModelData", schemaPath, CreatureModelColumns(), 28);
+        dbcRoot = Path.GetFullPath(dbcRoot); var display = LoadTable(RequiredTablePath(dbcRoot, "CreatureDisplayInfo.dbc"), "CreatureDisplayInfo", schemaPath, CreatureDisplayColumns(), 16); var model = LoadTable(RequiredTablePath(dbcRoot, "CreatureModelData.dbc"), "CreatureModelData", schemaPath, CreatureModelColumns(), 28);
         return ResolveDisplay(display.File, display.Columns, model.File, model.Columns, displayId, processedAssetLibrary, 1f, cancellationToken);
+    }
+
+    public IReadOnlyList<CreatureDisplayPreview> ResolveModelDisplays(string dbcRoot, string? schemaPath, string modelClientPath, string? processedAssetLibrary = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(modelClientPath)) throw new ArgumentException("A creature model client path is required.", nameof(modelClientPath));
+        dbcRoot = Path.GetFullPath(dbcRoot); var display = LoadTable(RequiredTablePath(dbcRoot, "CreatureDisplayInfo.dbc"), "CreatureDisplayInfo", schemaPath, CreatureDisplayColumns(), 16); var model = LoadTable(RequiredTablePath(dbcRoot, "CreatureModelData.dbc"), "CreatureModelData", schemaPath, CreatureModelColumns(), 28);
+        var normalized = NormalizeModel(modelClientPath); var modelIds = new HashSet<uint>(); var modelIdColumn = Column(model.Columns, "ID"); var modelNameColumn = Column(model.Columns, "ModelName");
+        for (var row = 0; row < model.File.RowCount; row++)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); var raw = Convert.ToString(model.File.GetDisplayValue(row, modelNameColumn)) ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(raw) && NormalizeModel(raw).Equals(normalized, StringComparison.OrdinalIgnoreCase)) modelIds.Add(model.File.GetRaw(row, modelIdColumn));
+        }
+        if (modelIds.Count == 0) return [];
+        var displayIdColumn = Column(display.Columns, "ID"); var displayModelColumn = Column(display.Columns, "ModelID"); var ids = new List<uint>();
+        for (var row = 0; row < display.File.RowCount; row++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (modelIds.Contains(display.File.GetRaw(row, displayModelColumn))) ids.Add(display.File.GetRaw(row, displayIdColumn));
+        }
+        return ids.Where(id => id != 0).Distinct().Order().Select(id => ResolveDisplay(display.File, display.Columns, model.File, model.Columns, id, processedAssetLibrary, 1f, cancellationToken)).ToArray();
+    }
+
+    public CreatureModelDisplayLookup ResolveModelDisplaysForProvenance(string? targetDbcRoot, string? schemaPath, string modelClientPath,
+        string? processedAssetLibrary, string provenance, CancellationToken cancellationToken = default)
+    {
+        string? targetFinding = null;
+        if (!string.IsNullOrWhiteSpace(targetDbcRoot) && HasCreatureTables(targetDbcRoot))
+        {
+            try
+            {
+                var targetDisplays = ResolveModelDisplays(targetDbcRoot, schemaPath, modelClientPath, processedAssetLibrary, cancellationToken);
+                if (targetDisplays.Count > 0)
+                    return new(targetDisplays, Path.GetFullPath(targetDbcRoot), "Resolved from the configured target/server DBCs.");
+                targetFinding = $"The configured target/server DBCs contain no record for {NormalizeModel(modelClientPath)}.";
+            }
+            catch (InvalidDataException exception)
+            {
+                targetFinding = $"The configured target/server creature DBCs are not compatible with the WotLK build-12340 layout: {exception.Message}";
+            }
+        }
+        else targetFinding = "The configured target/server folder does not contain a complete CreatureDisplayInfo/CreatureModelData pair.";
+
+        var sourceRoot = ProcessedProvenanceDbcRoot(processedAssetLibrary, provenance);
+        if (sourceRoot is null)
+            return new([], null, $"{targetFinding} Processed provenance '{provenance}' also has no complete creature DBC pair.");
+        try
+        {
+            var sourceDisplays = ResolveModelDisplays(sourceRoot, schemaPath, modelClientPath, processedAssetLibrary, cancellationToken);
+            return sourceDisplays.Count == 0
+                ? new([], sourceRoot, $"{targetFinding} The exact processed provenance DBC pair also contains no matching record.") { FromProcessedProvenance = true }
+                : new(sourceDisplays, sourceRoot, $"{targetFinding} Resolved from processed provenance '{provenance}'.") { FromProcessedProvenance = true };
+        }
+        catch (InvalidDataException exception)
+        {
+            return new([], sourceRoot, $"Processed provenance '{provenance}' has creature DBCs, but they are not compatible with the WotLK build-12340 layout: {exception.Message}") { FromProcessedProvenance = true };
+        }
     }
 
     public static string? ResolveSameProvenanceAsset(string? libraryRoot, string provenance, string rawClientPath)
@@ -107,6 +171,25 @@ public sealed class CreatureDisplayPreviewService
         if (!File.Exists(path)) throw new FileNotFoundException($"Required {table}.dbc is unavailable.", path); var file = WdbcFile.Load(path); var resolution = !string.IsNullOrWhiteSpace(schemaPath) && File.Exists(schemaPath) ? DbcSchemaCatalog.Load(schemaPath).ResolveColumns(table, file.FieldCount) : new DbcSchemaResolution(builtIn, file.FieldCount == fields ? DbcSchemaMatchKind.NamedMatch : DbcSchemaMatchKind.FieldCountMismatchFallback, fields, DbcRecordKeyStrategy.Physical(0));
         if (resolution.MatchKind != DbcSchemaMatchKind.NamedMatch || resolution.Columns.Count != fields) throw new InvalidDataException($"{table}.dbc requires the WotLK build-12340 {fields}-field layout; file/schema resolved {file.FieldCount}/{resolution.Columns.Count}."); return (file, resolution.Columns);
     }
+
+    private static bool HasCreatureTables(string root) => FindTableFile(root, "CreatureDisplayInfo.dbc") is not null && FindTableFile(root, "CreatureModelData.dbc") is not null;
+
+    private static string? ProcessedProvenanceDbcRoot(string? libraryRoot, string provenance)
+    {
+        if (string.IsNullOrWhiteSpace(libraryRoot) || !Directory.Exists(libraryRoot) || string.IsNullOrWhiteSpace(provenance)) return null;
+        var root = Path.Combine(Path.GetFullPath(libraryRoot), "Archives", "Content", "DBFilesClient", provenance);
+        return HasCreatureTables(root) ? root : null;
+    }
+
+    private static string? FindTableFile(string root, string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) return null;
+        return Directory.EnumerateFiles(root, "*", SearchOption.TopDirectoryOnly)
+            .FirstOrDefault(path => Path.GetFileName(path).Equals(fileName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string RequiredTablePath(string root, string fileName)
+        => FindTableFile(root, fileName) ?? throw new FileNotFoundException($"Required {fileName} is unavailable in the configured DBC folder.", Path.Combine(root, fileName));
 
     private static IReadOnlyList<DbcColumn> CreatureDisplayColumns() => Columns(["ID", "ModelID", "SoundID", "ExtendedDisplayInfoID", "CreatureModelScale", "CreatureModelAlpha", "TextureVariation[0]", "TextureVariation[1]", "TextureVariation[2]", "PortraitTextureName", "BloodLevel", "BloodID", "NPCSoundID", "ParticleColorID", "CreatureGeosetData", "ObjectEffectPackageID"], [4, 6, 7, 8, 9]);
     private static IReadOnlyList<DbcColumn> CreatureModelColumns() => Columns(["ID", "Flags", "ModelName", "SizeClass", "ModelScale", "BloodID", "FootprintTextureID", "FootprintTextureLength", "FootprintTextureWidth", "FootprintParticleScale", "FoleyMaterialID", "FootstepShakeSize", "DeathThudShakeSize", "SoundID", "CollisionWidth", "CollisionHeight", "MountHeight", "GeoBoxMinX", "GeoBoxMinY", "GeoBoxMinZ", "GeoBoxMaxX", "GeoBoxMaxY", "GeoBoxMaxZ", "WorldEffectScale", "AttachedEffectScale", "MissileCollisionRadius", "MissileCollisionPush", "MissileCollisionRaise"], [2, 4, 7, 8, 9, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
