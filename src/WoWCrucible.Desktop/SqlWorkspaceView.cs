@@ -136,6 +136,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _tableFilter.TextChanged += (_, _) => PopulateTables(); _tables.SelectionChanged += async (_, _) => await SelectTableAsync();
         _schemas.SelectionChanged += async (_, _) => { if (!_suppressSchemaSelection && _schemas.SelectedItem is string database) await SwitchSchemaAsync(database); };
         _rows.SelectionChanged += (_, _) => SelectRow();
+        _rows.DoubleTapped += (_, _) => OpenSelectedDecodedEditor();
         _rowDisplay.SelectionChanged += (_, _) => ApplyRowTemplate();
         _queryDisplay.SelectionChanged += (_, _) => ApplyQueryResultTemplate();
         _queryResultSets.SelectionChanged += (_, _) => SelectQueryResultSet();
@@ -147,6 +148,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _favoriteSearch.TextChanged += (_, _) => ApplyFavoriteFilter();
         _favoriteState.SelectionChanged += (_, _) => ApplyFavoriteFilter();
         _favorites.SelectionChanged += (_, _) => SelectFavorite();
+        _favorites.DoubleTapped += async (_, _) => await OpenFavoriteAsync(CanOpenSelectedFavoriteInGuidedEditor());
         RefreshConnectionStatus(); RefreshFavorites(); RefreshQueryHistory(); PopulateTables(); PopulateRelations();
     }
 
@@ -405,7 +407,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         heading.Children.Add(new TextBlock { Text = $"Complete row editor · {_page.Table} · {_selectedRow.Display}", FontSize = 16, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap });
         var actions = new WrapPanel(); var favorite = new Button { Content = "★ Favorite" }; favorite.Click += (_, _) => FavoriteSelected(); actions.Children.Add(favorite);
         var clone = new Button { Content = "Clone complete row as new identity" }; clone.Click += (_, _) => BeginCreateRow(_selectedRow); actions.Children.Add(clone);
-        if (CanOpenGuidedEditor(_page.Table)) { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => GuidedEditRequested?.Invoke(this, new(_page.Table, _selectedRow.Values)); actions.Children.Add(guided); }
+        if (CanOpenGuidedEditor(_page.Table)) { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => OpenSelectedDecodedEditor(); actions.Children.Add(guided); }
         var delete = new Button { Content = "Delete exactly this row" }; delete.Click += (_, _) => PrepareDelete(); actions.Children.Add(delete); heading.Children.Add(actions);
         var browseDbc = new Button { Content = "DBC/DB2…" }; browseDbc.Click += async (_, _) => await PickFavoritePathAsync(_favoriteDbc, "Select a related client table", "DBC or DB2", "*.dbc", "*.db2");
         var browseMpq = new Button { Content = "MPQ…" }; browseMpq.Click += async (_, _) => await PickFavoritePathAsync(_favoriteMpq, "Select a related MPQ patch", "MPQ", "*.mpq");
@@ -1017,6 +1019,15 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     }
 
     private SqlRowFavorite? SelectedFavorite() => (_favorites.SelectedItem as FavoriteDisplayRow)?.Favorite;
+
+    private bool CanOpenSelectedFavoriteInGuidedEditor() => SelectedFavorite() is { Table: { } table } && CanOpenGuidedEditor(table);
+
+    private void OpenSelectedDecodedEditor()
+    {
+        if (_selectedRow is null || _page is null) { _status.Text = "Select a row first."; return; }
+        if (!CanOpenGuidedEditor(_page.Table)) { _status.Text = $"{_page.Table} has no decoded editor yet; its complete live-schema row remains editable here."; return; }
+        GuidedEditRequested?.Invoke(this, new(_page.Table, _selectedRow.Values));
+    }
 
     private void RefreshFavorites(string? preferredIdentity = null)
     {

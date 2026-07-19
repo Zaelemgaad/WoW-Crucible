@@ -3,11 +3,39 @@ using MySqlConnector;
 
 namespace WoWCrucible.Core;
 
+public enum ItemAcquisitionReviewGroup
+{
+    KnownAcquisition,
+    OtherManualReview,
+    DeprecatedTestOrDeveloper,
+    NpcOrMonsterEquipment
+}
+
 public sealed record ItemCatalogEntry(uint Entry, string Name, int Quality, int ItemLevel, uint ItemSetId,
     IReadOnlyList<string> AcquisitionSources, IReadOnlyList<string>? ReviewNotes = null)
 {
     public bool HasKnownAcquisitionPath => AcquisitionSources.Count > 0;
     public IReadOnlyList<string> NoPathReview => ReviewNotes ?? [];
+    public ItemAcquisitionReviewGroup ReviewGroup => ClassifyReviewGroup(Name, HasKnownAcquisitionPath);
+
+    public static ItemAcquisitionReviewGroup ClassifyReviewGroup(string? name, bool hasKnownAcquisitionPath)
+    {
+        if (hasKnownAcquisitionPath) return ItemAcquisitionReviewGroup.KnownAcquisition;
+        var value = name?.Trim() ?? string.Empty;
+        if (value.StartsWith("NPC Equip", StringComparison.OrdinalIgnoreCase) || value.StartsWith("Monster -", StringComparison.OrdinalIgnoreCase))
+            return ItemAcquisitionReviewGroup.NpcOrMonsterEquipment;
+        if (value.StartsWith("OLD", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("deprecated", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("test", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("[PH]", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("(old)", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("unused", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("obsolete", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("gamemaster", StringComparison.OrdinalIgnoreCase) ||
+            value.StartsWith("Admin ", StringComparison.OrdinalIgnoreCase))
+            return ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper;
+        return ItemAcquisitionReviewGroup.OtherManualReview;
+    }
 }
 public sealed record ItemAcquisitionAudit(string Database, DateTimeOffset AuditedUtc, IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources,
     int TotalItems, int ObtainableItems, IReadOnlyList<ItemCatalogEntry> NoKnownAcquisitionPath,

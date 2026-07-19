@@ -29,6 +29,12 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         SelectedIndex = 0,
         HorizontalAlignment = HorizontalAlignment.Stretch
     };
+    private readonly ComboBox _reviewGroup = new()
+    {
+        ItemsSource = new[] { "All no-path review groups", "Other / manual review", "Deprecated / test / developer", "NPC / monster equipment" },
+        SelectedIndex = 0,
+        HorizontalAlignment = HorizontalAlignment.Stretch
+    };
     private readonly TextBox _inspectId = new() { PlaceholderText = "Inspect exact item ID…" };
     private readonly TextBox _acquisitionDbc = new() { PlaceholderText = "Optional server DBC folder for CharStartOutfit.dbc coverage…" };
     private readonly TextBox _favoriteMpq = new() { PlaceholderText = "Optional related MPQ path saved with favorites…" };
@@ -67,7 +73,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             var identity = new StackPanel { Spacing = 2, Children = { new TextBlock { Text = item.Name, TextWrapping = TextWrapping.Wrap } } };
             var explanation = item.HasKnownAcquisitionPath
                 ? $"Known path · {string.Join("; ", item.AcquisitionSources.Take(2))}"
-                : item.NoPathReview.FirstOrDefault() ?? "No accepted acquisition evidence found.";
+                : $"{ReviewGroupName(item.ReviewGroup)} · {item.NoPathReview.FirstOrDefault() ?? "No accepted acquisition evidence found."}";
             identity.Children.Add(new TextBlock { Text = explanation, TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = new SolidColorBrush(Color.Parse(item.HasKnownAcquisitionPath ? "#79B58A" : "#D4A45F")) });
             Grid.SetColumn(identity, 1); panel.Children.Add(identity);
             AddCell(panel, QualityName(item.Quality), 2); AddCell(panel, $"iLvl {item.ItemLevel}", 3); AddCell(panel, item.ItemSetId == 0 ? "No set" : $"Set {item.ItemSetId}", 4); return panel;
@@ -86,7 +92,13 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             if (TryParseItemId(_search.Text, out var exactId)) { _inspectId.Text = exactId.ToString(); await InspectExactAsync(); }
             else if (_audit is null) await AuditAsync();
         };
-        _classification.SelectionChanged += (_, _) => ApplyAuditFilter();
+        _classification.SelectionChanged += (_, _) =>
+        {
+            _reviewGroup.IsEnabled = _classification.SelectedIndex == 0;
+            if (_classification.SelectedIndex != 0) _reviewGroup.SelectedIndex = 0;
+            ApplyAuditFilter();
+        };
+        _reviewGroup.SelectionChanged += (_, _) => ApplyAuditFilter();
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
@@ -138,12 +150,14 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var favorite = new Button { Content = "★ Favorite selected row" }; favorite.Click += async (_, _) => await OpenSelectedItemAsync(true);
         var browseDbc = new Button { Content = "DBC folder…" }; browseDbc.Click += async (_, _) => await PickFolderAsync(_acquisitionDbc, "Select the server DBC folder");
         var browseMpq = new Button { Content = "Related MPQ…" }; browseMpq.Click += async (_, _) => await PickFileAsync(_favoriteMpq, "Select an optional related MPQ", "*.mpq");
-        var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto"), RowSpacing = 7, Margin = new Thickness(0,0,0,8) };
+        var header = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), RowSpacing = 7, Margin = new Thickness(0,0,0,8) };
         header.Children.Add(audit);
         var searchRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Margin = new Thickness(10,0), Children = { _search, WithColumn(findExact, 1) } };
         Grid.SetColumn(searchRow, 1); header.Children.Add(searchRow); Grid.SetColumn(_auditSummary, 2); _auditSummary.VerticalAlignment = VerticalAlignment.Center; header.Children.Add(_auditSummary);
         var classificationLabel = new TextBlock { Text = "Show", VerticalAlignment = VerticalAlignment.Center };
         Grid.SetRow(classificationLabel, 1); header.Children.Add(classificationLabel); Grid.SetRow(_classification, 1); Grid.SetColumn(_classification, 1); _classification.Margin = new Thickness(10,0); header.Children.Add(_classification);
+        var groupLabel = new TextBlock { Text = "Review group", VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetRow(groupLabel, 2); header.Children.Add(groupLabel); Grid.SetRow(_reviewGroup, 2); Grid.SetColumn(_reviewGroup, 1); _reviewGroup.Margin = new Thickness(10,0); header.Children.Add(_reviewGroup);
         var rowActions = new WrapPanel { Children = { edit, fullSql, favorite } }; Grid.SetRow(rowActions, 1); Grid.SetColumnSpan(rowActions, 2);
         var exact = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _inspectId, WithColumn(inspect, 1), rowActions } };
         var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
@@ -190,7 +204,10 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             _audit = await new ItemCatalogService().AuditAsync(profile, EmptyNull(_acquisitionDbc.Text));
             _auditIdentity = AuditIdentity(profile);
             ApplyAuditFilter();
-            _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} no path · {_audit.ObtainableItems:N0} known · {_audit.TotalItems:N0} total";
+            var manual = _audit.NoKnownAcquisitionPath.Count(item => item.ReviewGroup == ItemAcquisitionReviewGroup.OtherManualReview);
+            var legacy = _audit.NoKnownAcquisitionPath.Count(item => item.ReviewGroup == ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper);
+            var npc = _audit.NoKnownAcquisitionPath.Count(item => item.ReviewGroup == ItemAcquisitionReviewGroup.NpcOrMonsterEquipment);
+            _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} no path · {manual:N0} other/manual · {legacy:N0} deprecated/test/dev · {npc:N0} NPC/monster · {_audit.ObtainableItems:N0} known · {_audit.TotalItems:N0} total";
             _status.Text = $"Checked {_audit.CheckedSources.Count:N0} source families; {_audit.MissingSources.Count:N0} unavailable or unconfigured. Exact IDs are pinned even when another classification filter is selected.";
             DesktopCrashLogger.Debug("ITEM", "acquisition-audit-success", ("total_items", _audit.TotalItems), ("no_known_path", _audit.NoKnownAcquisitionPath.Count), ("checked_sources", _audit.CheckedSources.Count), ("missing_sources", _audit.MissingSources.Count));
         }
@@ -212,7 +229,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             var evidence = item.HasKnownAcquisitionPath
                 ? item.AcquisitionSources.Select(value => $"Accepted · {value}")
                 : item.NoPathReview;
-            _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(item.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\n" + string.Join("\n", evidence.Select(value => $"• {value}"));
+            _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(item.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\nReview group: {ReviewGroupName(item.ReviewGroup)}\n" + string.Join("\n", evidence.Select(value => $"• {value}"));
             _items.ItemsSource = new[] { item }; _items.SelectedItem = item; _items.ScrollIntoView(item);
             _status.Text = $"Pinned item {entry:N0} across {_audit.CheckedSources.Count:N0} source families. It can now be opened, favorited, or edited.";
         }
@@ -234,7 +251,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     {
         var known = item.HasKnownAcquisitionPath;
         var evidence = known ? item.AcquisitionSources.Select(value => $"Accepted · {value}") : item.NoPathReview;
-        _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(known ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\n" +
+        _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(known ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\nReview group: {ReviewGroupName(item.ReviewGroup)}\n" +
             string.Join("\n", evidence.Select(value => $"• {value}"));
     }
 
@@ -317,12 +334,31 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             2 => _audit.AllItems,
             _ => _audit.NoKnownAcquisitionPath
         };
+        if (mode == 0)
+        {
+            rows = _reviewGroup.SelectedIndex switch
+            {
+                1 => rows.Where(item => item.ReviewGroup == ItemAcquisitionReviewGroup.OtherManualReview),
+                2 => rows.Where(item => item.ReviewGroup == ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper),
+                3 => rows.Where(item => item.ReviewGroup == ItemAcquisitionReviewGroup.NpcOrMonsterEquipment),
+                _ => rows
+            };
+        }
         if (query.Length > 0) rows = rows.Where(item => item.Entry.ToString().Contains(query, StringComparison.OrdinalIgnoreCase) || item.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || QualityName(item.Quality).Contains(query, StringComparison.OrdinalIgnoreCase) || item.ItemLevel.ToString().Contains(query) || item.ItemSetId.ToString().Contains(query));
         var result = rows.ToArray(); _items.ItemsSource = result;
         if (result.Length > 0) { _items.SelectedItem = result[0]; _items.ScrollIntoView(result[0]); }
         var label = mode switch { 1 => "known-path", 2 => "total", _ => "no-known-path" };
-        _status.Text = $"Showing {result.Length:N0} {label} item(s). Numeric searches always show an existing exact row and state its classification.";
+        var group = mode == 0 && _reviewGroup.SelectedIndex > 0 ? $" · {Convert.ToString(_reviewGroup.SelectedItem)}" : string.Empty;
+        _status.Text = $"Showing {result.Length:N0} {label} item(s){group}. Numeric searches always show an existing exact row and state its classification.";
     }
+
+    private static string ReviewGroupName(ItemAcquisitionReviewGroup group) => group switch
+    {
+        ItemAcquisitionReviewGroup.KnownAcquisition => "Known acquisition",
+        ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper => "Deprecated / test / developer",
+        ItemAcquisitionReviewGroup.NpcOrMonsterEquipment => "NPC / monster equipment",
+        _ => "Other / manual review"
+    };
 
     private static bool TryParseItemId(string? text, out uint entry)
     {

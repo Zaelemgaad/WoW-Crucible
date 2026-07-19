@@ -1265,7 +1265,7 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
         var output = Option(rawOptions, "--output="); var dbc = Option(rawOptions, "--dbc="); var unknown = rawOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown item-audit option: {unknown[0]}");
         var audit = await new ItemCatalogService().AuditAsync(profile, dbc);
-        foreach (var item in audit.NoKnownAcquisitionPath) Console.WriteLine($"{item.Entry}\t{item.Quality}\t{item.ItemLevel}\t{item.ItemSetId}\t{item.Name}");
+        foreach (var item in audit.NoKnownAcquisitionPath) Console.WriteLine($"{item.Entry}\t{item.Quality}\t{item.ItemLevel}\t{item.ItemSetId}\t{item.ReviewGroup}\t{item.Name}");
         if (output is not null) File.WriteAllText(output, System.Text.Json.JsonSerializer.Serialize(audit, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         Console.Error.WriteLine($"Item acquisition audit: {audit.NoKnownAcquisitionPath.Count:N0} of {audit.TotalItems:N0} item(s) have no known path across {audit.CheckedSources.Count:N0} available source table(s). Missing source families: {string.Join(", ", audit.MissingSources)}{(output is null ? string.Empty : $". Report: {Path.GetFullPath(output)}")}");
         return 0;
@@ -1278,6 +1278,7 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
         if (inspection.Item is null) return Fail($"Item {inspectedEntry} does not exist in item_template.");
         Console.WriteLine($"ITEM\t{inspection.Item.Entry}\t{inspection.Item.Name}");
         Console.WriteLine($"CLASSIFICATION\t{(inspection.HasKnownAcquisitionPath ? "KNOWN ACQUISITION PATH" : "NO KNOWN ACQUISITION PATH")}");
+        Console.WriteLine($"REVIEW_GROUP\t{inspection.Item.ReviewGroup}");
         foreach (var evidence in inspection.AcceptedEvidence) Console.WriteLine($"ACCEPTED\t{evidence}");
         foreach (var evidence in inspection.RejectedEvidence) Console.WriteLine($"REJECTED\t{evidence}");
         Console.WriteLine($"COVERAGE\t{inspection.CheckedSources.Count} checked\t{inspection.MissingSources.Count} missing");

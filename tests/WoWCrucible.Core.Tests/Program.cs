@@ -1037,6 +1037,12 @@ if (!new uint[] { 100, 102, 103, 104, 106 }.All(graphAcquired.ContainsKey) || gr
 var startingItems = ItemCatalogService.ReadCharStartOutfitItems(Path.Combine(args[1], "CharStartOutfit.dbc"));
 if (!startingItems.Contains(6948) || startingItems.Contains(17) || startingItems.Contains(17802))
     throw new InvalidOperationException("CharStartOutfit DBC acquisition coverage did not distinguish starting equipment from cut/developer items.");
+if (ItemCatalogEntry.ClassifyReviewGroup("Martin Fury", false) != ItemAcquisitionReviewGroup.OtherManualReview ||
+    ItemCatalogEntry.ClassifyReviewGroup("Thunderfury, Blessed Blade of the Windseeker?", false) != ItemAcquisitionReviewGroup.OtherManualReview ||
+    ItemCatalogEntry.ClassifyReviewGroup("NPC Equip 50505", false) != ItemAcquisitionReviewGroup.NpcOrMonsterEquipment ||
+    ItemCatalogEntry.ClassifyReviewGroup("Deprecated Old Belt", false) != ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper ||
+    ItemCatalogEntry.ClassifyReviewGroup("Anything", true) != ItemAcquisitionReviewGroup.KnownAcquisition)
+    throw new InvalidOperationException("No-path item review grouping hid or mislabeled exact developer/cut-item regression cases.");
 var spellCreation = ItemCatalogService.ReadSpellCreationGraph(Path.Combine(args[1], "Spell.dbc"));
 if (!spellCreation.TryGetValue(597, out var conjureFood) || !conjureFood.CreatedItems.Contains(1113u) || spellCreation.Count < 1_000)
     throw new InvalidOperationException("Spell.dbc acquisition coverage did not map reachable create-item effects such as Conjured Bread.");
