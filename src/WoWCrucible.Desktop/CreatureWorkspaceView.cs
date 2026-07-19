@@ -71,6 +71,17 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     private readonly TextBox _appearancePortPreview = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "Select a source appearance and build an additive import plan. Nothing is written while planning." };
     private readonly TextBox _appearancePatchProvenance = new() { PlaceholderText = "Optional exact asset provenance (auto when possible)" };
     private readonly Border _appearancePortConfirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
+    private readonly TextBox _chrPath = new() { PlaceholderText = "WMV character .chr file" };
+    private readonly TextBox _chrTexturePath = new() { PlaceholderText = "Baked character texture (.png, .tga, or .blp)" };
+    private readonly TextBox _chrDbcRoot = new() { PlaceholderText = "Target WotLK DBC folder" };
+    private readonly TextBox _chrSchemaPath = new() { PlaceholderText = "WotLK 3.3.5 (12340) schema XML" };
+    private readonly NumericUpDown _chrSound = Number(0, uint.MaxValue);
+    private readonly NumericUpDown _chrScale = Number(0.01m, 100, 1);
+    private readonly NumericUpDown _chrAlpha = Number(0, 255, 255);
+    private readonly TextBox _chrPreview = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "Choose a WMV .chr and baked texture, then inspect the deterministic additive plan. Nothing is written while planning." };
+    private readonly TextBlock _chrStatus = Status("Uses the configured target DBCs and the verified world database item_template mapping.");
+    private readonly Border _chrConfirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
+    private NpcChrAppearancePlan? _pendingChrPlan;
     private CreatureDisplayCatalog? _appearanceCatalog;
     private string? _appearanceCatalogRoot;
     private bool _appearanceCatalogIsTarget = true;
@@ -106,6 +117,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
             {
                 new TabItem { Header = "Identity & appearance", Content = new ScrollViewer { Content = IdentityForm() } },
                 new TabItem { Header = "DBC appearance catalog", Content = AppearanceCatalogPage() },
+                new TabItem { Header = "WMV .chr NPC", Content = ChrAppearancePage() },
                 new TabItem { Header = "Interaction", Content = new ScrollViewer { Content = InteractionForm() } },
                 new TabItem { Header = "Combat & movement", Content = new ScrollViewer { Content = CombatForm() } },
                 new TabItem { Header = "Loot IDs & scripting", Content = new ScrollViewer { Content = LootForm() } },
@@ -138,7 +150,120 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
             Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(actions, 2), WithRow(_confirmation, 3) }
         };
         RefreshPreview(); RefreshSchemaStatus();
+        UseConfiguredChrTargets();
         if (Directory.Exists(_session.Settings.CoreDbcPath)) Dispatcher.UIThread.Post(async () => await LoadAppearanceCatalogAsync(false), DispatcherPriority.Background);
+    }
+
+    private Control ChrAppearancePage()
+    {
+        var chooseChr = new Button { Content = "Choose .chr…" }; chooseChr.Click += async (_, _) => await PickChrInputAsync(_chrPath, "Choose a WoW Model Viewer character file", "WMV character", ["*.chr"]);
+        var chooseTexture = new Button { Content = "Choose baked texture…" }; chooseTexture.Click += async (_, _) => await PickChrInputAsync(_chrTexturePath, "Choose the character's baked texture", "Character texture", ["*.png", "*.tga", "*.blp", "*.jpg", "*.jpeg"]);
+        var configured = new Button { Content = "Use configured target" }; configured.Click += (_, _) => UseConfiguredChrTargets();
+        var inspect = AccentButton("Inspect additive plan"); inspect.Click += async (_, _) => await PlanChrAppearanceAsync(inspect);
+        var export = new Button { Content = "Export plan…" }; export.Click += async (_, _) => await ExportChrPlanAsync();
+        var apply = AccentButton("Build DBC + tiny MPQ bundle…"); apply.Click += async (_, _) => await PrepareChrApplyAsync();
+        return new Grid
+        {
+            RowDefinitions = new("Auto,*,Auto,Auto"), Margin = new Thickness(10), RowSpacing = 8,
+            Children =
+            {
+                new StackPanel
+                {
+                    Spacing = 7,
+                    Children =
+                    {
+                        new TextBlock { Text = "WoW Model Viewer character → native WotLK NPC appearance", FontSize = 17, FontWeight = FontWeight.SemiBold },
+                        new TextBlock { Text = "Crucible parses the 18-line .chr contract itself, resolves its model against CreatureModelData, translates armor item entries through the connected item_template, and plans only missing CreatureDisplayInfoExtra / CreatureDisplayInfo rows. It never mutates the live DBC folder and never emits REPLACE.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") },
+                        new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 8, RowDefinitions = new("Auto,Auto,Auto,Auto"), RowSpacing = 7, Children = { chooseChr, WithColumn(_chrPath, 1), WithRow(chooseTexture, 1), WithRow(WithColumn(_chrTexturePath, 1), 1), WithRow(configured, 2), WithRow(WithColumn(_chrDbcRoot, 1), 2), WithRow(new TextBlock { Text = "Schema", VerticalAlignment = VerticalAlignment.Center }, 3), WithRow(WithColumn(_chrSchemaPath, 1), 3) } },
+                        new WrapPanel { Children = { new TextBlock { Text = "Sound ID", VerticalAlignment = VerticalAlignment.Center }, _chrSound, new TextBlock { Text = "Scale", VerticalAlignment = VerticalAlignment.Center }, _chrScale, new TextBlock { Text = "Alpha", VerticalAlignment = VerticalAlignment.Center }, _chrAlpha } },
+                        new WrapPanel { Children = { inspect, export, apply } }
+                    }
+                },
+                WithRow(new ScrollViewer { Content = _chrPreview }, 1),
+                WithRow(_chrStatus, 2),
+                WithRow(_chrConfirmation, 3)
+            }
+        };
+    }
+
+    private async Task PickChrInputAsync(TextBox target, string title, string label, IReadOnlyList<string> patterns)
+    {
+        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(label) { Patterns = patterns }] });
+        if (files.FirstOrDefault()?.TryGetLocalPath() is { } path) { target.Text = path; InvalidateChrPlan("Input changed; inspect a fresh plan before writing."); }
+    }
+
+    private void UseConfiguredChrTargets()
+    {
+        _chrDbcRoot.Text = _session.Settings.CoreDbcPath;
+        _chrSchemaPath.Text = _session.Settings.SchemaDefinitionPath;
+        InvalidateChrPlan("Configured target paths loaded. Inspect the plan when the .chr and texture are ready.");
+    }
+
+    private void InvalidateChrPlan(string message)
+    {
+        _pendingChrPlan = null; _chrConfirmation.IsVisible = false; _chrStatus.Text = message;
+    }
+
+    private async Task PlanChrAppearanceAsync(Button button)
+    {
+        try
+        {
+            if (!_session.DatabaseTested || _session.DatabaseProfile is null) throw new InvalidOperationException("Connect and verify Server & SQL first. Armor item entries must be resolved against the selected world database instead of guessed.");
+            button.IsEnabled = false; _chrConfirmation.IsVisible = false; _chrStatus.Text = "Parsing .chr and resolving model, equipment, and collision-safe target IDs…";
+            var character = NpcChrAppearanceService.Parse(_chrPath.Text ?? string.Empty);
+            var entries = character.Equipment.ArmorSlots.Select(slot => slot.ItemEntry);
+            var mapping = await NpcChrAppearanceService.ResolveItemDisplaysAsync(_session.DatabaseProfile, entries);
+            var options = new NpcChrAppearanceOptions(SoundId: (uint)(_chrSound.Value ?? 0), Scale: (float)(_chrScale.Value ?? 1), Alpha: (uint)(_chrAlpha.Value ?? 255));
+            var plan = await Task.Run(() => NpcChrAppearanceService.CreatePlan(_chrPath.Text ?? string.Empty, _chrTexturePath.Text ?? string.Empty, _chrDbcRoot.Text ?? string.Empty, _chrSchemaPath.Text ?? string.Empty, mapping, options));
+            _pendingChrPlan = plan; _chrPreview.Text = FormatChrPlan(plan);
+            _chrStatus.Text = plan.Ready ? $"READY · display {plan.DisplayId:N0} · {plan.AddedRows:N0} additive DBC row(s) · review before building." : $"BLOCKED · {plan.Blockers.Count:N0} issue(s) must be fixed; nothing can be written.";
+        }
+        catch (Exception exception) { _pendingChrPlan = null; _chrPreview.Text = $"PLAN FAILED\n{exception.Message}"; _chrStatus.Text = "No output was written."; DesktopCrashLogger.Log("WMV .chr NPC plan failed", exception); }
+        finally { button.IsEnabled = true; }
+    }
+
+    private async Task ExportChrPlanAsync()
+    {
+        if (_pendingChrPlan is not { } plan) { _chrStatus.Text = "Inspect a plan before exporting it."; return; }
+        var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Export WMV NPC appearance plan", SuggestedFileName = $"npc-display-{plan.DisplayId}.crucible.json", FileTypeChoices = [new FilePickerFileType("Crucible JSON") { Patterns = ["*.crucible.json", "*.json"] }] });
+        if (file?.TryGetLocalPath() is not { } path) return;
+        try { NpcChrAppearanceService.SavePlan(path, plan); _chrStatus.Text = $"Plan exported: {path}"; }
+        catch (Exception exception) { _chrStatus.Text = $"Plan export failed: {exception.Message}"; }
+    }
+
+    private async Task PrepareChrApplyAsync()
+    {
+        if (_pendingChrPlan is not { Ready: true } plan) { _chrStatus.Text = "Build a blocker-free plan first."; return; }
+        var folders = await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose parent for a new NPC appearance bundle", AllowMultiple = false });
+        if (folders.FirstOrDefault()?.TryGetLocalPath() is not { } parent) return;
+        var output = Path.Combine(parent, $"Crucible-Npc-{plan.DisplayId}-{DateTime.Now:yyyyMMdd-HHmmss}");
+        var cancel = new Button { Content = "Cancel" }; var confirm = AccentButton("Confirm new bundle");
+        cancel.Click += (_, _) => _chrConfirmation.IsVisible = false;
+        confirm.Click += async (_, _) => await ApplyChrPlanAsync(confirm, output);
+        _chrConfirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Create a new bundle at {output}? It will contain only changed target-based DBCs, the baked texture, a strict manifest, and a ready tiny MPQ. The configured DBCs and database will not be modified.", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center }, WithColumn(cancel, 1), WithColumn(confirm, 2) } };
+        _chrConfirmation.IsVisible = true;
+    }
+
+    private async Task ApplyChrPlanAsync(Button button, string output)
+    {
+        if (_pendingChrPlan is not { Ready: true } plan) return;
+        try
+        {
+            button.IsEnabled = false; _chrStatus.Text = "Revalidating bound inputs and building bundle…";
+            var result = await Task.Run(() => NpcChrAppearanceService.Apply(plan, output));
+            _displayIds[0].Value = result.Plan.DisplayId; _chrConfirmation.IsVisible = false; RefreshPreview();
+            _chrPreview.Text = FormatChrPlan(result.Plan) + $"\n\nBUILT\nBundle\t{result.OutputDirectory}\nPatch\t{result.PatchPath}\nManifest\t{result.ManifestPath}\nBaked texture\t{result.BakedTexturePath}\nReceipt\t{result.ReceiptPath}";
+            _chrStatus.Text = $"Bundle built and display {result.Plan.DisplayId:N0} placed in creature draft slot 1. The database is still unchanged; review the SQL plan and insert when ready.";
+        }
+        catch (Exception exception) { _chrStatus.Text = $"Bundle build failed safely: {exception.Message}"; DesktopCrashLogger.Log("WMV .chr NPC apply failed", exception); }
+        finally { button.IsEnabled = true; }
+    }
+
+    private static string FormatChrPlan(NpcChrAppearancePlan plan)
+    {
+        var equipment = plan.ItemDisplays.Select(item => $"{item.Slot,-10} item {item.ItemEntry,8:N0} → display {item.ItemDisplayId,8:N0} {(item.Resolved ? "OK" : "MISSING")}");
+        var weapons = plan.WeaponItemEntries.Select(pair => $"{pair.Key,-10} item {pair.Value,8:N0}");
+        return $"WMV NPC APPEARANCE PLAN\nStatus\t{(plan.Ready ? "READY" : "BLOCKED")}\nCharacter\tRace {plan.Character.RaceId}, sex {plan.Character.SexId}\nModel path\t{plan.Character.ModelPath}\nModel ID\t{plan.ModelId:N0}\nExtra ID\t{plan.ExtraId:N0} ({(plan.ReusesExtra ? "reuse" : "add")})\nDisplay ID\t{plan.DisplayId:N0} ({(plan.ReusesDisplay ? "reuse" : "add")})\nBaked texture\tTextures\\BakedNpcTextures\\{plan.BakedTextureName}\nDBC rows added\t{plan.AddedRows:N0}\n\nARMOR ITEM RESOLUTION\n{string.Join(Environment.NewLine, equipment)}\n\nWEAPON / QUIVER DATA (preserved for SQL authoring)\n{string.Join(Environment.NewLine, weapons)}\n\nFINDINGS\n{string.Join(Environment.NewLine, plan.Findings.Select(value => "• " + value))}\n\nBLOCKERS\n{(plan.Blockers.Count == 0 ? "none" : string.Join(Environment.NewLine, plan.Blockers.Select(value => "• " + value)))}";
     }
 
     private Control AppearanceCatalogPage()

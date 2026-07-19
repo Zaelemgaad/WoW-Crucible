@@ -811,6 +811,45 @@ static int Asset(string[] args)
         }
         return 0;
     }
+    if (args is ["npc-chr-plan", var chrPath, var chrTexture, var chrDbcRoot, var chrSchema, var chrHost, var chrPortText, var chrUser, var chrDatabase, var chrPlanPath, .. var chrPlanOptions])
+    {
+        var allowed = new[] { "--display-start=", "--extra-start=", "--sound=", "--scale=", "--alpha=", "--password-env=", "--ssl=", "--format=" };
+        var unknown = chrPlanOptions.Where(option => !allowed.Any(prefix => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown npc-chr-plan option: {unknown[0]}");
+        if (!uint.TryParse(chrPortText, out var chrPort) || chrPort is 0 or > 65535) return Fail("Database port must be from 1 to 65535.");
+        var passwordEnvironment = Option(chrPlanOptions, "--password-env=") ?? "WOW_CRUCIBLE_DB_PASSWORD"; var password = Environment.GetEnvironmentVariable(passwordEnvironment);
+        if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for item-template display resolution. Passwords are not accepted on the command line.");
+        if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(Option(chrPlanOptions, "--ssl=") ?? "Preferred", true, out var ssl)) return Fail("Unknown MySQL SSL mode.");
+        static uint? OptionalId(string[] values, string prefix) { var text = Option(values, prefix); if (text is null) return null; return uint.TryParse(text, out var parsed) && parsed > 0 ? parsed : throw new FormatException($"{prefix.TrimEnd('=')} must be a positive unsigned ID."); }
+        var displayStart = OptionalId(chrPlanOptions, "--display-start="); var extraStart = OptionalId(chrPlanOptions, "--extra-start=");
+        if (!uint.TryParse(Option(chrPlanOptions, "--sound=") ?? "0", out var sound)) return Fail("--sound must be an unsigned sound ID.");
+        if (!float.TryParse(Option(chrPlanOptions, "--scale=") ?? "1", System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var scale) || !float.IsFinite(scale) || scale <= 0) return Fail("--scale must be finite and positive.");
+        if (!uint.TryParse(Option(chrPlanOptions, "--alpha=") ?? "255", out var alpha) || alpha > 255) return Fail("--alpha must be 0 through 255.");
+        var character = NpcChrAppearanceService.Parse(chrPath); var profile = new DatabaseConnectionProfile(chrHost, chrPort, chrUser, password, chrDatabase, ssl);
+        var mapping = NpcChrAppearanceService.ResolveItemDisplaysAsync(profile, character.Equipment.ArmorSlots.Select(slot => slot.ItemEntry), CancellationToken.None).GetAwaiter().GetResult();
+        var plan = NpcChrAppearanceService.CreatePlan(chrPath, chrTexture, chrDbcRoot, chrSchema, mapping, new(displayStart, extraStart, sound, scale, alpha), CancellationToken.None);
+        var overwrite = chrPlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); NpcChrAppearanceService.SavePlan(chrPlanPath, plan, overwrite);
+        var json = chrPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"READY\t{plan.Ready}\nMODEL\t{plan.Character.ModelPath}\tCreatureModelData={plan.ModelId}\nEXTRA\t{plan.ExtraId}\t{(plan.ReusesExtra ? "REUSE" : "ADD")}\nDISPLAY\t{plan.DisplayId}\t{(plan.ReusesDisplay ? "REUSE" : "ADD")}\nBAKED_TEXTURE\tTextures\\BakedNpcTextures\\{plan.BakedTextureName}\nADD_ROWS\t{plan.AddedRows}\nPLAN\t{Path.GetFullPath(chrPlanPath)}");
+            foreach (var item in plan.ItemDisplays.Where(item => item.ItemEntry != 0)) Console.WriteLine($"ITEM\t{item.Slot}\tentry={item.ItemEntry}\tdisplay={item.ItemDisplayId}\tresolved={item.Resolved}");
+            foreach (var pair in plan.WeaponItemEntries.Where(pair => pair.Value != 0)) Console.WriteLine($"EQUIPMENT_SOURCE\t{pair.Key}\titem={pair.Value}");
+            foreach (var finding in plan.Findings) Console.WriteLine($"FINDING\t{finding}"); foreach (var blocker in plan.Blockers) Console.WriteLine($"BLOCKER\t{blocker}");
+        }
+        return plan.Ready ? 0 : 3;
+    }
+    if (args is ["npc-chr-apply", var chrApplyPlan, var chrOutput, .. var chrApplyOptions])
+    {
+        var json = chrApplyOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = chrApplyOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown npc-chr-apply option: {unknown[0]}");
+        var result = NpcChrAppearanceService.Apply(NpcChrAppearanceService.LoadPlan(chrApplyPlan), chrOutput, CancellationToken.None);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else { Console.WriteLine($"OUTPUT\t{result.OutputDirectory}\nDISPLAY\t{result.Plan.DisplayId}\nEXTRA\t{result.Plan.ExtraId}\nBAKED_TEXTURE\t{result.BakedTexturePath}\nMANIFEST\t{result.ManifestPath}\nPATCH\t{result.PatchPath}\nRECEIPT\t{result.ReceiptPath}"); foreach (var pair in result.OutputDbcFiles) Console.WriteLine($"DBC\t{pair.Key}\t{pair.Value}\t{result.OutputSha256[pair.Key]}"); }
+        return 0;
+    }
     if (args is ["creature-appearance-port-apply", var portPlanPath, var portOutputDirectory, .. var portApplyOptions])
     {
         var json = portApplyOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
@@ -1035,6 +1074,8 @@ Usage:
   wowcrucible asset gameobject-bulk-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
   wowcrucible asset creature-display-catalog <dbc-folder> [--schema=file] [--search=terms] [--limit=N] [--format=text|json]
   wowcrucible asset creature-appearance-port-plan <source-dbc-folder> <target-dbc-folder> <display-id> --schema=file [--output=plan.json] [--format=text|json] [--overwrite]
+  wowcrucible asset npc-chr-plan <file.chr> <texture> <target-dbc-folder> <schema.xml> <host> <port> <user> <database> <plan.json> [--display-start=N] [--extra-start=N] [--sound=N] [--scale=1] [--alpha=255] [--password-env=NAME] [--format=text|json] [--overwrite]
+  wowcrucible asset npc-chr-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
   wowcrucible asset creature-appearance-port-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
   wowcrucible asset creature-appearance-patch-plan <port-receipt.json> <processed-library> [--provenance=name] [--output=patch-plan.json] [--format=text|json] [--overwrite]
   wowcrucible asset creature-appearance-patch-manifest <patch-plan.json> <manifest.json> [--mpq=patch-name.MPQ] [--overwrite]

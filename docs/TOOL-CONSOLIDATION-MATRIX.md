@@ -52,7 +52,7 @@ Every top-level Tools directory is assigned below, including redundant editors. 
 | `Adb_Wdb_Parser*`, `WDB Converter*`, `WoWParser*` | ADB/WDB cache parsing, build-aware structures, SQL/CSV/JSON export |
 | `ADB-DB2-DBC - CSV convert`, `DB2 Editor*`, `DBC_DB2_Extractor`, `SQLtoDB2_Fix*` | DB2/DBC/CSV/SQL round-trip provider with schema validation |
 | `AmarothTools\ClientItem` | Item client-record planning and display dependency resolution |
-| `AmarothTools\NPCGenerator` | Character/NPC appearance import into additive display/extra DBC plus SQL plans |
+| `AmarothTools\NPCGenerator` | Implemented natively: strict WMV `.chr` parsing, live item-display resolution, target-model binding, semantic DBC dedupe/collision-safe IDs, baked BLP, changed-DBC manifest/receipt, ready tiny MPQ, and handoff into the schema-adaptive creature SQL editor |
 | `AmarothTools\GobGenerator` | Implemented natively: hash-bound bulk M2/root-WMO, folder, or direct indexed-MPQ virtual-path planning; effective-layer and recursive source snapshots; exact geometry bounds; provenance/dependency closure; existing-display reuse; collision-safe IDs; live-schema complete template SQL; changed DBC, manifest/receipt, and ready-built tiny MPQ |
 | `AmarothTools\ListfileCreation`, `AmarothTools\WMOListFile` | Path catalogs and recursive dependency graphs |
 | `CASC`, `cascExplorer` | CASC list/browse/extract/diff source provider |
