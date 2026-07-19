@@ -2399,6 +2399,7 @@ var fusionBase = Path.Combine(layerRoot, "fusion-base", "DBFilesClient"); var fu
 Directory.CreateDirectory(fusionBase); Directory.CreateDirectory(fusionA); Directory.CreateDirectory(fusionB);
 File.Copy(animationPath, Path.Combine(fusionBase, "AnimationData.dbc")); File.Copy(animationPath, Path.Combine(fusionA, "AnimationData.dbc"));
 File.Copy(castTimesSource, Path.Combine(fusionBase, "SpellCastTimes.dbc")); File.Copy(Path.Combine(overrideLayer, "SpellCastTimes.dbc"), Path.Combine(fusionA, "SpellCastTimes.dbc")); File.Copy(castTimesSource, Path.Combine(fusionB, "SpellCastTimes.dbc"));
+var fusionInterface = Path.Combine(Path.GetDirectoryName(fusionA)!, "Interface", "FrameXML"); Directory.CreateDirectory(fusionInterface); File.WriteAllText(Path.Combine(fusionInterface, "FusionFixture.lua"), "-- additive UI fixture");
 var fusionPlan = ClientFusionPlanner.Analyze(Path.GetDirectoryName(fusionBase)!, [new("Mod A", Path.GetDirectoryName(fusionA)!), new("Mod B", Path.GetDirectoryName(fusionB)!)]);
 var savedFusionPlan = Path.Combine(layerRoot, "fusion-plan.json"); ClientFusionPlanner.Save(savedFusionPlan, fusionPlan);
 if (fusionPlan.Entries.Single(entry => entry.ArchivePath.EndsWith("AnimationData.dbc", StringComparison.OrdinalIgnoreCase)).Status != ClientFusionStatus.IdenticalToBase ||
@@ -2408,8 +2409,35 @@ if (!File.Exists(savedFusionPlan) || !File.ReadAllText(savedFusionPlan).Contains
     throw new InvalidOperationException("Client fusion plan export did not preserve its entries.");
 var fusionConflict = fusionPlan.Entries.Single(entry => entry.Status == ClientFusionStatus.Conflict); var fusionChoice = fusionConflict.Candidates.Single(candidate => candidate.SourceName == "Mod A");
 var fusionStage = ClientFusionPlanner.Stage(Path.Combine(layerRoot, "fusion-stage"), fusionPlan, new Dictionary<string, string> { [fusionConflict.ArchivePath] = fusionChoice.FilePath });
-if (fusionStage.StagedFiles != 1 || fusionStage.SkippedBaseFiles != 1 || fusionStage.UnresolvedConflicts != 0 || !File.Exists(fusionStage.ManifestPath))
+if (fusionStage.StagedFiles != 2 || fusionStage.SkippedBaseFiles != 1 || fusionStage.UnresolvedConflicts != 0 || !File.Exists(fusionStage.ManifestPath))
     throw new InvalidOperationException("Resolved fusion staging did not produce a minimal patch manifest.");
+var loadedFusionPlan = ClientFusionPlanner.Load(savedFusionPlan); var blockedFusionDbcPlan = ClientFusionDbcService.CreatePlan(loadedFusionPlan, args[0]);
+if (blockedFusionDbcPlan.Tables.Count != 1 || blockedFusionDbcPlan.Tables[0].Ready || blockedFusionDbcPlan.Tables[0].Conflicts.Count != 1 || blockedFusionDbcPlan.Tables[0].Conflicts[0].DifferingColumns.Count == 0)
+    throw new InvalidOperationException("Semantic DBC fusion did not preserve a genuinely different occupied record as an explicit field-level blocker.");
+var blockedFusionDbcResult = ClientFusionDbcService.Apply(blockedFusionDbcPlan, Path.Combine(layerRoot, "fusion-dbc-blocked-result")); var partiallyStagedFusion = ClientFusionPlanner.Stage(Path.Combine(layerRoot, "fusion-dbc-partial-stage"), loadedFusionPlan, dbcResult: blockedFusionDbcResult);
+if (blockedFusionDbcResult.OutputFiles.Count != 0 || blockedFusionDbcResult.BlockedArchivePaths.Count != 1 || partiallyStagedFusion.StagedFiles != 1 || partiallyStagedFusion.UnresolvedConflicts != 1 || !PatchManifestService.Validate(PatchManifestService.Load(partiallyStagedFusion.ManifestPath)).Passed)
+    throw new InvalidOperationException("A blocked DBC did not remain excluded while unrelated additive client assets continued into a valid tiny patch manifest.");
+
+var additiveFusionA = Path.Combine(layerRoot, "fusion-add-a", "DBFilesClient"); var additiveFusionB = Path.Combine(layerRoot, "fusion-add-b", "DBFilesClient"); Directory.CreateDirectory(additiveFusionA); Directory.CreateDirectory(additiveFusionB);
+File.Copy(additionsOverridePath, Path.Combine(additiveFusionA, "SpellCastTimes.dbc"));
+var secondAddition = WdbcFile.Load(castTimesSource); var secondAdditionId = Enumerable.Range(0, secondAddition.RowCount).Select(row => secondAddition.GetRaw(row, castColumns[0])).Max() + 2; var secondAdditionRow = secondAddition.AddBlankRow();
+foreach (var column in castColumns) { if (column.Type == DbcValueType.StringOffset) secondAddition.SetDisplayValue(secondAdditionRow, column, secondAddition.GetString(secondAddition.GetRaw(0, column))); else secondAddition.SetRaw(secondAdditionRow, column, secondAddition.GetRaw(0, column)); }
+secondAddition.SetRaw(secondAdditionRow, castColumns[0], secondAdditionId); secondAddition.Save(Path.Combine(additiveFusionB, "SpellCastTimes.dbc"), false);
+var additiveFusionPlan = ClientFusionPlanner.Analyze(Path.GetDirectoryName(fusionBase)!, [new("Add A", Path.GetDirectoryName(additiveFusionA)!), new("Add B", Path.GetDirectoryName(additiveFusionB)!)]);
+if (additiveFusionPlan.Entries.Single().Status != ClientFusionStatus.Conflict) throw new InvalidOperationException("Whole-file fusion fixture did not expose its byte-different additive DBC candidates as a path conflict.");
+var additiveDbcPlan = ClientFusionDbcService.CreatePlan(additiveFusionPlan, args[0]); var additiveTablePlan = additiveDbcPlan.Tables.Single();
+if (!additiveTablePlan.Ready || additiveTablePlan.Additions.Count != 2 || additiveTablePlan.Conflicts.Count != 0 || additiveTablePlan.ReusedRows < WdbcFile.Load(castTimesSource).RowCount * 2)
+    throw new InvalidOperationException($"Semantic DBC fusion did not combine two non-overlapping record additions: ready={additiveTablePlan.Ready}, add={additiveTablePlan.Additions.Count}, reuse={additiveTablePlan.ReusedRows}, conflicts={additiveTablePlan.Conflicts.Count}.");
+var additiveDbcPlanPath = Path.Combine(layerRoot, "fusion-dbc-plan.json"); ClientFusionDbcService.SavePlan(additiveDbcPlanPath, additiveDbcPlan); var additiveDbcOutput = Path.Combine(layerRoot, "fusion-dbc-output"); var additiveDbcResult = ClientFusionDbcService.Apply(ClientFusionDbcService.LoadPlan(additiveDbcPlanPath), additiveDbcOutput); var reloadedAdditiveDbcResult = ClientFusionDbcService.LoadResult(additiveDbcResult.ReceiptPath);
+var mergedAdditivePath = reloadedAdditiveDbcResult.OutputFiles.Single().Value; if (WdbcFile.Load(mergedAdditivePath).RowCount != WdbcFile.Load(castTimesSource).RowCount + 2 || reloadedAdditiveDbcResult.BlockedArchivePaths.Count != 0)
+    throw new InvalidOperationException("Applied additive DBC fusion did not publish exactly the union of base and two new records.");
+var additiveFusionStage = ClientFusionPlanner.Stage(Path.Combine(layerRoot, "fusion-add-stage"), additiveFusionPlan, dbcResult: reloadedAdditiveDbcResult);
+if (additiveFusionStage.StagedFiles != 1 || additiveFusionStage.UnresolvedConflicts != 0 || !PatchManifestService.Validate(PatchManifestService.Load(additiveFusionStage.ManifestPath)).Passed)
+    throw new InvalidOperationException("A semantically resolved DBC path conflict did not feed the normal tiny client-fusion manifest.");
+var staleAdditivePath = Path.Combine(additiveFusionB, "SpellCastTimes.dbc"); var staleAdditiveBytes = File.ReadAllBytes(staleAdditivePath); File.WriteAllBytes(staleAdditivePath, staleAdditiveBytes.Concat(new byte[] { 1 }).ToArray());
+try { ClientFusionDbcService.Verify(additiveDbcPlan); throw new InvalidOperationException("DBC fusion accepted a source changed after planning."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("changed after planning", StringComparison.OrdinalIgnoreCase)) { }
+File.WriteAllBytes(staleAdditivePath, staleAdditiveBytes);
 
 var manifestPath = Path.Combine(layerRoot, "classless.crucible-patch.json");
 var manifestEntries = PatchInputMapper.Map([Path.Combine(overrideLayer, "SpellCastTimes.dbc")]);

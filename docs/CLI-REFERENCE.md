@@ -308,9 +308,14 @@ wowcrucible client corpus <output-listfile> <index-directory>...
 wowcrucible client show <index-directory>
 wowcrucible client extract <index-directory> <archive-relative-path> <folder> [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]
 wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]
+wowcrucible client fusion-dbc-plan <fusion-plan.json> <schema.xml> [--output=dbc-plan.json] [--format=text|json] [--overwrite]
+wowcrucible client fusion-dbc-apply <dbc-plan.json> <new-or-empty-output-folder>
+wowcrucible client fusion-stage <fusion-plan.json> <stage-folder> [--dbc-receipt=client-fusion-dbc.crucible.json]
 ```
 
 Client indexes are resumable and distinguish active, backup, inactive-locale, and custom-subdirectory archives. Anonymous hash-only MPQ entries remain quarantined unless explicitly requested. `install-patch` atomically installs the patch and deletes that exact client’s `Cache` folder only after success.
+
+`fusion` performs the fast whole-file comparison and saves the evidence needed by the record stage. `fusion-dbc-plan` then examines every byte-different `DBFilesClient\*.dbc` path that also exists in the effective base. It requires an exact named physical-ID schema, verifies compatible layouts, compares strings by value rather than string-table offset, unions IDs absent from the accumulated base, and deduplicates equal records supplied by multiple mods. A genuinely different record at an occupied ID is reported with its exact differing fields and returns review exit code `3`; it is never silently overwritten or renumbered without reference closure. `fusion-dbc-apply` rehashes the schema, base, and every source, recomputes the semantic plan, writes only safely merged tables plus a receipt, and retains unresolved table paths. `fusion-stage --dbc-receipt=...` verifies that receipt, substitutes merged tables, omits semantically base-equal DBCs, and leaves genuine conflicts outside the tiny patch manifest. The same sequence lives under **Client Workshop → Additive client fusion** without opening another window.
 
 ## Installed servers and SQL overlays
 

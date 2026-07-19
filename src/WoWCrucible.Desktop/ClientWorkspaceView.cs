@@ -34,6 +34,8 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private readonly ListBox _fusionItems = new();
     private readonly TextBlock _fusionSummary = Status("Fusion is additive-first: base-identical files are omitted and path conflicts remain blocked for review.");
     private ClientFusionPlan? _fusionPlan;
+    private ClientFusionDbcPlan? _fusionDbcPlan;
+    private ClientFusionDbcResult? _fusionDbcResult;
     private CancellationTokenSource? _operation;
     private readonly List<Button> _operationButtons = [];
 
@@ -172,10 +174,12 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var chooseBase = Button("Base…", async () => { var path = await PickFolderAsync("Select the extracted stock/effective client base"); if (path is not null) _fusionBase.Text = path; });
         var addSource = Button("Add source…", async () => { var path = await PickFolderAsync("Add an extracted override source"); if (path is not null) _fusionSources.Text = string.Join(Environment.NewLine, Lines(_fusionSources.Text).Append(path).Distinct(StringComparer.OrdinalIgnoreCase)); });
         var analyze = AccentButton("Analyze additive fusion"); analyze.Click += async (_, _) => await AnalyzeFusionAsync(); Register(analyze);
-        var stage = AccentButton("Stage non-conflicting patch…"); stage.Click += async (_, _) => await StageFusionAsync(); Register(stage);
+        var analyzeDbcs = AccentButton("Analyze DBC records"); analyzeDbcs.Click += async (_, _) => await AnalyzeFusionDbcsAsync(); Register(analyzeDbcs);
+        var writeDbcs = new Button { Content = "Prepare reviewed DBC result…" }; writeDbcs.Click += async (_, _) => await ApplyFusionDbcsAsync(); Register(writeDbcs);
+        var stage = AccentButton("Stage reviewed patch…"); stage.Click += async (_, _) => await StageFusionAsync(); Register(stage);
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
         AddPath(paths, 0, "Effective base", _fusionBase, chooseBase, null); AddPath(paths, 1, "Override sources", _fusionSources, addSource, null);
-        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, stage } }, 1), WithRow(_fusionItems, 2), WithRow(Card(_fusionSummary), 3) } };
+        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, analyzeDbcs, writeDbcs, stage } }, 1), WithRow(_fusionItems, 2), WithRow(Card(_fusionSummary), 3) } };
     }
 
     private async Task BuildIndexAsync()
@@ -298,7 +302,7 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
             var sources = Lines(_fusionSources.Text).Select((path, index) => new ClientFusionSource($"{index + 1}: {Path.GetFileName(Path.TrimEndingDirectorySeparator(path))}", path)).ToArray();
             var baseRoot = _fusionBase.Text ?? string.Empty;
             var progress = new Progress<(int Done, int Total, string Path)>(value => _operationStatus.Text = $"{value.Done:N0}/{value.Total:N0} · {value.Path}");
-            _fusionPlan = await Task.Run(() => ClientFusionPlanner.Analyze(baseRoot, sources, progress, _operation!.Token), _operation!.Token);
+            _fusionPlan = await Task.Run(() => ClientFusionPlanner.Analyze(baseRoot, sources, progress, _operation!.Token), _operation!.Token); _fusionDbcPlan = null; _fusionDbcResult = null;
             _fusionItems.ItemsSource = _fusionPlan.Entries;
             var grouped = _fusionPlan.Entries.GroupBy(entry => entry.Status).OrderBy(group => group.Key).Select(group => $"{group.Key}: {group.Count():N0}");
             _fusionSummary.Text = $"{_fusionPlan.Entries.Count:N0} logical paths analyzed.\n{string.Join(" · ", grouped)}\nConflicts are not silently resolved; DBC conflicts should be merged by record/ID instead of choosing a whole-file winner.";
@@ -309,12 +313,47 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         finally { End(); }
     }
 
+    private async Task AnalyzeFusionDbcsAsync()
+    {
+        if (_fusionPlan is null) { _fusionSummary.Text = "Analyze the client fusion paths first."; return; } var schema = _session.Settings.SchemaDefinitionPath;
+        if (string.IsNullOrWhiteSpace(schema) || !File.Exists(schema)) { _fusionSummary.Text = "Configure the exact WotLK schema XML in Server & SQL before semantic DBC fusion."; return; }
+        Begin("Comparing every colliding DBC by record ID and decoded field semantics…");
+        try
+        {
+            var plan = _fusionPlan; _fusionDbcPlan = await Task.Run(() => ClientFusionDbcService.CreatePlan(plan, schema, _operation!.Token), _operation!.Token); _fusionDbcResult = null;
+            var details = _fusionDbcPlan.Tables.Select(table => $"{(table.Ready ? table.RequiresOutput ? "MERGE" : "OMIT EQUAL" : "BLOCKED")} {table.Table}: +{table.Additions.Count:N0}, reuse {table.ReusedRows:N0}, conflicts {table.Conflicts.Count:N0}{(table.Conflicts.Count == 0 ? string.Empty : $" [{string.Join(", ", table.Conflicts.Take(8).Select(conflict => $"ID {conflict.Id}: {string.Join('/', conflict.DifferingColumns.Take(4))}"))}]")}");
+            _fusionSummary.Text = $"Semantic DBC review: {_fusionDbcPlan.ResolvableTables:N0} resolvable, {_fusionDbcPlan.BlockedTables:N0} blocked.\n{string.Join(Environment.NewLine, details)}\nDifferent content at an occupied ID remains blocked; Crucible will not discard it or guess cross-table reference rewrites.";
+            _operationStatus.Text = _fusionDbcPlan.BlockedTables == 0 ? "Every colliding DBC is additive or semantically equal." : "DBC review complete with explicit same-ID/layout/schema blockers.";
+        }
+        catch (OperationCanceledException) { _operationStatus.Text = "Semantic DBC fusion analysis cancelled."; }
+        catch (Exception exception) { Fail("Semantic DBC fusion analysis failed", exception); }
+        finally { End(); }
+    }
+
+    private async Task ApplyFusionDbcsAsync()
+    {
+        if (_fusionDbcPlan is null) { _fusionSummary.Text = "Analyze colliding DBC records first."; return; }
+        var parent = await PickFolderAsync("Choose a parent folder for new merged DBC outputs"); if (parent is null) return; var output = Path.Combine(parent, "Crucible-Fusion-DBCs"); for (var suffix = 2; Directory.Exists(output) || File.Exists(output); suffix++) output = Path.Combine(parent, $"Crucible-Fusion-DBCs-{suffix}");
+        Begin("Writing only hash-verified additive DBC unions…");
+        try
+        {
+            var plan = _fusionDbcPlan; _fusionDbcResult = await Task.Run(() => ClientFusionDbcService.Apply(plan, output, _operation!.Token), _operation!.Token);
+            _fusionSummary.Text = $"Wrote {_fusionDbcResult.OutputFiles.Count:N0} merged DBC(s); omitted {_fusionDbcResult.OmittedArchivePaths.Count:N0} semantically base-equal DBC(s); retained {_fusionDbcResult.BlockedArchivePaths.Count:N0} unresolved DBC conflict(s).\nReceipt: {_fusionDbcResult.ReceiptPath}\nStage reviewed patch will substitute these outputs and refuse the unresolved DBC paths.";
+            _operationStatus.Text = "Additive DBC outputs are ready for fusion staging.";
+        }
+        catch (OperationCanceledException) { _operationStatus.Text = "DBC fusion output cancelled safely."; }
+        catch (Exception exception) { Fail("DBC fusion output failed", exception); }
+        finally { End(); }
+    }
+
     private async Task StageFusionAsync()
     {
         if (_fusionPlan is null) { _fusionSummary.Text = "Analyze a fusion plan first."; return; }
+        var unresolvedDbcPaths = _fusionPlan.Entries.Where(entry => entry.BaseFilePath is not null && entry.ArchivePath.StartsWith("DBFilesClient\\", StringComparison.OrdinalIgnoreCase) && Path.GetExtension(entry.ArchivePath).Equals(".dbc", StringComparison.OrdinalIgnoreCase) && entry.Status != ClientFusionStatus.IdenticalToBase).ToArray();
+        if (unresolvedDbcPaths.Length > 0 && _fusionDbcResult is null) { _fusionSummary.Text = $"{unresolvedDbcPaths.Length:N0} byte-different DBC path(s) require Analyze DBC records before staging. Crucible will not copy a whole source DBC over the effective base without record-level review."; return; }
         var root = await PickFolderAsync("Select a staging folder for the small fusion patch"); if (root is null) return;
         var plan = _fusionPlan;
-        try { var result = await Task.Run(() => ClientFusionPlanner.Stage(root, plan)); _fusionSummary.Text = $"Staged {result.StagedFiles:N0} resolved changes; skipped {result.SkippedBaseFiles:N0} base-identical files; left {result.UnresolvedConflicts:N0} conflicts unresolved.\nManifest: {result.ManifestPath}"; }
+        try { var result = await Task.Run(() => ClientFusionPlanner.Stage(root, plan, dbcResult: _fusionDbcResult)); _fusionSummary.Text = $"Staged {result.StagedFiles:N0} resolved changes; skipped {result.SkippedBaseFiles:N0} base-identical/semantically-equal files; left {result.UnresolvedConflicts:N0} conflicts unresolved.\nManifest: {result.ManifestPath}"; }
         catch (Exception exception) { Fail("Fusion staging failed", exception); }
     }
 

@@ -1100,6 +1100,32 @@ static int Client(string[] args)
         }
         return conflicts == 0 ? 0 : 3;
     }
+    if (args is ["fusion-dbc-plan", var fusionPlanPath, var fusionSchemaPath, .. var fusionDbcPlanOptions])
+    {
+        var planOutput = Option(fusionDbcPlanOptions, "--output="); var overwrite = fusionDbcPlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var json = fusionDbcPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = fusionDbcPlanOptions.Where(option => !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown fusion-dbc-plan option: {unknown[0]}"); if (planOutput is not null && File.Exists(planOutput) && !overwrite) return Fail($"DBC fusion plan already exists; use --overwrite to replace it: {Path.GetFullPath(planOutput)}");
+        var plan = ClientFusionDbcService.CreatePlan(ClientFusionPlanner.Load(fusionPlanPath), fusionSchemaPath); if (planOutput is not null) ClientFusionDbcService.SavePlan(planOutput, plan);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"TABLES\t{plan.Tables.Count:N0}\nRESOLVABLE\t{plan.ResolvableTables:N0}\nBLOCKED\t{plan.BlockedTables:N0}");
+            foreach (var table in plan.Tables) { Console.WriteLine($"DBC\t{(table.Ready ? table.RequiresOutput ? "MERGE" : "OMIT_EQUAL" : "BLOCKED")}\t{table.ArchivePath}\tadd={table.Additions.Count:N0}\treuse={table.ReusedRows:N0}\tconflicts={table.Conflicts.Count:N0}"); foreach (var conflict in table.Conflicts) Console.WriteLine($"CONFLICT\t{table.Table}\tID={conflict.Id}\t{conflict.ExistingSource}\t{conflict.IncomingSource}\t{string.Join(',', conflict.DifferingColumns)}"); foreach (var blocker in table.Blockers) Console.WriteLine($"BLOCKER\t{table.Table}\t{blocker}"); }
+            foreach (var finding in plan.Findings) Console.WriteLine($"FINDING\t{finding}"); if (planOutput is not null) Console.WriteLine($"PLAN\t{Path.GetFullPath(planOutput)}");
+        }
+        return plan.BlockedTables == 0 ? 0 : 3;
+    }
+    if (args is ["fusion-dbc-apply", var fusionDbcPlanPath, var fusionDbcOutput])
+    {
+        var result = ClientFusionDbcService.Apply(ClientFusionDbcService.LoadPlan(fusionDbcPlanPath), fusionDbcOutput); Console.WriteLine($"OUTPUT\t{result.OutputDirectory}\nRECEIPT\t{result.ReceiptPath}\nMERGED\t{result.OutputFiles.Count:N0}\nOMITTED_EQUAL\t{result.OmittedArchivePaths.Count:N0}\nBLOCKED\t{result.BlockedArchivePaths.Count:N0}");
+        foreach (var pair in result.OutputFiles) Console.WriteLine($"DBC\t{pair.Key}\t{pair.Value}\t{result.OutputSha256[pair.Key]}"); return result.BlockedArchivePaths.Count == 0 ? 0 : 3;
+    }
+    if (args is ["fusion-stage", var stagedFusionPlanPath, var stagedFusionRoot, .. var fusionStageOptions])
+    {
+        var dbcReceipt = Option(fusionStageOptions, "--dbc-receipt="); var unknown = fusionStageOptions.Where(option => !option.StartsWith("--dbc-receipt=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown fusion-stage option: {unknown[0]}");
+        var plan = ClientFusionPlanner.Load(stagedFusionPlanPath); var dbcResult = dbcReceipt is null ? null : ClientFusionDbcService.LoadResult(dbcReceipt); var result = ClientFusionPlanner.Stage(stagedFusionRoot, plan, dbcResult: dbcResult);
+        Console.WriteLine($"ROOT\t{result.RootPath}\nMANIFEST\t{result.ManifestPath}\nSTAGED\t{result.StagedFiles:N0}\nBASE_IDENTICAL\t{result.SkippedBaseFiles:N0}\nUNRESOLVED\t{result.UnresolvedConflicts:N0}"); return result.UnresolvedConflicts == 0 ? 0 : 3;
+    }
     if (args is ["index", var clientRoot, var outputDirectory, .. var options])
     {
         var unknown = options.Where(option => !option.Equals("--no-hash", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--client-exe=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -1144,7 +1170,7 @@ static int Client(string[] args)
     return ClientHelp(2);
 }
 
-static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  wowcrucible client clear-cache <client-root>\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]", code);
+static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  wowcrucible client clear-cache <client-root>\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]\n  wowcrucible client fusion-dbc-plan <fusion-plan.json> <schema.xml> [--output=dbc-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-apply <dbc-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-stage <fusion-plan.json> <stage-folder> [--dbc-receipt=client-fusion-dbc.crucible.json]", code);
 
 static async Task<int> Server(string[] args)
 {

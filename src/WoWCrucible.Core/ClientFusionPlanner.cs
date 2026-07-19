@@ -57,13 +57,30 @@ public static class ClientFusionPlanner
         File.Move(temporary, path, true);
     }
 
-    public static ClientFusionStageResult Stage(string rootPath, ClientFusionPlan plan, IReadOnlyDictionary<string, string>? conflictSelections = null)
+    public static ClientFusionPlan Load(string path)
     {
+        var plan = JsonSerializer.Deserialize<ClientFusionPlan>(File.ReadAllText(path)) ?? throw new InvalidDataException("Client fusion plan is empty.");
+        if (plan.FormatVersion != 1) throw new InvalidDataException($"Unsupported client fusion plan version {plan.FormatVersion}."); return plan;
+    }
+
+    public static ClientFusionStageResult Stage(string rootPath, ClientFusionPlan plan, IReadOnlyDictionary<string, string>? conflictSelections = null, ClientFusionDbcResult? dbcResult = null)
+    {
+        if (dbcResult is not null)
+        {
+            ClientFusionDbcService.VerifyResult(dbcResult); if (JsonSerializer.Serialize(dbcResult.Plan.FusionPlan) != JsonSerializer.Serialize(plan)) throw new InvalidDataException("The merged DBC receipt belongs to a different client fusion plan.");
+        }
         rootPath = Path.GetFullPath(rootPath); var filesRoot = Path.Combine(rootPath, "files"); Directory.CreateDirectory(filesRoot);
         var entries = new List<PatchEntry>(); var unresolved = 0; var skipped = 0;
         foreach (var entry in plan.Entries)
         {
             if (entry.Status == ClientFusionStatus.IdenticalToBase) { skipped++; continue; }
+            if (dbcResult is not null && dbcResult.Plan.Tables.Any(table => table.ArchivePath.Equals(entry.ArchivePath, StringComparison.OrdinalIgnoreCase)))
+            {
+                if (dbcResult.BlockedArchivePaths.Contains(entry.ArchivePath, StringComparer.OrdinalIgnoreCase)) { unresolved++; continue; }
+                if (dbcResult.OmittedArchivePaths.Contains(entry.ArchivePath, StringComparer.OrdinalIgnoreCase)) { skipped++; continue; }
+                if (!dbcResult.OutputFiles.TryGetValue(entry.ArchivePath, out var merged)) throw new InvalidDataException($"DBC fusion receipt has no resolved output for {entry.ArchivePath}.");
+                var mergedDestination = Path.Combine(filesRoot, entry.ArchivePath.Replace('\\', Path.DirectorySeparatorChar)); Directory.CreateDirectory(Path.GetDirectoryName(mergedDestination)!); File.Copy(merged, mergedDestination, true); entries.Add(new(mergedDestination, entry.ArchivePath)); continue;
+            }
             ClientFusionCandidate? candidate;
             if (entry.Status == ClientFusionStatus.Conflict)
             {
