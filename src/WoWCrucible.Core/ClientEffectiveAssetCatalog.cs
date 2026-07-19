@@ -50,6 +50,9 @@ public sealed class ClientEffectiveAssetCatalog
             cancellationToken.ThrowIfCancellationRequested();
             var archivePath = SafeChild(clientRoot, summary.RelativePath, "indexed archive");
             if (!File.Exists(archivePath)) throw new FileNotFoundException("An indexed target-client archive no longer exists.", archivePath);
+            var archiveInfo = new FileInfo(archivePath);
+            if (archiveInfo.Length != summary.Length || archiveInfo.LastWriteTimeUtc.Ticks != summary.LastWriteUtcTicks)
+                throw new InvalidDataException($"Indexed archive identity changed after indexing: {summary.RelativePath}. Rebuild the client index before resolving virtual paths.");
             var contentPath = SafeChild(indexDirectory, summary.ContentIndexFile, "archive content index");
             var content = File.Exists(contentPath) ? JsonSerializer.Deserialize<ArchiveContentIndex>(File.ReadAllText(contentPath)) : null;
             var files = content?.Files.Where(file => !file.IsMetadata && !ClientArchiveIndexService.IsAnonymous(file.ArchivePath)).ToArray() ?? [];
@@ -125,16 +128,49 @@ public sealed class ClientEffectiveAssetCatalog
     {
         var key = $"{candidate.ArchiveRelativePath}\u001f{candidate.Entry.ArchivePath}\u001f{candidate.Entry.Locale}";
         if (_hashes.TryGetValue(key, out var cached)) return cached;
-        var archive = _archives.Single(value => value.Summary.RelativePath.Equals(candidate.ArchiveRelativePath, StringComparison.OrdinalIgnoreCase));
         var temporaryRoot = Path.Combine(Path.GetTempPath(), $"wow-crucible-effective-{Environment.ProcessId}-{Guid.NewGuid():N}");
         try
         {
-            new PatchArchiveService().Extract(archive.ArchivePath, temporaryRoot, [candidate.Entry], cancellationToken: cancellationToken);
-            var extracted = SafeChild(temporaryRoot, Normalize(candidate.Entry.ArchivePath), "extracted target asset");
-            if (!File.Exists(extracted)) throw new IOException($"The effective target asset was not extracted: {candidate.Entry.ArchivePath}");
+            var extracted = ExtractEffective(candidate, temporaryRoot, false, cancellationToken);
             var hash = HashFile(extracted, cancellationToken); _hashes[key] = hash; return hash;
         }
         finally { try { if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, true); } catch { } }
+    }
+
+    /// <summary>Extracts one already-resolved effective entry without weakening archive precedence.</summary>
+    public string ExtractEffective(ClientEffectiveAssetCandidate candidate, string destinationRoot, bool overwrite = false,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(candidate); destinationRoot = Path.GetFullPath(destinationRoot);
+        var archive = _archives.SingleOrDefault(value => value.Summary.RelativePath.Equals(candidate.ArchiveRelativePath, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidDataException($"Archive '{candidate.ArchiveRelativePath}' is not active in this client catalog.");
+        var current = Resolve(candidate.Entry.ArchivePath, candidate.ArchiveRelativePath, cancellationToken);
+        if (current.State != ClientEffectiveAssetState.Effective || current.Effective is null ||
+            current.Effective.Entry.BlockIndex != candidate.Entry.BlockIndex || current.Effective.Entry.Locale != candidate.Entry.Locale ||
+            current.Effective.Entry.Size != candidate.Entry.Size || current.Effective.Entry.CompressedSize != candidate.Entry.CompressedSize ||
+            current.Effective.Entry.Flags != candidate.Entry.Flags || !Normalize(current.Effective.Entry.ArchivePath).Equals(Normalize(candidate.Entry.ArchivePath), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"The indexed candidate for '{candidate.Entry.ArchivePath}' no longer resolves to the requested physical archive entry.");
+        var extracted = SafeChild(destinationRoot, Normalize(candidate.Entry.ArchivePath), "effective extraction destination");
+        if (File.Exists(extracted) && !overwrite) throw new IOException($"Effective extraction destination already exists: {extracted}");
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), $"wow-crucible-indexed-extract-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        try
+        {
+            new PatchArchiveService().Extract(archive.ArchivePath, temporaryRoot, [candidate.Entry], cancellationToken: cancellationToken);
+            var temporary = SafeChild(temporaryRoot, Normalize(candidate.Entry.ArchivePath), "temporary effective extraction");
+            if (!File.Exists(temporary)) throw new IOException($"The effective target asset was not extracted: {candidate.Entry.ArchivePath}");
+            if (new FileInfo(temporary).Length != candidate.Entry.Size) throw new IOException($"Extracted size mismatch for {candidate.Entry.ArchivePath}.");
+            Directory.CreateDirectory(Path.GetDirectoryName(extracted)!); File.Move(temporary, extracted, overwrite); return extracted;
+        }
+        finally { try { if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, true); } catch { } }
+    }
+
+    /// <summary>Returns named active paths matching a directory-local prefix and extension.</summary>
+    public IReadOnlyList<string> FindKnownPaths(string rawPrefix, string extension)
+    {
+        var prefix = Normalize(rawPrefix); extension = extension.StartsWith('.') ? extension : "." + extension;
+        return _known.Keys.Where(path => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+                Path.GetExtension(path).Equals(extension, StringComparison.OrdinalIgnoreCase))
+            .Order(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     private static (long? Rank, string Description) Precedence(string relativePath, ClientArchiveScope scope, string? activeLocale)

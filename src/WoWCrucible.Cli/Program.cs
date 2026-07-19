@@ -286,6 +286,41 @@ static int Knowledge(string[] args)
 static int Asset(string[] args)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args[0].Equals("gameobject-index-plan", StringComparison.OrdinalIgnoreCase))
+    {
+        var options = args[1..]; var operands = options.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
+        if (operands.Length < 5) return Fail("asset gameobject-index-plan requires <client-index> <GameObjectDisplayInfo.dbc> <schema.xml> <new-workspace> <virtual-model-path>... .");
+        var allowed = new[] { "--display-start=", "--template-start=", "--occupied=", "--archive-choice=", "--format=" };
+        var unknown = options.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !allowed.Any(prefix => value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))).ToArray(); if (unknown.Length > 0) return Fail($"Unknown asset gameobject-index-plan option: {unknown[0]}");
+        if (!uint.TryParse(Option(options, "--display-start=") ?? "100000", out var displayStart) || displayStart == 0) return Fail("--display-start must be a positive unsigned ID.");
+        if (!uint.TryParse(Option(options, "--template-start=") ?? "100000", out var templateStart) || templateStart == 0) return Fail("--template-start must be a positive unsigned ID.");
+        var occupiedPath = Option(options, "--occupied="); var occupied = occupiedPath is null ? null : CrucibleContentProjectService.ReadOccupiedIds(occupiedPath);
+        var choices = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var option in options.Where(value => value.StartsWith("--archive-choice=", StringComparison.OrdinalIgnoreCase)))
+        {
+            var value = option["--archive-choice=".Length..]; var separator = value.IndexOf('|');
+            if (separator <= 0 || separator == value.Length - 1) return Fail("--archive-choice must use virtual-client-path|Data\\archive.MPQ.");
+            choices[value[..separator]] = value[(separator + 1)..];
+        }
+        var result = ClientIndexedAssetSnapshotService.CreateGameObjectPlan(operands[0], operands[3], operands[4..], operands[1], operands[2], displayStart, templateStart,
+            occupiedTemplateIds: occupied, archiveOverrides: choices);
+        if (options.Contains("--format=json", StringComparer.OrdinalIgnoreCase)) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"Workspace\t{Path.GetFullPath(operands[3])}\nSnapshot\t{result.SnapshotPath}\nIndexFingerprint\t{result.Snapshot.IndexFingerprint}\nReady\t{result.Plan.Ready}\nRoots\t{result.Snapshot.RootClientPaths.Count:N0}\nResolvedAssets\t{result.Snapshot.Files.Count(file => file.SourceRelativePath is not null):N0}\nExternalBindings\t{result.Snapshot.Files.Count(file => file.State == ClientIndexedAssetSnapshotState.ExternalBinding):N0}\nPlan\t{result.PlanPath}\nModels\t{result.Plan.Rows.Count:N0}\nPatchAssets\t{result.Plan.Assets.Count:N0}");
+            foreach (var row in result.Plan.Rows) Console.WriteLine($"ROW\t{row.TemplateId}\tdisplay={row.DisplayId}\t{(row.ReusesDisplay ? "REUSE" : "ADD")}\t{row.ClientPath}\t{row.Name}");
+        }
+        return result.Plan.Ready ? 0 : 3;
+    }
+    if (args[0].Equals("indexed-snapshot-verify", StringComparison.OrdinalIgnoreCase))
+    {
+        var options = args[1..]; var operands = options.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray(); if (operands.Length != 1) return Fail("asset indexed-snapshot-verify requires <indexed-assets.snapshot.json>.");
+        var unknown = options.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.Equals("--archives", StringComparison.OrdinalIgnoreCase) && !value.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !value.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown asset indexed-snapshot-verify option: {unknown[0]}");
+        var snapshot = ClientIndexedAssetSnapshotService.Load(operands[0], true, options.Contains("--archives", StringComparer.OrdinalIgnoreCase));
+        if (options.Contains("--format=json", StringComparer.OrdinalIgnoreCase)) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(snapshot, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else Console.WriteLine($"Snapshot\t{Path.GetFullPath(operands[0])}\nValid\tTrue\nArchiveIdentityChecked\t{options.Contains("--archives", StringComparer.OrdinalIgnoreCase)}\nIndexFingerprint\t{snapshot.IndexFingerprint}\nRoots\t{snapshot.RootClientPaths.Count:N0}\nResolvedAssets\t{snapshot.Files.Count(file => file.SourceRelativePath is not null):N0}\nBlockers\t{snapshot.Blocking.Count:N0}");
+        return snapshot.Ready ? 0 : 3;
+    }
     if (args[0].Equals("gameobject-bulk-plan", StringComparison.OrdinalIgnoreCase))
     {
         var options = args[1..]; var operands = options.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
@@ -994,6 +1029,8 @@ Usage:
   wowcrucible asset m2-downport-scan <file-or-folder>... [--listfile=id-path.csv] [--format=text|json]
   wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin] [--listfile=id-path.csv]
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
+  wowcrucible asset gameobject-index-plan <client-index> <GameObjectDisplayInfo.dbc> <schema.xml> <new-workspace> <virtual-model-path>... [--display-start=N] [--template-start=N] [--occupied=ids.txt] [--archive-choice=client-path|Data\archive.MPQ]... [--format=text|json]
+  wowcrucible asset indexed-snapshot-verify <indexed-assets.snapshot.json> [--archives] [--format=text|json]
   wowcrucible asset gameobject-bulk-plan <GameObjectDisplayInfo.dbc> <schema.xml> <plan.json> <model-or-folder>... [--library=processed-folder] [--client-root=folder] [--display-start=N] [--template-start=N] [--occupied=ids.txt] [--format=text|json] [--overwrite]
   wowcrucible asset gameobject-bulk-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
   wowcrucible asset creature-display-catalog <dbc-folder> [--schema=file] [--search=terms] [--limit=N] [--format=text|json]

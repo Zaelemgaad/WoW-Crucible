@@ -1265,6 +1265,40 @@ finally { File.Move(heldTerrain, graphTerrain); }
 Directory.Delete(targetClientFixture, true);
 var bulkTexture = Path.Combine(assetFixture, "Character", "BloodElf", "Female", "fixture.blp"); Directory.CreateDirectory(Path.GetDirectoryName(bulkTexture)!); File.WriteAllBytes(bulkTexture, [1, 2, 3, 4]);
 var gameObjectDisplayDbc = Path.Combine(args[1], "GameObjectDisplayInfo.dbc");
+var indexedGobClient = Path.Combine(Path.GetTempPath(), $"crucible-indexed-gob-client-{Guid.NewGuid():N}"); var indexedGobData = Path.Combine(indexedGobClient, "Data"); Directory.CreateDirectory(indexedGobData);
+Directory.CreateDirectory(Path.Combine(indexedGobClient, "WTF")); File.WriteAllText(Path.Combine(indexedGobClient, "WTF", "Config.wtf"), "SET locale \"enUS\"");
+var indexedModelClientPath = @"World\Generic\Crucible\geometry.m2"; var indexedSkinClientPath = @"World\Generic\Crucible\geometry00.skin"; var indexedTextureClientPath = @"Character\BloodElf\Female\fixture.blp";
+var indexedTextureOverride = Path.Combine(indexedGobClient, "fixture-override.blp"); File.WriteAllBytes(indexedTextureOverride, [9, 8, 7, 6]);
+var indexedGobArchives = new PatchArchiveService(); indexedGobArchives.Create(Path.Combine(indexedGobData, "common.MPQ"),
+    [new(geometryModelPath, indexedModelClientPath), new(Path.Combine(assetFixture, "geometry00.skin"), indexedSkinClientPath), new(bulkTexture, indexedTextureClientPath)]);
+var indexedGobPatch = Path.Combine(indexedGobData, "patch-4.MPQ"); indexedGobArchives.Create(indexedGobPatch,
+    [new(geometryModelPath, indexedModelClientPath), new(indexedTextureOverride, indexedTextureClientPath)]);
+var indexedGobIndex = Path.Combine(indexedGobClient, "index"); new ClientArchiveIndexService().Build(indexedGobClient, indexedGobIndex, true);
+var indexedGobWorkspace = Path.Combine(Path.GetTempPath(), $"crucible-indexed-gob-workspace-{Guid.NewGuid():N}");
+var indexedGobPlan = ClientIndexedAssetSnapshotService.CreateGameObjectPlan(indexedGobIndex, indexedGobWorkspace, [indexedModelClientPath], gameObjectDisplayDbc, args[0], 920_000, 930_000);
+var indexedGobRoot = indexedGobPlan.Snapshot.Files.Single(file => file.State == ClientIndexedAssetSnapshotState.Root); var indexedGobTexture = indexedGobPlan.Snapshot.Files.Single(file => file.ClientPath.Equals(indexedTextureClientPath, StringComparison.OrdinalIgnoreCase) && file.SourceRelativePath is not null);
+if (!indexedGobPlan.Snapshot.Ready || indexedGobPlan.Snapshot.Files.Count(file => file.SourceRelativePath is not null) != 3 || indexedGobPlan.Plan.Assets.Count != 3 ||
+    !indexedGobRoot.ArchiveRelativePath!.Equals(@"Data\patch-4.MPQ", StringComparison.OrdinalIgnoreCase) || !indexedGobTexture.ArchiveRelativePath!.Equals(@"Data\patch-4.MPQ", StringComparison.OrdinalIgnoreCase) ||
+    !File.ReadAllBytes(Path.Combine(indexedGobWorkspace, indexedGobTexture.SourceRelativePath!)).AsSpan().SequenceEqual(File.ReadAllBytes(indexedTextureOverride)))
+    throw new InvalidOperationException($"Direct indexed GameObject planning did not select effective layered MPQ bytes and close M2/SKIN/texture dependencies. ready={indexedGobPlan.Snapshot.Ready}; files={indexedGobPlan.Snapshot.Files.Count(file => file.SourceRelativePath is not null)}; assets={indexedGobPlan.Plan.Assets.Count}; root={indexedGobRoot.ArchiveRelativePath}; texture={indexedGobTexture.ArchiveRelativePath}; paths={string.Join(',', indexedGobPlan.Snapshot.Files.Select(file => $"{file.State}:{file.ClientPath}:{file.ArchiveRelativePath}"))}");
+_ = ClientIndexedAssetSnapshotService.Load(indexedGobPlan.SnapshotPath, true, true);
+var indexedGobOutput = Path.Combine(Path.GetTempPath(), $"crucible-indexed-gob-output-{Guid.NewGuid():N}"); var indexedGobResult = GameObjectBulkGeneratorService.Apply(indexedGobPlan.Plan, indexedGobOutput);
+if (!File.Exists(indexedGobResult.PatchPath) || !PatchManifestService.Validate(PatchManifestService.Load(indexedGobResult.ManifestPath), indexedGobResult.PatchPath).Passed)
+    throw new InvalidOperationException("Direct indexed GameObject plan did not apply to a valid tiny MPQ bundle.");
+var indexedGobMystery = Path.Combine(indexedGobData, "mystery.MPQ"); indexedGobArchives.Create(indexedGobMystery, [new(bulkTexture, indexedTextureClientPath)]); new ClientArchiveIndexService().Build(indexedGobClient, indexedGobIndex, true);
+var ambiguousGobWorkspace = Path.Combine(Path.GetTempPath(), $"crucible-indexed-gob-ambiguous-{Guid.NewGuid():N}"); var ambiguousGobSnapshot = ClientIndexedAssetSnapshotService.Create(indexedGobIndex, ambiguousGobWorkspace, [indexedModelClientPath]);
+if (ambiguousGobSnapshot.Ready || !ambiguousGobSnapshot.Blocking.Any(file => file.ClientPath.Equals(indexedTextureClientPath, StringComparison.OrdinalIgnoreCase) && file.State == ClientIndexedAssetSnapshotState.Ambiguous))
+    throw new InvalidOperationException("Direct indexed dependency capture trusted a nonstandard archive whose effective precedence is ambiguous.");
+var explicitGobWorkspace = Path.Combine(Path.GetTempPath(), $"crucible-indexed-gob-explicit-{Guid.NewGuid():N}"); var explicitGobSnapshot = ClientIndexedAssetSnapshotService.Create(indexedGobIndex, explicitGobWorkspace, [indexedModelClientPath],
+    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [indexedTextureClientPath] = @"Data\patch-4.MPQ" });
+if (!explicitGobSnapshot.Ready || explicitGobSnapshot.Files.Single(file => file.ClientPath.Equals(indexedTextureClientPath, StringComparison.OrdinalIgnoreCase) && file.SourceRelativePath is not null).ArchiveRelativePath != @"Data\patch-4.MPQ")
+    throw new InvalidOperationException("An explicit archive choice did not resolve and persist an ambiguous indexed dependency.");
+using (var append = new FileStream(indexedGobMystery, FileMode.Append, FileAccess.Write, FileShare.Read)) append.WriteByte(0);
+try { ClientIndexedAssetSnapshotService.Verify(explicitGobSnapshot, explicitGobWorkspace, true); throw new InvalidOperationException("An archive changed after indexed snapshot capture was accepted as current."); } catch (InvalidDataException) { }
+var indexedSnapshotSource = Path.Combine(indexedGobWorkspace, indexedGobTexture.SourceRelativePath!); File.AppendAllText(indexedSnapshotSource, "tamper");
+try { _ = ClientIndexedAssetSnapshotService.Load(indexedGobPlan.SnapshotPath); throw new InvalidOperationException("A tampered indexed source snapshot was accepted."); } catch (InvalidDataException) { }
+try { _ = GameObjectBulkGeneratorService.Apply(indexedGobPlan.Plan, Path.Combine(Path.GetTempPath(), $"crucible-indexed-gob-tampered-{Guid.NewGuid():N}")); throw new InvalidOperationException("A GameObject plan with a tampered indexed source was applied."); } catch (InvalidOperationException exception) when (exception.Message.Contains("changed after planning", StringComparison.OrdinalIgnoreCase)) { }
+Directory.Delete(indexedGobOutput, true); Directory.Delete(indexedGobWorkspace, true); Directory.Delete(ambiguousGobWorkspace, true); Directory.Delete(explicitGobWorkspace, true); Directory.Delete(indexedGobClient, true);
 var bulkPlan = GameObjectBulkGeneratorService.CreatePlan(gameObjectDisplayDbc, args[0], [geometryModelPath], 900_000, 910_000,
     clientRoot: assetFixture, occupiedTemplateIds: [910_000u, 910_002u]);
 if (!bulkPlan.Ready || bulkPlan.AddedDisplays != 1 || bulkPlan.Rows.Single().TemplateId != 910_001 || bulkPlan.Assets.Count != 3 ||

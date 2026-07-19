@@ -4,6 +4,7 @@ namespace WoWCrucible.Core;
 
 public enum ClientAssetDependencyState { Root, Resolved, TargetOverride, TargetInherited, Missing, CrossSourceConflict, TargetAmbiguous, ExternalBinding, Invalid }
 public sealed record ClientAssetLocation(string ClientPath, string Provenance, string SourcePath);
+public sealed record ClientAssetReference(string Kind, string ClientPath, bool External = false, string? Message = null, bool Missing = false);
 public sealed record ClientAssetDependencyNode(int Depth, string? ParentClientPath, string Kind, string ClientPath,
     ClientAssetDependencyState State, string Provenance, string? SourcePath, IReadOnlyList<string> Candidates, string Message,
     string? TargetArchive = null, string? TargetSha256 = null);
@@ -20,7 +21,6 @@ public static class ClientAssetDependencyService
 {
     private const int MaximumNodes = 250_000;
     private sealed record Work(string SourcePath, string ClientPath, string Provenance, int Depth);
-    private sealed record Reference(string Kind, string ClientPath, bool External = false, string? Message = null, bool Missing = false);
     private sealed record Chunk(string Id, byte[] Data);
 
     public static AssetComparisonIndex OpenLibraryLayout(string libraryRoot)
@@ -86,8 +86,8 @@ public static class ClientAssetDependencyService
         while (queue.TryDequeue(out var work))
         {
             cancellationToken.ThrowIfCancellationRequested(); if (!expanded.Add(work.SourcePath)) continue;
-            IReadOnlyList<Reference> references;
-            try { references = Inspect(work.SourcePath, work.ClientPath); }
+            IReadOnlyList<ClientAssetReference> references;
+            try { references = InspectReferences(work.SourcePath, work.ClientPath); }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 Add(new(work.Depth + 1, work.ClientPath, "parse", work.ClientPath, ClientAssetDependencyState.Invalid, work.Provenance, work.SourcePath, [work.SourcePath], exception.Message)); continue;
@@ -218,7 +218,7 @@ public static class ClientAssetDependencyService
             : new(depth, parent, kind, clientPath, ClientAssetDependencyState.CrossSourceConflict, provenance, null, candidates, $"Required {kind} exists only in {candidates.Length:N0} other provenance layer(s); Crucible will not silently mix sources.");
     }
 
-    private static IReadOnlyList<Reference> Inspect(string sourcePath, string clientPath)
+    public static IReadOnlyList<ClientAssetReference> InspectReferences(string sourcePath, string clientPath)
     {
         var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
         return extension switch
@@ -231,13 +231,17 @@ public static class ClientAssetDependencyService
         };
     }
 
-    private static IReadOnlyList<Reference> InspectM2(string path, string clientPath)
+    private static IReadOnlyList<ClientAssetReference> InspectM2(string path, string clientPath)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.SequentialScan);
         Span<byte> header = stackalloc byte[0x58]; if (stream.Read(header) != header.Length) throw new InvalidDataException("M2 header is truncated.");
         var magic = Encoding.ASCII.GetString(header[..4]); if (magic != "MD20" || BitConverter.ToUInt32(header[4..8]) != 264) throw new InvalidDataException("Recursive M2 closure currently requires an unwrapped Wrath MD20 version 264 model.");
-        var result = new List<Reference>(); var directory = Path.GetDirectoryName(clientPath) ?? string.Empty; var stem = Path.GetFileNameWithoutExtension(clientPath);
+        var result = new List<ClientAssetReference>(); var directory = Path.GetDirectoryName(clientPath) ?? string.Empty; var stem = Path.GetFileNameWithoutExtension(clientPath);
         var views = BitConverter.ToUInt32(header[0x44..0x48]); if (views > 32) throw new InvalidDataException($"M2 declares an unreasonable {views:N0} view/SKIN count.");
+        // Some valid/exported Wrath fixtures leave nViews at zero while still using
+        // the conventional 00.skin consumed by the client and Crucible preview.
+        // The model renderer requires that companion too, so closure must not omit it.
+        if (views == 0) views = 1;
         for (var index = 0; index < views; index++) result.Add(new("skin", Combine(directory, $"{stem}{index:00}.skin")));
         foreach (var animation in Directory.EnumerateFiles(Path.GetDirectoryName(path)!, Path.GetFileNameWithoutExtension(path) + "*.anim", SearchOption.TopDirectoryOnly)) result.Add(new("animation", Combine(directory, Path.GetFileName(animation))));
         foreach (var slot in M2PreviewGeometryService.InspectTextureSlots(path))
@@ -247,9 +251,9 @@ public static class ClientAssetDependencyService
         return result;
     }
 
-    private static IReadOnlyList<Reference> InspectWmo(string path, string clientPath)
+    private static IReadOnlyList<ClientAssetReference> InspectWmo(string path, string clientPath)
     {
-        var chunks = ReadChunks(path); var result = new List<Reference>(); var directory = Path.GetDirectoryName(clientPath) ?? string.Empty; var stem = Path.GetFileNameWithoutExtension(clientPath);
+        var chunks = ReadChunks(path); var result = new List<ClientAssetReference>(); var directory = Path.GetDirectoryName(clientPath) ?? string.Empty; var stem = Path.GetFileNameWithoutExtension(clientPath);
         if (!chunks.Any(chunk => chunk.Id == "MVER")) throw new InvalidDataException("WMO has no MVER chunk.");
         var root = chunks.FirstOrDefault(chunk => chunk.Id == "MOHD"); if (root is null) return [];
         foreach (var texture in Strings(chunks, "MOTX").Where(value => Path.GetExtension(value).Equals(".blp", StringComparison.OrdinalIgnoreCase))) result.Add(new("wmo-texture", texture));
@@ -260,9 +264,9 @@ public static class ClientAssetDependencyService
         return result.DistinctBy(reference => (reference.Kind, NormalizeReference(reference.ClientPath))).ToArray();
     }
 
-    private static IReadOnlyList<Reference> InspectMap(string path)
+    private static IReadOnlyList<ClientAssetReference> InspectMap(string path)
     {
-        var chunks = ReadChunks(path); var result = new List<Reference>();
+        var chunks = ReadChunks(path); var result = new List<ClientAssetReference>();
         foreach (var texture in Strings(chunks, "MTEX").Where(value => Path.GetExtension(value).Equals(".blp", StringComparison.OrdinalIgnoreCase))) result.Add(new("terrain-texture", texture));
         foreach (var model in Strings(chunks, "MMDX").Where(value => ExtensionIs(value, ".m2", ".mdx"))) result.Add(new("map-model", model));
         foreach (var wmo in Strings(chunks, "MWMO").Where(value => Path.GetExtension(value).Equals(".wmo", StringComparison.OrdinalIgnoreCase))) result.Add(new("map-wmo", wmo));

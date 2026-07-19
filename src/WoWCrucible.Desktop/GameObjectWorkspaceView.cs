@@ -36,6 +36,9 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
     private readonly Button _commit = AccentButton("Insert into connected world database"); private WorldContentWritePlan? _pendingPlan; private uint? _loadedEntry;
     private readonly TextBox _bulkSources = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, PlaceholderText = "One extracted .m2, root .wmo, or folder per line" };
     private readonly TextBox _bulkLibrary = new(); private readonly TextBox _bulkClientRoot = new() { PlaceholderText = "Optional root whose children use exact client paths" };
+    private readonly TextBox _bulkIndex = new() { PlaceholderText = "Complete client-index folder from Client workshop" };
+    private readonly TextBox _bulkVirtualSources = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, PlaceholderText = "One virtual client path per line, for example World\\Generic\\PassiveDoodads\\model.m2" };
+    private readonly TextBox _bulkArchiveChoices = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, PlaceholderText = "Optional ambiguity choices: client path | Data\\patch-X.MPQ" };
     private readonly NumericUpDown _bulkDisplayStart = Number(1, uint.MaxValue, 100000); private readonly NumericUpDown _bulkTemplateStart = Number(1, uint.MaxValue, 100000);
     private readonly TextBlock _bulkStatus = Status("Select models, then build a review plan. Nothing is written while planning.");
     private readonly TextBox _bulkPreview = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
@@ -51,7 +54,7 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
         _session = session; _session.Changed += SessionChanged; _type.SelectedIndex = 3; _bulkApply.IsEnabled = false; HookEvents(); RefreshDataLabels(); _modelHost.Children.Add(_model); _modelHost.Children.Add(_wmo);
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "GAMEOBJECTS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1) } };
-        _bulkLibrary.Text = session.Settings.ProcessedAssetLibraryPath;
+        _bulkLibrary.Text = session.Settings.ProcessedAssetLibraryPath; _bulkIndex.Text = session.Settings.ClientIndexPath;
         var editor = new TabControl { Items = { new TabItem { Header = "Template", Content = new ScrollViewer { Content = TemplateForm() } }, new TabItem { Header = "Type-aware Data0–23", Content = DataPage() }, new TabItem { Header = "World spawn", Content = new ScrollViewer { Content = SpawnForm() } }, new TabItem { Header = "Loot & quests", Content = LootQuestPage() }, new TabItem { Header = "Bulk model import", Content = BulkPage() } } };
         var loadModel = new Button { Content = "Load extracted M2 / WMO…" }; loadModel.Click += async (_, _) => await LoadModelAsync(); var clearModel = new Button { Content = "Clear" }; clearModel.Click += (_, _) => { _modelOperation?.Cancel(); _model.ClearGeometry(); _wmo.ClearGeometry(); _attachmentPicker.ItemsSource = null; _model.SetAttachmentOverlay(false); _modelStatus.Text = "Model preview cleared."; };
         _showAttachments.Click += (_, _) => ApplyAttachmentOverlay(); _attachmentPicker.SelectionChanged += (_, _) => ApplyAttachmentOverlay();
@@ -110,6 +113,8 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
         var addFolder = new Button { Content = "Add folder…" }; addFolder.Click += async (_, _) => await AddBulkFolderAsync();
         var clear = new Button { Content = "Clear list" }; clear.Click += (_, _) => { _bulkSources.Text = string.Empty; _bulkPlan = null; _bulkApply.IsEnabled = false; _bulkPreview.Text = string.Empty; };
         var plan = AccentButton("Build collision/dependency plan"); plan.Click += async (_, _) => await PlanBulkAsync(plan);
+        var browseIndex = new Button { Content = "Client index…" }; browseIndex.Click += async (_, _) => await PickBulkIndexAsync();
+        var indexedPlan = AccentButton("Build directly from indexed paths…"); indexedPlan.Click += async (_, _) => await PlanIndexedBulkAsync(indexedPlan);
         _bulkApply.Click += async (_, _) => await ApplyBulkAsync();
         var fields = new StackPanel { Spacing = 9, Margin = new Thickness(12), Children =
         {
@@ -119,11 +124,26 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
             _bulkSources,
             Form(("Processed asset library", _bulkLibrary), ("Optional client-path root", _bulkClientRoot), ("First display ID", _bulkDisplayStart), ("First template ID", _bulkTemplateStart)),
             new WrapPanel { Children = { plan, _bulkApply } },
+            new Border { BorderBrush = Brush.Parse("#2B3548"), BorderThickness = new Thickness(1), Padding = new Thickness(12), Child = new StackPanel { Spacing = 8, Children =
+            {
+                new TextBlock { Text = "Direct indexed-client source", FontSize = 16, FontWeight = FontWeight.SemiBold },
+                new TextBlock { Text = "Enter virtual M2/root-WMO paths from a complete Client workshop index. Crucible resolves the effective Wrath MPQ layer, extracts the complete recursive dependency closure into a hash-bound source snapshot, then builds the same collision-safe GameObject plan. No manual archive extraction is required.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") },
+                new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Children = { _bulkIndex, WithColumn(browseIndex, 1) } },
+                _bulkVirtualSources,
+                _bulkArchiveChoices,
+                indexedPlan
+            } } },
             _bulkStatus,
             new TextBlock { Text = "Review", FontWeight = FontWeight.SemiBold },
             _bulkPreview
         } };
         return new ScrollViewer { Content = fields };
+    }
+
+    private async Task PickBulkIndexAsync()
+    {
+        var folders = await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Select a complete Crucible client-index folder", AllowMultiple = false });
+        var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _bulkIndex.Text = Path.GetFullPath(path);
     }
 
     private async Task AddBulkFilesAsync()
@@ -167,6 +187,36 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
         finally { button.IsEnabled = true; }
     }
 
+    private async Task PlanIndexedBulkAsync(Button button)
+    {
+        var index = _bulkIndex.Text?.Trim(); var virtualSources = ParseLines(_bulkVirtualSources.Text);
+        if (string.IsNullOrWhiteSpace(index) || !Directory.Exists(index)) { _bulkStatus.Text = "Choose a complete client-index folder first."; return; }
+        if (virtualSources.Count == 0) { _bulkStatus.Text = "Enter at least one virtual M2 or root-WMO client path."; return; }
+        var folders = await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose a new or empty indexed-source workspace", AllowMultiple = false });
+        var workspace = folders.FirstOrDefault()?.TryGetLocalPath(); if (workspace is null) return;
+        _bulkOperation?.Cancel(); _bulkOperation?.Dispose(); var operation = _bulkOperation = new CancellationTokenSource();
+        try
+        {
+            button.IsEnabled = false; _bulkApply.IsEnabled = false; _bulkStatus.Text = "Resolving effective MPQ layers and extracting a verified dependency snapshot…";
+            var dbc = Path.Combine(_session.Settings.CoreDbcPath, "GameObjectDisplayInfo.dbc"); var schema = _session.Settings.SchemaDefinitionPath;
+            IReadOnlyList<uint>? occupied = null;
+            if (_session.DatabaseTested && _session.DatabaseProfile is not null && _session.DatabaseCapabilities is not null)
+            {
+                var occupancy = await new ContentIdOccupancyService().InspectAsync(ContentIdDomain.GameObject, _session.DatabaseProfile, _session.DatabaseCapabilities, null, null, cancellationToken: operation.Token);
+                if (!occupancy.Complete) throw new InvalidOperationException($"Live gameobject ID scan is incomplete: {string.Join(" ", occupancy.Warnings)}"); occupied = occupancy.OccupiedIds;
+            }
+            var choices = ParseArchiveChoices(_bulkArchiveChoices.Text); var displayStart = (uint)(_bulkDisplayStart.Value ?? 100000); var templateStart = (uint)(_bulkTemplateStart.Value ?? 100000);
+            var result = await Task.Run(() => ClientIndexedAssetSnapshotService.CreateGameObjectPlan(index, workspace, virtualSources, dbc, schema,
+                displayStart, templateStart, _session.DatabaseCapabilities, occupied, choices, operation.Token), operation.Token);
+            operation.Token.ThrowIfCancellationRequested(); _bulkPlan = result.Plan; _bulkPreview.Text = $"INDEXED SOURCE SNAPSHOT\n{result.SnapshotPath}\nFingerprint: {result.Snapshot.IndexFingerprint}\nResolved files: {result.Snapshot.Files.Count(file => file.SourceRelativePath is not null):N0}\nExternal bindings: {result.Snapshot.Files.Count(file => file.State == ClientIndexedAssetSnapshotState.ExternalBinding):N0}\n\n{BulkPlanText(result.Plan)}";
+            _bulkApply.IsEnabled = result.Plan.Ready; _bulkStatus.Text = $"Indexed plan ready · {result.Plan.Rows.Count:N0} templates · {result.Plan.Assets.Count:N0} exact dependency files · snapshot {result.SnapshotPath}.";
+            _session.Settings.ClientIndexPath = Path.GetFullPath(index); _session.Settings.Save();
+        }
+        catch (OperationCanceledException) { _bulkStatus.Text = "Indexed GameObject planning cancelled."; }
+        catch (Exception exception) { _bulkPlan = null; _bulkPreview.Text = exception.ToString(); _bulkStatus.Text = $"Indexed planning stopped safely: {exception.Message}"; DesktopCrashLogger.Log("Indexed gameobject planning failed", exception); }
+        finally { button.IsEnabled = true; }
+    }
+
     private async Task ApplyBulkAsync()
     {
         if (_bulkPlan?.Ready != true) { _bulkStatus.Text = "Build a blocker-free plan first."; return; }
@@ -181,6 +231,17 @@ internal sealed class GameObjectWorkspaceView : UserControl, IDisposable
     }
 
     private IReadOnlyList<string> ParseBulkSources() => (_bulkSources.Text ?? string.Empty).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    private static IReadOnlyList<string> ParseLines(string? text) => (text ?? string.Empty).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    private static IReadOnlyDictionary<string, string> ParseArchiveChoices(string? text)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in ParseLines(text))
+        {
+            var separator = line.IndexOf('|'); if (separator <= 0 || separator == line.Length - 1) throw new InvalidDataException($"Invalid archive choice '{line}'. Use client path | Data\\archive.MPQ.");
+            result[line[..separator].Trim()] = line[(separator + 1)..].Trim();
+        }
+        return result;
+    }
     private static string BulkPlanText(GameObjectBulkPlan plan)
     {
         var builder = new System.Text.StringBuilder(); builder.AppendLine($"Ready: {plan.Ready} · models {plan.Rows.Count:N0} · add displays {plan.AddedDisplays:N0} · reuse {plan.Rows.Count - plan.AddedDisplays:N0} · assets {plan.Assets.Count:N0}");
