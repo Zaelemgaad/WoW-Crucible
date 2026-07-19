@@ -420,6 +420,46 @@ static int Asset(string[] args)
         }
         return selected is not null ? 0 : 3;
     }
+    if (args is ["model-export", var exportModelPath, var exportObjPath, .. var exportOptions])
+    {
+        var overwrite = exportOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var allGeosets = exportOptions.Contains("--all-geosets", StringComparer.OrdinalIgnoreCase); var naked = exportOptions.Contains("--naked", StringComparer.OrdinalIgnoreCase);
+        var skinPath = Option(exportOptions, "--skin="); var animationText = Option(exportOptions, "--animation="); var timeText = Option(exportOptions, "--time="); var groupText = Option(exportOptions, "--groups=");
+        var textureOptions = exportOptions.Where(option => option.StartsWith("--texture=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var unknown = exportOptions.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) && !option.Equals("--naked", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--texture=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown model-export option: {unknown[0]}");
+        if (allGeosets && (naked || groupText is not null)) return Fail("--all-geosets cannot be combined with --naked or --groups.");
+        if (timeText is not null && animationText is null) return Fail("--time requires --animation=<sequence-index>.");
+        var selectedGroups = naked ? new Dictionary<int, int>(M2GeosetCatalog.NakedCharacterSelection) : new Dictionary<int, int>();
+        if (groupText is not null)
+        {
+            foreach (var token in groupText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var parts = token.Split(':');
+                if (parts.Length != 2 || !int.TryParse(parts[0], out var group) || !int.TryParse(parts[1], out var variant) || group < 0 || variant < 0 || variant > 99) return Fail($"Invalid geoset selection '{token}'; use group:variant with non-negative values and variants 0-99.");
+                selectedGroups[group] = variant;
+            }
+        }
+        var selection = selectedGroups.Count == 0 ? null : new M2GeosetSelection(selectedGroups, naked ? "naked CLI export preset" : "explicit CLI export selection");
+        var geometry = M2PreviewGeometryService.Load(exportModelPath, skinPath, allGeosets ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance, selection);
+        M2AnimationPose? pose = null;
+        if (animationText is not null)
+        {
+            if (!int.TryParse(animationText, out var sequence) || sequence < 0 || sequence >= geometry.Sequences.Count) return Fail($"--animation must be a sequence index from 0 through {Math.Max(0, geometry.Sequences.Count - 1)}.");
+            if (timeText is not null && (!double.TryParse(timeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsedTime) || !double.IsFinite(parsedTime))) return Fail("--time must be a finite millisecond value.");
+            var time = timeText is null ? 0d : double.Parse(timeText, System.Globalization.CultureInfo.InvariantCulture); pose = M2AnimationService.CreatePose(geometry); M2AnimationService.SampleInto(geometry, sequence, time, pose);
+        }
+        var textures = new Dictionary<int, RgbaTexture>();
+        foreach (var option in textureOptions)
+        {
+            var value = option["--texture=".Length..]; var separator = value.IndexOf(':');
+            if (separator <= 0 || !int.TryParse(value[..separator], out var slot) || slot < 0 || separator == value.Length - 1) return Fail($"Invalid texture binding '{value}'; use --texture=slot:path.blp.");
+            textures[slot] = BlpTextureService.Decode(value[(separator + 1)..]);
+        }
+        var result = M2ObjExportService.Export(geometry, exportObjPath, pose, textures, overwrite);
+        Console.WriteLine($"OBJ\t{result.ObjPath}\nMTL\t{result.MaterialPath}\nReceipt\t{result.ReceiptPath}\nVertices\t{result.Vertices:N0}\nTriangles\t{result.Triangles:N0}\nPosed\t{result.Posed}\nTextures\t{result.TexturePaths.Count:N0}");
+        foreach (var texture in result.TexturePaths) Console.WriteLine($"TEXTURE\t{texture}");
+        return 0;
+    }
     if (args is ["preview-info", var previewModelPath, .. var previewOptions])
     {
         var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.Equals("--naked", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -536,6 +576,7 @@ Usage:
   wowcrucible asset inspect <model.m2|building.wmo>...
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
   wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
+  wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--naked|--groups=group:variant,...|--all-geosets] [--overwrite]
   wowcrucible asset wmo-preview-info <root-or-group.wmo> [--groups] [--content-root=folder] [--format=text|json]
   wowcrucible asset path-candidates <processed-library> <client-path> [--preferred=provenance] [--format=text|json]
   wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>

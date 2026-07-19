@@ -113,6 +113,22 @@ public static class M2AnimationService
         return new(geometry.Vertices.Count, geometry.Bones.Count, geometry.Attachments.Count);
     }
 
+    public static M2AnimationPose SnapshotPose(M2PreviewGeometry geometry, M2AnimationPose pose)
+    {
+        ArgumentNullException.ThrowIfNull(geometry); ArgumentNullException.ThrowIfNull(pose);
+        if (pose.Vertices.Length != geometry.Vertices.Count || pose.Normals.Length != geometry.Vertices.Count || pose.BoneTransforms.Length != geometry.Bones.Count || pose.AttachmentPositions.Length != geometry.Attachments.Count || pose.SequenceIndex < 0)
+            throw new ArgumentException("The sampled animation pose does not belong to this geometry or has not been sampled.", nameof(pose));
+        var snapshot = new M2AnimationPose(pose.Vertices.Length, pose.BoneTransforms.Length, pose.AttachmentPositions.Length)
+        {
+            Minimum = pose.Minimum,
+            Maximum = pose.Maximum,
+            SequenceIndex = pose.SequenceIndex,
+            TimeMilliseconds = pose.TimeMilliseconds
+        };
+        pose.Vertices.CopyTo(snapshot.Vertices, 0); pose.Normals.CopyTo(snapshot.Normals, 0); pose.BoneTransforms.CopyTo(snapshot.BoneTransforms, 0); pose.AttachmentPositions.CopyTo(snapshot.AttachmentPositions, 0);
+        return snapshot;
+    }
+
     public static void SampleInto(M2PreviewGeometry geometry, int sequenceIndex, double elapsedMilliseconds, M2AnimationPose pose)
     {
         ArgumentNullException.ThrowIfNull(geometry); ArgumentNullException.ThrowIfNull(pose);

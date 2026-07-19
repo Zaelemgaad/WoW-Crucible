@@ -52,6 +52,7 @@ wowcrucible asset texture-validate <file-or-folder> [--recursive]
 wowcrucible asset inspect <model.m2|building.wmo>...
 wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] ["--target-choice=client-path|archive"]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
 wowcrucible asset preview-info <wrath-model.m2> [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
+wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--naked|--groups=group:variant,...|--all-geosets] [--overwrite]
 wowcrucible asset wmo-preview-info <root-or-group.wmo> [--groups] [--content-root=folder] [--format=text|json]
 wowcrucible asset path-candidates <processed-library> <client-path> [--preferred=provenance] [--format=text|json]
 wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>
@@ -77,6 +78,8 @@ wowcrucible asset definitive-stage <library-folder> <output-folder>
 The same native inspection/workspace flow is available under **Modern asset conversion** in the desktop navigation. It accepts recursive drag/drop, keeps source and dependency snapshots immutable and hash-verified, reopens moved `conversion-report.json` workspaces, and previews M2 files that are already compatible with WotLK 3.3.5a. A successful inspection does not claim that a modern MD21 model has been converted; output writing remains intentionally blocked until its translated structures can be validated.
 
 `preview-info` reports every Wrath animation sequence. Add `--animation=N --time=MS` to resolve aliases and external `.anim` files, sample the weighted bone pose at an exact time, and report its resulting bounds. This is the command-line diagnostic for the same animation path used by the in-window model preview.
+
+`model-export` writes the exact currently requested visible mesh as Wavefront OBJ/MTL. `--animation=N --time=MS` exports the sampled weighted pose; without it the bind mesh is exported. `--texture=slot:file.blp` decodes a real M2 texture definition to a neighboring PNG and binds it in the MTL. A `.crucible-model.json` receipt retains source M2/SKIN hashes, geoset selection, animation time, and the original WoW render flags/blend modes that OBJ cannot represent exactly. Existing outputs are refused unless `--overwrite` is explicit. The same export is available above the live model in Asset Compare and snapshots the current scrubbed pose before background writing.
 
 `wmo-preview-info` loads a WotLK WMO root (or infers the root from a selected `_###.wmo` group), validates root/group chunk bounds and render indices, and reports groups, vertices, triangles, material bindings, bounds, missing/collision-only groups, and resolved BLP paths. `--groups` includes per-group geometry details. `--content-root` supplies an extracted client root for texture resolution; processed libraries otherwise prefer the WMO's exact provenance and use another provenance only when exactly one candidate exists. The same bounded loader drives the embedded WMO views in Modern asset conversion, GameObjects, and Maps & World.
 

@@ -77,6 +77,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly Dictionary<int, int> _manualGeosetVariants = [];
     private IReadOnlyList<AssetComparisonModel> _allModels = []; private IReadOnlyList<AssetComparisonModel> _folderModels = []; private Control? _imageComparisonPane; private Control? _modelPreviewPane; private Control? _imageComparisonTools; private Control? _imageDirectoryTools; private Control? _imageCardScroller; private Control? _imagePager; private Control? _modelOnlyCatalogNotice; private AssetComparisonEntry? _selectedTexture; private M2PreviewGeometry? _loadedModelGeometry;
     private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath; private string? _geosetInspectorModel; private int _resolvedModelTextureCount; private bool _appearanceComposed;
+    private IReadOnlyDictionary<int, RgbaTexture> _loadedModelTextures = new Dictionary<int, RgbaTexture>();
     private Task? _modelDiscoveryTask;
     private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _suppressAppearanceSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
 
@@ -253,7 +254,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                 }
             }
         };
-        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _geosetMode, geosetInspector, attachmentInspector, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
+        var exportModel = new Button { Content = "Export visible/current-pose OBJ…" }; exportModel.Click += async (_, _) => await RunUiActionAsync("model-export", ExportModelAsync);
+        var modelActions = new WrapPanel { Orientation = Orientation.Horizontal, Children = { exportModel } };
+        var modelHeader = new StackPanel { Spacing = 7, Margin = new Thickness(9), Children = { new TextBlock { Text = "AUTOMATIC M2 MODEL BROWSER", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, modelFilters, _modelPicker, _geosetMode, modelActions, geosetInspector, attachmentInspector, appearanceHeader, appearancePickers, _appearanceStatus, _modelStatus } };
         var modelHeaderScroll = new ScrollViewer { Content = modelHeader, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
         var modelPane = new Grid { RowDefinitions = new("2*,Auto,3*"), IsVisible = false, Children = { modelHeaderScroll } };
         var modelSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }; Grid.SetRow(modelSplitter, 1); modelPane.Children.Add(modelSplitter);
@@ -351,7 +354,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var modelOnly = IsModelOnlyDirectory(directory);
         _directoryReady = false; _modelsDiscovered = false; _folderEntries = []; _filteredEntries = []; _selectedTexture = null; _resolvedModelTexturePath = null; _resolvedModelTextureCount = 0; _appearanceComposed = false;
         _modelDiscoveryTask = null;
-        _allModels = []; _folderModels = []; _modelDiscoveryScope = directory.LogicalPath; _loadedModelGeometry = null; _modelDependencyGraph = null;
+        _allModels = []; _folderModels = []; _modelDiscoveryScope = directory.LogicalPath; _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>(); _modelDependencyGraph = null;
         _modelView.ClearGeometry(); _modelView.SetTexture(null); ApplyDirectoryPresentation(directory, modelOnly); FilterModels(requestModelLoad: false);
         foreach (var bitmap in _thumbnailBitmaps) bitmap.Dispose(); _thumbnailBitmaps.Clear(); _cards.Children.Clear(); _pageStatus.Text = "Loading directory…";
         _folderTitle.Text = string.IsNullOrEmpty(directory.LogicalPath) ? "(archive root)" : directory.LogicalPath;
@@ -464,7 +467,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         if (!_active) return;
         var activity = _activityVersion; var request = ++_imageSelectionRequest;
         _imageSelectionCancellation?.Cancel(); _imageSelectionCancellation?.Dispose(); _imageSelectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token); var token = _imageSelectionCancellation.Token;
-        _selectedTexture = entry; _resolvedModelTexturePath = null; _resolvedModelTextureCount = 0; _modelView.SetTexture(entry.FullPath); UpdateModelStatus();
+        _selectedTexture = entry; _resolvedModelTexturePath = null; _resolvedModelTextureCount = 0; _loadedModelTextures = new Dictionary<int, RgbaTexture>(); _modelView.SetTexture(entry.FullPath); UpdateModelStatus();
         var slot = _activeSlot; try
         {
             var bitmap = await Task.Run(() => new Bitmap(entry.FullPath), token); if (!IsCurrent(token, activity) || request != _imageSelectionRequest) { bitmap.Dispose(); return; } _comparisonBitmaps[slot]?.Dispose(); _comparisonBitmaps[slot] = bitmap; _comparisonImages[slot].Source = bitmap;
@@ -534,6 +537,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _modelCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token, directoryToken); var token = _modelCancellation.Token;
         if (_modelPicker.SelectedItem is not AssetComparisonModel model)
         {
+            _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>();
             ClearGeosetInspector("Choose a compatible M2 to inspect its geosets.");
             ClearAttachmentInspector("Choose a compatible M2 to inspect its attachment points.");
             _modelStatus.Text = _allModels.Count == 0
@@ -541,7 +545,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                 : $"{_allModels.Count:N0} M2 file(s) were discovered, but none match the current model filter. Choose All models to inspect compatibility details.";
             return;
         }
-        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _modelDependencyGraph = null; _modelView.ClearGeometry(); ClearGeosetInspector("This model has no compatible M2/SKIN geometry to inspect."); ClearAttachmentInspector("This model has no compatible attachment data to inspect."); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
+        if (model.Compatibility != AssetModelCompatibility.Ready || model.SkinPath is null) { _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>(); _modelDependencyGraph = null; _modelView.ClearGeometry(); ClearGeosetInspector("This model has no compatible M2/SKIN geometry to inspect."); ClearAttachmentInspector("This model has no compatible attachment data to inspect."); _modelStatus.Text = $"{model.Status}\nSource: {model.Provenance} · {model.LogicalPath}\nChoose a READY model to render it."; return; }
         _modelStatus.Text = $"Loading {model.FileName}…";
         var stopwatch = Stopwatch.StartNew();
         DesktopCrashLogger.Debug("MODEL", "comparison-preview-start", ("model", model.ModelPath), ("skin", model.SkinPath));
@@ -597,7 +601,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
                     if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
                 }
             }
-            _loadedModelGeometry = geometry; _modelDependencyGraph = graph; _resolvedModelTexturePath = embeddedTexturePath; _resolvedModelTextureCount = embeddedTextures.Count; RefreshGeosetInspector(geometry); RefreshAttachmentInspector(geometry); _modelView.SetGeometry(geometry); ApplyAttachmentOverlay();
+            _loadedModelGeometry = geometry; _loadedModelTextures = new Dictionary<int, RgbaTexture>(embeddedTextures); _modelDependencyGraph = graph; _resolvedModelTexturePath = embeddedTexturePath; _resolvedModelTextureCount = embeddedTextures.Count; RefreshGeosetInspector(geometry); RefreshAttachmentInspector(geometry); _modelView.SetGeometry(geometry); ApplyAttachmentOverlay();
             if (_selectedTexture is null) _modelView.SetDecodedTextures(embeddedTextures);
             UpdateModelStatus();
             DesktopCrashLogger.Debug("MODEL", "comparison-preview-success", ("model", model.ModelPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("texture_slots", geometry.TextureSlots.Count), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
@@ -606,6 +610,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         catch (Exception exception)
         {
             if (!IsCurrent(token, activity) || request != _modelRequest) return;
+            _loadedModelGeometry = null; _loadedModelTextures = new Dictionary<int, RgbaTexture>();
             DesktopCrashLogger.Log($"Comparison model preview failed: {model.ModelPath}", exception); ClearGeosetInspector("Model loading failed before the geoset table could be inspected."); ClearAttachmentInspector("Model loading failed before attachment points could be inspected.");
             _modelStatus.Text = $"Could not load {model.FileName}: {exception.Message}";
         }
@@ -723,6 +728,27 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         };
     }
 
+    private async Task ExportModelAsync()
+    {
+        if (_loadedModelGeometry is null || _modelPicker.SelectedItem is not AssetComparisonModel model)
+        {
+            _modelStatus.Text = "Load a READY M2/SKIN model before exporting.";
+            return;
+        }
+        var file = await GetStorageProvider().SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export the visible/current-pose model",
+            SuggestedFileName = Path.GetFileNameWithoutExtension(model.FileName) + "-visible.obj",
+            FileTypeChoices = [new FilePickerFileType("Wavefront model") { Patterns = ["*.obj"] }]
+        });
+        var path = file?.TryGetLocalPath(); if (path is null) return;
+        var geometry = _loadedModelGeometry; var pose = _modelView.SnapshotPose(); var textures = new Dictionary<int, RgbaTexture>(_loadedModelTextures);
+        _modelStatus.Text = $"Exporting {geometry.TriangleIndices.Count / 3:N0} visible triangle(s)…";
+        var result = await Task.Run(() => M2ObjExportService.Export(geometry, path, pose, textures, overwrite: true));
+        _modelStatus.Text = $"Exported {(result.Posed ? "the current animation pose" : "the static visible mesh")} as {result.Triangles:N0} triangle(s) with {result.TexturePaths.Count:N0} resolved texture(s).\nOBJ: {result.ObjPath}\nExact provenance and WoW material metadata: {result.ReceiptPath}";
+        DesktopCrashLogger.Debug("MODEL", "obj-export-success", ("model", geometry.ModelPath), ("output", result.ObjPath), ("vertices", result.Vertices), ("triangles", result.Triangles), ("posed", result.Posed), ("textures", result.TexturePaths.Count));
+    }
+
     private void UpdateModelStatus()
     {
         if (_modelPicker.SelectedItem is not AssetComparisonModel model) return;
@@ -739,12 +765,12 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var visibleGeosets = _loadedModelGeometry is null ? string.Empty : string.Join(" · ", M2GeosetCatalog.Describe(_loadedModelGeometry.Submeshes)
             .SelectMany(group => group.Variants.Where(variant => variant.Visible).Select(variant => $"{group.Name}={variant.Variant}")));
         var previewNote = _appearanceComposed
-            ? "Geometry, per-submesh materials, and the selected CharSections body/face/facial-hair/underwear/scalp/hair appearance are live. Equipment, animation, and multi-pass shaders remain fidelity stages."
+            ? "Geometry, supported multi-pass blend modes, the selected CharSections appearance, and animation playback are live. Exact multi-texture shader combiners and particles remain fidelity stages; the visible/current pose can be exported above."
             : _resolvedModelTexturePath is not null
-            ? "Geometry and first-pass per-submesh texture-unit assignment are live. Unresolved replaceable slots and multi-pass shader blending remain fidelity stages."
+            ? "Geometry, resolved per-pass textures, supported WoW blend modes, and animation playback are live. Unresolved replaceable slots, exact multi-texture shader combiners, and particles remain fidelity stages."
             : _modelOnlyDirectory
-            ? "Geometry is live. Replacement texture resolution and Character layer/CharSections composition remain approximate until the full appearance plan supplies every layer."
-            : "Geometry and the selected PNG texture are live. Character layer/CharSections composition is still an approximation until the full appearance plan supplies every layer.";
+            ? "Geometry and animation are live. Replacement texture resolution and Character layer/CharSections composition remain incomplete until the appearance plan supplies every layer."
+            : "Geometry, animation, and the selected PNG diagnostic override are live. The override is not treated as an invented WoW material binding.";
         _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{geosets}{(visibleGeosets.Length == 0 ? string.Empty : $"\nVisible groups: {visibleGeosets}")}\n{texture}\n{slots}\n{dependencies}\n{previewNote}";
     }
 

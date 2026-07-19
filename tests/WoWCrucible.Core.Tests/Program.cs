@@ -522,6 +522,19 @@ if (animatedGeometry.Sequences.Count != 1 || animatedGeometry.Sequences[0].Anima
     Math.Abs(animatedMountedOrigin.X - animatedPose.AttachmentPositions[0].X) > 0.0001f || Math.Abs(animatedMountedOrigin.Y - animatedPose.AttachmentPositions[0].Y) > 0.0001f || Math.Abs(animatedMountedOrigin.Z - animatedPose.AttachmentPositions[0].Z) > 0.0001f ||
     animatedPose.SequenceIndex != 0 || Math.Abs(animatedPose.TimeMilliseconds - 500) > 0.0001)
     throw new InvalidOperationException("Wrath M2 linear bone animation sampling, weighted skinning, or attachment transformation failed.");
+var modelExportPath = Path.Combine(assetFixture, "exports", "animated-visible.obj");
+var modelExport = M2ObjExportService.Export(animatedGeometry, modelExportPath, animatedPose, new Dictionary<int, RgbaTexture> { [0] = new(1, 1, [12, 34, 56, 255]) });
+var exportedObj = File.ReadAllText(modelExport.ObjPath); var exportedMtl = File.ReadAllText(modelExport.MaterialPath);
+var exportReceipt = JsonSerializer.Deserialize<M2ObjExportReceipt>(File.ReadAllText(modelExport.ReceiptPath)) ?? throw new InvalidDataException("M2 OBJ export receipt is empty.");
+if (!modelExport.Posed || modelExport.Vertices != 3 || modelExport.Triangles != 2 || modelExport.TexturePaths.Count != 1 ||
+    exportedObj.Split('\n').Count(line => line.StartsWith("v ", StringComparison.Ordinal)) != 3 || exportedObj.Split('\n').Count(line => line.StartsWith("f ", StringComparison.Ordinal)) != 2 ||
+    !exportedObj.Contains("# animation sequence=0 time-ms=500", StringComparison.Ordinal) || !exportedObj.Contains("v 0 0 -1", StringComparison.Ordinal) ||
+    !exportedMtl.Contains("map_Kd animated-visible-texture-000.png", StringComparison.Ordinal) || !File.Exists(modelExport.TexturePaths[0]) ||
+    exportReceipt.Format != "wow-crucible-m2-obj-v1" || exportReceipt.AnimationSequenceIndex != 0 || exportReceipt.AnimationTimeMilliseconds != 500 ||
+    exportReceipt.Materials.Count != 2 || exportReceipt.Triangles != 2 || exportReceipt.TextureFiles.Single() != "animated-visible-texture-000.png")
+    throw new InvalidOperationException("Native M2 OBJ export did not preserve visible geosets, sampled pose, materials, texture output, or its provenance receipt.");
+try { _ = M2ObjExportService.Export(animatedGeometry, modelExportPath, animatedPose); throw new InvalidOperationException("M2 OBJ export silently replaced an existing output without --overwrite."); }
+catch (IOException) { }
 var invalidAttachmentModel = Path.Combine(assetFixture, "geometry-invalid.m2"); var invalidAttachmentBytes = geometryBytes.ToArray(); BitConverter.GetBytes((uint)2).CopyTo(invalidAttachmentBytes, fixtureAttachmentOffset + 4); File.WriteAllBytes(invalidAttachmentModel, invalidAttachmentBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-invalid00.skin"));
 try { _ = M2PreviewGeometryService.Load(invalidAttachmentModel); throw new InvalidOperationException("An M2 attachment pointing beyond the bone table was accepted."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("references bone", StringComparison.Ordinal)) { }

@@ -70,6 +70,7 @@ public sealed class M2PreviewView : UserControl, IDisposable
         _canvas.SetMountedModels(models); UpdatePlaybackAvailability();
     }
     public void ClearMountedModels() { _canvas.ClearMountedModels(); UpdatePlaybackAvailability(); }
+    public M2AnimationPose? SnapshotPose() => _geometry is null || _pose is null ? null : M2AnimationService.SnapshotPose(_geometry, _pose);
 
     private void SelectSequence()
     {
