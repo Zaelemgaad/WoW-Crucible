@@ -22,6 +22,15 @@ public sealed record M2PreviewAttachment(int Index, uint Id, string Name, int Bo
     public override string ToString() => $"{Id:N0} · {Name} · bone {BoneIndex:N0}";
 }
 public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
+public enum M2PreviewTextureCoordinateSource { Primary, Secondary, Environment, Unsupported }
+public enum M2PreviewTextureStageBlend { Source, Modulate, Modulate2X, Add, AddNoAlpha, Unsupported }
+public sealed record M2PreviewTextureStage(int StageIndex, int TextureLookupIndex, int TextureDefinitionIndex,
+    short TextureCoordinateLookup, M2PreviewTextureCoordinateSource CoordinateSource,
+    int? TransparencyDefinitionIndex, int? TextureAnimationDefinitionIndex, M2PreviewTextureStageBlend Blend);
+public sealed record M2PreviewTextureCombiner(string Name, bool Supported, bool Exact)
+{
+    public static M2PreviewTextureCombiner None { get; } = new("No textures", true, true);
+}
 public sealed record M2GeosetSelection(IReadOnlyDictionary<int, int> GroupVariants, string Source);
 public sealed record M2PreviewSubmesh(int Index, ushort GeosetId, ushort Level, int VertexStart, int VertexCount, int TriangleStart, int TriangleIndexCount, bool Visible)
 {
@@ -29,12 +38,18 @@ public sealed record M2PreviewSubmesh(int Index, ushort GeosetId, ushort Level, 
     public int GeosetVariant => M2GeosetCatalog.Variant(GeosetId);
     public string GeosetGroupName => M2GeosetCatalog.GroupName(GeosetGroup);
 }
-public sealed record M2PreviewMaterialUnit(int Index, byte Flags, sbyte PriorityPlane, ushort ShaderId, ushort SubmeshIndex, ushort SecondarySubmeshIndex, short ColorIndex, ushort RenderFlagsIndex, ushort TextureUnitLookupIndex, ushort TextureCount, ushort TextureLookupIndex, int TextureDefinitionIndex, ushort SecondaryTextureUnitLookupIndex, ushort TransparencyLookupIndex, ushort TextureAnimationLookupIndex);
+public sealed record M2PreviewMaterialUnit(int Index, byte Flags, sbyte PriorityPlane, ushort ShaderId, ushort SubmeshIndex, ushort SecondarySubmeshIndex, short ColorIndex, ushort RenderFlagsIndex, ushort TextureUnitLookupIndex, ushort TextureCount, ushort TextureLookupIndex, int TextureDefinitionIndex, ushort SecondaryTextureUnitLookupIndex, ushort TransparencyLookupIndex, ushort TextureAnimationLookupIndex)
+{
+    public IReadOnlyList<M2PreviewTextureStage> TextureStages { get; init; } = [];
+    public M2PreviewTextureCombiner Combiner { get; init; } = M2PreviewTextureCombiner.None;
+}
 public sealed record M2PreviewBatch(int SubmeshIndex, ushort GeosetId, int TriangleStart, int TriangleIndexCount, int? MaterialUnitIndex, int? TextureDefinitionIndex)
 {
     public ushort RenderFlags { get; init; }
     public ushort BlendMode { get; init; }
     public sbyte PriorityPlane { get; init; }
+    public IReadOnlyList<M2PreviewTextureStage> TextureStages { get; init; } = [];
+    public M2PreviewTextureCombiner Combiner { get; init; } = M2PreviewTextureCombiner.None;
 }
 public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadOnlyList<Vector3> Vertices, IReadOnlyList<Vector3> Normals, IReadOnlyList<Vector2> TextureCoordinates, IReadOnlyList<int> TriangleIndices, Vector3 Minimum, Vector3 Maximum, IReadOnlyList<M2TextureSlot> TextureSlots)
 {
@@ -45,6 +60,7 @@ public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadO
     public IReadOnlyList<M2PreviewBone> Bones { get; init; } = [];
     public IReadOnlyList<M2PreviewAttachment> Attachments { get; init; } = [];
     public IReadOnlyList<M2PreviewSequence> Sequences { get; init; } = [];
+    public IReadOnlyList<Vector2> SecondaryTextureCoordinates { get; init; } = [];
     public int TotalTriangleIndices { get; init; } = TriangleIndices.Count;
     public M2PreviewVisibilityMode VisibilityMode { get; init; } = M2PreviewVisibilityMode.BaseAppearance;
     public M2GeosetSelection? GeosetSelection { get; init; }
@@ -69,7 +85,7 @@ public static class M2PreviewGeometryService
         var vertexCount = CheckedCount(ReadUInt(model, 0x3C), MaximumVertices, "M2 vertex");
         var vertexOffset = CheckedOffset(ReadUInt(model, 0x40), "M2 vertex");
         RequireRange(model, vertexOffset, vertexCount, VertexStride, "M2 vertices");
-        var vertices = new Vector3[vertexCount]; var normals = new Vector3[vertexCount]; var textureCoordinates = new Vector2[vertexCount];
+        var vertices = new Vector3[vertexCount]; var normals = new Vector3[vertexCount]; var textureCoordinates = new Vector2[vertexCount]; var secondaryTextureCoordinates = new Vector2[vertexCount];
         var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity);
         for (var index = 0; index < vertexCount; index++)
         {
@@ -77,7 +93,8 @@ public static class M2PreviewGeometryService
             var vertex = ReadVector(model, offset); var normal = ReadVector(model, offset + 20);
             if (!Finite(vertex) || !Finite(normal)) throw new InvalidDataException($"M2 vertex {index:N0} contains a non-finite coordinate.");
             var uv = new Vector2(BitConverter.ToSingle(model, offset + 32), BitConverter.ToSingle(model, offset + 36));
-            vertices[index] = vertex; normals[index] = normal; textureCoordinates[index] = Finite(uv) ? uv : Vector2.Zero; minimum = Vector3.Min(minimum, vertex); maximum = Vector3.Max(maximum, vertex);
+            var secondaryUv = new Vector2(BitConverter.ToSingle(model, offset + 40), BitConverter.ToSingle(model, offset + 44));
+            vertices[index] = vertex; normals[index] = normal; textureCoordinates[index] = Finite(uv) ? uv : Vector2.Zero; secondaryTextureCoordinates[index] = Finite(secondaryUv) ? secondaryUv : Vector2.Zero; minimum = Vector3.Min(minimum, vertex); maximum = Vector3.Max(maximum, vertex);
         }
 
         var bones = ReadBones(model);
@@ -86,6 +103,9 @@ public static class M2PreviewGeometryService
         var textureSlots = ReadTextureSlots(model);
         var renderFlags = ReadRenderFlags(model);
         var textureLookup = ReadTextureLookup(model, textureSlots.Count);
+        var textureCoordinateLookup = ReadSignedLookup(model, 0x88, 0x8C, "M2 texture-coordinate lookup");
+        var transparencyLookup = ReadUnsignedLookup(model, 0x90, 0x94, "M2 transparency lookup");
+        var textureAnimationLookup = ReadUnsignedLookup(model, 0x98, 0x9C, "M2 texture-animation lookup");
         skinPath = ResolveSkin(modelPath, skinPath);
         var skin = File.ReadAllBytes(skinPath);
         if (skin.Length < 48 || FourCc(skin, 0) != "SKIN") throw new InvalidDataException("The companion file is not a valid SKIN container.");
@@ -103,7 +123,7 @@ public static class M2PreviewGeometryService
             if (vertexIndex >= vertices.Length) throw new InvalidDataException($"SKIN lookup {lookupIndex:N0} references M2 vertex {vertexIndex:N0}, but only {vertices.Length:N0} vertices exist.");
             allTriangles[index] = vertexIndex;
         }
-        var materialUnits = ReadMaterialUnits(skin, textureLookup, textureSlots.Count, renderFlags.Count);
+        var materialUnits = ReadMaterialUnits(skin, textureLookup, textureCoordinateLookup, transparencyLookup, textureAnimationLookup, textureSlots.Count, renderFlags.Count);
         var (submeshes, triangles, batches) = ReadVisibleSubmeshes(skin, allTriangles, materialUnits, renderFlags, visibilityMode, geosetSelection);
         if (triangles.Length > 0)
         {
@@ -119,6 +139,7 @@ public static class M2PreviewGeometryService
             Bones = bones,
             Attachments = attachments,
             Sequences = animationRig.Sequences,
+            SecondaryTextureCoordinates = secondaryTextureCoordinates,
             TotalTriangleIndices = allTriangles.Length,
             VisibilityMode = visibilityMode,
             GeosetSelection = geosetSelection,
@@ -237,7 +258,33 @@ public static class M2PreviewGeometryService
         return result;
     }
 
-    private static IReadOnlyList<M2PreviewMaterialUnit> ReadMaterialUnits(byte[] skin, IReadOnlyList<ushort> textureLookup, int textureCount, int renderFlagCount)
+    private static short[] ReadSignedLookup(byte[] model, int countOffset, int dataOffset, string label)
+    {
+        const int MaximumLookups = 65_536;
+        if (model.Length < dataOffset + 4) return [];
+        var count = CheckedCount(ReadUInt(model, countOffset), MaximumLookups, label);
+        var offset = CheckedOffset(ReadUInt(model, dataOffset), label);
+        RequireRange(model, offset, count, 2, label);
+        var result = new short[count];
+        for (var index = 0; index < count; index++) result[index] = ReadShort(model, offset + index * 2);
+        return result;
+    }
+
+    private static ushort[] ReadUnsignedLookup(byte[] model, int countOffset, int dataOffset, string label)
+    {
+        const int MaximumLookups = 65_536;
+        if (model.Length < dataOffset + 4) return [];
+        var count = CheckedCount(ReadUInt(model, countOffset), MaximumLookups, label);
+        var offset = CheckedOffset(ReadUInt(model, dataOffset), label);
+        RequireRange(model, offset, count, 2, label);
+        var result = new ushort[count];
+        for (var index = 0; index < count; index++) result[index] = ReadUShort(model, offset + index * 2);
+        return result;
+    }
+
+    private static IReadOnlyList<M2PreviewMaterialUnit> ReadMaterialUnits(byte[] skin, IReadOnlyList<ushort> textureLookup,
+        IReadOnlyList<short> textureCoordinateLookup, IReadOnlyList<ushort> transparencyLookup,
+        IReadOnlyList<ushort> textureAnimationLookup, int textureCount, int renderFlagCount)
     {
         const int CountOffset = 36; const int DataOffset = 40; const int MaterialStride = 24; const int MaximumMaterials = 131_072;
         if (skin.Length < DataOffset + 4) return [];
@@ -250,14 +297,88 @@ public static class M2PreviewGeometryService
             var item = offset + index * MaterialStride;
             var textureLookupIndex = ReadUShort(skin, item + 16);
             var renderFlagsIndex = ReadUShort(skin, item + 10);
+            var stageCount = ReadUShort(skin, item + 14);
+            if (stageCount > 64) throw new InvalidDataException($"SKIN material unit {index:N0} declares {stageCount:N0} texture stages; the WotLK preview safety limit is 64.");
+            var shaderId = ReadUShort(skin, item + 2);
+            var textureCoordinateLookupIndex = ReadUShort(skin, item + 18);
+            var transparencyLookupIndex = ReadUShort(skin, item + 20);
+            var textureAnimationLookupIndex = ReadUShort(skin, item + 22);
             if (renderFlagCount > 0 && renderFlagsIndex >= renderFlagCount) throw new InvalidDataException($"SKIN material unit {index:N0} references render flag {renderFlagsIndex:N0}, but only {renderFlagCount:N0} records exist.");
-            var textureDefinitionIndex = textureLookupIndex < textureLookup.Count ? textureLookup[textureLookupIndex] : -1;
-            if (textureLookup.Count == 0 && textureLookupIndex < textureCount) textureDefinitionIndex = textureLookupIndex;
-            result[index] = new(index, skin[item], unchecked((sbyte)skin[item + 1]), ReadUShort(skin, item + 2), ReadUShort(skin, item + 4), ReadUShort(skin, item + 6),
-                ReadShort(skin, item + 8), renderFlagsIndex, ReadUShort(skin, item + 12), ReadUShort(skin, item + 14), textureLookupIndex,
-                textureDefinitionIndex, ReadUShort(skin, item + 18), ReadUShort(skin, item + 20), ReadUShort(skin, item + 22));
+            var combiner = DescribeCombiner(shaderId, stageCount);
+            var stages = new M2PreviewTextureStage[stageCount];
+            for (var stage = 0; stage < stages.Length; stage++)
+            {
+                var lookupIndex = textureLookupIndex + stage;
+                var definitionIndex = lookupIndex < textureLookup.Count ? textureLookup[lookupIndex] : textureLookup.Count == 0 && lookupIndex < textureCount ? lookupIndex : -1;
+                var coordinateIndex = textureCoordinateLookupIndex + stage;
+                var coordinate = coordinateIndex < textureCoordinateLookup.Count ? textureCoordinateLookup[coordinateIndex] : short.MinValue;
+                var source = coordinate switch
+                {
+                    0 => M2PreviewTextureCoordinateSource.Primary,
+                    1 => M2PreviewTextureCoordinateSource.Secondary,
+                    -1 => M2PreviewTextureCoordinateSource.Environment,
+                    _ => M2PreviewTextureCoordinateSource.Unsupported
+                };
+                int? transparencyIndex = transparencyLookupIndex + stage < transparencyLookup.Count && transparencyLookup[transparencyLookupIndex + stage] != ushort.MaxValue
+                    ? transparencyLookup[transparencyLookupIndex + stage]
+                    : null;
+                int? animationIndex = textureAnimationLookupIndex + stage < textureAnimationLookup.Count && textureAnimationLookup[textureAnimationLookupIndex + stage] != ushort.MaxValue
+                    ? textureAnimationLookup[textureAnimationLookupIndex + stage]
+                    : null;
+                stages[stage] = new(stage, lookupIndex, definitionIndex, coordinate, source, transparencyIndex, animationIndex,
+                    StageBlend(combiner.Name, stage));
+            }
+            var textureDefinitionIndex = stages.FirstOrDefault()?.TextureDefinitionIndex ?? -1;
+            var supported = combiner.Supported && stages.All(stage => stage.TextureDefinitionIndex >= 0 && stage.CoordinateSource is M2PreviewTextureCoordinateSource.Primary or M2PreviewTextureCoordinateSource.Secondary);
+            if (supported != combiner.Supported) combiner = combiner with { Supported = false, Exact = false };
+            result[index] = new(index, skin[item], unchecked((sbyte)skin[item + 1]), shaderId, ReadUShort(skin, item + 4), ReadUShort(skin, item + 6),
+                ReadShort(skin, item + 8), renderFlagsIndex, ReadUShort(skin, item + 12), stageCount, textureLookupIndex,
+                textureDefinitionIndex, textureCoordinateLookupIndex, transparencyLookupIndex, textureAnimationLookupIndex)
+            {
+                TextureStages = stages,
+                Combiner = combiner
+            };
         }
         return result;
+    }
+
+    internal static M2PreviewTextureCombiner DescribeCombiner(ushort shaderId, int textureCount)
+    {
+        if (textureCount <= 0) return M2PreviewTextureCombiner.None;
+        if ((shaderId & 0x8000) != 0) return new($"Explicit shader {shaderId & 0x7FFF}", false, false);
+        var first = (shaderId & 0x70) != 0 ? "Mod" : "Opaque";
+        if (textureCount == 1) return new(first, true, true);
+        if (textureCount != 2) return new($"{first} + {textureCount - 1:N0} legacy stage(s)", false, false);
+        var second = (shaderId & 0x7) switch
+        {
+            0 => "Opaque",
+            3 => "Add",
+            4 => "Mod2x",
+            6 => "Mod2xNA",
+            7 => first == "Opaque" ? "AddAlpha" : "AddNA",
+            _ => "Mod"
+        };
+        // The isolated Skia passes reproduce the legacy RGB operation and declared UV route,
+        // but several client combiners choose alpha from one specific stage rather than using
+        // the canvas operator's alpha result. Keep the public fidelity label conservative until
+        // those per-combiner alpha equations are implemented as one runtime shader.
+        return new($"{first}_{second}", true, false);
+    }
+
+    private static M2PreviewTextureStageBlend StageBlend(string combiner, int stage)
+    {
+        if (stage == 0) return M2PreviewTextureStageBlend.Source;
+        if (stage > 1) return M2PreviewTextureStageBlend.Unsupported;
+        var suffix = combiner[(combiner.LastIndexOf('_') + 1)..];
+        return suffix switch
+        {
+            "Opaque" or "Mod" => M2PreviewTextureStageBlend.Modulate,
+            "Mod2x" => M2PreviewTextureStageBlend.Modulate2X,
+            "Mod2xNA" => M2PreviewTextureStageBlend.Modulate2X,
+            "Add" or "AddAlpha" => M2PreviewTextureStageBlend.Add,
+            "AddNA" => M2PreviewTextureStageBlend.AddNoAlpha,
+            _ => M2PreviewTextureStageBlend.Unsupported
+        };
     }
 
     private static (IReadOnlyList<M2PreviewSubmesh> Submeshes, int[] Triangles, IReadOnlyList<M2PreviewBatch> Batches) ReadVisibleSubmeshes(byte[] skin, int[] allTriangles, IReadOnlyList<M2PreviewMaterialUnit> materialUnits, IReadOnlyList<M2PreviewRenderFlag> renderFlags, M2PreviewVisibilityMode visibilityMode, M2GeosetSelection? geosetSelection)
@@ -331,7 +452,9 @@ public static class M2PreviewGeometryService
                     {
                         RenderFlags = flags?.Flags ?? 0,
                         BlendMode = flags?.BlendMode ?? 0,
-                        PriorityPlane = material.PriorityPlane
+                        PriorityPlane = material.PriorityPlane,
+                        TextureStages = material.TextureStages,
+                        Combiner = material.Combiner
                     });
                 }
             }

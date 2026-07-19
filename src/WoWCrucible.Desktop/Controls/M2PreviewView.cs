@@ -356,14 +356,14 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                     transformed[index] = Vector3.Transform(Vector3.Transform(sourceVertices[index], source.Transform) - center, rotation);
                 IReadOnlyList<M2PreviewBatch> batches = sourceGeometry.Batches.Count == 0 ? [new M2PreviewBatch(0, 0, 0, sourceGeometry.TriangleIndices.Count, null, null)] : sourceGeometry.Batches;
                 var firstBatchBySubmesh = batches.GroupBy(batch => batch.SubmeshIndex).ToDictionary(group => group.Key, group => group.First());
-                var texturedSubmeshes = batches.Where(batch => ResolveTexture(source, batch.TextureDefinitionIndex) is not null).Select(batch => batch.SubmeshIndex).ToHashSet();
+                var texturedSubmeshes = batches.Where(batch => ResolveTextureStages(source, batch).Count > 0).Select(batch => batch.SubmeshIndex).ToHashSet();
                 foreach (var batch in batches)
                 {
                     var firstPass = ReferenceEquals(batch, firstBatchBySubmesh[batch.SubmeshIndex]);
                     if (source.ManualTexture is not null && !firstPass) continue;
                     var end = Math.Min(sourceGeometry.TriangleIndices.Count, batch.TriangleStart + batch.TriangleIndexCount);
-                    var activeTexture = ResolveTexture(source, batch.TextureDefinitionIndex);
-                    if (activeTexture is null && (texturedSubmeshes.Contains(batch.SubmeshIndex) || !firstPass)) continue;
+                    var activeStages = ResolveTextureStages(source, batch);
+                    if (activeStages.Count == 0 && (texturedSubmeshes.Contains(batch.SubmeshIndex) || !firstPass)) continue;
                     var passOrder = batch.PriorityPlane * 131_072 + (batch.MaterialUnitIndex ?? 0);
                     for (var offset = batch.TriangleStart; offset + 2 < end; offset += 3 * sampling)
                     {
@@ -377,7 +377,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                         var normal = Vector3.Cross(b - a, c - a);
                         if (normal.LengthSquared() > 0.000001f) normal = Vector3.Normalize(normal);
                         var brightness = (batch.RenderFlags & 0x1) != 0 ? 1f : Math.Clamp(0.25f + 0.75f * Math.Abs(Vector3.Dot(normal, light)), 0.2f, 1f);
-                        faces.Add(new((a.Y + b.Y + c.Y) / 3f, passOrder, sourceIndex, ia, ib, ic, ax, ay, bx, by, cx, cy, (byte)Math.Round(brightness * 15), activeTexture, batch.BlendMode));
+                        faces.Add(new((a.Y + b.Y + c.Y) / 3f, passOrder, sourceIndex, batch.MaterialUnitIndex ?? -1, ia, ib, ic, ax, ay, bx, by, cx, cy, (byte)Math.Round(brightness * 15), activeStages, batch.BlendMode));
                     }
                 }
             }
@@ -389,7 +389,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             using var fill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill };
             using var edge = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 0.65f, Color = new SKColor(5, 9, 15, 58) };
             using var path = new SKPath();
-            foreach (var face in faces.Where(face => face.Texture is null))
+            foreach (var face in faces.Where(face => face.TextureStages.Count == 0))
             {
                 var value = 48 + face.Shade * 11;
                 fill.Color = new SKColor((byte)Math.Min(220, value / 2 + 45), (byte)Math.Min(230, value), (byte)Math.Min(255, value + 24));
@@ -397,26 +397,54 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                 canvas.DrawPath(path, fill); canvas.DrawPath(path, edge);
             }
 
-            var texturedFaces = faces.Where(face => face.Texture is not null).GroupBy(face => new TextureGroup(face.PassOrder, face.SourceIndex, face.Texture!, face.BlendMode)).OrderBy(group => group.Key.PassOrder);
+            var texturedFaces = faces.Where(face => face.TextureStages.Count > 0).GroupBy(face => new TextureGroup(face.PassOrder, face.SourceIndex, face.MaterialKey, face.BlendMode)).OrderBy(group => group.Key.PassOrder);
             foreach (var group in texturedFaces)
             {
-                var activeTexture = group.Key.Texture; var sourceGeometry = sources[group.Key.SourceIndex].Geometry; var groupFaces = group.ToArray();
-                var positions = new SKPoint[groupFaces.Length * 3]; var coordinates = new SKPoint[groupFaces.Length * 3]; var colors = new SKColor[groupFaces.Length * 3];
+                var sourceGeometry = sources[group.Key.SourceIndex].Geometry; var groupFaces = group.ToArray(); var stages = groupFaces[0].TextureStages;
+                var positions = new SKPoint[groupFaces.Length * 3]; var shadedColors = new SKColor[groupFaces.Length * 3]; var whiteColors = new SKColor[groupFaces.Length * 3];
                 for (var index = 0; index < groupFaces.Length; index++)
                 {
                     var face = groupFaces[index]; var offset = index * 3;
                     positions[offset] = new(face.Ax, face.Ay); positions[offset + 1] = new(face.Bx, face.By); positions[offset + 2] = new(face.Cx, face.Cy);
-                    AddUv(offset, face.Ia); AddUv(offset + 1, face.Ib); AddUv(offset + 2, face.Ic);
-                    var shade = (byte)Math.Clamp(70 + face.Shade * 12, 0, 255); colors[offset] = colors[offset + 1] = colors[offset + 2] = new SKColor(shade, shade, shade, 255);
+                    var shade = (byte)Math.Clamp(70 + face.Shade * 12, 0, 255); shadedColors[offset] = shadedColors[offset + 1] = shadedColors[offset + 2] = new SKColor(shade, shade, shade, 255);
+                    whiteColors[offset] = whiteColors[offset + 1] = whiteColors[offset + 2] = SKColors.White;
                 }
-                using var shader = SKShader.CreateBitmap(activeTexture, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat);
-                using var paint = new SKPaint { IsAntialias = true, Shader = shader, BlendMode = CanvasBlendMode(group.Key.BlendMode) };
-                if (group.Key.BlendMode == 6) paint.ColorFilter = SKColorFilter.CreateColorMatrix([2,0,0,0,0, 0,2,0,0,0, 0,0,2,0,0, 0,0,0,1,0]);
-                using var mesh = SKVertices.CreateCopy(SKVertexMode.Triangles, positions, coordinates, colors);
-                canvas.DrawVertices(mesh, SKBlendMode.Modulate, paint);
-                void AddUv(int destination, int vertex)
+                if (stages.Count == 1) DrawStage(stages[0], CanvasBlendMode(group.Key.BlendMode), shadedColors);
+                else
                 {
-                    var uv = sourceGeometry.TextureCoordinates[vertex]; coordinates[destination] = new(uv.X * activeTexture.Width, uv.Y * activeTexture.Height);
+                    using var composite = new SKPaint { BlendMode = CanvasBlendMode(group.Key.BlendMode) };
+                    var layerBounds = new SKRect(groupFaces.Min(face => Math.Min(face.Ax, Math.Min(face.Bx, face.Cx))) - 1,
+                        groupFaces.Min(face => Math.Min(face.Ay, Math.Min(face.By, face.Cy))) - 1,
+                        groupFaces.Max(face => Math.Max(face.Ax, Math.Max(face.Bx, face.Cx))) + 1,
+                        groupFaces.Max(face => Math.Max(face.Ay, Math.Max(face.By, face.Cy))) + 1);
+                    canvas.SaveLayer(layerBounds, composite);
+                    DrawStage(stages[0], SKBlendMode.SrcOver, shadedColors);
+                    foreach (var stage in stages.Skip(1)) DrawStage(stage, StageBlendMode(stage.Blend), whiteColors);
+                    canvas.Restore();
+                }
+
+                void DrawStage(ResolvedTextureStage stage, SKBlendMode blend, SKColor[] colors)
+                {
+                    var coordinates = new SKPoint[groupFaces.Length * 3];
+                    for (var index = 0; index < groupFaces.Length; index++)
+                    {
+                        var face = groupFaces[index]; var offset = index * 3;
+                        AddUv(offset, face.Ia); AddUv(offset + 1, face.Ib); AddUv(offset + 2, face.Ic);
+                    }
+                    using var shader = SKShader.CreateBitmap(stage.Texture, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat);
+                    using var paint = new SKPaint { IsAntialias = true, Shader = shader, BlendMode = blend };
+                    if (stage.Blend == M2PreviewTextureStageBlend.Modulate2X) paint.ColorFilter = SKColorFilter.CreateColorMatrix([2,0,0,0,0, 0,2,0,0,0, 0,0,2,0,0, 0,0,0,1,0]);
+                    if (stage.Blend == M2PreviewTextureStageBlend.AddNoAlpha) paint.ColorFilter = SKColorFilter.CreateColorMatrix([1,0,0,0,0, 0,1,0,0,0, 0,0,1,0,0, 0,0,0,0,0]);
+                    using var mesh = SKVertices.CreateCopy(SKVertexMode.Triangles, positions, coordinates, colors);
+                    canvas.DrawVertices(mesh, SKBlendMode.Modulate, paint);
+
+                    void AddUv(int destination, int vertex)
+                    {
+                        var uv = stage.CoordinateSource == M2PreviewTextureCoordinateSource.Secondary && sourceGeometry.SecondaryTextureCoordinates.Count == sourceGeometry.Vertices.Count
+                            ? sourceGeometry.SecondaryTextureCoordinates[vertex]
+                            : sourceGeometry.TextureCoordinates[vertex];
+                        coordinates[destination] = new(uv.X * stage.Texture.Width, uv.Y * stage.Texture.Height);
+                    }
                 }
             }
 
@@ -449,20 +477,45 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             using var hintFont = new SKFont(SKTypeface.Default, 12);
             var geosets = geometry.Submeshes.Count == 0 ? "complete mesh" : $"{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} geosets";
             var textureCount = texture is not null ? "manual texture" : $"{materialTextures.Count:N0} material texture(s)";
+            var multiTextureUnits = geometry.Batches.Count(batch => batch.TextureStages.Count > 1);
+            var multiTexture = multiTextureUnits == 0 ? string.Empty : $" · {multiTextureUnits:N0} multi-texture unit(s)";
+            var approximateUnits = geometry.Batches.Count(batch => batch.TextureStages.Count > 1 && batch.Combiner.Supported && !batch.Combiner.Exact);
+            var approximate = approximateUnits == 0 ? string.Empty : $" · {approximateUnits:N0} approximate";
+            var fallbackUnits = geometry.Batches.Count(batch => batch.TextureStages.Count > 1 && (!batch.Combiner.Supported || batch.TextureStages.Any(stage => stage.CoordinateSource is M2PreviewTextureCoordinateSource.Environment or M2PreviewTextureCoordinateSource.Unsupported)));
+            var fallback = fallbackUnits == 0 ? string.Empty : $" · {fallbackUnits:N0} first-stage fallback(s)";
             var attachments = showAttachments ? $" · {geometry.Attachments.Count:N0} attachment point(s)" : string.Empty;
             var mounted = mountedModels.Count == 0 ? string.Empty : $" · {mountedModels.Count:N0} mounted model(s)";
             var animation = pose is null ? string.Empty : $" · animation {geometry.Sequences[pose.SequenceIndex].AnimationId:N0}:{geometry.Sequences[pose.SequenceIndex].SubAnimationId:N0}";
             var scene = sceneTransformLabel is null ? string.Empty : $" · {sceneTransformLabel}";
-            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
+            canvas.DrawText($"{Path.GetFileName(geometry.ModelPath)} · {geosets} · {textureCount}{multiTexture}{approximate}{fallback} · {faces.Count:N0} displayed faces{animation}{attachments}{mounted}{scene}", 12, 23, SKTextAlign.Left, titleFont, text);
             text.Color = new SKColor(170, 182, 200);
             canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hintFont, text);
         }
 
-        private static SKBitmap? ResolveTexture(SceneSource source, int? textureDefinitionIndex)
+        private static IReadOnlyList<ResolvedTextureStage> ResolveTextureStages(SceneSource source, M2PreviewBatch batch)
         {
-            if (source.ManualTexture is not null) return source.ManualTexture;
-            return textureDefinitionIndex is { } index && source.MaterialTextures?.TryGetValue(index, out var texture) == true ? texture : null;
+            if (source.ManualTexture is not null) return [new(source.ManualTexture, M2PreviewTextureCoordinateSource.Primary, M2PreviewTextureStageBlend.Source)];
+            if (batch.TextureStages.Count == 0)
+                return batch.TextureDefinitionIndex is { } index && source.MaterialTextures?.TryGetValue(index, out var texture) == true
+                    ? [new(texture, M2PreviewTextureCoordinateSource.Primary, M2PreviewTextureStageBlend.Source)]
+                    : [];
+            var result = new List<ResolvedTextureStage>(batch.TextureStages.Count);
+            foreach (var stage in batch.TextureStages)
+            {
+                if (stage.TextureDefinitionIndex < 0 || source.MaterialTextures is not { } textures || !textures.TryGetValue(stage.TextureDefinitionIndex, out var texture)) return result.Count == 0 ? [] : [result[0]];
+                if (stage.CoordinateSource is not (M2PreviewTextureCoordinateSource.Primary or M2PreviewTextureCoordinateSource.Secondary) || stage.Blend == M2PreviewTextureStageBlend.Unsupported)
+                    return result.Count == 0 ? [] : [result[0]];
+                result.Add(new(texture, stage.CoordinateSource, stage.Blend));
+            }
+            return batch.Combiner.Supported ? result : result.Count == 0 ? [] : [result[0]];
         }
+
+        private static SKBlendMode StageBlendMode(M2PreviewTextureStageBlend blend) => blend switch
+        {
+            M2PreviewTextureStageBlend.Modulate or M2PreviewTextureStageBlend.Modulate2X => SKBlendMode.Modulate,
+            M2PreviewTextureStageBlend.Add or M2PreviewTextureStageBlend.AddNoAlpha => SKBlendMode.Plus,
+            _ => SKBlendMode.SrcOver
+        };
 
         private static SKBlendMode CanvasBlendMode(ushort blendMode) => blendMode switch
         {
@@ -471,7 +524,8 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             _ => SKBlendMode.SrcOver
         };
 
-        private readonly record struct TextureGroup(int PassOrder, int SourceIndex, SKBitmap Texture, ushort BlendMode);
-        private readonly record struct Face(float Depth, int PassOrder, int SourceIndex, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy, byte Shade, SKBitmap? Texture, ushort BlendMode);
+        private sealed record ResolvedTextureStage(SKBitmap Texture, M2PreviewTextureCoordinateSource CoordinateSource, M2PreviewTextureStageBlend Blend);
+        private readonly record struct TextureGroup(int PassOrder, int SourceIndex, int MaterialKey, ushort BlendMode);
+        private readonly record struct Face(float Depth, int PassOrder, int SourceIndex, int MaterialKey, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy, byte Shade, IReadOnlyList<ResolvedTextureStage> TextureStages, ushort BlendMode);
     }
 }

@@ -6,7 +6,10 @@ using System.Text.Json;
 
 namespace WoWCrucible.Core;
 
-public sealed record M2ObjExportMaterial(int SubmeshIndex, ushort GeosetId, string Name, int? TextureDefinitionIndex, ushort BlendMode, ushort RenderFlags, int Passes);
+public sealed record M2ObjExportTextureStage(int StageIndex, int TextureDefinitionIndex, M2PreviewTextureCoordinateSource CoordinateSource,
+    M2PreviewTextureStageBlend Blend, int? TransparencyDefinitionIndex, int? TextureAnimationDefinitionIndex);
+public sealed record M2ObjExportMaterial(int SubmeshIndex, ushort GeosetId, string Name, int? TextureDefinitionIndex, ushort BlendMode, ushort RenderFlags, int Passes,
+    string Combiner, bool CombinerSupported, bool CombinerExact, IReadOnlyList<M2ObjExportTextureStage> TextureStages);
 public sealed record M2ObjExportReceipt(string Format, DateTimeOffset ExportedUtc, string ModelPath, string ModelSha256, string SkinPath, string SkinSha256,
     M2PreviewVisibilityMode VisibilityMode, IReadOnlyDictionary<int, int>? GeosetSelection, int? AnimationSequenceIndex, double? AnimationTimeMilliseconds,
     int Vertices, int Triangles, IReadOnlyList<M2ObjExportMaterial> Materials, IReadOnlyList<string> TextureFiles);
@@ -51,10 +54,11 @@ public static class M2ObjExportService
             foreach (var item in stagedTextures) BlpTextureService.WritePng(item.Stage, item.Texture);
             WriteMaterials(stagedMtl, groups, stagedTextures.ToDictionary(item => item.Key, item => Path.GetFileName(item.Destination)));
             WriteObj(stagedObj, Path.GetFileName(materialPath), geometry, pose, groups);
-            var receipt = new M2ObjExportReceipt("wow-crucible-m2-obj-v1", DateTimeOffset.UtcNow, geometry.ModelPath, Sha256(geometry.ModelPath), geometry.SkinPath, Sha256(geometry.SkinPath),
+            var receipt = new M2ObjExportReceipt("wow-crucible-m2-obj-v2", DateTimeOffset.UtcNow, geometry.ModelPath, Sha256(geometry.ModelPath), geometry.SkinPath, Sha256(geometry.SkinPath),
                 geometry.VisibilityMode, geometry.GeosetSelection?.GroupVariants, pose?.SequenceIndex, pose?.TimeMilliseconds, geometry.Vertices.Count, geometry.TriangleIndices.Count / 3,
                 groups.Select(group => new M2ObjExportMaterial(group.SubmeshIndex, group.GeosetId, group.MaterialName, group.Batch.TextureDefinitionIndex, group.Batch.BlendMode, group.Batch.RenderFlags,
-                    geometry.Batches.Count(batch => batch.SubmeshIndex == group.SubmeshIndex))).ToArray(), stagedTextures.Select(item => Path.GetFileName(item.Destination)).ToArray());
+                    geometry.Batches.Count(batch => batch.SubmeshIndex == group.SubmeshIndex), group.Batch.Combiner.Name, group.Batch.Combiner.Supported, group.Batch.Combiner.Exact,
+                    group.Batch.TextureStages.Select(stage => new M2ObjExportTextureStage(stage.StageIndex, stage.TextureDefinitionIndex, stage.CoordinateSource, stage.Blend, stage.TransparencyDefinitionIndex, stage.TextureAnimationDefinitionIndex)).ToArray())).ToArray(), stagedTextures.Select(item => Path.GetFileName(item.Destination)).ToArray());
             File.WriteAllText(stagedReceipt, JsonSerializer.Serialize(receipt, Json) + Environment.NewLine, new UTF8Encoding(false));
 
             PublishAll(new[] { (Stage: stagedObj, Destination: outputPath), (Stage: stagedMtl, Destination: materialPath) }
@@ -117,6 +121,8 @@ public static class M2ObjExportService
         {
             writer.WriteLine(); writer.WriteLine($"newmtl {group.MaterialName}");
             writer.WriteLine($"# wow-blend-mode {group.Batch.BlendMode}"); writer.WriteLine($"# wow-render-flags 0x{group.Batch.RenderFlags:X4}");
+            writer.WriteLine($"# wow-combiner {group.Batch.Combiner.Name} supported={group.Batch.Combiner.Supported} exact={group.Batch.Combiner.Exact}");
+            foreach (var stage in group.Batch.TextureStages) writer.WriteLine($"# wow-texture-stage {stage.StageIndex} texture={stage.TextureDefinitionIndex} uv={stage.CoordinateSource} blend={stage.Blend}");
             writer.WriteLine("Ka 0 0 0"); writer.WriteLine("Kd 1 1 1"); writer.WriteLine("Ks 0 0 0"); writer.WriteLine("d 1"); writer.WriteLine("illum 1");
             if (group.Batch.TextureDefinitionIndex is { } texture && textureFiles.TryGetValue(texture, out var file)) writer.WriteLine($"map_Kd {file}");
         }

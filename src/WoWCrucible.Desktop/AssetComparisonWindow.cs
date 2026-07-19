@@ -569,7 +569,8 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             _appearanceComposed = false;
             if (_selectedTexture is null)
             {
-                var usedTextureDefinitions = geometry.Batches.Where(batch => batch.TextureDefinitionIndex is not null).Select(batch => batch.TextureDefinitionIndex!.Value).Distinct().ToHashSet();
+                var usedTextureDefinitions = geometry.Batches.SelectMany(batch => batch.TextureStages).Where(stage => stage.TextureDefinitionIndex >= 0).Select(stage => stage.TextureDefinitionIndex)
+                    .Concat(geometry.Batches.Where(batch => batch.TextureStages.Count == 0 && batch.TextureDefinitionIndex is not null).Select(batch => batch.TextureDefinitionIndex!.Value)).Distinct().ToHashSet();
                 foreach (var slot in geometry.TextureSlots.Where(slot => usedTextureDefinitions.Contains(slot.Index) && slot.Type == 0 && !string.IsNullOrWhiteSpace(slot.EmbeddedPath)))
                 {
                     var clientPath = PatchInputMapper.NormalizeArchivePath(slot.EmbeddedPath!);
@@ -757,6 +758,10 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             : $"Selected texture candidate: {_selectedTexture.Provenance} · {_selectedTexture.FileName}";
         var slots = _loadedModelGeometry is null ? "Texture slots: load pending." : _loadedModelGeometry.TextureSlots.Count == 0 ? "Texture slots: none declared." : "Texture slots: " + string.Join(", ", _loadedModelGeometry.TextureSlots.Select(slot => $"{slot.Index}:{TextureTypeName(slot.Type)}{(string.IsNullOrWhiteSpace(slot.EmbeddedPath) ? string.Empty : $"={slot.EmbeddedPath}")}"));
         var dependencies = _modelDependencyGraph is null ? "Dependencies: inspection pending." : $"Dependencies: {_modelDependencyGraph.Resolved.Count:N0} resolved · {_modelDependencyGraph.ExternalBindings.Count:N0} appearance/DBC binding(s) · {_modelDependencyGraph.Blocking.Count:N0} BLOCKING";
+        var multiTextureUnits = _loadedModelGeometry?.MaterialUnits.Count(material => material.TextureStages.Count > 1) ?? 0;
+        var multiTextureFallbacks = _loadedModelGeometry?.MaterialUnits.Count(material => material.TextureStages.Count > 1 && !material.Combiner.Supported) ?? 0;
+        var multiTextureApproximations = _loadedModelGeometry?.MaterialUnits.Count(material => material.TextureStages.Count > 1 && material.Combiner.Supported && !material.Combiner.Exact) ?? 0;
+        var materials = _loadedModelGeometry is null ? "Materials: load pending." : $"Materials: {_loadedModelGeometry.MaterialUnits.Count:N0} unit(s) · {multiTextureUnits:N0} multi-texture · {multiTextureApproximations:N0} labeled approximation(s) · {multiTextureFallbacks:N0} explicitly labeled first-stage fallback(s)";
         var geosets = _loadedModelGeometry is null || _loadedModelGeometry.Submeshes.Count == 0
             ? "Geosets: no SKIN submesh table; showing the complete mesh."
             : $"Geosets: {_loadedModelGeometry.Submeshes.Count(section => section.Visible):N0} visible of {_loadedModelGeometry.Submeshes.Count:N0} · {_loadedModelGeometry.VisibilityMode} · {_loadedModelGeometry.TriangleIndices.Count / 3:N0} of {_loadedModelGeometry.TotalTriangleIndices / 3:N0} triangles" +
@@ -765,13 +770,13 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var visibleGeosets = _loadedModelGeometry is null ? string.Empty : string.Join(" · ", M2GeosetCatalog.Describe(_loadedModelGeometry.Submeshes)
             .SelectMany(group => group.Variants.Where(variant => variant.Visible).Select(variant => $"{group.Name}={variant.Variant}")));
         var previewNote = _appearanceComposed
-            ? "Geometry, supported multi-pass blend modes, the selected CharSections appearance, and animation playback are live. Exact multi-texture shader combiners and particles remain fidelity stages; the visible/current pose can be exported above."
+            ? "Geometry, per-material textures, supported two-stage WotLK combiners with primary/secondary UV routing, the selected CharSections appearance, and animation playback are live. Environment/explicit/three-plus-stage shaders and particles remain fidelity stages; the visible/current pose can be exported above."
             : _resolvedModelTexturePath is not null
-            ? "Geometry, resolved per-pass textures, supported WoW blend modes, and animation playback are live. Unresolved replaceable slots, exact multi-texture shader combiners, and particles remain fidelity stages."
+            ? "Geometry, resolved per-material textures, supported two-stage WotLK combiners with primary/secondary UV routing, and animation playback are live. Unresolved replaceable slots, environment/explicit/three-plus-stage shaders, and particles remain fidelity stages."
             : _modelOnlyDirectory
             ? "Geometry and animation are live. Replacement texture resolution and Character layer/CharSections composition remain incomplete until the appearance plan supplies every layer."
             : "Geometry, animation, and the selected PNG diagnostic override are live. The override is not treated as an invented WoW material binding.";
-        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{geosets}{(visibleGeosets.Length == 0 ? string.Empty : $"\nVisible groups: {visibleGeosets}")}\n{texture}\n{slots}\n{dependencies}\n{previewNote}";
+        _modelStatus.Text = $"READY · {model.Provenance} · {model.FileName}\nContent path: {model.LogicalPath} · Skin: {Path.GetFileName(model.SkinPath)}\n{geosets}{(visibleGeosets.Length == 0 ? string.Empty : $"\nVisible groups: {visibleGeosets}")}\n{texture}\n{slots}\n{materials}\n{dependencies}\n{previewNote}";
     }
 
     private async Task ScanDuplicatesAsync()
