@@ -1,11 +1,12 @@
 using System.ComponentModel;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 
 namespace WoWCrucible.Core;
 
 public sealed record PatchEntry(string SourcePath, string ArchivePath);
-public sealed record MpqFileEntry(string ArchivePath, long Size, long CompressedSize, uint Flags, uint Locale)
+public sealed record MpqFileEntry(string ArchivePath, long Size, long CompressedSize, uint Flags, uint Locale, uint BlockIndex = uint.MaxValue)
 {
     public bool IsMetadata => MpqPathClassifier.IsMetadata(ArchivePath);
 }
@@ -98,11 +99,16 @@ public static class PatchInputMapper
 public sealed class PatchArchiveService
 {
     public const long MaximumSafeUpdateBytes = 2L * 1024 * 1024 * 1024;
+    public const int MaximumExtractionWorkers = 16;
+    public static int RecommendedExtractionWorkers => Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
     private const uint CreateListFile = 0x00100000;
     private const uint CreateArchiveV2 = 0x01000000;
     private const uint FileCompress = 0x00000200;
     private const uint FileReplaceExisting = 0x80000000;
     private const uint CompressionZlib = 0x02;
+    private const uint OpenReadOnly = 0x00000100;
+    private static readonly object LegacyLocaleExtractionLock = new();
+    private sealed record ExtractionItem(MpqFileEntry Entry, string InternalPath, string OutputPath, string Destination, string LookupPath);
 
     public void Create(string outputPath, IEnumerable<PatchEntry> sourceEntries)
     {
@@ -162,7 +168,7 @@ public sealed class PatchArchiveService
                 do
                 {
                     if (!string.IsNullOrWhiteSpace(data.FileName))
-                        result.Add(new(data.FileName, data.FileSize, data.CompressedSize, data.FileFlags, data.Locale));
+                        result.Add(new(data.FileName, data.FileSize, data.CompressedSize, data.FileFlags, data.Locale, data.BlockIndex));
                     data = new Native.SFileFindData();
                 } while (Native.SFileFindNextFile(find, ref data));
             }
@@ -173,48 +179,112 @@ public sealed class PatchArchiveService
     }
 
     public void Extract(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default,
-        bool overwriteExisting = true, bool preserveLocaleVariants = false, Action<MpqFileEntry, Exception>? extractionFailure = null)
+        bool overwriteExisting = true, bool preserveLocaleVariants = false, Action<MpqFileEntry, Exception>? extractionFailure = null, int workers = 0)
     {
+        if (workers is < 0 or > MaximumExtractionWorkers) throw new ArgumentOutOfRangeException(nameof(workers), $"Extraction workers must be auto (0) or from 1 to {MaximumExtractionWorkers}.");
         archivePath = Path.GetFullPath(archivePath);
         destinationRoot = Path.GetFullPath(destinationRoot);
-        Directory.CreateDirectory(destinationRoot);
         var entries = files.ToArray();
+        var normalizedPaths = entries.Select(entry => PatchInputMapper.NormalizeArchivePath(entry.ArchivePath)).ToArray();
         var duplicatePaths = preserveLocaleVariants
-            ? entries.GroupBy(entry => PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            ? normalizedPaths.GroupBy(path => path, StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase)
             : [];
         var occurrences = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var archive = OpenArchiveWithRetry(archivePath, "open the MPQ archive");
+        var work = new List<ExtractionItem>(entries.Length);
+        for (var index = 0; index < entries.Length; index++)
+        {
+            var internalPath = normalizedPaths[index];
+            var outputPath = internalPath;
+            if (duplicatePaths.Contains(internalPath))
+            {
+                occurrences.TryGetValue(internalPath, out var occurrence); occurrences[internalPath] = ++occurrence;
+                var extension = Path.GetExtension(internalPath); var stem = internalPath[..^extension.Length];
+                outputPath = $"{stem}.locale-{entries[index].Locale:X4}.variant-{occurrence:D2}{extension}";
+            }
+            var destination = Path.GetFullPath(Path.Combine(destinationRoot, outputPath.Replace('\\', Path.DirectorySeparatorChar)));
+            var relativeDestination = Path.GetRelativePath(destinationRoot, destination);
+            if (relativeDestination.Equals("..", StringComparison.Ordinal) || relativeDestination.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+                throw new InvalidOperationException($"Unsafe archive path: {internalPath}");
+            var extensionForLookup = Path.GetExtension(internalPath);
+            if (string.IsNullOrEmpty(extensionForLookup)) extensionForLookup = ".bin";
+            var lookupPath = entries[index].BlockIndex <= 99_999_999 ? $"File{entries[index].BlockIndex:D8}{extensionForLookup}" : internalPath;
+            work.Add(new(entries[index], internalPath, outputPath, destination, lookupPath));
+        }
+
+        Directory.CreateDirectory(destinationRoot);
+        var done = 0;
+        var progressLock = new object();
+        void Report(ExtractionItem item)
+        {
+            var completed = Interlocked.Increment(ref done);
+            if (progress is not null) lock (progressLock) progress.Report((completed, entries.Length, item.OutputPath));
+        }
+
+        var pending = new List<ExtractionItem>(work.Count);
+        foreach (var item in work)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!overwriteExisting && File.Exists(item.Destination)) Report(item);
+            else pending.Add(item);
+        }
+        if (pending.Count == 0) return;
+
+        // Entries sharing one output path intentionally remain ordered on one worker. This preserves
+        // the long-standing "last selected locale wins" behavior when variants are not preserved.
+        var groups = pending.GroupBy(item => item.Destination, StringComparer.OrdinalIgnoreCase).Select(group => group.ToArray()).ToArray();
+        var workerCount = Math.Min(groups.Length, workers == 0 ? RecommendedExtractionWorkers : workers);
+        var archives = new IntPtr[workerCount];
         try
         {
-            for (var index = 0; index < entries.Length; index++)
+            for (var index = 0; index < archives.Length; index++) archives[index] = OpenArchiveWithRetry(archivePath, "open the MPQ archive for parallel extraction");
+            var nextGroup = -1;
+            ExceptionDispatchInfo? fatal = null;
+            var failureLock = new object();
+            Parallel.For(0, workerCount, new ParallelOptions { MaxDegreeOfParallelism = workerCount }, workerIndex =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                Native.SFileSetLocale(entries[index].Locale);
-                var internalPath = PatchInputMapper.NormalizeArchivePath(entries[index].ArchivePath);
-                var outputPath = internalPath;
-                if (duplicatePaths.Contains(internalPath))
-                {
-                    occurrences.TryGetValue(internalPath, out var occurrence); occurrences[internalPath] = ++occurrence;
-                    var extension = Path.GetExtension(internalPath); var stem = internalPath[..^extension.Length];
-                    outputPath = $"{stem}.locale-{entries[index].Locale:X4}.variant-{occurrence:D2}{extension}";
-                }
-                var destination = Path.GetFullPath(Path.Combine(destinationRoot, outputPath.Replace('\\', Path.DirectorySeparatorChar)));
-                var relativeDestination = Path.GetRelativePath(destinationRoot, destination);
-                if (relativeDestination.Equals("..", StringComparison.Ordinal) || relativeDestination.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-                    throw new InvalidOperationException($"Unsafe archive path: {internalPath}");
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                if (!overwriteExisting && File.Exists(destination)) { progress?.Report((index + 1, entries.Length, outputPath)); continue; }
                 try
                 {
-                    ExtractFileAtomically(destination, overwriteExisting,
-                        temporary => Native.SFileExtractFile(archive, internalPath, temporary, 0),
-                        () => ThrowNative($"extract '{internalPath}'"));
+                    while (!cancellationToken.IsCancellationRequested && Volatile.Read(ref fatal) is null)
+                    {
+                        var groupIndex = Interlocked.Increment(ref nextGroup);
+                        if (groupIndex >= groups.Length) break;
+                        foreach (var item in groups[groupIndex])
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            try
+                            {
+                                ExtractFileAtomically(item.Destination, overwriteExisting,
+                                    temporary => ExtractNative(archives[workerIndex], item, temporary),
+                                    () => ThrowNative($"extract '{item.InternalPath}'"));
+                            }
+                            catch (Exception exception) when (extractionFailure is not null)
+                            {
+                                lock (failureLock) extractionFailure(item.Entry, exception);
+                            }
+                            Report(item);
+                        }
+                    }
                 }
-                catch (Exception exception) when (extractionFailure is not null) { extractionFailure(entries[index], exception); }
-                progress?.Report((index + 1, entries.Length, outputPath));
-            }
+                catch (Exception exception)
+                {
+                    lock (failureLock) fatal ??= ExceptionDispatchInfo.Capture(exception);
+                }
+            });
+            cancellationToken.ThrowIfCancellationRequested();
+            fatal?.Throw();
         }
-        finally { Native.SFileCloseArchive(archive); }
+        finally { foreach (var archive in archives) if (archive != IntPtr.Zero) Native.SFileCloseArchive(archive); }
+    }
+
+    private static bool ExtractNative(IntPtr archive, ExtractionItem item, string temporary)
+    {
+        if (!item.LookupPath.Equals(item.InternalPath, StringComparison.Ordinal))
+            return Native.SFileExtractFile(archive, item.LookupPath, temporary, 0);
+        lock (LegacyLocaleExtractionLock)
+        {
+            Native.SFileSetLocale(item.Entry.Locale);
+            return Native.SFileExtractFile(archive, item.InternalPath, temporary, 0);
+        }
     }
 
     internal IReadOnlyList<(MpqFileEntry Entry, string FilePath)> ExtractFlat(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, CancellationToken cancellationToken = default)
@@ -267,7 +337,7 @@ public sealed class PatchArchiveService
         IntPtr archive = IntPtr.Zero;
         try
         {
-            archive = OpenArchiveWithRetry(tempPath, "open the MPQ archive for updating");
+            archive = OpenArchiveWithRetry(tempPath, "open the MPQ archive for updating", 0);
             foreach (var entry in entries)
                 if (!Native.SFileAddFileEx(archive, entry.SourcePath, entry.ArchivePath, FileCompress | FileReplaceExisting, CompressionZlib, 0xFFFFFFFF))
                     ThrowNative($"add '{entry.ArchivePath}'");
@@ -295,13 +365,13 @@ public sealed class PatchArchiveService
 
     private static void ThrowNative(string operation) => throw new Win32Exception(Marshal.GetLastWin32Error(), $"StormLib could not {operation}");
 
-    private static IntPtr OpenArchiveWithRetry(string archivePath, string operation)
+    private static IntPtr OpenArchiveWithRetry(string archivePath, string operation, uint flags = OpenReadOnly)
     {
         const int attempts = 3;
         var error = 0;
         for (var attempt = 1; attempt <= attempts; attempt++)
         {
-            if (Native.SFileOpenArchive(archivePath, 0, 0, out var archive)) return archive;
+            if (Native.SFileOpenArchive(archivePath, 0, flags, out var archive)) return archive;
             error = Marshal.GetLastWin32Error();
             if (attempt < attempts) Thread.Sleep(attempt * 150);
         }

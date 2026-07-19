@@ -52,6 +52,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private readonly TextBox _archivePath = new() { PlaceholderText = "MPQ archive" };
     private readonly TextBox _externalListfile = new() { PlaceholderText = "Optional external listfile" };
     private readonly TextBox _browserSearch = new() { PlaceholderText = "Global flat-path search (* and ? supported)…" };
+    private readonly ComboBox _extractionWorkers = new() { ItemsSource = new[] { $"Auto (up to {PatchArchiveService.RecommendedExtractionWorkers})", "1 worker", "2 workers", "4 workers", "8 workers", "16 workers" }, SelectedIndex = 0 };
     private readonly ListBox _browserItems = new() { SelectionMode = SelectionMode.Multiple };
     private readonly ListBox _treeItems = new() { SelectionMode = SelectionMode.Multiple };
     private readonly WrapPanel _treeBreadcrumb = new() { VerticalAlignment = VerticalAlignment.Center };
@@ -279,7 +280,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         var open = new Button { Content = "Open MPQ" }; open.Click += async (_, _) => await ChooseArchiveAsync();
         var listfile = new Button { Content = "External listfile…" }; listfile.Click += async (_, _) => await ChooseListfileAsync();
         var cancel = new Button { Content = "Cancel operation" }; cancel.Click += (_, _) => _operation?.Cancel();
-        var toolbar = new WrapPanel { Children = { open, listfile, cancel } };
+        var toolbar = new WrapPanel { Children = { open, listfile, cancel, new TextBlock { Text = "Extraction:", VerticalAlignment = VerticalAlignment.Center }, _extractionWorkers } };
         var paths = new Grid { ColumnDefinitions = new("2*,*,2*"), ColumnSpacing = 8, Children = { _archivePath, WithColumn(_externalListfile, 1), WithColumn(_browserSearch, 2) } };
         var modes = new TabControl { Items = { new TabItem { Header = "Folders", Content = BuildFolderBrowser() }, new TabItem { Header = "Flat search", Content = BuildFlatBrowser() } } };
         return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), Margin = new Thickness(8), RowSpacing = 8, Children = { toolbar, WithRow(paths, 1), WithRow(modes, 2), WithRow(_browserStatus, 3) } };
@@ -507,7 +508,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private async Task ExtractAsync(IReadOnlyList<MpqFileEntry> entries)
     {
         if (entries.Count == 0) { _browserStatus.Text = "Select at least one archive entry."; return; } var destination = await PickFolderAsync("Select extraction destination"); if (destination is null) return; BeginOperation();
-        try { var archivePath = _archivePath.Text ?? string.Empty; var progress = new Progress<(int Done, int Total, string Path)>(value => _browserStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}"); await Task.Run(() => new PatchArchiveService().Extract(archivePath, destination, entries, progress, _operation!.Token)); _browserStatus.Text = $"Extracted {entries.Count:N0} entries to {destination}."; }
+        try { var archivePath = _archivePath.Text ?? string.Empty; var workers = _extractionWorkers.SelectedIndex switch { 1 => 1, 2 => 2, 3 => 4, 4 => 8, 5 => 16, _ => 0 }; var workerLabel = workers == 0 ? $"auto (up to {PatchArchiveService.RecommendedExtractionWorkers})" : workers.ToString(); var progress = new Progress<(int Done, int Total, string Path)>(value => _browserStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}"); await Task.Run(() => new PatchArchiveService().Extract(archivePath, destination, entries, progress, _operation!.Token, workers: workers)); _browserStatus.Text = $"Extracted {entries.Count:N0} entries to {destination} using {workerLabel} worker(s)."; }
         catch (OperationCanceledException) { _browserStatus.Text = "Extraction cancelled."; }
         catch (Exception exception) { _browserStatus.Text = $"Extraction failed: {exception.Message}"; DesktopCrashLogger.Log("MPQ extraction failed", exception); }
     }

@@ -1926,6 +1926,8 @@ if (!listed.Any(entry => entry.ArchivePath.Equals("DBFilesClient\\AnimationData.
     throw new InvalidOperationException("MPQ file enumeration did not find a known file.");
 if (!listed.Any(entry => entry.IsMetadata) || listed.Count(entry => !entry.IsMetadata) != 2)
     throw new InvalidOperationException("MPQ metadata was not distinguished from payload content.");
+if (listed.Where(entry => !entry.IsMetadata).Any(entry => entry.BlockIndex == uint.MaxValue))
+    throw new InvalidOperationException("MPQ enumeration did not retain exact StormLib block indexes for locale-safe extraction.");
 var clientFixture = Path.Combine(Path.GetTempPath(), $"crucible-client-{Guid.NewGuid():N}"); var clientData = Path.Combine(clientFixture, "Data"); Directory.CreateDirectory(clientData);
 Directory.CreateDirectory(Path.Combine(clientFixture, "WTF")); File.WriteAllText(Path.Combine(clientFixture, "WTF", "Config.wtf"), "SET locale \"enUS\"");
 File.Copy(mpqOutput, Path.Combine(clientData, "patch-test.mpq")); var clientIndexDirectory = Path.Combine(clientFixture, "index");
@@ -1951,10 +1953,20 @@ if (globExtract.SelectedFiles != 2 || globExtract.ExtractedFiles != 2)
     throw new InvalidOperationException("Indexed extraction path globs were treated as literal text.");
 Directory.Delete(clientFixture, true);
 var extractRoot = Path.Combine(Path.GetTempPath(), $"wow-crucible-extract-{Guid.NewGuid():N}");
-patchService.Extract(mpqOutput, extractRoot, listed.Where(entry => entry.ArchivePath.Equals("DBFilesClient\\SpellCastTimes.dbc", StringComparison.OrdinalIgnoreCase)));
-if (!File.Exists(Path.Combine(extractRoot, "DBFilesClient", "SpellCastTimes.dbc")))
-    throw new InvalidOperationException("MPQ extraction did not preserve the internal folder path.");
+var extractionProgress = new List<int>();
+patchService.Extract(mpqOutput, extractRoot, listed.Where(entry => !entry.IsMetadata), new InlineProgress<(int Done, int Total, string Path)>(value => { lock (extractionProgress) extractionProgress.Add(value.Done); }), workers: 4);
+var extractedAnimation = Path.Combine(extractRoot, "DBFilesClient", "AnimationData.dbc");
+var extractedCastTimes = Path.Combine(extractRoot, "DBFilesClient", "SpellCastTimes.dbc");
+if (!File.Exists(extractedAnimation) || !File.Exists(extractedCastTimes) || !File.ReadAllBytes(extractedAnimation).AsSpan().SequenceEqual(File.ReadAllBytes(animationPath)) || !File.ReadAllBytes(extractedCastTimes).AsSpan().SequenceEqual(File.ReadAllBytes(secondPatchEntry.Single().SourcePath)))
+    throw new InvalidOperationException("Parallel MPQ extraction did not preserve exact bytes and internal folder paths.");
+if (extractionProgress.Count != 2 || extractionProgress.Order().SequenceEqual([1, 2]) is false)
+    throw new InvalidOperationException("Parallel MPQ extraction progress was not complete and monotonic.");
 Directory.Delete(extractRoot, true);
+var legacyExtractRoot = Path.Combine(Path.GetTempPath(), $"wow-crucible-legacy-extract-{Guid.NewGuid():N}");
+patchService.Extract(mpqOutput, legacyExtractRoot, listed.Where(entry => !entry.IsMetadata).Select(entry => entry with { BlockIndex = uint.MaxValue }), workers: 4);
+if (!File.ReadAllBytes(Path.Combine(legacyExtractRoot, "DBFilesClient", "AnimationData.dbc")).AsSpan().SequenceEqual(File.ReadAllBytes(animationPath)))
+    throw new InvalidOperationException("Legacy name-and-locale MPQ extraction fallback failed.");
+Directory.Delete(legacyExtractRoot, true);
 File.Delete(mpqOutput);
 File.Delete(mpqOutput + ".bak");
 
@@ -2537,4 +2549,9 @@ static string FindRepositoryRoot(string start)
     for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
         if (File.Exists(Path.Combine(directory.FullName, "WoWCrucible.slnx"))) return directory.FullName;
     throw new DirectoryNotFoundException($"Could not locate the WoW Crucible repository above {start}.");
+}
+
+sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+{
+    public void Report(T value) => report(value);
 }

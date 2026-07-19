@@ -18,7 +18,8 @@ public sealed record IndexedExtractionResult(int SelectedFiles, int ExtractedFil
 
 public sealed class ClientArchiveIndexService
 {
-    private const int IndexFormatVersion = 3;
+    private const int IndexFormatVersion = 4;
+    private const int ArchiveContentFormatVersion = 2;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     public ClientArchiveIndex Build(string clientRoot, string outputDirectory, bool hashArchives = true, IProgress<ClientIndexProgress>? progress = null, CancellationToken cancellationToken = default, string? externalListFile = null, string? executablePath = null)
@@ -49,7 +50,7 @@ public sealed class ClientArchiveIndexService
             var contentFile = old?.ContentIndexFile ?? Path.Combine("archives", ContentFileName(relative)).Replace('/', Path.DirectorySeparatorChar);
             var contentPath = Path.Combine(outputDirectory, contentFile);
             var oldContent = identityMatches ? TryLoad<ArchiveContentIndex>(contentPath) : null;
-            var contentMatches = oldContent is not null && oldContent.ArchiveLength == info.Length && oldContent.ArchiveLastWriteUtcTicks == info.LastWriteTimeUtc.Ticks;
+            var contentMatches = oldContent is not null && oldContent.FormatVersion == ArchiveContentFormatVersion && oldContent.ArchiveLength == info.Length && oldContent.ArchiveLastWriteUtcTicks == info.LastWriteTimeUtc.Ticks;
             var hash = identityMatches ? old?.Sha256 : null;
 
             if (hashArchives && string.IsNullOrWhiteSpace(hash))
@@ -69,7 +70,7 @@ public sealed class ClientArchiveIndexService
             {
                 progress?.Report(new(index, archives.Length, relative, "listing", false));
                 var files = new PatchArchiveService().ListFiles(path);
-                WriteAtomic(contentPath, new ArchiveContentIndex(1, relative, info.Length, info.LastWriteTimeUtc.Ticks, files));
+                WriteAtomic(contentPath, new ArchiveContentIndex(ArchiveContentFormatVersion, relative, info.Length, info.LastWriteTimeUtc.Ticks, files));
                 summaries.Add(ToSummary(relative, scope, info, hash, contentFile, files, null));
             }
             catch (Exception ex)
@@ -182,7 +183,7 @@ public sealed class ClientArchiveIndexService
                 var resolved = ToSummary(summary.RelativePath, summary.Scope, info, summary.Sha256, summary.ContentIndexFile, files, null);
                 if (resolved.PayloadFiles == summary.PayloadFiles && resolved.AnonymousFiles < summary.AnonymousFiles)
                 {
-                    WriteAtomic(Path.Combine(outputDirectory, summary.ContentIndexFile), new ArchiveContentIndex(1, summary.RelativePath, info.Length, info.LastWriteTimeUtc.Ticks, files));
+                    WriteAtomic(Path.Combine(outputDirectory, summary.ContentIndexFile), new ArchiveContentIndex(ArchiveContentFormatVersion, summary.RelativePath, info.Length, info.LastWriteTimeUtc.Ticks, files));
                     summaries[index] = resolved;
                 }
             }
@@ -219,7 +220,7 @@ public sealed class ClientArchiveIndexService
         return paths.Count;
     }
 
-    public static IndexedExtractionResult ExtractIndexed(string indexDirectory, string archiveRelativePath, string destinationRoot, string? filter = null, bool resolvedOnly = false, bool anonymousOnly = false, bool overwrite = false, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
+    public static IndexedExtractionResult ExtractIndexed(string indexDirectory, string archiveRelativePath, string destinationRoot, string? filter = null, bool resolvedOnly = false, bool anonymousOnly = false, bool overwrite = false, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default, int workers = 0)
     {
         indexDirectory = Path.GetFullPath(indexDirectory);
         var index = Load(indexDirectory);
@@ -234,7 +235,7 @@ public sealed class ClientArchiveIndexService
         if (relative.Equals("..", StringComparison.Ordinal) || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)) throw new InvalidDataException("The indexed archive path escapes the client root.");
         destinationRoot = Path.GetFullPath(destinationRoot);
         var pending = overwrite ? entries : entries.Where(entry => !ExistingExtractionMatches(destinationRoot, entry)).ToArray();
-        new PatchArchiveService().Extract(archivePath, destinationRoot, pending, progress, cancellationToken);
+        new PatchArchiveService().Extract(archivePath, destinationRoot, pending, progress, cancellationToken, workers: workers);
         return new(entries.Length, pending.Length, entries.Length - pending.Length);
     }
 

@@ -65,7 +65,7 @@ Client formats and server integration are separate: a client-build profile decla
 - Allows explicit selection of the WotLK build-12340 schema XML and remembers separate base/override DBC layers.
 - Keeps normal use silent: no startup, success, or activity logs, with only unhandled fatal diagnostics retained when possible. Opt-in **Devbug Mode** adds a live structured terminal and detailed asynchronous session log, retains only the newest three sessions, and never records database passwords. See [docs/DEVBUG-MODE.md](docs/DEVBUG-MODE.md).
 - Houses Crucible-owned settings, profiles, and logs in organized folders beside the executable. Read-only installations fall back to `%LOCALAPPDATA%\\WoWCrucible`, and every Devbug session identifies the effective data root.
-- Browses large MPQs without loading file contents through a lazy folder/breadcrumb view plus a separate global flat-path search, preserves visible locale variants, extracts selected files/folders or the current folder recursively in the background, and reports unresolved hash-only names honestly. Compressed app-local indexes beside the executable are identity-bound to archive/listfile path, size, and timestamp, atomically rebuilt after changes/corruption, and capped so giant archives reopen without repeated file-table scans or unbounded cache growth.
+- Browses large MPQs without loading file contents through a lazy folder/breadcrumb view plus a separate global flat-path search, preserves visible locale variants, extracts selected files/folders or the current folder recursively in the background, and reports unresolved hash-only names honestly. Exact StormLib block indexes make locale selection deterministic without a process-global locale race; read-only per-worker archive handles provide Auto/1/2/4/8/16-worker extraction while same-destination variants remain ordered and every file publishes atomically. Compressed app-local indexes beside the executable are identity-bound to archive/listfile path, size, and timestamp, atomically rebuilt after changes/corruption, and capped so giant archives reopen without repeated file-table scans or unbounded cache growth.
 - Opens later-client CASC storage read-only beside MPQ in the same archive workspace through a reproducibly built, commit-pinned MIT CascLib provider. Folder and flat search retain FileDataId/key-only rows instead of hiding unknown names, external listfiles remain optional path hints, and selected files/folders extract in the background. Crucible never mutates CASC storage and never downloads missing CDN payloads implicitly.
 - Builds content-first asset libraries where provenance is inserted immediately before each file, keeping every archive and imported-folder version of the same Character/UI/World directory adjacent instead of splitting sources into separate trees. New loose-file scans and extracted-folder imports write directly into that layout.
 - Consolidates older `Loose\Content` libraries into the same content-first tree with a read-only dry run, strict all-or-nothing blocking for non-identical destination conflicts, byte-for-byte duplicate verification, and a durable apply journal.
@@ -152,10 +152,10 @@ wowcrucible db sync-rollback 127.0.0.1 3306 admin acore_world target-sync-receip
 wowcrucible client install-patch patch-Z.MPQ "C:\Games\WoW" [--name=patch-Z.MPQ]
 wowcrucible client clear-cache "C:\Games\WoW"
 wowcrucible client index "C:\Games\WoW" client-index [--no-hash] [--listfile=known-paths.txt] [--client-exe=Wow.exe]
-wowcrucible client extract client-index "Data\patch-W.MPQ" extracted "DBFilesClient\*.dbc" --resolved-only
+wowcrucible client extract client-index "Data\patch-W.MPQ" extracted "DBFilesClient\*.dbc" --resolved-only [--workers=N]
 wowcrucible client corpus combined-paths.txt first-client-index second-client-index [...]
 wowcrucible client show client-index
-wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]
+wowcrucible client extract client-index "Data\patch-Z.mpq" extracted-layer [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]
 wowcrucible client fusion extracted-stock extracted-mod-a extracted-mod-b [--output=fusion-plan.json] [--stage=fusion-review] [--all]
 wowcrucible server client-plan "C:\path\to\installed-server" extracted-effective-dbc [--source=core-source] [--output=plan.json] [--stage=server-review]
 wowcrucible asset texture-decode texture.blp texture.png [--mip=0]
@@ -166,8 +166,8 @@ wowcrucible asset library-consolidate asset-library [--apply]
 wowcrucible asset library-catalog asset-library
 wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json] [--listfile=paths.txt]
 wowcrucible mpq tree patch.MPQ [internal-folder] [--format=text|json] [--listfile=paths.txt]
-wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N] [--listfile=paths.txt]
-wowcrucible mpq extract-folder patch.MPQ internal-folder output-folder [--quiet|--progress=N] [--listfile=paths.txt]
+wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]
+wowcrucible mpq extract-folder patch.MPQ internal-folder output-folder [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...]
 wowcrucible mpq update patch-W.MPQ file-or-folder [...]
 wowcrucible mpq merge patch-merged.MPQ patch-A.MPQ patch-B.MPQ [...] --conflicts=block

@@ -224,8 +224,8 @@ Promotion and clone/remap commands save semantic, reviewable operations. Strings
 ```text
 wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]
 wowcrucible mpq tree <archive.mpq> [internal-folder] [--format=text|json] [--listfile=paths.txt]
-wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--listfile=paths.txt]
-wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]
+wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]
+wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]
 wowcrucible mpq create <archive.mpq> <files/folders...>
 wowcrucible mpq update <small-patch.mpq> <files/folders...>
 wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]
@@ -236,6 +236,8 @@ Filters accept text or `*`, `?`, and `**` globs. `--content-only` excludes `(lis
 If an archive opens but only exposes StormLib `File000...` placeholders, Crucible reports those entries as unresolved names rather than calling the MPQ incompatible. Supply a compatible external path corpus with `--listfile=paths.txt` to recover known client paths before filtering or extraction.
 
 `tree` lists only the direct files and subfolders at the requested internal folder while reporting recursive counts and bytes. `extract-folder` resolves that exact folder to its recursive files before extraction. The desktop provides the same lazy breadcrumb browser beside the global flat search and displays non-default locale variants explicitly.
+
+Extraction opens source archives explicitly read-only and uses a separate StormLib archive handle per worker. Every enumerated member retains its exact block index, so parallel extraction selects the intended locale variant without racing StormLib's process-global locale setting; legacy caller-constructed entries without an index use a serialized compatibility fallback. Writes remain per-file atomic, same-destination variants stay ordered, cancellation leaves no `.extracting` file behind, and a later run can resume around existing indexed outputs. Auto uses up to four workers; `--workers=1..16` and the desktop selector allow storage-specific tuning. On the workspace's USB SATA SSD, a byte-verified Patch-H sample of 10,000 files (781,411,574 output bytes) measured 49.82–49.88 seconds with one worker and 43.39–43.52 seconds with two/four workers, with zero SHA-256 mismatches.
 
 Standalone list/tree/extract commands and the desktop archive browser share compressed indexes under `Cache\MPQ` beside the executable when portable. A cache is reused only when the archive and optional external listfile path, size, and write timestamp still match. Writes are atomic, corrupt entries are rebuilt, and pruning retains at most roughly 64 recent indexes within a 512 MiB budget.
 
@@ -273,7 +275,7 @@ wowcrucible client clear-cache <client-root>
 wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]
 wowcrucible client corpus <output-listfile> <index-directory>...
 wowcrucible client show <index-directory>
-wowcrucible client extract <index-directory> <archive-relative-path> <folder> [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet]
+wowcrucible client extract <index-directory> <archive-relative-path> <folder> [filter] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]
 wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]
 ```
 
