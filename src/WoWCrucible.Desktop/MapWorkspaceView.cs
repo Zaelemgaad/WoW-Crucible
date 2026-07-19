@@ -11,13 +11,19 @@ namespace WoWCrucible.Desktop;
 
 internal sealed class MapWorkspaceView : UserControl, IDisposable
 {
-    private sealed record WmoCandidateChoice(ClientAssetLocation Location)
+    private sealed record AssetCandidateChoice(ClientAssetLocation Location)
     {
         public override string ToString() => $"{Location.Provenance} · {Path.GetFileName(Location.SourcePath)}";
     }
-    private sealed record WmoReferenceChoice(string? ClientPath, MapWmoPlacement? Placement)
+    private sealed record MapObjectReferenceChoice(string? ClientPath, MapWmoPlacement? WmoPlacement, MapM2Placement? M2Placement)
     {
-        public override string ToString() => Placement is null ? ClientPath ?? "Unresolved WMO" : $"UID {Placement.UniqueId:N0} · {Path.GetFileName(ClientPath)} · pos {Placement.Position.X:0.##}, {Placement.Position.Y:0.##}, {Placement.Position.Z:0.##}";
+        public bool IsWmo => WmoPlacement is not null || ClientPath is { } path && Path.GetExtension(path).Equals(".wmo", StringComparison.OrdinalIgnoreCase);
+        public override string ToString()
+        {
+            if (WmoPlacement is { } wmo) return $"WMO · UID {wmo.UniqueId:N0} · {Path.GetFileName(ClientPath)} · pos {wmo.Position.X:0.##}, {wmo.Position.Y:0.##}, {wmo.Position.Z:0.##}";
+            if (M2Placement is { } m2) return $"M2 · UID {m2.UniqueId:N0} · {Path.GetFileName(ClientPath)} · pos {m2.Position.X:0.##}, {m2.Position.Y:0.##}, {m2.Position.Z:0.##}";
+            return $"{(IsWmo ? "WMO" : "M2")} · {ClientPath ?? "unresolved client path"}";
+        }
     }
     private static readonly MapBrushModeChoice[] BrushModes = [new("Raise / lower", AdtTerrainBrushMode.RaiseLower), new("Flatten toward height", AdtTerrainBrushMode.Flatten), new("Smooth terrain", AdtTerrainBrushMode.Smooth), new("Seeded noise", AdtTerrainBrushMode.Noise)];
     private readonly DesktopWorkspaceSession _session;
@@ -29,10 +35,11 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _status = Info("Read-only native inspection · no legacy map executable required");
     private readonly MapGridControl _grid = new();
     private readonly WmoPreviewView _wmoPreview = new();
-    private readonly TextBlock _wmoStatus = Info("Open an extracted root WMO referenced by this map to inspect its real grouped geometry.");
+    private readonly M2PreviewView _m2Preview = new() { IsVisible = false };
+    private readonly TextBlock _wmoStatus = Info("Select a placed or referenced WMO/M2 object to inspect its native geometry.");
     private readonly TabControl _visualTabs = new();
     private readonly TextBox _wmoLibrary = new() { PlaceholderText = "Processed asset library root…" };
-    private readonly ComboBox _wmoReferences = new() { PlaceholderText = "No WMO references loaded from this map" };
+    private readonly ComboBox _wmoReferences = new() { PlaceholderText = "No placed or referenced objects loaded from this map" };
     private readonly ComboBox _wmoCandidates = new() { PlaceholderText = "Select an explicit provenance candidate" };
     private readonly TextBox _heightDelta = new() { Text = "0", PlaceholderText = "Signed terrain height delta" };
     private readonly TextBox _brushCenterX = new() { Text = "8", PlaceholderText = "Center X (0–16)" };
@@ -77,7 +84,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var inspect = new Button { Content = "Inspect / reload" }; inspect.Click += async (_, _) => await OpenAsync(_path.Text);
         var openWmo = new Button { Content = "Preview extracted WMO…" }; openWmo.Click += async (_, _) => await PickWmoAsync();
         var chooseWmoLibrary = new Button { Content = "Choose processed library…" }; chooseWmoLibrary.Click += async (_, _) => await PickWmoLibraryAsync();
-        var previewReference = new Button { Content = "Preview selected reference" }; previewReference.Click += async (_, _) => await PreviewSelectedWmoAsync();
+        var previewReference = new Button { Content = "Preview selected object" }; previewReference.Click += async (_, _) => await PreviewSelectedObjectAsync();
         _wmoReferences.SelectionChanged += async (_, _) => await ResolveSelectedWmoAsync();
         _wmoCandidates.SelectionChanged += (_, _) => DescribeSelectedWmoCandidate();
         _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
@@ -124,8 +131,9 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         };
         var wmoResolver = new StackPanel { Margin = new Thickness(7), Spacing = 5, Children = { _wmoLibrary, new WrapPanel { Children = { chooseWmoLibrary, previewReference, openWmo } }, _wmoReferences, _wmoCandidates } };
         var wmoFooter = new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _wmoStatus }; Grid.SetRow(wmoFooter, 2);
-        Grid.SetRow(_wmoPreview, 1); var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, _wmoPreview, wmoFooter } };
-        _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Referenced WMO preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
+        var objectPreviewHost = new Grid { Children = { _wmoPreview, _m2Preview } }; Grid.SetRow(objectPreviewHost, 1);
+        var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, objectPreviewHost, wmoFooter } };
+        _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Placed object preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
         var body = new Grid { ColumnDefinitions = new("3*,Auto,2*") };
         body.Children.Add(_visualTabs);
         var splitter = new GridSplitter { ResizeDirection = GridResizeDirection.Columns, Background = Brush.Parse("#2B3445") }; body.Children.Add(splitter); Grid.SetColumn(splitter, 1);
@@ -151,11 +159,14 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             _chunks.ItemsSource = inspection.Chunks.Select(chunk => $"{chunk.Id} · {chunk.Occurrences:N0} chunk(s) · {chunk.PayloadBytes:N0} bytes").ToArray();
             _dependencies.ItemsSource = inspection.TexturePaths.Select(value => "Texture · " + value).Concat(inspection.ModelPaths.Select(value => "Model · " + value)).Concat(inspection.WmoPaths.Select(value => "WMO · " + value)).DefaultIfEmpty("No path-list dependencies in this file.").ToArray();
             _wmoCandidates.ItemsSource = null;
-            var placedPaths = inspection.WmoPlacements.Where(value => value.ClientPath is not null).Select(value => value.ClientPath!).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var wmoReferences = inspection.WmoPlacements.Select(value => new WmoReferenceChoice(value.ClientPath, value))
-                .Concat(inspection.WmoPaths.Where(value => !placedPaths.Contains(value)).Select(value => new WmoReferenceChoice(value, null))).ToArray();
+            var placedWmoPaths = inspection.WmoPlacements.Where(value => value.ClientPath is not null).Select(value => value.ClientPath!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var placedM2Paths = inspection.M2Placements.Where(value => value.ClientPath is not null).Select(value => value.ClientPath!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var wmoReferences = inspection.WmoPlacements.Select(value => new MapObjectReferenceChoice(value.ClientPath, value, null))
+                .Concat(inspection.M2Placements.Select(value => new MapObjectReferenceChoice(value.ClientPath, null, value)))
+                .Concat(inspection.WmoPaths.Where(value => !placedWmoPaths.Contains(value)).Select(value => new MapObjectReferenceChoice(value, null, null)))
+                .Concat(inspection.ModelPaths.Where(value => !placedM2Paths.Contains(value)).Select(value => new MapObjectReferenceChoice(value, null, null))).ToArray();
             _wmoReferences.ItemsSource = wmoReferences; _wmoReferences.SelectedIndex = wmoReferences.Length > 0 ? 0 : -1;
-            if (wmoReferences.Length == 0) _wmoStatus.Text = "This map contains no path-listed WMO references or MODF placements.";
+            if (wmoReferences.Length == 0) _wmoStatus.Text = "This map contains no path-listed or placed WMO/M2 objects.";
             _status.Text = $"Loaded {inspection.Kind} · {inspection.PresentCells:N0}/{inspection.Cells.Count:N0} present cells · click a cell for details · drop another map file anywhere on the grid" + (loaded.textureResult.Error is null ? string.Empty : $" · texture layers unavailable: {loaded.textureResult.Error}") + (loaded.alphaResult.Error is null ? string.Empty : $" · alpha maps unavailable: {loaded.alphaResult.Error}");
         }
         catch (OperationCanceledException) { }
@@ -409,8 +420,13 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private async Task ResolveSelectedWmoAsync()
     {
         _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = new CancellationTokenSource(); var token = _wmoOperation.Token; _wmoCandidates.ItemsSource = null;
-        if (_wmoReferences.SelectedItem is not WmoReferenceChoice reference) return;
-        if (string.IsNullOrWhiteSpace(reference.ClientPath)) { _wmoStatus.Text = $"MODF placement UID {reference.Placement?.UniqueId.ToString("N0") ?? "?"} has no resolvable MWID→MWMO path."; return; }
+        if (_wmoReferences.SelectedItem is not MapObjectReferenceChoice reference) return;
+        if (string.IsNullOrWhiteSpace(reference.ClientPath))
+        {
+            var identity = reference.WmoPlacement?.UniqueId ?? reference.M2Placement?.UniqueId;
+            _wmoStatus.Text = $"Placed object UID {identity?.ToString("N0") ?? "?"} has no resolvable path-list entry.";
+            return;
+        }
         var clientPath = reference.ClientPath;
         var library = _wmoLibrary.Text?.Trim(); if (string.IsNullOrWhiteSpace(library)) { _wmoStatus.Text = $"Referenced WMO: {clientPath} · choose the processed asset library to resolve it."; return; }
         _wmoStatus.Text = $"Resolving every provenance candidate for {clientPath}…";
@@ -427,31 +443,35 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
                 return (index, candidates, provenance);
             }, token);
             token.ThrowIfCancellationRequested(); _wmoLibraryIndex = resolved.index;
-            var choices = resolved.candidates.Select(value => new WmoCandidateChoice(value)).ToArray(); _wmoCandidates.ItemsSource = choices;
+            var choices = resolved.candidates.Select(value => new AssetCandidateChoice(value)).ToArray(); _wmoCandidates.ItemsSource = choices;
             var preferred = resolved.provenance is null ? null : choices.FirstOrDefault(value => value.Location.Provenance.Equals(resolved.provenance, StringComparison.OrdinalIgnoreCase));
             _wmoCandidates.SelectedItem = preferred ?? (choices.Length == 1 ? choices[0] : null);
             _wmoStatus.Text = choices.Length switch
             {
-                0 => $"Referenced WMO is absent from the processed library: {clientPath}",
+                0 => $"Referenced object is absent from the processed library: {clientPath}",
                 1 => $"Resolved one source for {clientPath}: {choices[0].Location.Provenance}. Ready to preview.",
                 _ when preferred is not null => $"Resolved {choices.Length:N0} sources; selected the map's exact provenance '{preferred.Location.Provenance}'.",
                 _ => $"Resolved {choices.Length:N0} provenance candidates. Choose one explicitly; Crucible has not compared their bytes and will not guess a layer."
             };
         }
         catch (OperationCanceledException) { }
-        catch (Exception exception) { _wmoStatus.Text = $"WMO reference resolution failed: {exception.Message}"; DesktopCrashLogger.Log("Map WMO reference resolution failed", exception); }
+        catch (Exception exception) { _wmoStatus.Text = $"Map object resolution failed: {exception.Message}"; DesktopCrashLogger.Log("Map object resolution failed", exception); }
     }
 
     private void DescribeSelectedWmoCandidate()
     {
-        if (_wmoCandidates.SelectedItem is not WmoCandidateChoice choice) return;
-        _wmoStatus.Text = $"Selected {choice.Location.Provenance} for {choice.Location.ClientPath}. Preview uses this exact file and resolves its groups/materials from the same source where available.";
+        if (_wmoCandidates.SelectedItem is not AssetCandidateChoice choice) return;
+        _wmoStatus.Text = $"Selected {choice.Location.Provenance} for {choice.Location.ClientPath}. Preview uses this exact physical file rather than guessing between layers.";
     }
 
-    private async Task PreviewSelectedWmoAsync()
+    private async Task PreviewSelectedObjectAsync()
     {
-        if (_wmoCandidates.SelectedItem is not WmoCandidateChoice choice) { _wmoStatus.Text = "Select an explicit WMO provenance candidate first."; return; }
-        await LoadWmoAsync(choice.Location.SourcePath, (_wmoReferences.SelectedItem as WmoReferenceChoice)?.Placement);
+        if (_wmoCandidates.SelectedItem is not AssetCandidateChoice choice) { _wmoStatus.Text = "Select an explicit object provenance candidate first."; return; }
+        var reference = _wmoReferences.SelectedItem as MapObjectReferenceChoice;
+        if (reference?.IsWmo == true || Path.GetExtension(choice.Location.SourcePath).Equals(".wmo", StringComparison.OrdinalIgnoreCase))
+            await LoadWmoAsync(choice.Location.SourcePath, reference?.WmoPlacement);
+        else
+            await LoadM2Async(choice.Location.SourcePath, reference?.M2Placement);
     }
 
     private async Task LoadWmoAsync(string path, MapWmoPlacement? placement)
@@ -460,7 +480,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         try
         {
             var loaded = await Task.Run(() => { var geometry = WmoPreviewGeometryService.Load(path, cancellationToken: token); var textures = WmoPreviewGeometryService.LoadTextures(geometry, cancellationToken: token); return (geometry, textures); }, token); token.ThrowIfCancellationRequested();
-            _wmoPreview.SetGeometry(loaded.geometry); _wmoPreview.SetPlacement(placement); _wmoPreview.SetDecodedTextures(loaded.textures.Textures); _visualTabs.SelectedIndex = 1;
+            _m2Preview.ClearGeometry(); _m2Preview.IsVisible = false; _wmoPreview.IsVisible = true; _wmoPreview.SetGeometry(loaded.geometry); _wmoPreview.SetPlacement(placement); _wmoPreview.SetDecodedTextures(loaded.textures.Textures); _visualTabs.SelectedIndex = 1;
             var placementText = placement is null ? string.Empty : $" · UID {placement.UniqueId:N0} · pos {placement.Position.X:0.##},{placement.Position.Y:0.##},{placement.Position.Z:0.##} · rot {placement.Orientation.X:0.##},{placement.Orientation.Y:0.##},{placement.Orientation.Z:0.##} · scale {placement.Scale:0.###}";
             _wmoStatus.Text = $"{Path.GetFileName(loaded.geometry.RootPath)} · {loaded.geometry.Groups.Count:N0} groups · {loaded.geometry.TriangleIndices.Count / 3:N0} triangles · {loaded.textures.Textures.Count:N0}/{loaded.geometry.Materials.Count:N0} textures{placementText}" + (loaded.geometry.Findings.Count + loaded.textures.Findings.Count == 0 ? string.Empty : $" · {loaded.geometry.Findings.Count + loaded.textures.Findings.Count:N0} finding(s)");
         }
@@ -468,14 +488,28 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         catch (Exception exception) { _wmoStatus.Text = $"WMO preview unavailable: {exception.Message}"; DesktopCrashLogger.Log("Map WMO preview failed", exception); }
     }
 
-    private static string Summary(MapAssetInspection value) => $"{Path.GetFileName(value.Path)}\n{value.Kind} · MVER {value.Version:N0}\nGrid {value.GridWidth:N0}×{value.GridHeight:N0} · {value.PresentCells:N0}/{value.Cells.Count:N0} present\nWorld tile {(value.TileX is null ? "not encoded by filename" : $"{value.TileX:N0},{value.TileY:N0}")}\nHeight {value.MinimumHeight?.ToString("0.###") ?? "-"} .. {value.MaximumHeight?.ToString("0.###") ?? "-"}\nHeader flags 0x{value.HeaderFlags:X}\n{value.TexturePaths.Count:N0} textures · {value.ModelPaths.Count:N0} models · {value.WmoPaths.Count:N0} WMO paths · {value.WmoPlacements.Count:N0} placed WMO instances" + (value.Findings.Count == 0 ? "\nValidation: clean" : "\n" + string.Join("\n", value.Findings.Select(finding => "Review: " + finding)));
+    private async Task LoadM2Async(string path, MapM2Placement? placement)
+    {
+        _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = new CancellationTokenSource(); var token = _wmoOperation.Token; _wmoStatus.Text = "Loading M2 and its WotLK SKIN geometry…";
+        try
+        {
+            var geometry = await Task.Run(() => { token.ThrowIfCancellationRequested(); return M2PreviewGeometryService.Load(path); }, token); token.ThrowIfCancellationRequested();
+            _wmoPreview.ClearGeometry(); _wmoPreview.IsVisible = false; _m2Preview.IsVisible = true; _m2Preview.SetGeometry(geometry); _visualTabs.SelectedIndex = 1;
+            var placementText = placement is null ? string.Empty : $" · UID {placement.UniqueId:N0} · pos {placement.Position.X:0.##},{placement.Position.Y:0.##},{placement.Position.Z:0.##} · rot {placement.Orientation.X:0.##},{placement.Orientation.Y:0.##},{placement.Orientation.Z:0.##} · scale {placement.Scale:0.###}";
+            _wmoStatus.Text = $"{Path.GetFileName(geometry.ModelPath)} · {geometry.Vertices.Count:N0} vertices · {geometry.TriangleIndices.Count / 3:N0} visible triangles · {geometry.TextureSlots.Count:N0} texture slots{placementText}";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { _wmoStatus.Text = $"M2 preview unavailable: {exception.Message}"; DesktopCrashLogger.Log("Map M2 preview failed", exception); }
+    }
+
+    private static string Summary(MapAssetInspection value) => $"{Path.GetFileName(value.Path)}\n{value.Kind} · MVER {value.Version:N0}\nGrid {value.GridWidth:N0}×{value.GridHeight:N0} · {value.PresentCells:N0}/{value.Cells.Count:N0} present\nWorld tile {(value.TileX is null ? "not encoded by filename" : $"{value.TileX:N0},{value.TileY:N0}")}\nHeight {value.MinimumHeight?.ToString("0.###") ?? "-"} .. {value.MaximumHeight?.ToString("0.###") ?? "-"}\nHeader flags 0x{value.HeaderFlags:X}\n{value.TexturePaths.Count:N0} textures · {value.ModelPaths.Count:N0} M2 paths · {value.WmoPaths.Count:N0} WMO paths · {value.M2Placements.Count:N0} placed M2 instances · {value.WmoPlacements.Count:N0} placed WMO instances" + (value.Findings.Count == 0 ? "\nValidation: clean" : "\n" + string.Join("\n", value.Findings.Select(finding => "Review: " + finding)));
     private static string Describe(MapTileCell cell) => $"Grid {cell.X:N0},{cell.Y:N0}\nPresent: {cell.Present}\nFlags: 0x{cell.Flags:X}\nAsync ID: {cell.AsyncId:N0}\nArea ID: {cell.AreaId?.ToString("N0") ?? "-"}\nHoles: 0x{cell.Holes?.ToString("X") ?? "-"}\nHeight: {cell.MinimumHeight?.ToString("0.###") ?? "-"} .. {cell.MaximumHeight?.ToString("0.###") ?? "-"}";
     private static bool IsMap(string? path) => path is not null && File.Exists(path) && Path.GetExtension(path).ToLowerInvariant() is ".adt" or ".wdt" or ".wdl";
     private static TextBlock Info(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#AAB5C7") };
     private static TextBlock Label(string text) => new() { Text = text, FontSize = 11, FontWeight = FontWeight.SemiBold, Foreground = Brush.Parse("#7F8A9F") };
     private static StackPanel Field(string label, Control control) => new() { Spacing = 3, Children = { Label(label), control } };
     private static Border Card(Control child) => new() { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Padding = new Thickness(9), Child = child };
-    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _operation = null; _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = null; _wmoPreview.Dispose(); }
+    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _operation = null; _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = null; _wmoPreview.Dispose(); _m2Preview.Dispose(); }
 }
 
 internal sealed class MapGridControl : Control
