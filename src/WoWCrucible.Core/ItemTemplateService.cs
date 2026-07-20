@@ -10,7 +10,8 @@ public sealed record ItemDraft(
     uint Entry, string Name, int Class, int Subclass, uint DisplayId, int Quality, int InventoryType,
     uint ItemLevel, uint RequiredLevel, uint BuyPrice, uint SellPrice, uint Bonding, uint Flags,
     float Armor, float DamageMin, float DamageMax, uint Delay, uint MaxDurability, string Description,
-    IReadOnlyList<ItemStatDraft>? Stats = null, IReadOnlyList<ItemSpellDraft>? Spells = null, uint ItemSetId = 0);
+    IReadOnlyList<ItemStatDraft>? Stats = null, IReadOnlyList<ItemSpellDraft>? Spells = null, uint ItemSetId = 0,
+    int DamageType = 0, int SoundOverrideSubclassId = -1, int Material = 0, int SheatheType = 0);
 
 public sealed record ItemWritePlan(
     string Table,
@@ -48,7 +49,7 @@ public static class ItemTemplateAdapter
 {
     public static DatabaseTableCapability CreatePortableTable()
     {
-        var names = new List<string> { "entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description", "itemset" };
+        var names = new List<string> { "entry", "class", "subclass", "SoundOverrideSubclass", "Material", "name", "displayid", "Quality", "InventoryType", "sheath", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description", "itemset" };
         for (var slot = 1; slot <= 10; slot++) { names.Add($"stat_type{slot}"); names.Add($"stat_value{slot}"); }
         for (var slot = 1; slot <= 5; slot++) names.AddRange([$"spellid_{slot}", $"spelltrigger_{slot}", $"spellcharges_{slot}", $"spellppmRate_{slot}", $"spellcooldown_{slot}", $"spellcategory_{slot}", $"spellcategorycooldown_{slot}"]);
         return new("item_template", names.Select((name, index) => new DatabaseColumnCapability(name, name is "name" or "description" ? "varchar" : "int", name is "name" or "description" ? "varchar(255)" : "int", false, "0", name == "entry" ? "PRI" : string.Empty, string.Empty, index + 1)).ToArray());
@@ -62,9 +63,10 @@ public static class ItemTemplateAdapter
         {
             ("entry", draft.Entry, true), ("class", draft.Class, true), ("subclass", draft.Subclass, true), ("name", draft.Name.Trim(), true),
             ("displayid", draft.DisplayId, true), ("Quality", draft.Quality, true), ("InventoryType", draft.InventoryType, true),
+            ("SoundOverrideSubclass", draft.SoundOverrideSubclassId, draft.SoundOverrideSubclassId != -1), ("Material", draft.Material, draft.Material != 0), ("sheath", draft.SheatheType, draft.SheatheType != 0),
             ("ItemLevel", draft.ItemLevel, draft.ItemLevel != 0), ("RequiredLevel", draft.RequiredLevel, draft.RequiredLevel != 0), ("BuyPrice", draft.BuyPrice, draft.BuyPrice != 0),
             ("SellPrice", draft.SellPrice, draft.SellPrice != 0), ("bonding", draft.Bonding, draft.Bonding != 0), ("Flags", draft.Flags, draft.Flags != 0), ("armor", draft.Armor, draft.Armor != 0),
-            ("dmg_min1", draft.DamageMin, draft.DamageMin != 0), ("dmg_max1", draft.DamageMax, draft.DamageMax != 0), ("dmg_type1", 0, false), ("delay", draft.Delay, draft.Delay != 0),
+            ("dmg_min1", draft.DamageMin, draft.DamageMin != 0), ("dmg_max1", draft.DamageMax, draft.DamageMax != 0), ("dmg_type1", draft.DamageType, draft.DamageType != 0), ("delay", draft.Delay, draft.Delay != 0),
             ("MaxDurability", draft.MaxDurability, draft.MaxDurability != 0), ("description", draft.Description ?? string.Empty, !string.IsNullOrWhiteSpace(draft.Description)), ("itemset", draft.ItemSetId, draft.ItemSetId != 0)
         };
         var values = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);

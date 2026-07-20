@@ -8,15 +8,23 @@ public enum ItemAcquisitionReviewGroup
     KnownAcquisition,
     OtherManualReview,
     DeprecatedTestOrDeveloper,
-    NpcOrMonsterEquipment
+    NpcOrMonsterEquipment,
+    ClientOnlyMissingServerDefinition
 }
+
+public enum ItemCatalogPresence { ServerUncheckedClient, ServerAndClient, ServerOnly, ClientOnly }
 
 public sealed record ItemCatalogEntry(uint Entry, string Name, int Quality, int ItemLevel, uint ItemSetId,
     IReadOnlyList<string> AcquisitionSources, IReadOnlyList<string>? ReviewNotes = null)
 {
     public bool HasKnownAcquisitionPath => AcquisitionSources.Count > 0;
     public IReadOnlyList<string> NoPathReview => ReviewNotes ?? [];
-    public ItemAcquisitionReviewGroup ReviewGroup => ClassifyReviewGroup(Name, HasKnownAcquisitionPath, Quality, NoPathReview);
+    public bool HasServerDefinition { get; init; } = true;
+    public bool ClientCoverageChecked { get; init; }
+    public ClientItemRecord? ClientRecord { get; init; }
+    public bool HasClientRecord => ClientRecord is not null;
+    public ItemCatalogPresence Presence => !HasServerDefinition ? ItemCatalogPresence.ClientOnly : !ClientCoverageChecked ? ItemCatalogPresence.ServerUncheckedClient : HasClientRecord ? ItemCatalogPresence.ServerAndClient : ItemCatalogPresence.ServerOnly;
+    public ItemAcquisitionReviewGroup ReviewGroup => !HasServerDefinition ? ItemAcquisitionReviewGroup.ClientOnlyMissingServerDefinition : ClassifyReviewGroup(Name, HasKnownAcquisitionPath, Quality, NoPathReview);
 
     public static ItemAcquisitionReviewGroup ClassifyReviewGroup(string? name, bool hasKnownAcquisitionPath, int quality = 0,
         IReadOnlyList<string>? reviewEvidence = null)
@@ -204,6 +212,7 @@ public sealed class ItemCatalogService
 
         AddCppGrantReviewEvidence(cppGrants, acquired, reachableSpells, rejected);
 
+        var clientItems = LoadClientIdentityCoverage(dbcFolder, checkedSources, missingSources);
         var itemColumns = schema[itemTable];
         var entryColumn = RequireColumn(itemColumns, "entry"); var nameColumn = RequireColumn(itemColumns, "name");
         var qualityColumn = ResolveColumn(itemColumns, "Quality", "quality"); var levelColumn = ResolveColumn(itemColumns, "ItemLevel", "itemlevel"); var setColumn = ResolveColumn(itemColumns, "itemset", "ItemSet");
@@ -223,9 +232,39 @@ public sealed class ItemCatalogService
                         .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                 items.Add(new(entry, Convert.ToString(reader.GetValue(1)) ?? string.Empty, quality, Convert.ToInt32(reader.GetValue(3)), Convert.ToUInt32(reader.GetValue(4)), sources, review));
             }
-        return new(items, rejected,
+        var completeItems = MergeClientIdentityCoverage(items, clientItems);
+        return new(completeItems, rejected,
             checkedSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
             missingSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray());
+    }
+
+    internal static IReadOnlyList<ItemCatalogEntry> MergeClientIdentityCoverage(IReadOnlyList<ItemCatalogEntry> serverItems, IReadOnlyList<ClientItemRecord>? clientItems)
+    {
+        ArgumentNullException.ThrowIfNull(serverItems);
+        var duplicateServer = serverItems.GroupBy(item => item.Entry).FirstOrDefault(group => group.Count() > 1);
+        if (duplicateServer is not null) throw new InvalidDataException($"The item catalog contains duplicate server entry {duplicateServer.Key:N0}.");
+        if (clientItems is null) return serverItems.OrderBy(item => item.Entry).ToArray();
+        var duplicateClient = clientItems.GroupBy(item => item.Id).FirstOrDefault(group => group.Count() > 1);
+        if (duplicateClient is not null) throw new InvalidDataException($"Item.dbc identity coverage contains duplicate ID {duplicateClient.Key:N0}.");
+        var clientById = clientItems.ToDictionary(item => item.Id); var serverIds = serverItems.Select(item => item.Entry).ToHashSet();
+        var result = serverItems.Select(item => item with { ClientCoverageChecked = true, ClientRecord = clientById.GetValueOrDefault(item.Entry) }).ToList();
+        foreach (var client in clientItems.Where(item => !serverIds.Contains(item.Id)))
+            result.Add(new(client.Id, $"Client-only Item.dbc record {client.Id:N0}", 0, 0, 0, [],
+                ["Item.dbc contains this ID, but the connected item_template has no server definition. The client can display its class/display metadata, but it cannot be acquired or used until a complete server row is deliberately authored."])
+            {
+                HasServerDefinition = false,
+                ClientCoverageChecked = true,
+                ClientRecord = client
+            });
+        return result.OrderBy(item => item.Entry).ToArray();
+    }
+
+    private static IReadOnlyList<ClientItemRecord>? LoadClientIdentityCoverage(string? dbcFolder, ICollection<string> checkedSources, ICollection<string> missingSources)
+    {
+        if (string.IsNullOrWhiteSpace(dbcFolder)) { missingSources.Add("Item.dbc (configure the server DBC folder for client-only identity coverage)"); return null; }
+        var path = Directory.Exists(dbcFolder) ? Path.Combine(dbcFolder, "Item.dbc") : Path.GetFileName(dbcFolder).Equals("Item.dbc", StringComparison.OrdinalIgnoreCase) ? Path.GetFullPath(dbcFolder) : Path.Combine(dbcFolder, "Item.dbc");
+        if (!File.Exists(path)) { missingSources.Add($"Item.dbc client identity coverage ({path})"); return null; }
+        var result = ItemClientSyncService.LoadClientItems(path); checkedSources.Add("Item.dbc (client/server identity union)"); return result;
     }
 
     private const string NoEvidenceMessage = "No accepted acquisition row was found in the checked SQL, SmartAI/script-command, DBC, and configured source coverage. Direct source call sites remain review candidates until their runtime registration and trigger are proven.";

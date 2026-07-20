@@ -24,8 +24,11 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private readonly NumericUpDown _itemLevel = Number(1, 1000, 1); private readonly NumericUpDown _requiredLevel = Number(0, 255);
     private readonly NumericUpDown _buy = Number(0, uint.MaxValue); private readonly NumericUpDown _sell = Number(0, uint.MaxValue);
     private readonly ComboBox _bonding = Choice((0,"No binding"),(1,"Bind on pickup"),(2,"Bind on equip"),(3,"Bind on use"),(4,"Quest item"));
+    private readonly NumericUpDown _soundOverride = Number(-1, int.MaxValue, -1);
+    private readonly ComboBox _material = Choice((-1,"Consumable / unspecified"),(0,"None"),(1,"Metal"),(2,"Wood"),(3,"Liquid"),(4,"Jewelry"),(5,"Chain"),(6,"Plate"),(7,"Cloth"),(8,"Leather"));
+    private readonly ComboBox _sheath = Choice((0,"None"),(1,"Two-hand weapon"),(2,"Staff"),(3,"One-hand weapon"),(4,"Shield"),(5,"Enchanter rod"),(6,"Off hand"),(7,"Ranged"));
     private readonly NumericUpDown _flags = Number(0, uint.MaxValue); private readonly NumericUpDown _armor = Number(0, 100000);
-    private readonly NumericUpDown _damageMin = Number(0, 100000); private readonly NumericUpDown _damageMax = Number(0, 100000); private readonly NumericUpDown _delay = Number(0, 10000); private readonly NumericUpDown _durability = Number(0, 100000);
+    private readonly NumericUpDown _damageMin = Number(0, 100000); private readonly NumericUpDown _damageMax = Number(0, 100000); private readonly ComboBox _damageType = Choice((0,"Physical"),(1,"Holy"),(2,"Fire"),(3,"Nature"),(4,"Frost"),(5,"Shadow"),(6,"Arcane")); private readonly NumericUpDown _delay = Number(0, 10000); private readonly NumericUpDown _durability = Number(0, 100000);
     private readonly NumericUpDown _itemSet = Number(0, uint.MaxValue);
     private readonly ComboBox[] _statTypes = Enumerable.Range(0,10).Select(_ => StatChoice()).ToArray(); private readonly NumericUpDown[] _statValues = Enumerable.Range(0,10).Select(_ => Number(-100000,100000)).ToArray();
     private readonly NumericUpDown[] _spellIds = Enumerable.Range(0,5).Select(_ => Number(0,int.MaxValue)).ToArray(); private readonly ComboBox[] _spellTriggers = Enumerable.Range(0,5).Select(_ => SpellTriggerChoice()).ToArray();
@@ -70,8 +73,8 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         foreach (var combo in Combos().Where(combo => !ReferenceEquals(combo, _class))) combo.SelectionChanged += (_, _) => RefreshPreview();
         foreach (var text in new[] { _name, _description }) text.TextChanged += (_, _) => RefreshPreview();
 
-        var basics = Form(("Entry ID",_entry),("Name",_name),("Item class",_class),("Subclass",_subclass),("Display ID",_display),("Quality",_quality),("Inventory slot",_inventory),("Item level",_itemLevel),("Required level",_requiredLevel),("Binding",_bonding),("Item set ID",_itemSet),("Description",_description));
-        var combat = Form(("Buy price (copper)",_buy),("Sell price (copper)",_sell),("Armor",_armor),("Minimum damage",_damageMin),("Maximum damage",_damageMax),("Weapon delay (ms)",_delay),("Durability",_durability),("Raw flags",_flags));
+        var basics = Form(("Entry ID",_entry),("Name",_name),("Item class",_class),("Subclass",_subclass),("Display ID",_display),("Quality",_quality),("Inventory slot",_inventory),("Material",_material),("Sheath position",_sheath),("Sound override subclass",_soundOverride),("Item level",_itemLevel),("Required level",_requiredLevel),("Binding",_bonding),("Item set ID",_itemSet),("Description",_description));
+        var combat = Form(("Buy price (copper)",_buy),("Sell price (copper)",_sell),("Armor",_armor),("Minimum damage",_damageMin),("Maximum damage",_damageMax),("Damage school",_damageType),("Weapon delay (ms)",_delay),("Durability",_durability),("Raw flags",_flags));
         var editTabs = new TabControl { Items = { new TabItem { Header="Basics", Content=new ScrollViewer { Content=basics } }, new TabItem { Header="Combat & value", Content=new ScrollViewer { Content=combat } }, new TabItem { Header="10 stat slots", Content=StatsPage() }, new TabItem { Header="5 spell effects", Content=SpellsPage() } } };
 
         var resolveDisplay = AccentButton("Resolve current display ID"); resolveDisplay.Click += async (_, _) => await ResolveDisplayAsync(true);
@@ -109,12 +112,36 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     public void LoadRow(IReadOnlyDictionary<string, object?> row)
     {
         _entry.Value=Decimal(row,"entry",1);_name.Text=Text(row,"name");Set(_class,Int(row,"class"));UpdateSubclassChoices();Set(_subclass,Int(row,"subclass"));
-        _display.Value=Decimal(row,"displayid");Set(_quality,Int(row,"Quality"));Set(_inventory,Int(row,"InventoryType"));_itemLevel.Value=Decimal(row,"ItemLevel",1);_requiredLevel.Value=Decimal(row,"RequiredLevel");
+        _display.Value=Decimal(row,"displayid");Set(_quality,Int(row,"Quality"));Set(_inventory,Int(row,"InventoryType"));Set(_material,Int(row,"Material"));Set(_sheath,Int(row,"sheath"));_soundOverride.Value=Decimal(row,"SoundOverrideSubclass",-1);_itemLevel.Value=Decimal(row,"ItemLevel",1);_requiredLevel.Value=Decimal(row,"RequiredLevel");
         _buy.Value=Decimal(row,"BuyPrice");_sell.Value=Decimal(row,"SellPrice");Set(_bonding,Int(row,"bonding"));_flags.Value=Decimal(row,"Flags");_armor.Value=Decimal(row,"armor");
-        _damageMin.Value=Decimal(row,"dmg_min1");_damageMax.Value=Decimal(row,"dmg_max1");_delay.Value=Decimal(row,"delay");_durability.Value=Decimal(row,"MaxDurability");_itemSet.Value=Decimal(row,"itemset");_description.Text=Text(row,"description");
+        _damageMin.Value=Decimal(row,"dmg_min1");_damageMax.Value=Decimal(row,"dmg_max1");Set(_damageType,Int(row,"dmg_type1"));_delay.Value=Decimal(row,"delay");_durability.Value=Decimal(row,"MaxDurability");_itemSet.Value=Decimal(row,"itemset");_description.Text=Text(row,"description");
         for(var index=0;index<10;index++){Set(_statTypes[index],Int(row,$"stat_type{index+1}"));_statValues[index].Value=Decimal(row,$"stat_value{index+1}");}
         for(var index=0;index<5;index++){var slot=index+1;_spellIds[index].Value=Decimal(row,$"spellid_{slot}");Set(_spellTriggers[index],Int(row,$"spelltrigger_{slot}"));_spellCharges[index].Value=Decimal(row,$"spellcharges_{slot}");_spellPpm[index].Value=Decimal(row,$"spellppmRate_{slot}");_spellCooldowns[index].Value=Decimal(row,$"spellcooldown_{slot}",-1);_spellCategories[index].Value=Decimal(row,$"spellcategory_{slot}");_spellCategoryCooldowns[index].Value=Decimal(row,$"spellcategorycooldown_{slot}",-1);}
         _loadedEntry=(uint)(_entry.Value??0);_commit.Content="Apply decoded fields to existing item";RefreshPreview();RefreshSql();_status.Text=$"Loaded live item {_loadedEntry} with decoded names. Unmapped/custom fields remain editable in SQL Studio."; _ = ResolveDisplayAsync(false); ScheduleSpellDecode();
+    }
+
+    public void LoadClientOnlyDraft(ClientItemRecord client)
+    {
+        ResetServerOnlyDraftFields();
+        _entry.Value=client.Id;_name.Text=$"Recovered client item {client.Id}";Set(_class,client.ClassId);UpdateSubclassChoices();Set(_subclass,client.SubclassId);
+        _display.Value=client.DisplayInfoId;Set(_quality,1);Set(_inventory,client.InventoryType);Set(_material,client.Material);Set(_sheath,client.SheatheType);_soundOverride.Value=client.SoundOverrideSubclassId;
+        _itemLevel.Value=1;_requiredLevel.Value=0;_loadedEntry=null;_commit.Content="Insert deliberate server definition";RefreshPreview();RefreshSql();
+        _status.Text=$"Client-only Item.dbc ID {client.Id:N0} loaded as a NEW server draft. Only the eight proven client fields were prefilled; choose a real name, stats, spells, prices, requirements, and behavior before inserting.";
+        _ = ResolveDisplayAsync(false);
+    }
+
+    private void ResetServerOnlyDraftFields()
+    {
+        _loadedEntry=null;
+        _buy.Value=0;_sell.Value=0;Set(_bonding,0);_flags.Value=0;_armor.Value=0;
+        _damageMin.Value=0;_damageMax.Value=0;Set(_damageType,0);_delay.Value=0;_durability.Value=0;
+        _itemSet.Value=0;_description.Text=string.Empty;
+        for(var index=0;index<10;index++){Set(_statTypes[index],0);_statValues[index].Value=0;}
+        for(var index=0;index<5;index++)
+        {
+            _spellIds[index].Value=0;Set(_spellTriggers[index],0);_spellCharges[index].Value=0;_spellPpm[index].Value=0;
+            _spellCooldowns[index].Value=-1;_spellCategories[index].Value=0;_spellCategoryCooldowns[index].Value=-1;
+        }
     }
 
     private Control StatsPage()
@@ -138,7 +165,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         return new ScrollViewer { Content=stack };
     }
 
-    private ItemDraft Draft() => new((uint)(_entry.Value??1),_name.Text??string.Empty,Selected(_class),Selected(_subclass),(uint)(_display.Value??0),Selected(_quality),Selected(_inventory),(uint)(_itemLevel.Value??1),(uint)(_requiredLevel.Value??0),(uint)(_buy.Value??0),(uint)(_sell.Value??0),(uint)Selected(_bonding),(uint)(_flags.Value??0),(float)(_armor.Value??0),(float)(_damageMin.Value??0),(float)(_damageMax.Value??0),(uint)(_delay.Value??0),(uint)(_durability.Value??0),_description.Text??string.Empty,_statTypes.Select((type,index)=>new ItemStatDraft(Selected(type),(int)(_statValues[index].Value??0))).ToArray(),_spellIds.Select((id,index)=>new ItemSpellDraft((int)(id.Value??0),Selected(_spellTriggers[index]),(int)(_spellCharges[index].Value??0),(float)(_spellPpm[index].Value??0),(int)(_spellCooldowns[index].Value??-1),(int)(_spellCategories[index].Value??0),(int)(_spellCategoryCooldowns[index].Value??-1))).ToArray(),(uint)(_itemSet.Value??0));
+    private ItemDraft Draft() => new((uint)(_entry.Value??1),_name.Text??string.Empty,Selected(_class),Selected(_subclass),(uint)(_display.Value??0),Selected(_quality),Selected(_inventory),(uint)(_itemLevel.Value??1),(uint)(_requiredLevel.Value??0),(uint)(_buy.Value??0),(uint)(_sell.Value??0),(uint)Selected(_bonding),(uint)(_flags.Value??0),(float)(_armor.Value??0),(float)(_damageMin.Value??0),(float)(_damageMax.Value??0),(uint)(_delay.Value??0),(uint)(_durability.Value??0),_description.Text??string.Empty,_statTypes.Select((type,index)=>new ItemStatDraft(Selected(type),(int)(_statValues[index].Value??0))).ToArray(),_spellIds.Select((id,index)=>new ItemSpellDraft((int)(id.Value??0),Selected(_spellTriggers[index]),(int)(_spellCharges[index].Value??0),(float)(_spellPpm[index].Value??0),(int)(_spellCooldowns[index].Value??-1),(int)(_spellCategories[index].Value??0),(int)(_spellCategoryCooldowns[index].Value??-1))).ToArray(),(uint)(_itemSet.Value??0),Selected(_damageType),(int)(_soundOverride.Value??-1),Selected(_material),Selected(_sheath));
     private DatabaseTableCapability Table() => _session.DatabaseCapabilities?.FindTable("item_template") ?? ItemTemplateAdapter.CreatePortableTable();
     private ItemWritePlan Plan() => ItemTemplateAdapter.CreatePlan(Draft(),Table());
 
@@ -148,7 +175,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         AddTooltip(string.IsNullOrWhiteSpace(item.Name)?"Unnamed Item":item.Name,QualityBrush(item.Quality),16,FontWeight.Bold);
         AddTooltip($"Item Level {item.ItemLevel}",Brush.Parse("#D2BE78")); if(item.Bonding!=0) AddTooltip(BondingName(item.Bonding),Brushes.White);
         if(item.InventoryType!=0) AddPair(SelectedName(_inventory),SelectedName(_subclass)); if(item.Armor>0) AddTooltip($"{item.Armor:0.##} Armor",Brushes.White);
-        if(item.DamageMin>0||item.DamageMax>0){ var speed=item.Delay/1000f; AddPair($"{item.DamageMin:0.##} - {item.DamageMax:0.##} Damage",speed>0?$"Speed {speed:0.00}":""); if(speed>0) AddTooltip($"({(item.DamageMin+item.DamageMax)/2f/speed:0.0} damage per second)",Brushes.White); }
+        if(item.DamageMin>0||item.DamageMax>0){ var speed=item.Delay/1000f; var school=item.DamageType==0?"":$" {SelectedName(_damageType)}"; AddPair($"{item.DamageMin:0.##} - {item.DamageMax:0.##}{school} Damage",speed>0?$"Speed {speed:0.00}":""); if(speed>0) AddTooltip($"({(item.DamageMin+item.DamageMax)/2f/speed:0.0} damage per second)",Brushes.White); }
         foreach(var stat in (item.Stats??[]).Take(10).Where(stat=>stat.Value!=0)){ var primary=stat.Type is 0 or 1 or 3 or 4 or 5 or 6 or 7; AddTooltip(primary?$"{(stat.Value>0?"+":"")}{stat.Value} {StatName(stat.Type)}":SecondaryStatText(stat.Type,stat.Value),primary?Brushes.White:Brush.Parse("#1EFF00")); }
         if(item.RequiredLevel>0) AddTooltip($"Requires Level {item.RequiredLevel}",Brushes.White); if(item.MaxDurability>0) AddTooltip($"Durability {item.MaxDurability} / {item.MaxDurability}",Brushes.White);
         foreach(var spell in (item.Spells??[]).Take(5).Where(spell=>spell.SpellId!=0)){ var prefix=spell.Trigger switch{0 or 5=>"Use",1=>"Equip",2=>"Chance on hit",4=>"Use",6=>"Use",_=>"Effect"};SpellTooltipRecord? decoded=null;if(_spellCatalog is not null)_spellCatalog.Records.TryGetValue((uint)spell.SpellId,out decoded);var label=decoded is null?$"Spell #{spell.SpellId}":decoded.Name+(string.IsNullOrWhiteSpace(decoded.Subtext)?string.Empty:$" ({decoded.Subtext})");var text=spell.Trigger==6?$"Use: Teaches {label}.":$"{prefix}: {label}.";var detail=decoded?.PreferredItemText(spell.Trigger);if(!string.IsNullOrWhiteSpace(detail))text+=$" {detail}";if(spell.Charges!=0)text+=$" ({Math.Abs(spell.Charges)} charge{(Math.Abs(spell.Charges)==1?"":"s")})";AddTooltip(text,Brush.Parse("#1EFF00")); }
@@ -380,8 +407,8 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private async Task PickFileAsync(TextBox target,string title,string pattern){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType(title){Patterns=[pattern]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
     private async Task PickTextureAsync(TextBox target,string title){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType("Character texture"){Patterns=["*.blp","*.png","*.jpg","*.jpeg","*.bmp","*.tga"]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
     private async Task PickFolderAsync(TextBox target,string title){var folders=await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions{Title=title,AllowMultiple=false});var path=folders.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
-    private IEnumerable<NumericUpDown> Numbers()=>new[]{_entry,_display,_itemLevel,_requiredLevel,_buy,_sell,_flags,_armor,_damageMin,_damageMax,_delay,_durability,_itemSet}.Concat(_statValues).Concat(_spellIds).Concat(_spellCharges).Concat(_spellPpm).Concat(_spellCooldowns).Concat(_spellCategories).Concat(_spellCategoryCooldowns);
-    private IEnumerable<ComboBox> Combos()=>new[]{_class,_subclass,_quality,_inventory,_bonding}.Concat(_statTypes).Concat(_spellTriggers);
+    private IEnumerable<NumericUpDown> Numbers()=>new[]{_entry,_display,_itemLevel,_requiredLevel,_buy,_sell,_soundOverride,_flags,_armor,_damageMin,_damageMax,_delay,_durability,_itemSet}.Concat(_statValues).Concat(_spellIds).Concat(_spellCharges).Concat(_spellPpm).Concat(_spellCooldowns).Concat(_spellCategories).Concat(_spellCategoryCooldowns);
+    private IEnumerable<ComboBox> Combos()=>new[]{_class,_subclass,_quality,_inventory,_material,_sheath,_bonding,_damageType}.Concat(_statTypes).Concat(_spellTriggers);
     private void AddTooltip(string text,IBrush brush,double fontSize=13,FontWeight? weight=null)=>_tooltip.Children.Add(new TextBlock{Text=text,TextWrapping=TextWrapping.Wrap,Foreground=brush,FontSize=fontSize,FontWeight=weight??FontWeight.Normal});
     private void AddPair(string left,string right)=>_tooltip.Children.Add(new Grid{ColumnDefinitions=new("*,Auto"),Children={new TextBlock{Text=left,Foreground=Brushes.White},WithColumn(new TextBlock{Text=right,Foreground=Brushes.White},1)}});
     private static Grid Form(params(string Label,Control Input)[] rows){var grid=new Grid{ColumnDefinitions=new("Auto,*"),RowDefinitions=new(string.Join(',',Enumerable.Repeat("Auto",rows.Length))),RowSpacing=7,ColumnSpacing=10,Margin=new Thickness(12)};for(var index=0;index<rows.Length;index++){AddText(grid,rows[index].Label,index,0);AddControl(grid,rows[index].Input,index,1);}return grid;}

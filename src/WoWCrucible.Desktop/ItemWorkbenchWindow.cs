@@ -26,13 +26,13 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _exactIds = new() { PlaceholderText = "Exact item ID(s), always bypassing filters: 17 and 17802" };
     private readonly ComboBox _classification = new()
     {
-        ItemsSource = new[] { "No known acquisition path", "Known acquisition path", "All item_template rows" },
+        ItemsSource = new[] { "No known acquisition path", "Known acquisition path", "All server + client identities" },
         SelectedIndex = 0,
         HorizontalAlignment = HorizontalAlignment.Stretch
     };
     private readonly ComboBox _reviewGroup = new()
     {
-        ItemsSource = new[] { "All no-path review groups", "Other / manual review", "Deprecated / test / developer", "NPC / monster equipment" },
+        ItemsSource = new[] { "All no-path review groups", "Other / manual review", "Deprecated / test / developer", "NPC / monster equipment", "Client-only / missing server definition" },
         SelectedIndex = 0,
         HorizontalAlignment = HorizontalAlignment.Stretch
     };
@@ -98,7 +98,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
                         FontWeight = FontWeight.Bold,
                         Foreground = new SolidColorBrush(Color.Parse(item.HasKnownAcquisitionPath ? "#79B58A" : "#E0A55B"))
                     },
-                    new TextBlock { Text = item.Name, TextWrapping = TextWrapping.Wrap }
+                    new TextBlock { Text = item.Name, TextWrapping = TextWrapping.Wrap },
+                    new TextBlock { Text = PresenceName(item), FontSize = 10, Foreground = new SolidColorBrush(Color.Parse(item.Presence == ItemCatalogPresence.ClientOnly ? "#D4A45F" : "#8190A6")) }
                 }
             };
             var explanation = item.HasKnownAcquisitionPath
@@ -111,7 +112,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         _items.SelectionChanged += (_, _) =>
         {
             if (_items.SelectedItem is not ItemCatalogEntry item) return;
-            _cloneSource.Text = item.Entry.ToString();
+            if (item.HasServerDefinition) _cloneSource.Text = item.Entry.ToString(); else { _cloneSource.Text = string.Empty; _cloneDestination.Text = item.Entry.ToString(); }
             _cloneResult.Text = $"Selected {item.Entry:N0} — {item.Name}\nQuality: {QualityName(item.Quality)} · Item level: {item.ItemLevel} · Set: {(item.ItemSetId == 0 ? "none" : item.ItemSetId)}";
             ShowCatalogEvidence(item);
         };
@@ -227,6 +228,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var edit = new Button { Content = "Open selected in decoded editor" }; edit.Click += async (_, _) => await OpenSelectedItemAsync(false);
         var fullSql = new Button { Content = "Open complete SQL row" }; fullSql.Click += async (_, _) => await OpenSelectedInSqlAsync();
         var favorite = new Button { Content = "★ Favorite selected row" }; favorite.Click += async (_, _) => await OpenSelectedItemAsync(true);
+        var recoverClient = AccentButton("Recover client-only row as server draft"); recoverClient.Click += (_, _) => OpenClientOnlyDraft();
         var browseDbc = new Button { Content = "DBC folder…" }; browseDbc.Click += async (_, _) => await PickFolderAsync(_acquisitionDbc, "Select the server DBC folder");
         var browseCore = new Button { Content = "Core source…" }; browseCore.Click += async (_, _) => { await PickFolderAsync(_coreSource, "Select the AzerothCore or TrinityCore source root"); _session.Settings.CoreSourcePath = _coreSource.Text ?? string.Empty; _session.Settings.Save(); };
         var browseMpq = new Button { Content = "Related MPQ…" }; browseMpq.Click += async (_, _) => await PickFileAsync(_favoriteMpq, "Select an optional related MPQ", "*.mpq");
@@ -234,9 +236,9 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var classificationRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Show", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_classification, 1) } };
         var groupRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Review group", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_reviewGroup, 1) } };
         var header = new StackPanel { Spacing = 7, Margin = new Thickness(0,0,0,8), Children = { new WrapPanel { Children = { audit, reset, _auditSummary } }, exactRow, _search, classificationRow, groupRow } };
-        var rowActions = new WrapPanel { Children = { inspect, edit, fullSql, favorite } };
+        var rowActions = new WrapPanel { Children = { inspect, edit, fullSql, favorite, recoverClient } };
         var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_coreSource, 1), WithRow(WithColumn(browseCore, 1), 1), WithRow(_favoriteMpq, 2), WithRow(WithColumn(browseMpq, 1), 2) } };
-        var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, and developer cheats. Type 17, 17802, or a numeric batch into either search field to pin those exact item_template rows above every classification/review filter; text searches remain broad. Every row states which evidence was accepted or rejected, can be favorited with optional DBC/DB2 and MPQ paths, opened in the decoded editor, or handed to the complete SQL row editor. Proven SmartAI player grants and reachable spell-script create-item commands are included. Core-source calls show exact class/callback/loader/file/line evidence. Only a clean Git revision matching the running core plus source registration, live SQL binding, and a proven trigger may change classification; currently that admits reachable ItemScript.OnExpire chains while conditional spell/aura, creature, OutdoorPvP, dirty, and mismatched-source calls remain review-only.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, developer cheats, and client-only Item.dbc identities. Type 17, 17802, or a numeric batch into either search field to pin exact IDs above every classification/review filter; text searches remain broad. A client-only row is not treated as a usable item: Crucible preserves its eight proven client fields and opens an INSERT draft, but requires deliberate server name/stats/spells/behavior authoring. SQL-backed rows can be favorited with optional DBC/DB2 and MPQ paths, opened in the decoded editor, or handed to the complete SQL row editor. Proven SmartAI player grants and reachable spell-script create-item commands are included. Core-source calls show exact class/callback/loader/file/line evidence. Only a clean Git revision matching the running core plus source registration, live SQL binding, and a proven trigger may change classification; currently that admits reachable ItemScript.OnExpire chains while conditional spell/aura, creature, OutdoorPvP, dirty, and mismatched-source calls remain review-only.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
         return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(rowActions, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
@@ -379,7 +381,10 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             var manual = _audit.NoKnownAcquisitionPath.Count(item => item.ReviewGroup == ItemAcquisitionReviewGroup.OtherManualReview);
             var legacy = _audit.NoKnownAcquisitionPath.Count(item => item.ReviewGroup == ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper);
             var npc = _audit.NoKnownAcquisitionPath.Count(item => item.ReviewGroup == ItemAcquisitionReviewGroup.NpcOrMonsterEquipment);
-            _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} no path · {manual:N0} other/manual · {legacy:N0} deprecated/test/dev · {npc:N0} NPC/monster · {_audit.ObtainableItems:N0} known · {_audit.TotalItems:N0} total";
+            var clientOnly = _audit.NoKnownAcquisitionPath.Count(item => item.ReviewGroup == ItemAcquisitionReviewGroup.ClientOnlyMissingServerDefinition);
+            var serverOnly = _audit.AllItems.Count(item => item.Presence == ItemCatalogPresence.ServerOnly);
+            var shared = _audit.AllItems.Count(item => item.Presence == ItemCatalogPresence.ServerAndClient);
+            _auditSummary.Text = $"{_audit.NoKnownAcquisitionPath.Count:N0} no path · {manual:N0} other/manual · {legacy:N0} deprecated/test/dev · {npc:N0} NPC/monster · {clientOnly:N0} client-only · {_audit.ObtainableItems:N0} known · {_audit.TotalItems:N0} identities · {shared:N0} server+client · {serverOnly:N0} server-only";
             _status.Text = $"Checked {_audit.CheckedSources.Count:N0} source families; {_audit.MissingSources.Count:N0} unavailable or unconfigured. Exact IDs are pinned even when another classification filter is selected.";
             DesktopCrashLogger.Debug("ITEM", "acquisition-audit-success", ("total_items", _audit.TotalItems), ("no_known_path", _audit.NoKnownAcquisitionPath.Count), ("checked_sources", _audit.CheckedSources.Count), ("missing_sources", _audit.MissingSources.Count));
         }
@@ -399,13 +404,15 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             if (_audit is null || !_auditIdentity.Equals(AuditIdentity(profile), StringComparison.Ordinal)) await AuditAsync();
             if (_audit is null) return;
             _auditById.TryGetValue(entry, out var item);
-            if (item is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _inspection.Text = $"Item {entry:N0} does not exist in item_template."; _status.Text = "Exact item inspection complete."; return; }
+            if (item is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _inspection.Text = $"Item {entry:N0} does not exist in item_template or the checked Item.dbc."; _status.Text = "Exact item inspection complete."; return; }
             var evidence = item.HasKnownAcquisitionPath
                 ? item.AcquisitionSources.Select(value => $"Accepted · {value}")
                 : item.NoPathReview;
-            _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(item.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\nReview group: {ReviewGroupName(item.ReviewGroup)}\n" + string.Join("\n", evidence.Select(value => $"• {value}"));
+            _inspection.Text = CatalogEvidenceText(item, evidence);
             _items.ItemsSource = new[] { item }; _items.SelectedItem = item; _items.ScrollIntoView(item);
-            _status.Text = $"Pinned item {entry:N0} across {_audit.CheckedSources.Count:N0} source families. It can now be opened, favorited, or edited.";
+            _status.Text = item.HasServerDefinition
+                ? $"Pinned item {entry:N0} across {_audit.CheckedSources.Count:N0} source families. It can now be opened, favorited, or edited."
+                : $"Pinned client-only Item.dbc record {entry:N0}. Recover it as a new server draft to author the fields the client file does not contain.";
         }
         catch (Exception exception) { await ErrorAsync("Exact item inspection failed", exception); }
     }
@@ -427,13 +434,21 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     {
         var known = item.HasKnownAcquisitionPath;
         var evidence = known ? item.AcquisitionSources.Select(value => $"Accepted · {value}") : item.NoPathReview;
-        _inspection.Text = $"{item.Entry:N0} — {item.Name}\nClassification: {(known ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\nReview group: {ReviewGroupName(item.ReviewGroup)}\n" +
-            string.Join("\n", evidence.Select(value => $"• {value}"));
+        _inspection.Text = CatalogEvidenceText(item, evidence);
+    }
+
+    private void OpenClientOnlyDraft()
+    {
+        if (_items.SelectedItem is not ItemCatalogEntry selected) { _status.Text = "Select a client-only Item.dbc row first."; return; }
+        if (selected.HasServerDefinition || selected.ClientRecord is null) { _status.Text = "The selected identity already has a server definition. Open it in the decoded editor instead."; return; }
+        _creator.LoadClientOnlyDraft(selected.ClientRecord); _tabs.SelectedIndex = 0;
+        _status.Text = $"Opened client-only ID {selected.Entry:N0} as a blank server draft with only its eight exact Item.dbc fields prefilled.";
     }
 
     private async Task OpenSelectedItemAsync(bool favorite)
     {
         if (_items.SelectedItem is not ItemCatalogEntry selected) { _status.Text = "Select an item row first."; return; }
+        if (!selected.HasServerDefinition) { OpenClientOnlyDraft(); return; }
         SetBusy($"Opening exact item_template row {selected.Entry:N0}…");
         try
         {
@@ -462,6 +477,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private async Task OpenSelectedInSqlAsync()
     {
         if (_items.SelectedItem is not ItemCatalogEntry selected) { _status.Text = "Select an item row first."; return; }
+        if (!selected.HasServerDefinition) { _status.Text = "This ID exists only in Item.dbc, so there is no complete SQL row to open. Use Recover client-only row as server draft."; return; }
         SetBusy($"Opening complete item_template row {selected.Entry:N0}…");
         try
         {
@@ -518,10 +534,11 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
                 1 => rows.Where(item => item.ReviewGroup == ItemAcquisitionReviewGroup.OtherManualReview),
                 2 => rows.Where(item => item.ReviewGroup == ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper),
                 3 => rows.Where(item => item.ReviewGroup == ItemAcquisitionReviewGroup.NpcOrMonsterEquipment),
+                4 => rows.Where(item => item.ReviewGroup == ItemAcquisitionReviewGroup.ClientOnlyMissingServerDefinition),
                 _ => rows
             };
         }
-        if (query.Length > 0) rows = rows.Where(item => item.Entry.ToString().Contains(query, StringComparison.OrdinalIgnoreCase) || item.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || QualityName(item.Quality).Contains(query, StringComparison.OrdinalIgnoreCase) || item.ItemLevel.ToString().Contains(query) || item.ItemSetId.ToString().Contains(query));
+        if (query.Length > 0) rows = rows.Where(item => item.Entry.ToString().Contains(query, StringComparison.OrdinalIgnoreCase) || item.Name.Contains(query, StringComparison.OrdinalIgnoreCase) || QualityName(item.Quality).Contains(query, StringComparison.OrdinalIgnoreCase) || PresenceName(item).Contains(query, StringComparison.OrdinalIgnoreCase) || item.ItemLevel.ToString().Contains(query) || item.ItemSetId.ToString().Contains(query));
         var result = rows.ToArray(); _items.ItemsSource = result;
         if (result.Length > 0) { _items.SelectedItem = result[0]; _items.ScrollIntoView(result[0]); }
         var label = mode switch { 1 => "known-path", 2 => "total", _ => "no-known-path" };
@@ -544,11 +561,11 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var noPath = rows.Count(item => !item.HasKnownAcquisitionPath);
         var known = rows.Length - noPath;
         _status.Text = $"Pinned {rows.Length:N0} exact item row(s) above all catalog filters · {noPath:N0} no-known-path · {known:N0} known-path" +
-            (missing.Length == 0 ? "." : $" · missing from item_template: {string.Join(", ", missing)}.");
+            (missing.Length == 0 ? "." : $" · missing from item_template and checked Item.dbc: {string.Join(", ", missing)}.");
         _inspection.Text = string.Join("\n\n", rows.Select(item =>
         {
             var evidence = item.HasKnownAcquisitionPath ? item.AcquisitionSources.Select(value => $"Accepted · {value}") : item.NoPathReview;
-            return $"{item.Entry:N0} — {item.Name}\nClassification: {(item.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\n• {string.Join("\n• ", evidence)}";
+            return CatalogEvidenceText(item, evidence);
         }));
     }
 
@@ -557,8 +574,25 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         ItemAcquisitionReviewGroup.KnownAcquisition => "Known acquisition",
         ItemAcquisitionReviewGroup.DeprecatedTestOrDeveloper => "Deprecated / test / developer",
         ItemAcquisitionReviewGroup.NpcOrMonsterEquipment => "NPC / monster equipment",
+        ItemAcquisitionReviewGroup.ClientOnlyMissingServerDefinition => "Client-only / missing server definition",
         _ => "Other / manual review"
     };
+
+    private static string PresenceName(ItemCatalogEntry item) => item.Presence switch
+    {
+        ItemCatalogPresence.ServerAndClient => "Present in item_template + Item.dbc",
+        ItemCatalogPresence.ServerOnly => "Server-only · absent from checked Item.dbc",
+        ItemCatalogPresence.ClientOnly => "Client-only · missing item_template definition",
+        _ => "Server row · Item.dbc coverage not configured"
+    };
+
+    private static string CatalogEvidenceText(ItemCatalogEntry item, IEnumerable<string> evidence)
+    {
+        var client = item.ClientRecord is null ? string.Empty :
+            $"\nClient record: class {item.ClientRecord.ClassId}, subclass {item.ClientRecord.SubclassId}, display {item.ClientRecord.DisplayInfoId:N0}, inventory {item.ClientRecord.InventoryType}, material {item.ClientRecord.Material}, sheath {item.ClientRecord.SheatheType}, sound override {item.ClientRecord.SoundOverrideSubclassId}";
+        return $"{item.Entry:N0} — {item.Name}\nPresence: {PresenceName(item)}\nClassification: {(item.HasKnownAcquisitionPath ? "known acquisition path" : "NO KNOWN ACQUISITION PATH")}\nReview group: {ReviewGroupName(item.ReviewGroup)}{client}\n" +
+            string.Join("\n", evidence.Select(value => $"• {value}"));
+    }
 
     private async Task CloneAsync()
     {

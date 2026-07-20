@@ -2581,9 +2581,9 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
         if (json && (output is null || requestedIds.Count > 0))
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { audit.Database, audit.AuditedUtc, audit.TotalItems, audit.ObtainableItems, NoKnownAcquisitionPath = audit.NoKnownAcquisitionPath.Count, audit.CheckedSources, audit.MissingSources, RequestedIds = requestedIds, MissingRequestedIds = missingRequested, Items = selected }, auditJsonOptions));
         else if (output is null || requestedIds.Count > 0)
-            foreach (var item in selected) Console.WriteLine($"{item.Entry}\t{(item.HasKnownAcquisitionPath ? "KNOWN" : "NO_PATH")}\t{item.Quality}\t{item.ItemLevel}\t{item.ItemSetId}\t{item.ReviewGroup}\t{item.Name}\t{string.Join(" | ", item.HasKnownAcquisitionPath ? item.AcquisitionSources : item.NoPathReview)}");
+            foreach (var item in selected) Console.WriteLine($"{item.Entry}\t{(item.HasKnownAcquisitionPath ? "KNOWN" : "NO_PATH")}\t{item.Presence}\t{item.Quality}\t{item.ItemLevel}\t{item.ItemSetId}\t{item.ReviewGroup}\t{item.Name}\t{string.Join(" | ", item.HasKnownAcquisitionPath ? item.AcquisitionSources : item.NoPathReview)}");
         if (output is not null) WriteTextAtomic(output, System.Text.Json.JsonSerializer.Serialize(audit, auditJsonOptions) + Environment.NewLine);
-        Console.Error.WriteLine($"Item acquisition audit: {audit.NoKnownAcquisitionPath.Count:N0} of {audit.TotalItems:N0} item(s) have no known path across {audit.CheckedSources.Count:N0} available source table(s).{(requestedIds.Count == 0 ? string.Empty : $" Exact selection: {selected.Count:N0} found, {missingRequested.Length:N0} missing.")} Missing source families: {string.Join(", ", audit.MissingSources)}{(output is null ? string.Empty : $". Report: {Path.GetFullPath(output)}")}");
+        Console.Error.WriteLine($"Item acquisition audit: {audit.NoKnownAcquisitionPath.Count:N0} of {audit.TotalItems:N0} server/client identity row(s) have no known path across {audit.CheckedSources.Count:N0} available source families.{(requestedIds.Count == 0 ? string.Empty : $" Exact selection: {selected.Count:N0} found, {missingRequested.Length:N0} missing.")} Missing source families: {string.Join(", ", audit.MissingSources)}{(output is null ? string.Empty : $". Report: {Path.GetFullPath(output)}")}");
         foreach (var missing in missingRequested) Console.Error.WriteLine($"MISSING_ITEM\t{missing}");
         return missingRequested.Length == 0 ? 0 : 3;
     }
@@ -2592,8 +2592,11 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
         var inspectOptions = args[6..]; var dbc = Option(inspectOptions, "--dbc="); var coreSource = Option(inspectOptions, "--core-source="); var unknown = inspectOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--core-source=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown item-inspect option: {unknown[0]}");
         var inspection = await new ItemCatalogService().InspectAsync(profile, inspectedEntry, dbc, coreSource);
-        if (inspection.Item is null) return Fail($"Item {inspectedEntry} does not exist in item_template.");
+        if (inspection.Item is null) return Fail($"Item {inspectedEntry} does not exist in item_template or the checked Item.dbc.");
         Console.WriteLine($"ITEM\t{inspection.Item.Entry}\t{inspection.Item.Name}");
+        Console.WriteLine($"PRESENCE\t{inspection.Item.Presence}");
+        if (inspection.Item.ClientRecord is { } client)
+            Console.WriteLine($"CLIENT_RECORD\tclass={client.ClassId}\tsubclass={client.SubclassId}\tsound={client.SoundOverrideSubclassId}\tmaterial={client.Material}\tdisplay={client.DisplayInfoId}\tinventory={client.InventoryType}\tsheath={client.SheatheType}");
         Console.WriteLine($"CLASSIFICATION\t{(inspection.HasKnownAcquisitionPath ? "KNOWN ACQUISITION PATH" : "NO KNOWN ACQUISITION PATH")}");
         Console.WriteLine($"REVIEW_GROUP\t{inspection.Item.ReviewGroup}");
         foreach (var evidence in inspection.AcceptedEvidence) Console.WriteLine($"ACCEPTED\t{evidence}");

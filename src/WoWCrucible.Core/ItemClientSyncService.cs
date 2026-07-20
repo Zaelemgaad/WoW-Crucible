@@ -58,14 +58,32 @@ public static class ItemClientSyncService
     {
         itemDbcPath = RequiredFile(itemDbcPath, "Item.dbc"); schemaPath = RequiredFile(schemaPath, "DBC schema");
         var file = WdbcFile.Load(itemDbcPath); var schema = DbcSchemaCatalog.Load(schemaPath).ResolveColumns("Item", file.FieldCount);
-        var id = Column(schema, "ID"); var classId = Column(schema, "ClassID"); var subclass = Column(schema, "SubclassID");
-        var sound = Column(schema, "Sound_Override_Subclassid"); var material = Column(schema, "Material");
-        var display = Column(schema, "DisplayInfoID"); var inventory = Column(schema, "InventoryType"); var sheath = Column(schema, "SheatheType");
+        return ReadClientItems(file, ItemColumns(schema));
+    }
+
+    public static IReadOnlyList<ClientItemRecord> LoadClientItems(string itemDbcPath)
+    {
+        itemDbcPath = RequiredFile(itemDbcPath, "Item.dbc"); var file = WdbcFile.Load(itemDbcPath);
+        if (file.FieldCount != 8 || file.RecordSize != 32)
+            throw new InvalidDataException($"Item.dbc has {file.FieldCount:N0} fields and {file.RecordSize:N0}-byte records; WotLK build 12340 requires 8 fields and 32-byte records.");
+        return ReadClientItems(file, new(
+            new(0, 0, 4, "ID", DbcValueType.UInt32, true),
+            new(1, 4, 4, "ClassID", DbcValueType.Int32),
+            new(2, 8, 4, "SubclassID", DbcValueType.Int32),
+            new(3, 12, 4, "Sound_Override_Subclassid", DbcValueType.Int32),
+            new(4, 16, 4, "Material", DbcValueType.Int32),
+            new(5, 20, 4, "DisplayInfoID", DbcValueType.UInt32),
+            new(6, 24, 4, "InventoryType", DbcValueType.Int32),
+            new(7, 28, 4, "SheatheType", DbcValueType.Int32)));
+    }
+
+    private static IReadOnlyList<ClientItemRecord> ReadClientItems(WdbcFile file, Columns columns)
+    {
         var result = new List<ClientItemRecord>(file.RowCount); var seen = new HashSet<uint>();
         for (var row = 0; row < file.RowCount; row++)
         {
-            var value = new ClientItemRecord(file.GetRaw(row, id), Signed(file.GetRaw(row, classId)), Signed(file.GetRaw(row, subclass)), Signed(file.GetRaw(row, sound)),
-                Signed(file.GetRaw(row, material)), file.GetRaw(row, display), Signed(file.GetRaw(row, inventory)), Signed(file.GetRaw(row, sheath)));
+            var value = new ClientItemRecord(file.GetRaw(row, columns.Id), Signed(file.GetRaw(row, columns.ClassId)), Signed(file.GetRaw(row, columns.SubclassId)), Signed(file.GetRaw(row, columns.Sound)),
+                Signed(file.GetRaw(row, columns.Material)), file.GetRaw(row, columns.Display), Signed(file.GetRaw(row, columns.Inventory)), Signed(file.GetRaw(row, columns.Sheath)));
             if (!seen.Add(value.Id)) throw new InvalidDataException($"Item.dbc contains duplicate ID {value.Id:N0}; synchronization is ambiguous.");
             result.Add(value);
         }

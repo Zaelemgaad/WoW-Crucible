@@ -581,6 +581,10 @@ wowcrucible db reference-search 127.0.0.1 3306 acore acore_world spell Frostbolt
 
 `spell-inspect` explains the effective server record for one spell. AzerothCore loads the file `Spell.dbc` first, then a matching `spell_dbc` row replaces that complete server-side record. When `--dbc` is supplied, Crucible compares the two using AzerothCore's exact 234-character `SpellEntryfmt`: ignored `x` cells do not create false differences, integer cells compare by their loaded 32-bit representation, floats compare as floats, and server-consumed strings compare as decoded text. The audit also searches schema-adaptively across recognized proc, script, rank, prerequisite, trainer, item, quest, creature-spell, spell-click, character-start, faction-change, SmartAI, condition, and disable tables. Text output is concise; `--format=json` includes every value and complete primary key from every matched row.
 
+### Item client/server identity coverage
+
+When `--dbc` is configured, `item-audit` strictly decodes the eight-field build-12340 `Item.dbc` and unions those identities with `item_template`. Each result reports `ServerAndClient`, `ServerOnly`, `ClientOnly`, or `ServerUncheckedClient` presence. Client-only identities receive their own review group and exact class/subclass/sound/material/display/inventory/sheath record, but are never promoted into fake usable server templates. The desktop can recover one into a clean new-item draft containing only those proven fields; every server-only field remains deliberate. `item-inspect` prints the same presence and exact client record.
+
 ## Common examples
 
 ```powershell

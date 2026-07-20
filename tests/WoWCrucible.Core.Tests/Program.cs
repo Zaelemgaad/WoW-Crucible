@@ -1967,8 +1967,10 @@ var azerothPlan = ItemTemplateAdapter.CreatePlan(itemDraft, azerothItemTable);
 var trinityPlan = ItemTemplateAdapter.CreatePlan(itemDraft, trinityItemTable);
 var portablePlan = ItemTemplateAdapter.CreatePlan(itemDraft, ItemTemplateAdapter.CreatePortableTable());
 var itemSetPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { ItemSetId = 4321 }, ItemTemplateAdapter.CreatePortableTable());
+var decodedClientFieldPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { DamageType = 2, SoundOverrideSubclassId = 7, Material = 6, SheatheType = 4 }, ItemTemplateAdapter.CreatePortableTable());
 var gapStatsPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(0, 0), new(7, 75)] }, trinityItemTable);
-if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Values["StatsCount"] is not 2 || trinityPlan.Values.ContainsKey("MaxDurability") || trinityPlan.Values["spellid_1"] is not 12345 || portablePlan.OmittedFields.Count != 0 || itemSetPlan.Values["itemset"] is not 4321u)
+if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Values["StatsCount"] is not 2 || trinityPlan.Values.ContainsKey("MaxDurability") || trinityPlan.Values["spellid_1"] is not 12345 || portablePlan.OmittedFields.Count != 0 || itemSetPlan.Values["itemset"] is not 4321u ||
+    decodedClientFieldPlan.Values["dmg_type1"] is not 2 || decodedClientFieldPlan.Values["SoundOverrideSubclass"] is not 7 || decodedClientFieldPlan.Values["Material"] is not 6 || decodedClientFieldPlan.Values["sheath"] is not 4)
     throw new InvalidOperationException("Capability-aware item mapping or SQL escaping failed.");
 if (!azerothPlan.LosesSelectedSemantics || !azerothPlan.SelectedOmittedFields.Contains("spellcharges_1") || !trinityPlan.LosesSelectedSemantics || !trinityPlan.SelectedOmittedFields.Contains("MaxDurability") || portablePlan.LosesSelectedSemantics)
     throw new InvalidOperationException("Item planning did not distinguish configured values lost by a target schema from harmless unavailable defaults.");
@@ -2364,6 +2366,24 @@ catch (FileNotFoundException) { }
 var itemSyncRoot = Path.Combine(creatureLibrary, "item-client-sync"); Directory.CreateDirectory(itemSyncRoot);
 var sourceItemDbc = Path.Combine(args[1], "Item.dbc"); var sourceItemDisplayDbc = Path.Combine(args[1], "ItemDisplayInfo.dbc");
 var clientItems = ItemClientSyncService.LoadClientItems(sourceItemDbc, args[0]); var existingClientItem = clientItems.First(row => row.DisplayInfoId != 0); var preservedClientItem = clientItems.First(row => row.Id != existingClientItem.Id);
+var schemaFreeClientItems = ItemClientSyncService.LoadClientItems(sourceItemDbc);
+if (!schemaFreeClientItems.SequenceEqual(clientItems))
+    throw new InvalidOperationException("Strict build-12340 Item.dbc identity loading disagreed with the selected WotLK schema.");
+var serverIdentityOne = new ItemCatalogEntry(1, "Server only", 1, 1, 0, [], []);
+var serverIdentityTwo = new ItemCatalogEntry(2, "Shared identity", 2, 10, 0, [], []);
+var clientIdentityTwo = existingClientItem with { Id = 2 };
+var clientIdentityThree = preservedClientItem with { Id = 3 };
+var unionIdentities = ItemCatalogService.MergeClientIdentityCoverage([serverIdentityOne, serverIdentityTwo], [clientIdentityTwo, clientIdentityThree]);
+if (unionIdentities.Count != 3 || unionIdentities.Single(item => item.Entry == 1).Presence != ItemCatalogPresence.ServerOnly ||
+    unionIdentities.Single(item => item.Entry == 2).Presence != ItemCatalogPresence.ServerAndClient ||
+    unionIdentities.Single(item => item.Entry == 3).Presence != ItemCatalogPresence.ClientOnly ||
+    unionIdentities.Single(item => item.Entry == 3).HasServerDefinition ||
+    unionIdentities.Single(item => item.Entry == 3).ReviewGroup != ItemAcquisitionReviewGroup.ClientOnlyMissingServerDefinition ||
+    unionIdentities.Single(item => item.Entry == 3).ClientRecord != clientIdentityThree)
+    throw new InvalidOperationException("The item acquisition catalog did not preserve SQL-only, shared, and client-only identities distinctly.");
+var uncheckedIdentities = ItemCatalogService.MergeClientIdentityCoverage([serverIdentityOne], null);
+if (uncheckedIdentities.Single().Presence != ItemCatalogPresence.ServerUncheckedClient)
+    throw new InvalidOperationException("An unconfigured Item.dbc was mislabeled as proof that the server item is client-absent.");
 var changedClientItem = existingClientItem with { Material = existingClientItem.Material == 0 ? 1 : 0 };
 var addedClientItem = changedClientItem with { Id = checked(clientItems.Max(row => row.Id) + 100u) };
 var serverItemSnapshot = new[] { new ServerClientItemRecord(changedClientItem, 6, "Cruciblé, Existing"), new ServerClientItemRecord(addedClientItem, 4, "Crucible Added") };
