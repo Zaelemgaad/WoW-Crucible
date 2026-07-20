@@ -13,6 +13,15 @@ public enum DatabaseSyncOperationStatus { Ready, AlreadyApplied, Conflict, Block
 public sealed record DatabaseSyncTarget(string Host, uint Port, string User, string Database, string ServerVersion);
 public sealed record DatabaseSyncField(string Column, LegacyDatabaseAuditValue Before, LegacyDatabaseAuditValue After);
 public sealed record DatabaseSyncIdRemap(string Table, string Column, uint SourceId, uint TargetId, int RewrittenReferences);
+public sealed record DatabaseSyncDependencyInclusion(
+    string Relation,
+    bool Declared,
+    string SelectedIdentity,
+    string IncludedIdentity,
+    string SelectedEndpoint,
+    string IncludedEndpoint,
+    string MatchedValue,
+    string Description);
 public sealed record DatabaseSyncOperation(
     string Table,
     LegacyDatabaseContentDomain Domain,
@@ -43,7 +52,9 @@ public sealed record DatabaseSyncPlan(
     IReadOnlyList<DatabaseSyncIdRemap> IdRemaps,
     IReadOnlyList<DatabaseSyncOperation> Operations,
     string ContentSha256,
-    IReadOnlyList<string> Warnings)
+    IReadOnlyList<string> Warnings,
+    bool DependencyClosureIncluded = false,
+    IReadOnlyList<DatabaseSyncDependencyInclusion>? DependencyInclusions = null)
 {
     public int Ready => Operations.Count(operation => operation.Status == DatabaseSyncOperationStatus.Ready);
     public int AlreadyApplied => Operations.Count(operation => operation.Status == DatabaseSyncOperationStatus.AlreadyApplied);
@@ -57,7 +68,8 @@ public sealed record DatabaseSyncBuildOptions(
     int MaximumOperations = 100_000,
     bool Overwrite = false,
     bool AutoRemapCollisions = false,
-    uint? RemapStart = null);
+    uint? RemapStart = null,
+    bool IncludeDependencyClosure = false);
 
 public sealed record DatabaseSyncPlanResult(string Path, DatabaseSyncPlan Plan, long Bytes);
 public sealed record DatabaseSyncApplyResult(string ReceiptPath, int Applied, int AlreadyApplied);
@@ -81,7 +93,7 @@ public sealed class DatabaseSynchronizationService
 {
     public const string PlanFormat = "wow-crucible-database-sync-plan";
     public const string ReceiptFormat = "wow-crucible-database-sync-receipt";
-    public const int FormatVersion = 2;
+    public const int FormatVersion = 3;
     public const int ReceiptFormatVersion = 1;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.General)
     {
@@ -114,24 +126,33 @@ public sealed class DatabaseSynchronizationService
         if (manifest.BaselineIdentity != LegacyDatabaseBaselineIdentity.MatchingCoreIdentity)
             throw new InvalidDataException($"Synchronization requires matching baseline/edited core identity; this audit reports {manifest.BaselineIdentity}.");
         var patterns = (options.IncludePatterns ?? []).Select(pattern => pattern.Trim()).Where(pattern => pattern.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var selectedTables = manifest.Tables.Where(table => table.DataEntry is not null && table.Status is LegacyDatabaseTableAuditStatus.Changed or LegacyDatabaseTableAuditStatus.LegacyTableOnly or LegacyDatabaseTableAuditStatus.BaselineTableOnly)
-            .Where(table => patterns.Length == 0 || patterns.Any(pattern => LegacyDatabaseSnapshotService.GlobMatches(table.Name, pattern))).ToArray();
+        var eligibleTables = manifest.Tables.Where(table => table.DataEntry is not null && table.Status is LegacyDatabaseTableAuditStatus.Changed or LegacyDatabaseTableAuditStatus.LegacyTableOnly or LegacyDatabaseTableAuditStatus.BaselineTableOnly).ToArray();
+        var selectedTables = eligibleTables.Where(table => patterns.Length == 0 || patterns.Any(pattern => LegacyDatabaseSnapshotService.GlobMatches(table.Name, pattern))).ToArray();
         if (selectedTables.Length == 0) throw new InvalidOperationException("The synchronization selection contains no row-level comparable changed tables.");
 
         var capabilities = await new DatabaseCapabilityService().InspectAsync(target, cancellationToken);
         await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(target)); await connection.OpenAsync(cancellationToken);
-        var sourceOperations = new List<DatabaseSyncOperation>();
-        for (var tableIndex = 0; tableIndex < selectedTables.Length; tableIndex++)
+        var scannedTables = options.IncludeDependencyClosure && patterns.Length > 0 ? eligibleTables : selectedTables;
+        var candidateOperations = new List<DatabaseSyncOperation>();
+        for (var tableIndex = 0; tableIndex < scannedTables.Length; tableIndex++)
         {
-            var table = selectedTables[tableIndex]; progress?.Report(("Comparing target rows", table.Name, tableIndex, selectedTables.Length));
+            var table = scannedTables[tableIndex]; progress?.Report((options.IncludeDependencyClosure ? "Reading dependency candidates" : "Comparing target rows", table.Name, tableIndex, scannedTables.Length));
             await foreach (var change in auditService.ReadChangesAsync(audit, table.Name, cancellationToken))
             {
                 if (change.Kind == LegacyDatabaseRowChangeKind.Removed && !options.IncludeRemovals) continue;
                 if (change.Kind == LegacyDatabaseRowChangeKind.UnattributedCandidate) continue;
-                if (sourceOperations.Count >= options.MaximumOperations) throw new InvalidOperationException($"The plan exceeded the explicit {options.MaximumOperations:N0}-operation safety limit. Narrow the table selection or raise the limit deliberately.");
-                sourceOperations.Add(FromAuditChange(change));
+                if (candidateOperations.Count >= options.MaximumOperations) throw new InvalidOperationException($"The {(options.IncludeDependencyClosure ? "dependency candidate scan" : "plan")} exceeded the explicit {options.MaximumOperations:N0}-operation safety limit. Narrow the table selection or raise the limit deliberately.");
+                candidateOperations.Add(FromAuditChange(change));
             }
-            progress?.Report(("Compared target rows", table.Name, tableIndex + 1, selectedTables.Length));
+            progress?.Report((options.IncludeDependencyClosure ? "Read dependency candidates" : "Compared target rows", table.Name, tableIndex + 1, scannedTables.Length));
+        }
+        var seedTableNames = selectedTables.Select(table => table.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var seeds = candidateOperations.Where(operation => seedTableNames.Contains(operation.Table)).ToArray();
+        IReadOnlyList<DatabaseSyncOperation> sourceOperations = seeds; IReadOnlyList<DatabaseSyncDependencyInclusion> dependencyInclusions = [];
+        if (options.IncludeDependencyClosure && patterns.Length > 0)
+        {
+            var expanded = ExpandDependencyClosure(seeds, candidateOperations, capabilities.Relationships, options.MaximumOperations, cancellationToken);
+            sourceOperations = expanded.Operations; dependencyInclusions = expanded.Inclusions;
         }
         var preliminary = new List<DatabaseSyncOperation>(sourceOperations.Count);
         foreach (var operation in sourceOperations) preliminary.Add(await AnalyzeAsync(connection, null, target, capabilities, operation, lockRow: false, cancellationToken));
@@ -151,10 +172,16 @@ public sealed class DatabaseSynchronizationService
             options.IncludeRemovals ? "Explicit removals are included and require exact full-row preimages before DELETE." : "Source removals are excluded. Crucible never carries deletions into a target implicitly."
         };
         if (remaps.Count > 0) warnings.Add($"Automatically allocated {remaps.Count:N0} collision-free ID remap(s) above live target maxima and rewrote {remaps.Sum(remap => remap.RewrittenReferences):N0} recognized selected reference(s). Review every mapping before apply.");
+        if (options.IncludeDependencyClosure)
+            warnings.Add(patterns.Length == 0
+                ? "Dependency closure was enabled, but no table filter was supplied; every eligible changed row was already selected."
+                : $"Dependency closure added {dependencyInclusions.Count:N0} exactly related changed row(s) through declared or named core relationships. Review every recorded causal edge before apply.");
         if (manifest.Warnings.Count > 0) warnings.AddRange(manifest.Warnings.Select(warning => $"Source audit: {warning}"));
         var sourceAuditSha256 = await Sha256FileAsync(audit, cancellationToken); var binding = new DatabaseSyncTarget(target.Host, target.Port, target.User, target.Database, capabilities.ServerVersion);
         var plan = new DatabaseSyncPlan(PlanFormat, FormatVersion, ToolVersion(), DateTimeOffset.UtcNow, sourceAuditSha256,
-            binding, options.IncludeRemovals, patterns, remaps, ordered, HashPlanContent(sourceAuditSha256, binding, options.IncludeRemovals, patterns, remaps, ordered), warnings);
+            binding, options.IncludeRemovals, patterns, remaps, ordered,
+            HashPlanContent(sourceAuditSha256, binding, options.IncludeRemovals, patterns, remaps, ordered, options.IncludeDependencyClosure, dependencyInclusions), warnings,
+            options.IncludeDependencyClosure, dependencyInclusions);
         await WriteAtomicAsync(output, plan, options.Overwrite, cancellationToken);
         return new(output, plan, new FileInfo(output).Length);
     }
@@ -163,9 +190,77 @@ public sealed class DatabaseSynchronizationService
     {
         await using var stream = new FileStream(Path.GetFullPath(path), FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var plan = await JsonSerializer.DeserializeAsync<DatabaseSyncPlan>(stream, Json, cancellationToken) ?? throw new InvalidDataException("Synchronization plan is empty.");
-        if (plan.Format != PlanFormat || plan.FormatVersion != FormatVersion) throw new InvalidDataException($"Unsupported synchronization plan format {plan.Format} v{plan.FormatVersion}.");
-        if (!HashPlanContent(plan.SourceAuditSha256, plan.Target, plan.RemovalsIncluded, plan.IncludePatterns, plan.IdRemaps, plan.Operations).Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Synchronization plan content hash mismatch.");
+        if (plan.Format != PlanFormat || plan.FormatVersion is not 2 and not FormatVersion) throw new InvalidDataException($"Unsupported synchronization plan format {plan.Format} v{plan.FormatVersion}.");
+        var contentHash = plan.FormatVersion == 2
+            ? HashPlanContentV2(plan.SourceAuditSha256, plan.Target, plan.RemovalsIncluded, plan.IncludePatterns, plan.IdRemaps, plan.Operations)
+            : HashPlanContent(plan.SourceAuditSha256, plan.Target, plan.RemovalsIncluded, plan.IncludePatterns, plan.IdRemaps, plan.Operations, plan.DependencyClosureIncluded, plan.DependencyInclusions ?? []);
+        if (!contentHash.Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Synchronization plan content hash mismatch.");
         return plan;
+    }
+
+    public static (IReadOnlyList<DatabaseSyncOperation> Operations, IReadOnlyList<DatabaseSyncDependencyInclusion> Inclusions) ExpandDependencyClosure(
+        IReadOnlyList<DatabaseSyncOperation> seeds,
+        IReadOnlyList<DatabaseSyncOperation> candidates,
+        IReadOnlyList<DatabaseRelationCapability> relationships,
+        int maximumOperations = 100_000,
+        CancellationToken cancellationToken = default)
+    {
+        if (maximumOperations is < 1 or > 1_000_000) throw new ArgumentOutOfRangeException(nameof(maximumOperations));
+        if (seeds.Count > maximumOperations) throw new InvalidOperationException($"The seed selection exceeds the {maximumOperations:N0}-operation safety limit.");
+        var uniqueCandidates = candidates.GroupBy(OperationIdentity, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+        var byIdentity = uniqueCandidates.Select((operation, index) => (Operation: operation, Index: index)).ToDictionary(value => OperationIdentity(value.Operation), value => value.Index, StringComparer.OrdinalIgnoreCase);
+        var candidateIndicesByTable = uniqueCandidates.Select((operation, index) => (operation.Table, Index: index)).GroupBy(value => value.Table, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Select(value => value.Index).ToArray(), StringComparer.OrdinalIgnoreCase);
+        var endpointColumns = relationships.SelectMany(relation => new[] { (relation.FromTable, relation.FromColumn), (relation.ToTable, relation.ToColumn) })
+            .Distinct(new TableColumnComparer()).ToArray();
+        var endpointIndex = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+        foreach (var endpoint in endpointColumns)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!candidateIndicesByTable.TryGetValue(endpoint.Item1, out var tableIndices)) continue;
+            foreach (var index in tableIndices)
+            {
+                var operation = uniqueCandidates[index];
+                foreach (var value in RelationValues(operation, endpoint.Item2))
+                {
+                    var key = EndpointKey(endpoint.Item1, endpoint.Item2, value); if (!endpointIndex.TryGetValue(key, out var matches)) endpointIndex[key] = matches = []; matches.Add(index);
+                }
+            }
+        }
+        var relationshipsByTable = relationships.SelectMany(relation => new[] { (Table: relation.FromTable, Relation: relation), (Table: relation.ToTable, Relation: relation) })
+            .GroupBy(value => value.Table, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.Select(value => value.Relation).Distinct().ToArray(), StringComparer.OrdinalIgnoreCase);
+        var selected = new HashSet<int>(); var queue = new Queue<int>();
+        foreach (var seed in seeds)
+        {
+            if (!byIdentity.TryGetValue(OperationIdentity(seed), out var index)) continue;
+            if (selected.Add(index)) queue.Enqueue(index);
+        }
+        var inclusions = new List<DatabaseSyncDependencyInclusion>();
+        while (queue.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); var selectedIndex = queue.Dequeue(); var selectedOperation = uniqueCandidates[selectedIndex];
+            if (!relationshipsByTable.TryGetValue(selectedOperation.Table, out var touchingRelationships)) continue;
+            foreach (var relation in touchingRelationships)
+            {
+                var selectedIsFrom = relation.FromTable.Equals(selectedOperation.Table, StringComparison.OrdinalIgnoreCase);
+                var selectedTable = selectedIsFrom ? relation.FromTable : relation.ToTable; var selectedColumn = selectedIsFrom ? relation.FromColumn : relation.ToColumn;
+                var includedTable = selectedIsFrom ? relation.ToTable : relation.FromTable; var includedColumn = selectedIsFrom ? relation.ToColumn : relation.FromColumn;
+                foreach (var value in RelationValues(selectedOperation, selectedColumn))
+                {
+                    if (!endpointIndex.TryGetValue(EndpointKey(includedTable, includedColumn, value), out var matches)) continue;
+                    foreach (var match in matches)
+                    {
+                        if (match == selectedIndex || !selected.Add(match)) continue;
+                        if (selected.Count > maximumOperations) throw new InvalidOperationException($"Dependency closure exceeded the explicit {maximumOperations:N0}-operation safety limit.");
+                        var included = uniqueCandidates[match]; queue.Enqueue(match);
+                        inclusions.Add(new(relation.Name, relation.Declared, selectedOperation.Identity, included.Identity,
+                            $"{selectedTable}.{selectedColumn}", $"{includedTable}.{includedColumn}", DisplayRelationValue(value), relation.Description));
+                    }
+                }
+            }
+        }
+        var ordered = selected.Select(index => uniqueCandidates[index]).OrderBy(operation => operation.Table, StringComparer.OrdinalIgnoreCase).ThenBy(operation => operation.Identity, StringComparer.Ordinal).ToArray();
+        return (ordered, inclusions);
     }
 
     public async Task<DatabaseSyncApplyResult> ApplyAsync(string planPath, DatabaseConnectionProfile target, string receiptPath, bool overwrite = false, CancellationToken cancellationToken = default)
@@ -235,6 +330,7 @@ public sealed class DatabaseSynchronizationService
     public string PreviewSql(DatabaseSyncPlan plan)
     {
         var builder = new StringBuilder(); builder.AppendLine("-- WoW Crucible target-bound database synchronization preview"); builder.AppendLine($"-- Target: {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}"); builder.AppendLine("-- Apply through Crucible for transactional row locking, exact preimage verification, and a rollback receipt.");
+        foreach (var inclusion in plan.DependencyInclusions ?? []) builder.AppendLine($"-- DEPENDENCY: {inclusion.IncludedIdentity} via {inclusion.Relation} ({inclusion.SelectedEndpoint} = {inclusion.IncludedEndpoint} = {inclusion.MatchedValue}); triggered by {inclusion.SelectedIdentity}.");
         foreach (var remap in plan.IdRemaps) builder.AppendLine($"-- ID REMAP: {remap.Table}.{remap.Column} {remap.SourceId} -> {remap.TargetId}; {remap.RewrittenReferences:N0} recognized selected reference(s) rewritten.");
         builder.AppendLine("START TRANSACTION;");
         foreach (var operation in plan.Operations.Where(operation => operation.Status == DatabaseSyncOperationStatus.Ready)) builder.AppendLine(Preview(operation));
@@ -243,6 +339,20 @@ public sealed class DatabaseSynchronizationService
 
     private static DatabaseSyncOperation FromAuditChange(LegacyDatabaseRowChange change) => new(change.Table, change.Domain, change.Kind, change.Key,
         change.Fields.Select(field => new DatabaseSyncField(field.Column, field.Baseline, field.Legacy)).ToArray(), DatabaseSyncOperationStatus.Ready, "Not analyzed");
+
+    private static string OperationIdentity(DatabaseSyncOperation operation) => $"{operation.Table}\u001f{string.Join('\u001e', operation.Key.OrderBy(part => part.Column, StringComparer.OrdinalIgnoreCase).Select(part => $"{part.Column}\u001d{(int)part.Value.State}\u001d{part.Value.Value}"))}";
+    private static IReadOnlyList<LegacyDatabaseAuditValue> RelationValues(DatabaseSyncOperation operation, string column)
+    {
+        var values = new List<LegacyDatabaseAuditValue>();
+        values.AddRange(operation.Key.Where(part => part.Column.Equals(column, StringComparison.OrdinalIgnoreCase)).Select(part => part.Value));
+        values.AddRange(operation.Fields.Where(field => field.Column.Equals(column, StringComparison.OrdinalIgnoreCase)).Select(field => operation.Kind == LegacyDatabaseRowChangeKind.Removed ? field.Before : field.After));
+        return values.Where(value => value.State is LegacyDatabaseAuditValueState.Scalar or LegacyDatabaseAuditValueState.Binary)
+            .DistinctBy(value => $"{(int)value.State}\u001f{value.Value}", StringComparer.Ordinal).ToArray();
+    }
+    private static string EndpointKey(string table, string column, LegacyDatabaseAuditValue value) => $"{table.ToUpperInvariant()}\u001f{column.ToUpperInvariant()}\u001f{(int)value.State}\u001f{value.Value}";
+    private static string DisplayRelationValue(LegacyDatabaseAuditValue value) => value.State == LegacyDatabaseAuditValueState.Binary
+        ? $"<binary {Convert.FromBase64String(value.Value ?? string.Empty).Length:N0} bytes>"
+        : value.Value ?? string.Empty;
 
     private static async Task<IReadOnlyList<DatabaseSyncIdRemap>> AllocateRemapsAsync(MySqlConnection connection, DatabaseConnectionProfile target,
         DatabaseCapabilities capabilities, IReadOnlyList<DatabaseSyncOperation> source, IReadOnlyList<DatabaseSyncOperation> preliminary, uint? requestedStart, CancellationToken cancellationToken)
@@ -464,8 +574,10 @@ public sealed class DatabaseSynchronizationService
     }
     private static string Quote(string name) => ItemWritePlan.QuoteIdentifier(name);
     private static string Qualified(string database, string table) => $"{Quote(database)}.{Quote(table)}";
-    private static string HashPlanContent(string sourceAuditSha256, DatabaseSyncTarget target, bool removalsIncluded, IReadOnlyList<string> patterns, IReadOnlyList<DatabaseSyncIdRemap> remaps, IReadOnlyList<DatabaseSyncOperation> operations)
+    private static string HashPlanContentV2(string sourceAuditSha256, DatabaseSyncTarget target, bool removalsIncluded, IReadOnlyList<string> patterns, IReadOnlyList<DatabaseSyncIdRemap> remaps, IReadOnlyList<DatabaseSyncOperation> operations)
         => Hash(new { sourceAuditSha256, target, removalsIncluded, patterns, remaps, operations });
+    private static string HashPlanContent(string sourceAuditSha256, DatabaseSyncTarget target, bool removalsIncluded, IReadOnlyList<string> patterns, IReadOnlyList<DatabaseSyncIdRemap> remaps, IReadOnlyList<DatabaseSyncOperation> operations, bool dependencyClosureIncluded, IReadOnlyList<DatabaseSyncDependencyInclusion> dependencyInclusions)
+        => Hash(new { sourceAuditSha256, target, removalsIncluded, patterns, remaps, operations, dependencyClosureIncluded, dependencyInclusions });
     private static string HashReceiptContent(string planSha256, DatabaseSyncTarget target, IReadOnlyList<DatabaseSyncOperation> operations)
         => Hash(new { planSha256, target, operations });
     private static string Hash<T>(T value) => Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(value, HashJson))).ToLowerInvariant();

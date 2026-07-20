@@ -3185,6 +3185,45 @@ if (LegacyDatabaseAuditService.DetermineBaselineIdentity(incompleteBaselineIdent
 if (LegacyDatabaseDomainCatalog.Classify("player_class_stats") != LegacyDatabaseContentDomain.ClassesAndRaces ||
     LegacyDatabaseDomainCatalog.Classify("player_race_stats") != LegacyDatabaseContentDomain.ClassesAndRaces)
     throw new InvalidOperationException("Legacy recovery failed to classify current AzerothCore class/race stat tables.");
+LegacyDatabaseAuditValue DependencyValue(uint value) => new(LegacyDatabaseAuditValueState.Scalar, value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+DatabaseSyncOperation DependencyOperation(string table, LegacyDatabaseContentDomain domain, params (string Column, uint Value)[] key) =>
+    new(table, domain, LegacyDatabaseRowChangeKind.Added, key.Select(part => new LegacyDatabaseAuditKeyPart(part.Column, DependencyValue(part.Value))).ToArray(), [], DatabaseSyncOperationStatus.Ready, "fixture");
+var dependencyItem = DependencyOperation("item_template", LegacyDatabaseContentDomain.ItemsAndSets, ("entry", 100));
+var dependencyVendor = DependencyOperation("npc_vendor", LegacyDatabaseContentDomain.VendorsAndLoot, ("entry", 200), ("item", 100));
+var dependencyCreature = DependencyOperation("creature_template", LegacyDatabaseContentDomain.Creatures, ("entry", 200));
+var dependencyModel = DependencyOperation("creature_template_model", LegacyDatabaseContentDomain.Creatures, ("CreatureID", 200), ("Idx", 0));
+var dependencyUnrelated = DependencyOperation("item_template", LegacyDatabaseContentDomain.ItemsAndSets, ("entry", 999));
+var dependencyRelations = new[]
+{
+    new DatabaseRelationCapability("item-vendor", "npc_vendor", "item", "item_template", "entry", false, "vendor item"),
+    new DatabaseRelationCapability("creature-vendor", "npc_vendor", "entry", "creature_template", "entry", false, "vendor owner"),
+    new DatabaseRelationCapability("creature-model", "creature_template_model", "CreatureID", "creature_template", "entry", false, "creature model"),
+    new DatabaseRelationCapability("creature-self-cycle", "creature_template", "entry", "creature_template", "entry", false, "cycle fixture")
+};
+var dependencyClosure = DatabaseSynchronizationService.ExpandDependencyClosure([dependencyItem], [dependencyItem, dependencyVendor, dependencyCreature, dependencyModel, dependencyUnrelated], dependencyRelations);
+if (dependencyClosure.Operations.Count != 4 || dependencyClosure.Operations.Contains(dependencyUnrelated) || dependencyClosure.Inclusions.Count != 3 ||
+    dependencyClosure.Inclusions.Select(inclusion => inclusion.Relation).ToHashSet().SetEquals(["item-vendor", "creature-vendor", "creature-model"]) == false ||
+    dependencyClosure.Inclusions.Any(inclusion => inclusion.MatchedValue is not "100" and not "200" || string.IsNullOrWhiteSpace(inclusion.SelectedIdentity) || string.IsNullOrWhiteSpace(inclusion.IncludedIdentity)))
+    throw new InvalidOperationException("Database recovery dependency closure did not expand transitively with exact causal evidence or included an unrelated row.");
+try
+{
+    _ = DatabaseSynchronizationService.ExpandDependencyClosure([dependencyItem], [dependencyItem, dependencyVendor, dependencyCreature, dependencyModel], dependencyRelations, maximumOperations: 3);
+    throw new InvalidOperationException("Database recovery dependency closure exceeded its explicit operation cap.");
+}
+catch (InvalidOperationException exception) when (exception.Message.Contains("safety limit", StringComparison.OrdinalIgnoreCase)) { }
+var legacySyncTarget = new DatabaseSyncTarget("127.0.0.1", 3306, "fixture", "fixture_world", "fixture-server");
+var legacySyncSourceHash = new string('a', 64); var legacySyncPatterns = new[] { "item_template" }; var legacySyncRemaps = Array.Empty<DatabaseSyncIdRemap>(); var legacySyncOperations = new[] { dependencyItem };
+var legacySyncHashOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.General) { WriteIndented = false, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
+var legacySyncContent = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { sourceAuditSha256 = legacySyncSourceHash, target = legacySyncTarget, removalsIncluded = false, patterns = legacySyncPatterns, remaps = legacySyncRemaps, operations = legacySyncOperations }, legacySyncHashOptions);
+var legacySyncHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(legacySyncContent)).ToLowerInvariant();
+var legacySyncPlan = new DatabaseSyncPlan(DatabaseSynchronizationService.PlanFormat, 2, "fixture", DateTimeOffset.UtcNow, legacySyncSourceHash, legacySyncTarget, false, legacySyncPatterns, legacySyncRemaps, legacySyncOperations, legacySyncHash, ["legacy fixture"]);
+var legacySyncPath = Path.Combine(layerRoot, "legacy-v2-sync-plan.json");
+var legacySyncJsonOptions = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
+var legacySyncJson = System.Text.Json.JsonSerializer.SerializeToNode(legacySyncPlan, legacySyncJsonOptions)!.AsObject(); legacySyncJson.Remove("DependencyClosureIncluded"); legacySyncJson.Remove("DependencyInclusions");
+File.WriteAllText(legacySyncPath, legacySyncJson.ToJsonString(legacySyncJsonOptions));
+var loadedLegacySync = new DatabaseSynchronizationService().LoadPlanAsync(legacySyncPath).GetAwaiter().GetResult();
+if (loadedLegacySync.FormatVersion != 2 || loadedLegacySync.Operations.Count != 1 || loadedLegacySync.DependencyClosureIncluded || loadedLegacySync.DependencyInclusions is not null)
+    throw new InvalidOperationException("Database synchronization format v3 broke verified readability of an existing v2 plan.");
 using (var stream = File.Create(snapshotArtifact))
 using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Create))
 {

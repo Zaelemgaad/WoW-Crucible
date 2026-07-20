@@ -30,6 +30,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _recoveryReceipt = new() { PlaceholderText = "Apply receipt for exact rollback" };
     private readonly CheckBox _recoveryRemovals = new() { Content = "Include explicitly reviewed removals" };
     private readonly CheckBox _recoveryAutoRemap = new() { Content = "Remap occupied added IDs" };
+    private readonly CheckBox _recoveryDependencyClosure = new() { Content = "Include exact changed-row dependency closure", IsChecked = true };
     private readonly TextBox _recoveryRemapStart = new() { PlaceholderText = "Optional first remapped ID" };
     private readonly TextBlock _recoveryRemapSummary = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#D5B56A")), IsVisible = false };
     private readonly ListBox _recoveryOperations = new();
@@ -212,9 +213,9 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                     audit,
                     new Border { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _legacyStatus },
                     new TextBlock { Text = "Compare and synchronize with the connected target", FontSize = 18, FontWeight = FontWeight.SemiBold },
-                    new TextBlock { Text = "A plan requires a verified matching-core baseline audit. Crucible compares every selected primary-keyed row with the live target, excludes removals by default, and binds the result to this exact host/user/database. Occupied added IDs remain conflicts unless remapping is explicitly enabled; every resulting mapping and recognized reference rewrite is shown before apply.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
+                    new TextBlock { Text = "A plan requires a verified matching-core baseline audit. Crucible compares every selected primary-keyed row with the live target, excludes removals by default, and binds the result to this exact host/user/database. Dependency closure follows only exact declared or named core relationship values through other changed audit rows; every causal inclusion remains visible. Occupied added IDs remain conflicts unless remapping is explicitly enabled.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
                     auditPath,
-                    new WrapPanel { Children = { _recoveryRemovals, _recoveryAutoRemap, _recoveryRemapStart, buildPlan } },
+                    new WrapPanel { Children = { _recoveryRemovals, _recoveryDependencyClosure, _recoveryAutoRemap, _recoveryRemapStart, buildPlan } },
                     _recoveryRemapSummary,
                     planPath,
                     new WrapPanel { Children = { exportSql, applyPlan } },
@@ -224,7 +225,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                 }
             }
         };
-        return new Grid { RowDefinitions = new("2*,Auto,*"), RowSpacing = 7, Children = { configuration, WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = new SolidColorBrush(Color.Parse("#2B3445")) }, 1), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _recoveryOperations }, 2) } };
+        return new ResponsiveSplitGrid(configuration, new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _recoveryOperations }, 3, 2, 1.7);
     }
 
     private Control DbcSqlDeploymentPage()
@@ -569,7 +570,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         try
         {
             var progress = new Progress<(string Stage, string? Table, int Completed, int Total)>(value => _legacyStatus.Text = $"{value.Stage}{(value.Table is null ? string.Empty : $" · {value.Table}")} · {value.Completed:N0}/{value.Total:N0} tables");
-            var result = await new DatabaseSynchronizationService().BuildPlanAsync(audit, _session.DatabaseProfile, output, new(Patterns(_legacyIncludes.Text), _recoveryRemovals.IsChecked == true, AutoRemapCollisions: _recoveryAutoRemap.IsChecked == true, RemapStart: remapStart), progress, _operation!.Token);
+            var result = await new DatabaseSynchronizationService().BuildPlanAsync(audit, _session.DatabaseProfile, output, new(Patterns(_legacyIncludes.Text), _recoveryRemovals.IsChecked == true, AutoRemapCollisions: _recoveryAutoRemap.IsChecked == true, RemapStart: remapStart, IncludeDependencyClosure: _recoveryDependencyClosure.IsChecked == true), progress, _operation!.Token);
             _recoveryPlan.Text = result.Path; ShowDatabaseSyncPlan(result.Plan);
         }
         catch (OperationCanceledException) { _legacyStatus.Text = "Target comparison cancelled; no partial plan was published."; }
@@ -589,9 +590,16 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private void ShowDatabaseSyncPlan(DatabaseSyncPlan plan)
     {
         _loadedRecoveryPlan = plan; _recoveryOperations.ItemsSource = plan.Operations;
-        _recoveryRemapSummary.IsVisible = plan.IdRemaps.Count > 0;
-        _recoveryRemapSummary.Text = plan.IdRemaps.Count == 0 ? string.Empty : "ID remaps — review before apply:\n" + string.Join(Environment.NewLine, plan.IdRemaps.Select(remap => $"{remap.Table}.{remap.Column}: {remap.SourceId} → {remap.TargetId} · {remap.RewrittenReferences:N0} recognized reference(s) rewritten"));
-        _legacyStatus.Text = $"Verified target plan for {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}.\n{plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already applied · {plan.Conflicts:N0} conflicts · {plan.Blocked:N0} blocked · {plan.IdRemaps.Count:N0} ID remaps · {plan.Operations.Count:N0} total.\n{(plan.RemovalsIncluded ? "Explicit removals are included." : "Removals are excluded.")}";
+        var dependencyInclusions = plan.DependencyInclusions ?? [];
+        var dependencyLines = dependencyInclusions.Take(500).Select(inclusion => $"{inclusion.IncludedIdentity} ← {inclusion.Relation} ({inclusion.SelectedEndpoint} = {inclusion.IncludedEndpoint} = {inclusion.MatchedValue}) from {inclusion.SelectedIdentity}").ToList();
+        if (dependencyInclusions.Count > dependencyLines.Count) dependencyLines.Add($"… {dependencyInclusions.Count - dependencyLines.Count:N0} more causal edges remain in the hash-bound plan artifact and CLI inspection output.");
+        _recoveryRemapSummary.IsVisible = plan.IdRemaps.Count > 0 || dependencyInclusions.Count > 0;
+        _recoveryRemapSummary.Text = string.Join(Environment.NewLine + Environment.NewLine, new[]
+        {
+            plan.IdRemaps.Count == 0 ? string.Empty : "ID remaps — review before apply:\n" + string.Join(Environment.NewLine, plan.IdRemaps.Select(remap => $"{remap.Table}.{remap.Column}: {remap.SourceId} → {remap.TargetId} · {remap.RewrittenReferences:N0} recognized reference(s) rewritten")),
+            dependencyInclusions.Count == 0 ? string.Empty : "Dependency additions — exact causal edges:\n" + string.Join(Environment.NewLine, dependencyLines)
+        }.Where(section => section.Length > 0));
+        _legacyStatus.Text = $"Verified target plan for {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}.\n{plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already applied · {plan.Conflicts:N0} conflicts · {plan.Blocked:N0} blocked · {plan.IdRemaps.Count:N0} ID remaps · {(plan.DependencyInclusions?.Count ?? 0):N0} dependency additions · {plan.Operations.Count:N0} total.\n{(plan.RemovalsIncluded ? "Explicit removals are included." : "Removals are excluded.")}";
     }
 
     private async Task ExportDatabaseSyncPreviewAsync()
