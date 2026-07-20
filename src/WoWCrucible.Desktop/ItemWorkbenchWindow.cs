@@ -37,11 +37,13 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         HorizontalAlignment = HorizontalAlignment.Stretch
     };
     private readonly TextBox _acquisitionDbc = new() { PlaceholderText = "Optional server DBC folder for CharStartOutfit.dbc coverage…" };
+    private readonly Button _openLoadedCompleteRow = new() { Content = "Open every SQL field for this item", IsEnabled = false };
     private readonly TextBox _favoriteMpq = new() { PlaceholderText = "Optional related MPQ path saved with favorites…" };
     private readonly ListBox _items = new();
     private readonly TextBlock _auditSummary = new() { TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _inspection = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#AEB8C8")) };
     private ItemAcquisitionAudit? _audit;
+    private IReadOnlyDictionary<string, object?>? _loadedSqlRow;
     private IReadOnlyDictionary<uint, ItemCatalogEntry> _auditById = new Dictionary<uint, ItemCatalogEntry>();
     private bool _auditLoading;
     private string _auditIdentity = string.Empty;
@@ -126,6 +128,13 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             args.Handled = true;
             await InspectSearchExactAsync();
         };
+        _exactIds.TextChanged += (_, _) =>
+        {
+            if (_audit is null) return;
+            var entries = ItemIdQueryParser.Parse(_exactIds.Text);
+            if (entries.Count > 0) ShowPinnedExactItems(entries);
+            else ApplyAuditFilter();
+        };
         _classification.SelectionChanged += (_, _) =>
         {
             _reviewGroup.IsEnabled = _classification.SelectedIndex == 0;
@@ -144,10 +153,35 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var sqlStudio = AccentButton("SQL Studio — full database"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
         var sqlFavorites = new Button { Content = "★ SQL row favorites" }; sqlFavorites.Click += async (_, _) => await OpenSqlFavoritesAsync();
         var mpqMerge = new Button { Content = "Merge MPQ patches" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
+        _openLoadedCompleteRow.Click += (_, _) =>
+        {
+            if (_loadedSqlRow is null) { _status.Text = "Load an existing item_template row into the decoded editor first."; return; }
+            FullSqlEditRequested?.Invoke(this, new("item_template", _loadedSqlRow));
+        };
         var titleActions = new WrapPanel { Children = { sqlStudio, sqlFavorites, mpqMerge } };
         root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, titleActions } } });
         var connection = ConnectionBar(); Grid.SetRow(connection, 1); root.Children.Add(connection);
-        _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = _creator }, new TabItem { Header = "Acquisition / cut-item audit", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() }, new TabItem { Header = "SQL ↔ Item.dbc sync", Content = ClientItemSyncPage() } } };
+        var decodedItemPage = new Grid
+        {
+            RowDefinitions = new("Auto,*"),
+            Children =
+            {
+                new Border
+                {
+                    BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(8, 4),
+                    Child = new WrapPanel
+                    {
+                        Children =
+                        {
+                            _openLoadedCompleteRow,
+                            new TextBlock { Text = "Decoded controls preserve unmapped/custom columns; the complete view exposes every live-schema field.", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0) }
+                        }
+                    }
+                },
+                WithRow(_creator, 1)
+            }
+        };
+        _tabs = new TabControl { Margin = new Thickness(12), Items = { new TabItem { Header = "Create / edit item", Content = decodedItemPage }, new TabItem { Header = "Acquisition / cut-item audit", Content = AcquisitionPage() }, new TabItem { Header = "Full item copy", Content = ClonePage() }, new TabItem { Header = "Item sets & effects", Content = ItemSetPage() }, new TabItem { Header = "SQL ↔ Item.dbc sync", Content = ClientItemSyncPage() } } };
         _tabs.SelectionChanged += async (_, _) =>
         {
             if (_tabs.SelectedIndex != 1 || _audit is not null || _auditLoading) return;
@@ -164,7 +198,13 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         Grid.SetRow(statusBorder, 3); root.Children.Add(statusBorder); Content = root;
     }
 
-    public void OpenItemRow(IReadOnlyDictionary<string, object?> row) { _creator.LoadRow(row); _tabs.SelectedIndex = 0; _status.Text = "Loaded the selected SQL row into the decoded item editor. The SQL Studio row editor remains available for every custom/unknown column."; }
+    public void OpenItemRow(IReadOnlyDictionary<string, object?> row)
+    {
+        _loadedSqlRow = new Dictionary<string, object?>(row, StringComparer.OrdinalIgnoreCase);
+        _openLoadedCompleteRow.IsEnabled = true;
+        _creator.LoadRow(row); _tabs.SelectedIndex = 0;
+        _status.Text = "Loaded the selected SQL row into the decoded item editor. Open every SQL field returns to the same exact live row, including custom/unknown columns.";
+    }
 
     private Control ConnectionBar()
     {
@@ -411,7 +451,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
                 _status.Text = $"Favorited exact row {row.Display}. It is now available in SQL Studio → Favorites.";
                 return;
             }
-            _creator.LoadRow(row.Values); _tabs.SelectedIndex = 0; _status.Text = $"Loaded exact row {row.Display} into the decoded item editor. SQL Studio still exposes every raw/custom field.";
+            OpenItemRow(row.Values); _status.Text = $"Loaded exact row {row.Display} into the decoded item editor. Open every SQL field returns to this exact row.";
         }
         catch (Exception exception) { await ErrorAsync(favorite ? "Favorite failed" : "Decoded item open failed", exception); }
     }

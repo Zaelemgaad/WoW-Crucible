@@ -1562,6 +1562,8 @@ if (Directory.Exists(desktopSourceRoot))
     var mainWindowMarkup = desktopMarkup.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml", StringComparison.OrdinalIgnoreCase)).Value;
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 17802", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("_exactIds.TextChanged", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("Open every SQL field for this item", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Find exact ID(s) — bypass every filter", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("ItemIdQueryParser.Parse(query)", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("ShowPinnedExactItems(exactIds)", StringComparison.Ordinal) ||
