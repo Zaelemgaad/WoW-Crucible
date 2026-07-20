@@ -669,6 +669,21 @@ for (var y = 0; y < 8; y++) for (var x = 0; x < 8; x++)
 }
 var rgbaFixture = new RgbaTexture(8, 8, texturePixels); var nativePng = Path.Combine(textureFixture, "fixture.png");
 BlpTextureService.WritePng(nativePng, rgbaFixture);
+var editPixels = texturePixels.ToArray(); var editableTexture = new RgbaTexture(8, 8, editPixels);
+var firstPixelEdit = TexturePixelEditService.ApplyStroke(editableTexture, [new TexturePoint(0.5, 0.5)], new(0.75, 1, 250, 10, 20, 30, TexturePaintMode.ColorAndAlpha, TextureBrushFalloff.Hard));
+if (firstPixelEdit.ChangedPixels != 1 || !editPixels.AsSpan(0, 4).SequenceEqual(new byte[] { 250, 10, 20, 30 }) || editPixels[7] != texturePixels[7])
+    throw new InvalidOperationException("Native texture painting did not isolate one exact hard-brush RGBA pixel.");
+var rgbOnlyAlpha = editPixels[3]; TexturePixelEditService.ApplyStroke(editableTexture, [new TexturePoint(0.5, 0.5)], new(0.75, 1, 1, 2, 3, 255, TexturePaintMode.RgbOnly, TextureBrushFalloff.Hard));
+if (!editPixels.AsSpan(0, 3).SequenceEqual(new byte[] { 1, 2, 3 }) || editPixels[3] != rgbOnlyAlpha) throw new InvalidOperationException("RGB-only texture painting changed alpha.");
+var continuous = TexturePixelEditService.ApplyStroke(editableTexture, [new TexturePoint(0.5, 4.5), new TexturePoint(7.5, 4.5)], new(0.7, 1, 99, 88, 77, 66, TexturePaintMode.ColorAndAlpha, TextureBrushFalloff.Hard));
+if (continuous.ChangedPixels != 8 || Enumerable.Range(0, 8).Any(x => editPixels[(4 * 8 + x) * 4] != 99)) throw new InvalidOperationException("Interpolated texture stroke left gaps between pointer samples.");
+var alphaFill = TexturePixelEditService.Fill(editableTexture, new(1, 1, 0, 0, 0, 128, TexturePaintMode.AlphaOnly));
+if (alphaFill.ChangedPixels == 0 || Enumerable.Range(0, 64).Any(pixel => editPixels[pixel * 4 + 3] != 128)) throw new InvalidOperationException("Alpha-only texture fill did not preserve a complete exact alpha plane.");
+TexturePixelEditService.InvertAlpha(editableTexture); if (Enumerable.Range(0, 64).Any(pixel => editPixels[pixel * 4 + 3] != 127)) throw new InvalidOperationException("Texture alpha inversion did not operate byte-exactly.");
+var statistics = TexturePixelEditService.Analyze(editableTexture); var alphaView = TexturePixelEditService.RenderChannels(editableTexture, new(AlphaAsGrayscale: true));
+if (statistics.MinimumA != 127 || statistics.MaximumA != 127 || statistics.TranslucentPixels != 64 || alphaView.Pixels[0] != 127 || alphaView.Pixels[1] != 127 || alphaView.Pixels[2] != 127 || alphaView.Pixels[3] != 255)
+    throw new InvalidOperationException("Texture channel statistics or non-mutating alpha visualization regressed.");
+try { TexturePixelEditService.ApplyStroke(editableTexture, [new TexturePoint(0, 0)], new(1, 1.1, 0, 0, 0, 0)); throw new InvalidOperationException("An out-of-range texture brush opacity was accepted."); } catch (ArgumentOutOfRangeException) { }
 foreach (var format in new[] { BlpOutputFormat.Dxt1, BlpOutputFormat.Dxt1Alpha, BlpOutputFormat.Dxt3, BlpOutputFormat.Dxt5 })
 {
     var blp = Path.Combine(textureFixture, $"fixture-{format}.blp");
@@ -1673,9 +1688,13 @@ if (Directory.Exists(desktopSourceRoot))
     var lightingWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingEditorSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingBandEditorView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingEnvironmentSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingEnvironmentView.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var textureWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("TextureWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var textureCanvasSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("TexturePixelCanvas.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowMarkup = desktopMarkup.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml", StringComparison.OrdinalIgnoreCase)).Value;
     if (!lightingWorkspaceSource.Contains("Edit time band", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Environment preview", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Author selected color curve", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Author selected float curve", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Path.ChangeExtension(dbcPath, \".m2\")", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Optional preview-only texture layer", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("requestedTextureProvenance", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("ClientAssetDependencyService.Analyze(_assetIndex, choice.Location, overrides, token)", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("M2PreviewView", StringComparison.Ordinal) || !lightingEnvironmentSource.Contains("WorldLightingEnvironmentSample", StringComparison.Ordinal) || !lightingEnvironmentSource.Contains("LinearGradientBrush", StringComparison.Ordinal) || !lightingEditorSource.Contains("new ResponsiveSplitGrid", StringComparison.Ordinal) || !lightingEditorSource.Contains("Apply to loaded DBC · keep .bak", StringComparison.Ordinal) || !lightingEditorSource.Contains("WorldLightingBandEditPlan", StringComparison.Ordinal) || !lightingEditorSource.Contains("_baselines", StringComparison.Ordinal) || !appSource.Contains("--lighting", StringComparison.Ordinal) || !mainWindowSource.Contains("OpenLightingWorkspace", StringComparison.Ordinal))
         throw new InvalidOperationException("Same-window responsive world-light curve authoring or retained source-preimage wiring regressed.");
+    if (!textureWorkspaceSource.Contains("Edit RGBA pixels", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("Save edited BLP2", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("TexturePixelEditService.ApplyStroke", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("128 MiB undo budget", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("The loaded source is immutable", StringComparison.Ordinal) || !textureCanvasSource.Contains("PointerWheelChanged", StringComparison.Ordinal) || !textureCanvasSource.Contains("IsMiddleButtonPressed", StringComparison.Ordinal) || !textureCanvasSource.Contains("TexturePixelEditService.RenderChannels", StringComparison.Ordinal))
+        throw new InvalidOperationException("Responsive native RGBA/channel texture editing or immutable-source safety regressed.");
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 and 17802", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("_exactIds.TextChanged", StringComparison.Ordinal) ||
