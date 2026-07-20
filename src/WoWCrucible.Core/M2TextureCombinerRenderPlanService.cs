@@ -23,7 +23,7 @@ public static class M2TextureCombinerRenderPlanService
             // lit * mix(base * environment * 2, base, base alpha) + additive.rgb * additive.a
             return [new(0, M2TextureRenderPassBlend.Source, true), new(1, M2TextureRenderPassBlend.Modulate, false), new(0, M2TextureRenderPassBlend.DestinationOut, false), new(0, M2TextureRenderPassBlend.Add, true), new(2, M2TextureRenderPassBlend.Add, false)];
         }
-        if (combiner.Kind is M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha or M2PreviewTextureCombinerKind.ExplicitModAddAlpha)
+        if (combiner.Kind is M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha or M2PreviewTextureCombinerKind.ExplicitModAddAlphaEnvironment or M2PreviewTextureCombinerKind.ExplicitModAddAlpha)
         {
             RequireTwo(stages, combiner);
             return [new(0, M2TextureRenderPassBlend.Source, true), new(1, M2TextureRenderPassBlend.Add, false)];
