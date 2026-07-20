@@ -1215,6 +1215,38 @@ static int Client(string[] args)
             : $"Client cache is already absent: {result.CachePath}");
         return 0;
     }
+    if (args is ["publisher-key", var publisherPrivateKey, var publisherPublicKey, .. var publisherKeyOptions])
+    {
+        var passwordEnvironment = Option(publisherKeyOptions, "--password-env=") ?? "WOW_CRUCIBLE_PUBLISHER_PASSWORD";
+        var unknown = publisherKeyOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown publisher-key option: {unknown[0]}");
+        if (string.IsNullOrWhiteSpace(passwordEnvironment)) return Fail("--password-env requires a non-empty environment-variable name.");
+        var password = Environment.GetEnvironmentVariable(passwordEnvironment); if (password is null) return Fail($"Set the {passwordEnvironment} environment variable. Publisher passwords are never accepted on the command line.");
+        var result = ClientReleaseSigningService.CreatePublisherKey(publisherPrivateKey, publisherPublicKey, password.AsSpan());
+        Console.WriteLine($"PRIVATE_KEY\t{result.PrivateKeyPath}\nPUBLIC_KEY\t{result.PublicKeyPath}\nKEY_ID\t{result.KeyId}\nALGORITHM\t{result.Algorithm}");
+        return 0;
+    }
+    if (args is ["release-sign", var signBundle, var signPrivateKey, var signedChannelOutput, .. var signOptions])
+    {
+        var passwordEnvironment = Option(signOptions, "--password-env=") ?? "WOW_CRUCIBLE_PUBLISHER_PASSWORD";
+        var unknown = signOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown release-sign option: {unknown[0]}");
+        if (string.IsNullOrWhiteSpace(passwordEnvironment)) return Fail("--password-env requires a non-empty environment-variable name.");
+        var password = Environment.GetEnvironmentVariable(passwordEnvironment); if (password is null) return Fail($"Set the {passwordEnvironment} environment variable. Publisher passwords are never accepted on the command line.");
+        var result = ClientReleaseSigningService.SignBundle(signBundle, signPrivateKey, password.AsSpan(), signedChannelOutput);
+        Console.WriteLine($"SIGNED_CHANNEL\t{result.SignedChannelPath}\nCHANNEL_SHA256\t{result.SignedChannelSha256}\nKEY_ID\t{result.KeyId}\nCONTENT_ID\t{result.Manifest.ContentId}\nFILES\t{result.Manifest.Files.Count:N0}");
+        return 0;
+    }
+    if (args is ["release-verify", var verifyChannel, var verifyPublicKey, .. var verifyOptions])
+    {
+        var json = verifyOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = verifyOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown release-verify option: {unknown[0]}");
+        var result = ClientReleaseSigningService.VerifySignedChannel(verifyChannel, verifyPublicKey);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else Console.WriteLine($"VERIFIED\tTrue\nSIGNED_CHANNEL\t{result.SignedChannelPath}\nCHANNEL_SHA256\t{result.SignedChannelSha256}\nTRUSTED_PUBLIC_KEY\t{result.TrustedPublicKeyPath}\nKEY_ID\t{result.KeyId}\nCHANNEL\t{result.Manifest.Channel}\nRELEASE\t{result.Manifest.Name}\nCONTENT_ID\t{result.Manifest.ContentId}\nFILES\t{result.Manifest.Files.Count:N0}\nBYTES\t{result.Body.PayloadBytes:N0}");
+        return 0;
+    }
     if (args is ["release-create", var releaseSource, var releaseBundle, .. var releaseOptions])
     {
         var name = Option(releaseOptions, "--name="); var channel = Option(releaseOptions, "--channel=") ?? "public"; var changelogFile = Option(releaseOptions, "--changelog=");
@@ -1228,9 +1260,12 @@ static int Client(string[] args)
     }
     if (args is ["release-plan", var releaseManifest, var releaseClientRoot, var releasePlanPath, .. var releasePlanOptions])
     {
-        var groups = releasePlanOptions.Where(option => option.StartsWith("--group=", StringComparison.OrdinalIgnoreCase)).Select(option => option[8..]).ToArray(); var overwrite = releasePlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
-        var unknown = releasePlanOptions.Where(option => !option.StartsWith("--group=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown release-plan option: {unknown[0]}");
-        var plan = ClientReleaseService.CreatePlan(releaseManifest, releaseClientRoot, groups); ClientReleaseService.SavePlan(releasePlanPath, plan, overwrite); PrintReleasePlan(plan); Console.WriteLine($"PLAN\t{Path.GetFullPath(releasePlanPath)}"); return plan.Ready ? 0 : 3;
+        var groups = releasePlanOptions.Where(option => option.StartsWith("--group=", StringComparison.OrdinalIgnoreCase)).Select(option => option[8..]).ToArray(); var overwrite = releasePlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var trustedKey = Option(releasePlanOptions, "--trusted-key=");
+        var unknown = releasePlanOptions.Where(option => !option.StartsWith("--group=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--trusted-key=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown release-plan option: {unknown[0]}");
+        var plan = trustedKey is null
+            ? ClientReleaseService.CreatePlan(releaseManifest, releaseClientRoot, groups)
+            : ClientReleaseService.CreateTrustedPlan(releaseManifest, trustedKey, releaseClientRoot, groups);
+        ClientReleaseService.SavePlan(releasePlanPath, plan, overwrite); PrintReleasePlan(plan); Console.WriteLine($"PLAN\t{Path.GetFullPath(releasePlanPath)}"); return plan.Ready ? 0 : 3;
     }
     if (args is ["release-apply", var releaseApplyPlanPath, var releaseReceiptPath, .. var releaseApplyOptions])
     {
@@ -1368,11 +1403,11 @@ static IReadOnlyList<ClientReleaseGroupRule> ParseReleaseGroupRules(IEnumerable<
 
 static void PrintReleasePlan(ClientReleasePlan plan)
 {
-    Console.WriteLine($"READY\t{plan.Ready}\nTARGET\t{plan.TargetClientRoot}\nADD\t{plan.Adds:N0}\nREPLACE\t{plan.Replacements:N0}\nREMOVE_MANAGED\t{plan.Removals:N0}\nUNCHANGED\t{plan.Unchanged:N0}\nGROUPS\t{string.Join(',', plan.SelectedOptionalGroups)}");
+    Console.WriteLine($"READY\t{plan.Ready}\nTARGET\t{plan.TargetClientRoot}\nTRUST\t{(plan.Trust is null ? "LOCAL_UNSIGNED" : "VERIFIED_SIGNED_CHANNEL")}\nPUBLISHER_KEY_ID\t{plan.Trust?.KeyId ?? "-"}\nADD\t{plan.Adds:N0}\nREPLACE\t{plan.Replacements:N0}\nREMOVE_MANAGED\t{plan.Removals:N0}\nUNCHANGED\t{plan.Unchanged:N0}\nGROUPS\t{string.Join(',', plan.SelectedOptionalGroups)}");
     foreach (var action in plan.Actions) Console.WriteLine($"ACTION\t{action.Kind}\t{action.RelativePath}\t{action.OptionalGroup ?? "required"}\t{action.Detail}"); foreach (var blocker in plan.Blockers) Console.WriteLine($"BLOCKER\t{blocker}");
 }
 
-static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  wowcrucible client clear-cache <client-root>\n  wowcrucible client release-create <source-folder> <new-bundle-folder> --name=NAME [--channel=public] [--changelog=notes.txt] [--optional=group|relative-prefix]...\n  wowcrucible client release-plan <bundle-or-manifest> <client-root> <plan.json> [--group=name]... [--overwrite]\n  wowcrucible client release-apply <plan.json> <receipt.json> [--apply] [--overwrite]\n  wowcrucible client release-rollback <receipt.json> [--apply]\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]\n  wowcrucible client fusion-dbc-plan <fusion-plan.json> <schema.xml> [--output=dbc-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-apply <dbc-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-dbc-remap-plan <fusion-plan.json> <schema.xml> <WoWDBDefs-definitions> [--output=remap-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-remap-apply <remap-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-stage <fusion-plan.json> <stage-folder> [--dbc-receipt=client-fusion-dbc.crucible.json|--dbc-remap-receipt=client-fusion-dbc-remap.crucible.json]\n\nRelease bundles are local/offline publication artifacts. Payloads and plans are SHA-256 bound; only files proven owned by a previous Crucible release can be pruned. Apply force-closes Wow processes from the selected client, backs up every replaced/removed preimage, records ownership, and clears that client's Cache. Apply and rollback are dry-run unless --apply is explicit. Network transport and cryptographic channel signing are separate future layers, not implied by this command.", code);
+static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  wowcrucible client clear-cache <client-root>\n  wowcrucible client publisher-key <new-private.pem> <new-public.pem> [--password-env=WOW_CRUCIBLE_PUBLISHER_PASSWORD]\n  wowcrucible client release-create <source-folder> <new-bundle-folder> --name=NAME [--channel=public] [--changelog=notes.txt] [--optional=group|relative-prefix]...\n  wowcrucible client release-sign <bundle-or-manifest> <encrypted-private.pem> <bundle\\channel.crucible.json> [--password-env=WOW_CRUCIBLE_PUBLISHER_PASSWORD]\n  wowcrucible client release-verify <channel.crucible.json> <trusted-public.pem> [--format=text|json]\n  wowcrucible client release-plan <bundle-or-signed-channel> <client-root> <plan.json> [--trusted-key=public.pem] [--group=name]... [--overwrite]\n  wowcrucible client release-apply <plan.json> <receipt.json> [--apply] [--overwrite]\n  wowcrucible client release-rollback <receipt.json> [--apply]\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]\n  wowcrucible client fusion-dbc-plan <fusion-plan.json> <schema.xml> [--output=dbc-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-apply <dbc-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-dbc-remap-plan <fusion-plan.json> <schema.xml> <WoWDBDefs-definitions> [--output=remap-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-remap-apply <remap-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-stage <fusion-plan.json> <stage-folder> [--dbc-receipt=client-fusion-dbc.crucible.json|--dbc-remap-receipt=client-fusion-dbc-remap.crucible.json]\n\nPublisher private keys are encrypted PKCS#8 files and must remain outside release bundles. Passwords come only from an environment variable. A trusted plan re-verifies the signed descriptor, public-key identity, manifest, every payload, target preimage, and ownership state again during apply. Unsigned local bundles remain available for private/offline work and are labeled LOCAL_UNSIGNED. Apply and rollback are dry-run unless --apply is explicit. Network transport remains separate and is not implied by signing.", code);
 
 static async Task<int> Server(string[] args)
 {

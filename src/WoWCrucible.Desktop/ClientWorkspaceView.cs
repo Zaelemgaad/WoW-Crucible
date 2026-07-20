@@ -46,6 +46,10 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private readonly TextBox _releaseOptionalRules = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, PlaceholderText = "Optional group mappings, one per line: HD Textures|Data\\patch-HD.MPQ" };
     private readonly TextBox _releaseTargetRoot = new() { PlaceholderText = "Target WoW client root containing Data" };
     private readonly TextBox _releaseSelectedGroups = new() { PlaceholderText = "Optional groups to install, comma separated" };
+    private readonly TextBox _releasePrivateKey = new() { PlaceholderText = "Encrypted publisher private key · never included in a bundle" };
+    private readonly TextBox _releasePublicKey = new() { PlaceholderText = "Explicit trusted publisher public key" };
+    private readonly TextBox _releasePublisherPassword = new() { PasswordChar = '●', PlaceholderText = "Publisher key password · memory only" };
+    private readonly TextBox _releaseSignedChannel = new() { PlaceholderText = "Signed channel descriptor beside release.crucible.json" };
     private readonly ListBox _releaseActions = new();
     private readonly TextBlock _releaseSummary = Status("Create or select a release bundle, choose optional groups, then review an exact install plan.");
     private readonly Border _releaseConfirmation = new() { IsVisible = false, Padding = new Thickness(10), BorderBrush = Brush.Parse("#755A2B"), BorderThickness = new Thickness(1) };
@@ -215,15 +219,78 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var bundle = Button("Bundle parent…", async () => { var path = await PickFolderAsync("Choose a parent for a new portable release bundle"); if (path is not null) { var stem = string.Concat((_releaseName.Text ?? "release").Where(char.IsLetterOrDigit)); if (stem.Length == 0) stem = "Release"; _releaseBundleRoot.Text = Path.Combine(path, $"Crucible-{stem}-{DateTime.Now:yyyyMMdd-HHmmss}"); } });
         var target = Button("Client…", async () => { var path = await PickFolderAsync("Choose the target WoW client root containing Data"); if (path is not null) _releaseTargetRoot.Text = path; });
         var create = AccentButton("Build immutable release bundle"); create.Click += async (_, _) => await CreateReleaseBundleAsync(); Register(create);
+        var createKey = new Button { Content = "Create encrypted publisher key…" }; createKey.Click += async (_, _) => await CreatePublisherKeyAsync(); Register(createKey);
+        var privateKey = Button("Private key…", async () => { var path = await PickFileAsync("Choose encrypted publisher private key", ["*.pem", "*"]); if (path is not null) _releasePrivateKey.Text = path; });
+        var publicKey = Button("Public key…", async () => { var path = await PickFileAsync("Choose trusted publisher public key", ["*.pem", "*"]); if (path is not null) _releasePublicKey.Text = path; });
+        var signedChannel = Button("Signed channel…", async () => { var path = await PickFileAsync("Choose signed release channel", ["*.json", "*"]); if (path is not null) _releaseSignedChannel.Text = path; });
+        var sign = AccentButton("Sign immutable bundle"); sign.Click += async (_, _) => await SignReleaseBundleAsync(); Register(sign);
+        var verify = new Button { Content = "Verify signed release" }; verify.Click += async (_, _) => await VerifySignedReleaseAsync(); Register(verify);
         var plan = AccentButton("Review client install plan"); plan.Click += async (_, _) => await PlanReleaseAsync(); Register(plan);
         var export = new Button { Content = "Export reviewed plan…" }; export.Click += async (_, _) => await ExportReleasePlanAsync();
         var install = AccentButton("Install reviewed release…"); install.Click += async (_, _) => await PrepareReleaseInstallAsync(); Register(install);
         var rollback = new Button { Content = "Validate rollback receipt…" }; rollback.Click += async (_, _) => await PrepareReleaseRollbackAsync(); Register(rollback);
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
         AddPath(paths, 0, "Release source", _releaseSourceRoot, source, null); AddPath(paths, 1, "Bundle / manifest", _releaseBundleRoot, bundle, null); AddPath(paths, 2, "Target client", _releaseTargetRoot, target, null);
+        var trustPaths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
+        AddPath(trustPaths, 0, "Private key", _releasePrivateKey, privateKey, null); AddPath(trustPaths, 1, "Trusted public key", _releasePublicKey, publicKey, null); AddPath(trustPaths, 2, "Signed channel", _releaseSignedChannel, signedChannel, null);
         var identity = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { new StackPanel { Children = { new TextBlock { Text = "Release name" }, _releaseName } }, WithColumn(new StackPanel { Children = { new TextBlock { Text = "Channel (stable ownership identity)" }, _releaseChannel } }, 1) } };
-        var configuration = new StackPanel { Spacing = 7, Children = { paths, identity, new TextBlock { Text = "Changelog" }, _releaseChangelog, new TextBlock { Text = "Optional groups · group|client-relative prefix · a group may own multiple prefixes" }, _releaseOptionalRules, new TextBlock { Text = "Optional groups selected for this target" }, _releaseSelectedGroups, new WrapPanel { Children = { create, plan, export, install, rollback } }, _releaseConfirmation, Card(_releaseSummary), new TextBlock { Text = "Safety contract: bundles and plans bind every payload by SHA-256. Updates back up every replaced or removed file. Only unchanged files proven owned by the previous Crucible release can be pruned. Installation closes Wow.exe only when it belongs to the selected client and always clears that client's Cache. This is an offline/local distribution foundation; network downloads and cryptographic channel signing are not claimed here.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") } } };
+        var configuration = new StackPanel { Spacing = 7, Children = { paths, identity, new TextBlock { Text = "Changelog" }, _releaseChangelog, new TextBlock { Text = "Optional groups · group|client-relative prefix · a group may own multiple prefixes" }, _releaseOptionalRules, new WrapPanel { Children = { create } }, new TextBlock { Text = "Publisher authentication", FontSize = 16, FontWeight = FontWeight.SemiBold }, trustPaths, new TextBlock { Text = $"Publisher password (minimum {ClientReleaseSigningService.MinimumPasswordLength} characters; held in memory only and never saved or logged)" }, _releasePublisherPassword, new WrapPanel { Children = { createKey, sign, verify } }, new TextBlock { Text = "Optional groups selected for this target" }, _releaseSelectedGroups, new WrapPanel { Children = { plan, export, install, rollback } }, _releaseConfirmation, Card(_releaseSummary), new TextBlock { Text = "Safety contract: local unsigned bundles remain available for private work and are labeled as such. A signed plan re-verifies the explicit trusted public key, exact signed descriptor, manifest, every payload, target preimage, and ownership state again at install time. Private keys are encrypted, must remain outside bundles, and never enter settings or logs. Updates back up every replaced/removed file, prune only unchanged Crucible-owned paths, close Wow.exe only for the selected client, and clear that client's Cache. Network transport remains separate.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") } } };
         return new Grid { RowDefinitions = new("*,*"), RowSpacing = 8, Margin = new Thickness(8), Children = { new ScrollViewer { Content = configuration }, WithRow(_releaseActions, 1) } };
+    }
+
+    private async Task CreatePublisherKeyAsync()
+    {
+        var parent = await PickFolderAsync("Choose a private publisher-key folder outside release bundles"); if (parent is null) return;
+        Begin("Generating and verifying an encrypted offline publisher identity…");
+        try
+        {
+            var privatePath = Path.Combine(parent, "crucible-publisher-private.pem");
+            var publicPath = Path.Combine(parent, "crucible-publisher-public.pem");
+            var password = _releasePublisherPassword.Text ?? string.Empty;
+            var result = await Task.Run(() => ClientReleaseSigningService.CreatePublisherKey(privatePath, publicPath, password.AsSpan()), _operation!.Token);
+            _releasePrivateKey.Text = result.PrivateKeyPath; _releasePublicKey.Text = result.PublicKeyPath;
+            _releaseSummary.Text = $"Publisher identity ready · {result.Algorithm}\nKey ID: {result.KeyId}\nPrivate: {result.PrivateKeyPath}\nPublic trust anchor: {result.PublicKeyPath}";
+            _operationStatus.Text = "Encrypted publisher key created. Back it up separately; distribute only the public key.";
+        }
+        catch (Exception exception) { Fail("Publisher key creation failed", exception); }
+        finally { End(); }
+    }
+
+    private async Task SignReleaseBundleAsync()
+    {
+        var bundleValue = _releaseBundleRoot.Text ?? string.Empty;
+        string? bundleRoot;
+        try { bundleRoot = Directory.Exists(bundleValue) ? Path.GetFullPath(bundleValue) : Path.GetDirectoryName(Path.GetFullPath(bundleValue)); }
+        catch (Exception exception) { Fail("Release bundle path is invalid", exception); return; }
+        if (bundleRoot is null || !File.Exists(Path.Combine(bundleRoot, ClientReleaseService.ManifestFileName))) { _operationStatus.Text = "Choose or create an immutable release bundle first."; return; }
+        var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Create signed channel beside release.crucible.json", SuggestedStartLocation = await Storage().TryGetFolderFromPathAsync(bundleRoot), SuggestedFileName = "channel.crucible.json", FileTypeChoices = [new FilePickerFileType("Crucible signed channel") { Patterns = ["*.json"] }] });
+        var output = file?.TryGetLocalPath(); if (output is null) return;
+        Begin("Verifying every payload and signing the exact release identity…");
+        try
+        {
+            var password = _releasePublisherPassword.Text ?? string.Empty;
+            var result = await Task.Run(() => ClientReleaseSigningService.SignBundle(bundleValue, _releasePrivateKey.Text ?? string.Empty, password.AsSpan(), output), _operation!.Token);
+            _releaseSignedChannel.Text = result.SignedChannelPath; _releasePlan = null; _releaseActions.ItemsSource = null;
+            _releaseSummary.Text = $"SIGNED · {result.Manifest.Name} · {result.Manifest.Files.Count:N0} file(s)\nPublisher key ID: {result.KeyId}\nChannel SHA-256: {result.SignedChannelSha256}\n{result.SignedChannelPath}";
+            _operationStatus.Text = "Signed channel created. Verify it with the separately trusted public key before distribution.";
+        }
+        catch (Exception exception) { Fail("Release signing failed", exception); }
+        finally { End(); }
+    }
+
+    private async Task VerifySignedReleaseAsync()
+    {
+        Begin("Authenticating publisher, manifest, and every signed release payload…");
+        try
+        {
+            var progress = new Progress<ClientReleaseProgress>(value => _operationStatus.Text = $"{value.Completed:N0}/{value.Total:N0} · {value.Stage} · {value.RelativePath}");
+            var result = await Task.Run(() => ClientReleaseSigningService.VerifySignedChannel(_releaseSignedChannel.Text ?? string.Empty, _releasePublicKey.Text ?? string.Empty, progress), _operation!.Token);
+            _releaseBundleRoot.Text = result.BundleRoot;
+            _releaseSummary.Text = $"AUTHENTIC · {result.Manifest.Name} · channel {result.Manifest.Channel}\nPublisher key ID: {result.KeyId}\nContent: {result.Manifest.ContentId}\n{result.Manifest.Files.Count:N0} file(s) · {FormatBytes(result.Body.PayloadBytes)}";
+            _operationStatus.Text = "Signed release and complete payload verified against the explicit trusted public key.";
+        }
+        catch (Exception exception) { Fail("Signed release verification failed", exception); }
+        finally { End(); }
     }
 
     private async Task CreateReleaseBundleAsync()
@@ -250,9 +317,14 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         try
         {
             var progress = new Progress<ClientReleaseProgress>(value => _operationStatus.Text = $"{value.Completed:N0}/{value.Total:N0} · {value.Stage} · {value.RelativePath}");
-            var plan = await Task.Run(() => ClientReleaseService.CreatePlan(_releaseBundleRoot.Text ?? string.Empty, _releaseTargetRoot.Text ?? string.Empty, ParseGroups(_releaseSelectedGroups.Text), progress), _operation!.Token);
+            var signedChannel = _releaseSignedChannel.Text?.Trim(); var trustedKey = _releasePublicKey.Text?.Trim();
+            var plan = await Task.Run(() => !string.IsNullOrWhiteSpace(signedChannel) || !string.IsNullOrWhiteSpace(trustedKey)
+                ? !string.IsNullOrWhiteSpace(signedChannel) && !string.IsNullOrWhiteSpace(trustedKey)
+                    ? ClientReleaseService.CreateTrustedPlan(signedChannel, trustedKey, _releaseTargetRoot.Text ?? string.Empty, ParseGroups(_releaseSelectedGroups.Text), progress)
+                    : throw new InvalidOperationException("Trusted planning requires both a signed channel descriptor and its explicit public key.")
+                : ClientReleaseService.CreatePlan(_releaseBundleRoot.Text ?? string.Empty, _releaseTargetRoot.Text ?? string.Empty, ParseGroups(_releaseSelectedGroups.Text), progress), _operation!.Token);
             _releasePlan = plan; _releaseActions.ItemsSource = plan.Actions;
-            _releaseSummary.Text = $"{(plan.Ready ? "READY" : "BLOCKED")} · add {plan.Adds:N0} · replace {plan.Replacements:N0} · remove owned {plan.Removals:N0} · unchanged {plan.Unchanged:N0}\nSelected optional groups: {(plan.SelectedOptionalGroups.Count == 0 ? "none" : string.Join(", ", plan.SelectedOptionalGroups))}\n{string.Join(Environment.NewLine, plan.Blockers.Select(blocker => "• " + blocker))}";
+            _releaseSummary.Text = $"{(plan.Ready ? "READY" : "BLOCKED")} · {(plan.Trust is null ? "LOCAL UNSIGNED" : "AUTHENTIC SIGNED CHANNEL")} · add {plan.Adds:N0} · replace {plan.Replacements:N0} · remove owned {plan.Removals:N0} · unchanged {plan.Unchanged:N0}\nPublisher: {plan.Trust?.KeyId ?? "not authenticated"}\nSelected optional groups: {(plan.SelectedOptionalGroups.Count == 0 ? "none" : string.Join(", ", plan.SelectedOptionalGroups))}\n{string.Join(Environment.NewLine, plan.Blockers.Select(blocker => "• " + blocker))}";
             _operationStatus.Text = plan.Ready ? "Exact release plan is ready for export or confirmed installation." : $"Release plan has {plan.Blockers.Count:N0} blocker(s); no installation is available.";
         }
         catch (OperationCanceledException) { _operationStatus.Text = "Release planning cancelled."; }

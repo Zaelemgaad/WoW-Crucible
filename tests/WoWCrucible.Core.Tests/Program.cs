@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -443,14 +444,56 @@ try
     File.WriteAllText(Path.Combine(bundleOne.BundleRoot, "Payload", "unexpected.bin"), "unexpected"); var unexpectedRejected = false;
     try { ClientReleaseService.VerifyBundle(bundleOne.BundleRoot, bundleOne.Manifest); } catch (InvalidDataException) { unexpectedRejected = true; }
     File.Delete(Path.Combine(bundleOne.BundleRoot, "Payload", "unexpected.bin")); if (!unexpectedRejected) throw new InvalidOperationException("Client release verification accepted an unmanifested payload file.");
+    var publisherPassword = "fixture-publisher-password"; var publisherKeys = Path.Combine(releaseFixture, "publisher-keys");
+    var shortPasswordRejected = false;
+    try { ClientReleaseSigningService.CreatePublisherKey(Path.Combine(publisherKeys, "weak-private.pem"), Path.Combine(publisherKeys, "weak-public.pem"), "too-short".AsSpan()); } catch (ArgumentException) { shortPasswordRejected = true; }
+    if (!shortPasswordRejected || File.Exists(Path.Combine(publisherKeys, "weak-private.pem")) || File.Exists(Path.Combine(publisherKeys, "weak-public.pem"))) throw new InvalidOperationException("Publisher key creation accepted a short password or left partial key material.");
+    var publisher = ClientReleaseSigningService.CreatePublisherKey(Path.Combine(publisherKeys, "private.pem"), Path.Combine(publisherKeys, "public.pem"), publisherPassword.AsSpan());
+    var otherPublisher = ClientReleaseSigningService.CreatePublisherKey(Path.Combine(publisherKeys, "other-private.pem"), Path.Combine(publisherKeys, "other-public.pem"), publisherPassword.AsSpan());
+    var signedChannelPath = Path.Combine(bundleOne.BundleRoot, "channel.crucible.json");
+    var wrongPasswordRejected = false;
+    try { ClientReleaseSigningService.SignBundle(bundleOne.BundleRoot, publisher.PrivateKeyPath, "wrong-password-value".AsSpan(), Path.Combine(bundleOne.BundleRoot, "wrong-password-channel.json")); } catch (CryptographicException) { wrongPasswordRejected = true; }
+    if (!wrongPasswordRejected || File.Exists(Path.Combine(bundleOne.BundleRoot, "wrong-password-channel.json"))) throw new InvalidOperationException("Release signing accepted the wrong private-key password or left a false signed artifact.");
+    var signedChannel = ClientReleaseSigningService.SignBundle(bundleOne.BundleRoot, publisher.PrivateKeyPath, publisherPassword.AsSpan(), signedChannelPath);
+    var verifiedChannel = ClientReleaseSigningService.VerifySignedChannel(signedChannelPath, publisher.PublicKeyPath);
+    if (verifiedChannel.KeyId != publisher.KeyId || verifiedChannel.Manifest.ContentId != bundleOne.Manifest.ContentId || signedChannel.KeyId != publisher.KeyId)
+        throw new InvalidOperationException("Signed client release did not preserve its explicit publisher or content identity.");
+    var wrongKeyRejected = false;
+    try { ClientReleaseSigningService.VerifySignedChannel(signedChannelPath, otherPublisher.PublicKeyPath); } catch (CryptographicException) { wrongKeyRejected = true; }
+    if (!wrongKeyRejected) throw new InvalidOperationException("Signed client release accepted a different publisher's public key.");
+    var envelope = System.Text.Json.JsonSerializer.Deserialize<ClientReleaseSignedChannel>(File.ReadAllText(signedChannelPath))!;
+    var signatureBytes = Convert.FromBase64String(envelope.SignatureBase64); signatureBytes[0] ^= 0x40;
+    var tamperedChannelPath = Path.Combine(bundleOne.BundleRoot, "channel-tampered.crucible.json");
+    File.WriteAllText(tamperedChannelPath, System.Text.Json.JsonSerializer.Serialize(envelope with { SignatureBase64 = Convert.ToBase64String(signatureBytes) }));
+    var signatureTamperRejected = false;
+    try { ClientReleaseSigningService.VerifySignedChannel(tamperedChannelPath, publisher.PublicKeyPath); } catch (CryptographicException) { signatureTamperRejected = true; }
+    File.Delete(tamperedChannelPath); if (!signatureTamperRejected) throw new InvalidOperationException("Signed client release accepted a modified signature.");
+    var manifestBytes = File.ReadAllBytes(bundleOne.ManifestPath); File.WriteAllText(bundleOne.ManifestPath, File.ReadAllText(bundleOne.ManifestPath).Replace("\"first\"", "\"forged\"", StringComparison.Ordinal));
+    var manifestTamperRejected = false;
+    try { ClientReleaseSigningService.VerifySignedChannel(signedChannelPath, publisher.PublicKeyPath); } catch (CryptographicException) { manifestTamperRejected = true; }
+    File.WriteAllBytes(bundleOne.ManifestPath, manifestBytes); if (!manifestTamperRejected) throw new InvalidOperationException("Signed client release accepted a changed manifest.");
+    var payloadPath = Path.Combine(bundleOne.BundleRoot, "Payload", "Data", "patch-Z.MPQ"); var payloadBytes = File.ReadAllBytes(payloadPath); File.AppendAllText(payloadPath, "forged");
+    var payloadTamperRejected = false;
+    try { ClientReleaseSigningService.VerifySignedChannel(signedChannelPath, publisher.PublicKeyPath); } catch (InvalidDataException) { payloadTamperRejected = true; }
+    File.WriteAllBytes(payloadPath, payloadBytes); if (!payloadTamperRejected) throw new InvalidOperationException("Signed client release accepted changed payload bytes.");
+    var bundledPrivateKey = Path.Combine(bundleOne.BundleRoot, "publisher-private.pem"); File.Copy(publisher.PrivateKeyPath, bundledPrivateKey);
+    var bundledPrivateRejected = false;
+    try { ClientReleaseSigningService.SignBundle(bundleOne.BundleRoot, bundledPrivateKey, publisherPassword.AsSpan(), Path.Combine(bundleOne.BundleRoot, "forbidden-channel.json")); } catch (InvalidOperationException) { bundledPrivateRejected = true; }
+    File.Delete(bundledPrivateKey); if (!bundledPrivateRejected) throw new InvalidOperationException("Release signing allowed its publisher private key inside the distributed bundle.");
     var planOne = ClientReleaseService.CreatePlan(bundleOne.BundleRoot, client, ["HD"]); var planOnePath = Path.Combine(releaseFixture, "plan-one.json"); ClientReleaseService.SavePlan(planOnePath, planOne);
     if (!planOne.Ready || planOne.Adds != 1 || planOne.Replacements != 1 || ClientReleaseService.LoadPlan(planOnePath).Fingerprint != planOne.Fingerprint) throw new InvalidOperationException("Client release did not plan required/optional payloads and an unowned replacement exactly.");
     File.WriteAllText(targetPatch, "changed after review"); var staleRejected = false;
     try { ClientReleaseService.Apply(planOne, Path.Combine(releaseFixture, "stale-receipt.json")); } catch (InvalidOperationException) { staleRejected = true; }
     if (!staleRejected || File.Exists(Path.Combine(releaseFixture, "stale-receipt.json"))) throw new InvalidOperationException("Client release apply accepted a stale target preimage or published a false receipt.");
-    File.WriteAllText(targetPatch, "stock bytes"); planOne = ClientReleaseService.CreatePlan(bundleOne.BundleRoot, client, ["HD"]);
+    File.WriteAllText(targetPatch, "stock bytes"); planOne = ClientReleaseService.CreateTrustedPlan(signedChannelPath, publisher.PublicKeyPath, client, ["HD"]);
+    if (planOne.Trust?.KeyId != publisher.KeyId || ClientReleaseService.LoadPlan(planOnePath).Trust is not null)
+        throw new InvalidOperationException("Trusted and local client release plans did not retain distinct authentication state.");
+    var signedBytes = File.ReadAllBytes(signedChannelPath); File.AppendAllText(signedChannelPath, " "); var signedPlanStaleRejected = false;
+    try { ClientReleaseService.Apply(planOne, Path.Combine(releaseFixture, "stale-signed-receipt.json")); } catch (InvalidOperationException) { signedPlanStaleRejected = true; }
+    File.WriteAllBytes(signedChannelPath, signedBytes);
+    if (!signedPlanStaleRejected || File.Exists(Path.Combine(releaseFixture, "stale-signed-receipt.json"))) throw new InvalidOperationException("Trusted client release apply accepted a changed signed descriptor or published a false receipt.");
     var receiptOne = Path.Combine(releaseFixture, "receipt-one.json"); var appliedOne = ClientReleaseService.Apply(planOne, receiptOne);
-    if (Directory.Exists(Path.Combine(client, "Cache")) || File.ReadAllText(targetPatch) != "release one" || File.ReadAllText(targetOptional) != "optional one" || appliedOne.ChangedFiles != 2) throw new InvalidOperationException("Client release did not install required/optional payloads, record ownership, and clear Cache.");
+    if (Directory.Exists(Path.Combine(client, "Cache")) || File.ReadAllText(targetPatch) != "release one" || File.ReadAllText(targetOptional) != "optional one" || appliedOne.ChangedFiles != 2 || ClientReleaseService.LoadReceipt(receiptOne).Trust?.KeyId != publisher.KeyId) throw new InvalidOperationException("Trusted client release did not install required/optional payloads, retain publisher evidence, record ownership, and clear Cache.");
     var bundleTwo = ClientReleaseService.CreateBundle(sourceTwo, Path.Combine(releaseFixture, "bundle-two"), "Two", "public", "second", rules);
     File.WriteAllText(targetOptional, "player modified"); var protectedPlan = ClientReleaseService.CreatePlan(bundleTwo.BundleRoot, client);
     if (protectedPlan.Ready || !protectedPlan.Blockers.Any(blocker => blocker.Contains("changed outside Crucible", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("Client release planned deletion of an externally modified managed optional file.");
@@ -1473,12 +1516,16 @@ if (Directory.Exists(desktopSourceRoot))
         !sqlWorkspaceSource.Contains("Optional related DBC / DB2 path", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related MPQ path", StringComparison.Ordinal) ||
         !clientWorkspaceSource.Contains("Player release & rollback", StringComparison.Ordinal) ||
+        !clientWorkspaceSource.Contains("CreatePublisherKeyAsync", StringComparison.Ordinal) ||
+        !clientWorkspaceSource.Contains("SignReleaseBundleAsync", StringComparison.Ordinal) ||
+        !clientWorkspaceSource.Contains("VerifySignedReleaseAsync", StringComparison.Ordinal) ||
+        !clientWorkspaceSource.Contains("ClientReleaseService.CreateTrustedPlan", StringComparison.Ordinal) ||
         !clientWorkspaceSource.Contains("ClientReleaseService.Apply", StringComparison.Ordinal) ||
         !clientWorkspaceSource.Contains("ClientReleaseService.ValidateRollback", StringComparison.Ordinal) ||
         !appSource.Contains("--client", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenSqlFavorites", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenMpqMergeWorkspace", StringComparison.Ordinal))
-        throw new InvalidOperationException("Cut-item classification, exact-ID bypass, independent item-tab path controls, arbitrary SQL-row favorites, or the direct same-window Favorites route regressed.");
+        throw new InvalidOperationException("Cut-item navigation, SQL-row favorites, same-window authenticated client releases, or their direct workspace routes regressed.");
 }
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");

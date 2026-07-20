@@ -41,7 +41,8 @@ public sealed record ClientReleasePlan(
     string? InstalledStateSha256,
     IReadOnlyList<ClientReleaseAction> Actions,
     IReadOnlyList<string> Blockers,
-    string Fingerprint)
+    string Fingerprint,
+    ClientReleaseTrustBinding? Trust = null)
 {
     public bool Ready => Blockers.Count == 0;
     public int Adds => Actions.Count(action => action.Kind == ClientReleaseActionKind.Add);
@@ -80,7 +81,8 @@ public sealed record ClientReleaseReceipt(
     IReadOnlyList<int> ClosedWowProcessIds,
     ClientCacheInvalidationResult? Cache,
     string? RollbackPostimageRoot,
-    string? Finding);
+    string? Finding,
+    ClientReleaseTrustBinding? Trust = null);
 public sealed record ClientReleaseApplyResult(string ReceiptPath, string InstalledStatePath, int ChangedFiles, int RemovedFiles, IReadOnlyList<int> ClosedWowProcessIds, ClientCacheInvalidationResult Cache);
 public sealed record ClientReleaseRollbackResult(string ReceiptPath, int RestoredFiles, int RemovedFiles, ClientCacheInvalidationResult Cache);
 
@@ -134,9 +136,13 @@ public static class ClientReleaseService
     }
 
     public static ClientReleasePlan CreatePlan(string manifestOrBundlePath, string targetClientRoot, IEnumerable<string>? selectedOptionalGroups = null, IProgress<ClientReleaseProgress>? progress = null)
+        => CreatePlanCore(manifestOrBundlePath, targetClientRoot, selectedOptionalGroups, progress, verifyBundle: true);
+
+    private static ClientReleasePlan CreatePlanCore(string manifestOrBundlePath, string targetClientRoot, IEnumerable<string>? selectedOptionalGroups,
+        IProgress<ClientReleaseProgress>? progress, bool verifyBundle)
     {
         var manifestPath = ResolveManifest(manifestOrBundlePath); var bundleRoot = Path.GetDirectoryName(manifestPath)!;
-        var manifest = LoadManifest(manifestPath); VerifyBundle(bundleRoot, manifest, progress);
+        var manifest = LoadManifest(manifestPath); if (verifyBundle) VerifyBundle(bundleRoot, manifest, progress);
         targetClientRoot = ValidateClientRoot(targetClientRoot);
         var selected = (selectedOptionalGroups ?? []).Select(value => value.Trim()).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
         var available = manifest.Files.Where(file => file.OptionalGroup is not null).Select(file => file.OptionalGroup!).Distinct(StringComparer.OrdinalIgnoreCase).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -179,6 +185,25 @@ public static class ClientReleaseService
         return new(PlanFormat, FormatVersion, DateTimeOffset.UtcNow, bundleRoot, manifestPath, manifestHash, targetClientRoot, selected, statePath, stateHash, actions, blockers, fingerprint);
     }
 
+    public static ClientReleasePlan CreateTrustedPlan(string signedChannelPath, string trustedPublicKeyPath, string targetClientRoot,
+        IEnumerable<string>? selectedOptionalGroups = null, IProgress<ClientReleaseProgress>? progress = null)
+    {
+        var verified = ClientReleaseSigningService.VerifySignedChannel(signedChannelPath, trustedPublicKeyPath, progress);
+        var plan = CreatePlanCore(verified.ManifestPath, targetClientRoot, selectedOptionalGroups, progress, verifyBundle: false);
+        if (!plan.ManifestSha256.Equals(verified.Body.ManifestSha256, StringComparison.OrdinalIgnoreCase))
+            throw new CryptographicException("The signed release manifest changed between authentication and target planning.");
+        var trust = new ClientReleaseTrustBinding(
+            verified.SignedChannelPath,
+            verified.SignedChannelSha256,
+            verified.TrustedPublicKeyPath,
+            verified.TrustedPublicKeySha256,
+            verified.KeyId,
+            ClientReleaseSigningService.Algorithm);
+        var fingerprint = Fingerprint(plan.ManifestSha256, plan.TargetClientRoot, plan.SelectedOptionalGroups,
+            plan.InstalledStateSha256, plan.Actions, plan.Blockers, trust);
+        return plan with { Trust = trust, Fingerprint = fingerprint };
+    }
+
     public static void SavePlan(string path, ClientReleasePlan plan, bool overwrite = false) => Write(path, plan, overwrite);
     public static ClientReleasePlan LoadPlan(string path)
     {
@@ -191,9 +216,15 @@ public static class ClientReleaseService
     {
         if (!reviewedPlan.Ready) throw new InvalidOperationException($"Release plan has {reviewedPlan.Blockers.Count:N0} blocker(s).");
         receiptPath = PrepareOutput(receiptPath, overwriteReceipt);
-        var fresh = CreatePlan(reviewedPlan.ManifestPath, reviewedPlan.TargetClientRoot, reviewedPlan.SelectedOptionalGroups);
+        var fresh = reviewedPlan.Trust is null
+            ? CreatePlan(reviewedPlan.ManifestPath, reviewedPlan.TargetClientRoot, reviewedPlan.SelectedOptionalGroups)
+            : CreateTrustedPlan(reviewedPlan.Trust.SignedChannelPath, reviewedPlan.Trust.TrustedPublicKeyPath,
+                reviewedPlan.TargetClientRoot, reviewedPlan.SelectedOptionalGroups);
         if (!fresh.Ready || !fresh.Fingerprint.Equals(reviewedPlan.Fingerprint, StringComparison.Ordinal)) throw new InvalidOperationException("The release bundle, client files, selected groups, or ownership state changed after review. Create a new plan.");
-        var manifest = LoadManifest(fresh.ManifestPath); var closed = CloseTargetWowProcesses(fresh.TargetClientRoot);
+        var manifest = LoadManifest(fresh.ManifestPath);
+        if (!Sha256(fresh.ManifestPath).Equals(fresh.ManifestSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The release manifest changed after final verification. No client files were changed.");
+        var closed = CloseTargetWowProcesses(fresh.TargetClientRoot);
         var operationId = $"{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}-{manifest.ContentId[..Math.Min(12, manifest.ContentId.Length)]}";
         var operationRoot = Path.Combine(fresh.TargetClientRoot, ".crucible", "operations", operationId);
         var backupRoot = Path.Combine(operationRoot, "Backup"); var stagedRoot = Path.Combine(operationRoot, "Staged");
@@ -212,7 +243,7 @@ public static class ClientReleaseService
             if (!Sha256(staged).Equals(action.AfterSha256, StringComparison.OrdinalIgnoreCase)) throw new IOException($"Staged payload verification failed: {action.RelativePath}");
         }
         var pending = new ClientReleaseReceipt(ReceiptFormat, FormatVersion, "Pending", DateTimeOffset.UtcNow, null, null, fresh.Fingerprint, fresh.ManifestSha256,
-            fresh.TargetClientRoot, fresh.InstalledStatePath, fresh.InstalledStateSha256, previousState, null, backupRoot, fresh.Actions, closed, null, null, "Prepared all backups and staged payloads before changing the client.");
+            fresh.TargetClientRoot, fresh.InstalledStatePath, fresh.InstalledStateSha256, previousState, null, backupRoot, fresh.Actions, closed, null, null, "Prepared all backups and staged payloads before changing the client.", fresh.Trust);
         Write(receiptPath, pending, overwrite: true);
         try
         {
@@ -370,8 +401,9 @@ public static class ClientReleaseService
         var suffix = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(channel.ToUpperInvariant())))[..12];
         return Path.Combine(clientRoot, ".crucible", "channels", $"{slug}-{suffix}.json");
     }
-    private static string Fingerprint(string manifestHash, string clientRoot, IReadOnlyList<string> groups, string? stateHash, IReadOnlyList<ClientReleaseAction> actions, IReadOnlyList<string> blockers)
-        => HashText(JsonSerializer.Serialize(new { manifestHash, clientRoot = Path.GetFullPath(clientRoot).ToUpperInvariant(), groups, stateHash, actions, blockers }, Json));
+    private static string Fingerprint(string manifestHash, string clientRoot, IReadOnlyList<string> groups, string? stateHash, IReadOnlyList<ClientReleaseAction> actions, IReadOnlyList<string> blockers,
+        ClientReleaseTrustBinding? trust = null)
+        => HashText(JsonSerializer.Serialize(new { manifestHash, clientRoot = Path.GetFullPath(clientRoot).ToUpperInvariant(), groups, stateHash, actions, blockers, trust }, Json));
     private static string ComputeContentId(string name, string channel, IEnumerable<ClientReleaseFile> files)
         => HashText(JsonSerializer.Serialize(new { name, channel, files = files.OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase).Select(file => new { file.RelativePath, file.Length, Sha256 = file.Sha256.ToUpperInvariant(), file.OptionalGroup }) }, Json));
     private static string HashText(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
