@@ -29,7 +29,8 @@ public sealed record SqlDatabaseObjectChangePlan(
     string? ExpectedCreateSql,
     string? ExpectedCreateSqlSha256,
     string ReviewSql,
-    IReadOnlyList<string> Warnings)
+    IReadOnlyList<string> Warnings,
+    SqlDatabaseObjectImpactReport? DependencyImpact = null)
 {
     public bool ReplacesExisting => ExpectedCreateSql is not null;
 }
@@ -99,7 +100,8 @@ public sealed class SqlDatabaseObjectService
         await using var command = new MySqlCommand($"SHOW CREATE {Keyword(item.Type)} {Qualified(item.Database, item.Name)}", connection);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken); if (!await reader.ReadAsync(cancellationToken)) throw new InvalidOperationException($"SHOW CREATE returned no row for {item.Display}.");
         var index = Enumerable.Range(0, reader.FieldCount).FirstOrDefault(field => reader.GetName(field).StartsWith("Create ", StringComparison.OrdinalIgnoreCase) || reader.GetName(field).Equals("SQL Original Statement", StringComparison.OrdinalIgnoreCase), -1);
-        if (index < 0 || reader.IsDBNull(index)) throw new InvalidDataException($"SHOW CREATE did not expose a definition column for {item.Display}.");
+        if (index < 0) throw new InvalidDataException($"SHOW CREATE did not expose a definition column for {item.Display}.");
+        if (reader.IsDBNull(index)) throw new InvalidOperationException($"MySQL redacted the exact SHOW CREATE body for {item.Display}; the connected account does not have enough permission to inspect its definition.");
         return new(item, reader.GetString(index));
     }
 
@@ -163,8 +165,10 @@ public sealed class SqlDatabaseObjectService
         };
         if (existing is not null && type != SqlDatabaseObjectType.View) warnings.Add("Replacement requires DROP followed by CREATE. Crucible saves the exact preimage first and automatically attempts restoration if CREATE fails.");
         if (desired.Contains("DEFINER", StringComparison.OrdinalIgnoreCase)) warnings.Add("The exact DEFINER clause is retained. Confirm that account exists and is intentional on this server.");
+        var impact = await new SqlDatabaseObjectDependencyService().AnalyzeAsync(profile, type, name, desired, cancellationToken);
+        warnings.AddRange(impact.Findings.Select(finding => "DEPENDENCY · " + finding));
         var review = existing is null ? desired : $"{BuildDropSql(existing)}\n{desired}";
-        return new(ChangePlanFormat, DateTimeOffset.UtcNow, profile.Host, profile.Port, profile.Database, type, name, desired, Sha256(desired), before, before is null ? null : Sha256(before), review, warnings);
+        return new(ChangePlanFormat, DateTimeOffset.UtcNow, profile.Host, profile.Port, profile.Database, type, name, desired, Sha256(desired), before, before is null ? null : Sha256(before), review, warnings, impact);
     }
 
     public async Task<SqlDatabaseObjectChangeResult> ApplyChangeAsync(DatabaseConnectionProfile profile, SqlDatabaseObjectChangePlan plan,
@@ -181,6 +185,13 @@ public sealed class SqlDatabaseObjectService
         else
         {
             if (current is null || !Sha256(current.CreateSql).Equals(plan.ExpectedCreateSqlSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException($"{plan.Type} {plan.Database}.{plan.Name} changed after review; no DDL was executed.");
+        }
+
+        if (plan.DependencyImpact is not null)
+        {
+            var currentImpact = await new SqlDatabaseObjectDependencyService().AnalyzeAsync(profile, plan.Type, plan.Name, desired, cancellationToken);
+            if (!currentImpact.LiveGraphSha256.Equals(plan.DependencyImpact.LiveGraphSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"Dependencies for {plan.Type} {plan.Database}.{plan.Name} changed after review; no DDL was executed. Review the incoming and outgoing graph again.");
         }
 
         var receiptPath = AllocateReceiptPath(plan.Name); var pending = Receipt("PREIMAGE_SAVED_DDL_NOT_VERIFIED", profile, plan, null, null, null, null);

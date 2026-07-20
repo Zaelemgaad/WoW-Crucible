@@ -1838,12 +1838,33 @@ if (Directory.Exists(desktopSourceRoot))
         !sqlWorkspaceSource.Contains("SqlDatabaseObjectComposer.BuildRecurringEvent", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("LoadComposedDatabaseObjectAsync", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Review exact CREATE / replacement", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("Analyze selected / draft dependencies", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("FormatDatabaseObjectImpact", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("Dependency graph SHA-256", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("service.PrepareChangeAsync", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("SqlDatabaseObjectService().ApplyChangeAsync", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("RollbackChangeAsync", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("new ResponsiveSplitGrid(_databaseObjects, details", StringComparison.Ordinal))
         throw new InvalidOperationException("Responsive same-window guided/exact database-object authoring, recovery receipts, or stale-safe rollback wiring regressed.");
 }
+
+var dependencyOutgoing = new[]
+{
+    new SqlDatabaseObjectReference(SqlDatabaseObjectType.View, "world", "root_view", SqlDatabaseDependencyTargetKind.Table, "world", "source_table", "server metadata")
+};
+var dependencyIncoming = new[]
+{
+    new SqlDatabaseObjectReference(SqlDatabaseObjectType.View, "world", "consumer_view", SqlDatabaseDependencyTargetKind.View, "world", "root_view", "server metadata")
+};
+var dependencyHash = SqlDatabaseObjectDependencyService.GraphHash(SqlDatabaseObjectType.View, "world", "root_view", true, dependencyOutgoing, dependencyIncoming);
+var evidenceOnlyHash = SqlDatabaseObjectDependencyService.GraphHash(SqlDatabaseObjectType.View, "world", "root_view", true,
+    [dependencyOutgoing[0] with { Evidence = "definition parser" }], [dependencyIncoming[0] with { Evidence = "definition parser" }]);
+if (!dependencyHash.Equals(evidenceOnlyHash, StringComparison.Ordinal)) throw new InvalidOperationException("SQL object dependency fingerprints changed for evidence-label provenance only.");
+var addedIncomingHash = SqlDatabaseObjectDependencyService.GraphHash(SqlDatabaseObjectType.View, "world", "root_view", true, dependencyOutgoing,
+    [.. dependencyIncoming, new SqlDatabaseObjectReference(SqlDatabaseObjectType.Procedure, "world", "consumer_procedure", SqlDatabaseDependencyTargetKind.View, "world", "root_view", "definition parser")]);
+var removedOutgoingHash = SqlDatabaseObjectDependencyService.GraphHash(SqlDatabaseObjectType.View, "world", "root_view", true, [], dependencyIncoming);
+if (dependencyHash.Equals(addedIncomingHash, StringComparison.Ordinal) || dependencyHash.Equals(removedOutgoingHash, StringComparison.Ordinal))
+    throw new InvalidOperationException("SQL object dependency fingerprints did not bind relevant incoming/outgoing edge changes.");
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
 Directory.CreateDirectory(Path.Combine(serverFixture, "etc")); Directory.CreateDirectory(Path.Combine(serverFixture, "data", "dbc"));

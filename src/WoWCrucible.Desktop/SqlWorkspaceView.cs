@@ -76,6 +76,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly ComboBox _databaseObjectType = new() { ItemsSource = new[] { "All objects", "Views", "Triggers", "Procedures", "Functions", "Events" }, SelectedIndex = 0 };
     private readonly TextBox _databaseObjectSearch = new() { PlaceholderText = "Filter object names or details…" };
     private readonly TextBox _databaseObjectDefinition = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
+    private readonly TextBox _databaseObjectImpact = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "Select a live object, or enter an exact draft, then analyze its dependency impact." };
     private readonly TextBox _viewName = new() { PlaceholderText = "View name" };
     private readonly TextBox _viewSelect = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "SELECT entry, name FROM item_template;" };
     private readonly ComboBox _databaseObjectAuthorType = new() { ItemsSource = new[] { "View", "Trigger", "Procedure", "Function", "Event" }, SelectedIndex = 0 };
@@ -452,10 +453,11 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var reviewView = AccentButton("Review CREATE / REPLACE view"); reviewView.Click += (_, _) => PrepareCreateOrReplaceView();
         var loadSelected = new Button { Content = "Load selected exact definition into draft" }; loadSelected.Click += (_, _) => LoadSelectedDatabaseObjectDraft();
         var reviewExact = AccentButton("Review exact CREATE / replacement"); reviewExact.Click += async (_, _) => await PrepareDatabaseObjectChangeAsync();
+        var analyzeDependencies = new Button { Content = "Analyze selected / draft dependencies" }; analyzeDependencies.Click += async (_, _) => await AnalyzeDatabaseObjectImpactAsync(analyzeDependencies);
         var browseReceipt = new Button { Content = "Receipt…" }; browseReceipt.Click += async (_, _) => await PickDatabaseObjectReceiptAsync();
         var reviewRollback = new Button { Content = "Review stale-safe rollback" }; reviewRollback.Click += async (_, _) => await PrepareDatabaseObjectRollbackAsync();
-        var controls = new StackPanel { Spacing = 4, Children = { _databaseObjectSearch, new WrapPanel { Children = { refresh, _databaseObjectType, export, drop, enable, disable } } } };
-        var selected = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 5, Children = { new TextBlock { Text = "Exact SHOW CREATE definition", FontWeight = FontWeight.SemiBold }, WithRow(_databaseObjectDefinition, 1) } };
+        var controls = new StackPanel { Spacing = 4, Children = { _databaseObjectSearch, new WrapPanel { Children = { refresh, _databaseObjectType, export, analyzeDependencies, drop, enable, disable } } } };
+        var selected = new TabControl { Items = { new TabItem { Header = "Exact SHOW CREATE", Content = _databaseObjectDefinition }, new TabItem { Header = "Dependencies & draft impact", Content = _databaseObjectImpact } } };
         var viewEditor = new Grid
         {
             RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 5,
@@ -1030,11 +1032,12 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private async Task LoadSelectedDatabaseObjectAsync()
     {
-        if (_profile is null || _databaseObjects.SelectedItem is not SqlDatabaseObjectInfo item) { _databaseObjectDefinition.Text = string.Empty; return; }
+        if (_profile is null || _databaseObjects.SelectedItem is not SqlDatabaseObjectInfo item) { _databaseObjectDefinition.Text = string.Empty; _databaseObjectImpact.Text = "Select a live object, or enter an exact draft, then analyze its dependency impact."; return; }
         try
         {
             Begin($"Reading exact definition for {item.Type} {item.Name}…");
             var definition = await new SqlDatabaseObjectService().ShowCreateAsync(_profile, item, _operation!.Token); _databaseObjectDefinition.Text = definition.CreateSql;
+            _databaseObjectImpact.Text = $"Ready to analyze {item.Type} {item.Database}.{item.Name}. The selected exact definition is used unless the exact draft editor targets the same identity.";
             if (item.Type == SqlDatabaseObjectType.View) _viewName.Text = item.Name;
             _administrationStatus.Text = $"{item.Display} · definer {item.Definer}. Exact definition loaded.";
         }
@@ -1099,7 +1102,41 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private void InvalidateDatabaseObjectPlan()
     {
-        _databaseObjectChangePlan = null; _databaseObjectAuthorPlan.Text = "Draft changed · review again before applying.";
+        _databaseObjectChangePlan = null; _databaseObjectAuthorPlan.Text = "Draft changed · review again before applying."; _databaseObjectImpact.Text = "Draft changed · run dependency analysis again.";
+    }
+
+    private async Task AnalyzeDatabaseObjectImpactAsync(Button button)
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        try
+        {
+            var selected = _databaseObjects.SelectedItem as SqlDatabaseObjectInfo; var draftName = _databaseObjectAuthorName.Text?.Trim() ?? string.Empty;
+            var useDraft = draftName.Length > 0 && !string.IsNullOrWhiteSpace(_databaseObjectAuthorDefinition.Text);
+            var type = useDraft ? SelectedDatabaseObjectAuthorType() : selected?.Type ?? throw new InvalidOperationException("Select a live database object or enter an exact CREATE draft first.");
+            var name = useDraft ? draftName : selected!.Name; var definition = useDraft ? _databaseObjectAuthorDefinition.Text! : _databaseObjectDefinition.Text ?? string.Empty;
+            button.IsEnabled = false; Begin($"Analyzing incoming and outgoing dependencies for {type} {name}…");
+            var report = await new SqlDatabaseObjectDependencyService().AnalyzeAsync(_profile, type, name, definition, _operation!.Token);
+            _databaseObjectImpact.Text = FormatDatabaseObjectImpact(report); _administrationStatus.Text = $"Dependency impact for {type} {_profile.Database}.{name}: {report.Incoming.Count:N0} incoming, {report.OutgoingBefore.Count:N0} live outgoing, {report.AddedOutgoing.Count:N0} added, {report.RemovedOutgoing.Count:N0} removed.";
+        }
+        catch (OperationCanceledException) { _administrationStatus.Text = "Database-object dependency analysis cancelled."; }
+        catch (Exception exception) { Fail("Database-object dependency analysis failed", exception); _administrationStatus.Text = exception.Message; }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private static string FormatDatabaseObjectImpact(SqlDatabaseObjectImpactReport report)
+    {
+        var lines = new List<string>
+        {
+            $"{report.Type} {report.Database}.{report.Name} · {(report.Exists ? "live identity exists" : "new identity")}",
+            $"Relevant live graph SHA-256: {report.LiveGraphSha256}",
+            $"Declaration/signature changed: {report.DeclarationChanged}",
+            $"Incoming: {report.Incoming.Count:N0} · live outgoing: {report.OutgoingBefore.Count:N0} · draft outgoing: {report.OutgoingProposed.Count:N0} · added: {report.AddedOutgoing.Count:N0} · removed: {report.RemovedOutgoing.Count:N0}",
+            string.Empty, "FINDINGS"
+        };
+        lines.AddRange(report.Findings.Select(finding => "• " + finding));
+        Append("INCOMING DEPENDENTS", report.Incoming); Append("LIVE OUTGOING", report.OutgoingBefore); Append("DRAFT OUTGOING", report.OutgoingProposed); Append("ADDED BY DRAFT", report.AddedOutgoing); Append("REMOVED BY DRAFT", report.RemovedOutgoing);
+        lines.AddRange([string.Empty, "BEFORE DECLARATION", report.BeforeDeclaration ?? "<new identity>", string.Empty, "PROPOSED DECLARATION", report.ProposedDeclaration]); return string.Join(Environment.NewLine, lines);
+        void Append(string heading, IReadOnlyList<SqlDatabaseObjectReference> references) { lines.Add(string.Empty); lines.Add(heading); lines.AddRange(references.Count == 0 ? ["<none>"] : references.Select(reference => reference.Display)); }
     }
 
     private async Task ComposeGuidedTriggerAsync()
@@ -1180,7 +1217,8 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         {
             Begin("Binding the exact object draft to the live SHOW CREATE preimage…"); var service = new SqlDatabaseObjectService();
             var plan = await service.PrepareChangeAsync(_profile, SelectedDatabaseObjectAuthorType(), _databaseObjectAuthorName.Text ?? string.Empty, _databaseObjectAuthorDefinition.Text ?? string.Empty, _operation!.Token); _databaseObjectChangePlan = plan;
-            _databaseObjectAuthorPlan.Text = $"{(plan.ReplacesExisting ? "REPLACE EXISTING" : "CREATE NEW")} · {plan.Type} {plan.Database}.{plan.Name}\nDesired SHA-256: {plan.DesiredCreateSqlSha256}\nExpected before SHA-256: {plan.ExpectedCreateSqlSha256 ?? "identity must remain absent"}\n\n{plan.ReviewSql}\n\n{string.Join("\n", plan.Warnings.Select(warning => "WARNING · " + warning))}";
+            _databaseObjectAuthorPlan.Text = $"{(plan.ReplacesExisting ? "REPLACE EXISTING" : "CREATE NEW")} · {plan.Type} {plan.Database}.{plan.Name}\nDesired SHA-256: {plan.DesiredCreateSqlSha256}\nExpected before SHA-256: {plan.ExpectedCreateSqlSha256 ?? "identity must remain absent"}\nDependency graph SHA-256: {plan.DependencyImpact?.LiveGraphSha256 ?? "not captured"}\n\n{plan.ReviewSql}\n\n{string.Join("\n", plan.Warnings.Select(warning => "WARNING · " + warning))}";
+            if (plan.DependencyImpact is not null) _databaseObjectImpact.Text = FormatDatabaseObjectImpact(plan.DependencyImpact);
             End(); var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false; var confirm = AccentButton(plan.ReplacesExisting ? "Apply hash-bound replacement" : "Create exact object");
             confirm.Click += async (_, _) => await ApplyDatabaseObjectChangeAsync(confirm, plan);
             _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"{(plan.ReplacesExisting ? "REPLACE LIVE DATABASE OBJECT" : "CREATE DATABASE OBJECT")}\n{plan.Type} {plan.Database}.{plan.Name}\n\nThe full exact SQL and warnings are visible in the plan preview. Apply rechecks the live identity/preimage and writes a recovery receipt before DDL.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
