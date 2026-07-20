@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Layout;
@@ -105,6 +106,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     public MapWorkspaceView(DesktopWorkspaceSession session)
     {
         _session = session; _lightingView = new WorldLightingView(session); _lightingView.OpenDbcRecordRequested += (_, request) => OpenDbcRecordRequested?.Invoke(this, request); _wmoLibrary.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
+        AutomationProperties.SetName(_placementX, "Placement X"); AutomationProperties.SetName(_placementY, "Placement Y"); AutomationProperties.SetName(_placementZ, "Placement Z"); AutomationProperties.SetName(_sceneStatus, "Map scene status");
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
         var inspect = new Button { Content = "Inspect / reload" }; inspect.Click += async (_, _) => await OpenAsync(_path.Text);
@@ -118,6 +120,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var previewPlacementDelete = new Button { Content = "Review delete" }; previewPlacementDelete.Click += async (_, _) => await PreviewPlacementDeleteAsync();
         var savePlacementDelete = new Button { Content = "Build multi-tile delete payload…" }; savePlacementDelete.Click += async (_, _) => await SavePlacementLifecycleAsync(AdtPlacementLifecycleOperation.Delete);
         var buildScene = new Button { Content = "Build terrain + placement scene" }; buildScene.Click += async (_, _) => await BuildMapSceneAsync(buildScene);
+        var openPlacementControls = new Button { Content = "Open placement controls" }; openPlacementControls.Click += (_, _) => _visualTabs.SelectedIndex = 2;
         _wmoReferences.SelectionChanged += async (_, _) => { LoadPlacementFields(); await ResolveSelectedWmoAsync(); };
         _wmoCandidates.SelectionChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; DescribeSelectedWmoCandidate(); };
         foreach (var input in PlacementInputs()) input.TextChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; };
@@ -135,6 +138,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var previewAlpha = new Button { Content = "Preview alpha paint" }; previewAlpha.Click += async (_, _) => await PreviewAlphaAsync();
         var saveAlpha = new Button { Content = "Write alpha-painted ADT…" }; saveAlpha.Click += async (_, _) => await SaveAlphaAsync();
         _grid.TerrainPointSelected += (_, point) => { _brushCenterX.Text = point.X.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _brushCenterY.Text = point.Y.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _alphaPlan = null; UpdateBrushOverlay(); };
+        _mapScene.TerrainPicked += (_, pick) => UseScenePlacementPick(pick);
         _brushCenterX.TextChanged += (_, _) => BrushInputChanged(); _brushCenterY.TextChanged += (_, _) => BrushInputChanged(); _brushRadius.TextChanged += (_, _) => BrushInputChanged(); _brushStrength.TextChanged += (_, _) => _brushPlan = null; _brushMode.SelectionChanged += (_, _) => _brushPlan = null; _brushFalloff.SelectionChanged += (_, _) => _brushPlan = null; _brushTarget.TextChanged += (_, _) => _brushPlan = null; _brushSeed.TextChanged += (_, _) => _brushPlan = null;
         _heightDelta.TextChanged += (_, _) => _heightPlan = null;
         _textureLayerSlot.TextChanged += (_, _) => InvalidateTexturePreview(); _textureChoice.SelectionChanged += (_, _) => InvalidateTexturePreview();
@@ -167,7 +171,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var wmoFooter = new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _wmoStatus }; Grid.SetRow(wmoFooter, 2);
         var objectPreviewHost = new Grid { Children = { _wmoPreview, _m2Preview } }; Grid.SetRow(objectPreviewHost, 1);
         var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, objectPreviewHost, wmoFooter } };
-        var sceneControls = new StackPanel { Margin = new Thickness(7), Spacing = 5, Children = { new WrapPanel { Children = { buildScene, _sceneProvenance, _scenePlacementLimit } }, Info("One explicit provenance is used for the complete scene. Ambiguous or absent objects stay visibly unresolved; Crucible never mixes patches to make the view look complete.") } };
+        var sceneControls = new StackPanel { Margin = new Thickness(7), Spacing = 5, Children = { new WrapPanel { Children = { buildScene, openPlacementControls, _sceneProvenance, _scenePlacementLimit } }, Info("One explicit provenance is used for the complete scene. Ambiguous or absent objects stay visibly unresolved; Crucible never mixes patches to make the view look complete. Enable Pick placement position in the scene, click exact terrain, then open the placement controls to preview a coordinated add or transform.") } };
         var scenePage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { sceneControls, WithRow(_mapScene, 1), WithRow(new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _sceneStatus }, 2) } };
         _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Terrain + placement scene", Content = scenePage }); _visualTabs.Items.Add(new TabItem { Header = "Selected object preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
         var body = new ResponsiveSplitGrid(_visualTabs, details, 3, 2);
@@ -479,6 +483,14 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     }
 
     private IEnumerable<TextBox> PlacementInputs() => [_placementX, _placementY, _placementZ, _placementRotX, _placementRotY, _placementRotZ, _placementScale, _placementUid, _placementFlags, _placementDoodadSet, _placementNameSet];
+
+    private void UseScenePlacementPick(MapSceneTerrainPick pick)
+    {
+        _placementX.Text = Format(pick.WorldPosition.X); _placementY.Text = Format(pick.WorldPosition.Y); _placementZ.Text = Format(pick.WorldPosition.Z); _placementPlan = null; _placementMultiTilePlan = null;
+        var reference = _wmoReferences.SelectedItem as MapObjectReferenceChoice; var action = reference?.M2Placement is not null || reference?.WmoPlacement is not null ? "coordinated transform" : "coordinated add";
+        _placementStatus.Text = $"Scene-picked MCNK {pick.CellX},{pick.CellY} · X {pick.WorldPosition.X:0.###} · Y {pick.WorldPosition.Y:0.###} · Z {pick.WorldPosition.Z:0.###}. Open placement controls and preview the {action}; this is an unsaved field update only.";
+        _sceneStatus.Text = $"Exact terrain pick copied into placement X / Y / Z · MCNK {pick.CellX},{pick.CellY} · triangle {pick.TriangleIndex:N0} · no ADT or project file changed.";
+    }
 
     private void LoadPlacementFields()
     {
