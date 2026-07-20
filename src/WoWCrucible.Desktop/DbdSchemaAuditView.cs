@@ -11,14 +11,15 @@ namespace WoWCrucible.Desktop;
 internal sealed class DbdSchemaAuditView : UserControl
 {
     private readonly DesktopWorkspaceSession _session;
-    private readonly TextBox _definitions = new() { PlaceholderText = "WoWDBDefs definitions folder" };
+    private readonly TextBox _definitions = new() { PlaceholderText = "Optional WoWDBDefs definitions folder (XML may be used alone)" };
     private readonly TextBox _dbc = new() { PlaceholderText = "Server or extracted-client DBC/DB2 folder" };
-    private readonly TextBox _xml = new() { PlaceholderText = "Optional WDBX XML schema for a three-way comparison" };
+    private readonly TextBox _xml = new() { PlaceholderText = "Optional exact WDBX XML schema (accepted independently from DBD coverage)" };
     private readonly NumericUpDown _build = new() { Value = 12340, Minimum = 1, Maximum = int.MaxValue };
+    private readonly CheckBox _roundTrip = new() { Content = "Prove byte-identical unchanged write (isolated temporary output)" };
     private readonly TextBox _search = new() { PlaceholderText = "Filter table names, statuses, and messages…" };
-    private readonly ComboBox _statusFilter = new() { ItemsSource = new[] { "All results", "Problems only", "Matches only", "Missing definitions/builds", "Field-count mismatches", "Empty placeholders" }, SelectedIndex = 1 };
+    private readonly ComboBox _statusFilter = new() { ItemsSource = new[] { "All results", "Problems only", "Matches only", "Missing definitions/builds", "Field/record mismatches", "Delta patches", "Round-trip failures", "Empty placeholders" }, SelectedIndex = 1 };
     private readonly ListBox _results = new();
-    private readonly TextBlock _summary = Status("Choose a DBD corpus and client-table folder, then run the audit.");
+    private readonly TextBlock _summary = Status("Choose an exact XML schema or DBD corpus plus a client-table folder, then run the audit.");
     private readonly TextBlock _detail = Status("Select a table to see its complete schema result.");
     private IReadOnlyList<DbdSchemaAuditRow> _rows = [];
     private CancellationTokenSource? _operation;
@@ -55,10 +56,11 @@ internal sealed class DbdSchemaAuditView : UserControl
         var heading = new Border
         {
             BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 8),
-            Child = new WrapPanel { Children = { back, new TextBlock { Text = "DBD SCHEMA PROVIDER", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0), }, run, cancel } }
+            Child = new WrapPanel { Children = { back, new TextBlock { Text = "CLIENT TABLE SCHEMA AUDIT", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0), }, run, cancel } }
         };
-        var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(12, 10) };
-        AddPath(paths, 0, "Definitions", _definitions, definitionsBrowse); AddPath(paths, 1, "Tables folder", _dbc, dbcBrowse); AddPath(paths, 2, "XML cross-check", _xml, xmlBrowse); AddPath(paths, 3, "Client build", _build, new TextBlock { Text = "12340 = WotLK · 15595 = Cata", Foreground = Brush.Parse("#8995A8"), VerticalAlignment = VerticalAlignment.Center });
+        var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(12, 10) };
+        AddPath(paths, 0, "Optional DBDs", _definitions, definitionsBrowse); AddPath(paths, 1, "Tables folder", _dbc, dbcBrowse); AddPath(paths, 2, "Exact XML", _xml, xmlBrowse); AddPath(paths, 3, "Client build", _build, new TextBlock { Text = "12340 = WotLK · 15595 = Cata", Foreground = Brush.Parse("#8995A8"), VerticalAlignment = VerticalAlignment.Center });
+        AddPath(paths, 4, "Write proof", _roundTrip, new TextBlock { Text = "Optional · slower on a full corpus", Foreground = Brush.Parse("#8995A8"), VerticalAlignment = VerticalAlignment.Center });
         var filters = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Margin = new Thickness(12, 0, 12, 8), Children = { _search, WithColumn(_statusFilter, 1) } };
         var resultGrid = new Grid { RowDefinitions = new("Auto,*,Auto,*"), RowSpacing = 5, Margin = new Thickness(12, 0, 12, 8), Children = { _summary, WithRow(_results, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(new ScrollViewer { Content = _detail }, 3) } };
         Content = new Grid { RowDefinitions = new("Auto,Auto,Auto,*"), Children = { heading, WithRow(paths, 1), WithRow(filters, 2), WithRow(resultGrid, 3) } };
@@ -69,13 +71,13 @@ internal sealed class DbdSchemaAuditView : UserControl
         _operation?.Cancel(); _operation?.Dispose(); _operation = new();
         try
         {
-            var definitions = Path.GetFullPath(_definitions.Text?.Trim() ?? string.Empty); var dbc = Path.GetFullPath(_dbc.Text?.Trim() ?? string.Empty);
-            var xml = string.IsNullOrWhiteSpace(_xml.Text) ? null : Path.GetFullPath(_xml.Text.Trim()); var build = decimal.ToInt32(_build.Value ?? 12340);
+            var definitions = string.IsNullOrWhiteSpace(_definitions.Text) ? "-" : Path.GetFullPath(_definitions.Text.Trim()); var dbc = Path.GetFullPath(_dbc.Text?.Trim() ?? string.Empty);
+            var xml = string.IsNullOrWhiteSpace(_xml.Text) ? null : Path.GetFullPath(_xml.Text.Trim()); var build = decimal.ToInt32(_build.Value ?? 12340); var roundTrip = _roundTrip.IsChecked == true;
             _summary.Text = $"Auditing {Path.GetFileName(dbc)} against build {build:N0} definitions…";
-            var summary = await Task.Run(() => DbdSchemaService.Audit(definitions, dbc, build, xml), _operation.Token);
+            var summary = await Task.Run(() => DbdSchemaService.Audit(definitions, dbc, build, xml, roundTrip), _operation.Token);
             _rows = summary.Rows; ApplyFilter();
-            _summary.Text = $"{summary.Rows.Count:N0} tables · {summary.Matches:N0} exact · {summary.EmptyPlaceholders:N0} empty placeholder · {summary.Failures:N0} corpus/layout problem(s)";
-            _session.Settings.DbdDefinitionsPath = definitions; _session.Settings.CoreDbcPath = dbc; if (xml is not null) _session.Settings.SchemaDefinitionPath = xml; _session.Settings.Save();
+            _summary.Text = $"{summary.Rows.Count:N0} tables · {summary.Matches:N0} exact schema · {summary.RoundTripVerified:N0} byte-identical write proof(s) · {summary.EmptyPlaceholders:N0} empty placeholder · {summary.Failures:N0} problem(s)";
+            if (definitions != "-") _session.Settings.DbdDefinitionsPath = definitions; _session.Settings.CoreDbcPath = dbc; if (xml is not null) _session.Settings.SchemaDefinitionPath = xml; _session.Settings.Save();
             DesktopCrashLogger.Debug("DBD", "schema-audit-success", ("build", build), ("tables", summary.Rows.Count), ("matches", summary.Matches), ("empty", summary.EmptyPlaceholders), ("problems", summary.Failures));
         }
         catch (OperationCanceledException) { _summary.Text = "DBD schema audit cancelled."; }
@@ -91,7 +93,9 @@ internal sealed class DbdSchemaAuditView : UserControl
             2 => row.Status == DbdAuditStatus.Match,
             3 => row.Status is DbdAuditStatus.MissingDefinition or DbdAuditStatus.MissingBuild,
             4 => row.Status == DbdAuditStatus.FieldCountMismatch,
-            5 => row.Status == DbdAuditStatus.EmptyPlaceholder,
+            5 => row.Status == DbdAuditStatus.DeltaPatch,
+            6 => row.Status == DbdAuditStatus.RoundTripMismatch,
+            7 => row.Status == DbdAuditStatus.EmptyPlaceholder,
             _ => true
         }).ToArray();
         _results.ItemsSource = filtered;
@@ -100,7 +104,7 @@ internal sealed class DbdSchemaAuditView : UserControl
     private void ShowDetail()
     {
         if (_results.SelectedItem is not DbdSchemaAuditRow row) return;
-        _detail.Text = $"{row.Table}\nStatus: {row.Status}\nClient-table physical fields: {row.ActualFields:N0}\nDBD physical fields: {row.DbdFields?.ToString("N0") ?? "not resolved"}\nXML fields: {row.XmlFields?.ToString("N0") ?? "not supplied/resolved"}\n\n{row.Message}";
+        _detail.Text = $"{row.Table}\nStatus: {row.Status}\nContainer: {row.Container ?? "not resolved"}\nClient-table physical fields: {row.ActualFields:N0}\nRecord bytes: {row.RecordSize?.ToString("N0") ?? "not resolved"}\nDBD physical fields: {row.DbdFields?.ToString("N0") ?? "not resolved"}\nXML fields: {row.XmlFields?.ToString("N0") ?? "not supplied/resolved"}\nByte-identical round trip: {(row.ByteIdenticalRoundTrip is null ? "not requested" : row.ByteIdenticalRoundTrip == true ? "PASS" : "FAILED")}\nSource SHA-256: {row.SourceSha256 ?? "—"}\nOutput SHA-256: {row.RoundTripSha256 ?? "—"}\n\n{row.Message}";
     }
 
     private async Task PickFolderAsync(TextBox target, string title)

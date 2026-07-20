@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 
 namespace WoWCrucible.Core;
@@ -29,13 +30,15 @@ public sealed record DbdDefinition(string Path, string TableName, IReadOnlyDicti
 {
     public DbdLayout? ForBuild(int build) => Layouts.FirstOrDefault(layout => layout.Supports(build));
 }
-public enum DbdAuditStatus { Match, EmptyPlaceholder, MissingDefinition, MissingBuild, FieldCountMismatch, InvalidDbc, InvalidDefinition }
-public sealed record DbdSchemaAuditRow(string Table, DbdAuditStatus Status, int ActualFields, int? DbdFields, int? XmlFields, string Message);
+public enum DbdAuditStatus { Match, EmptyPlaceholder, DeltaPatch, MissingDefinition, MissingBuild, FieldCountMismatch, RoundTripMismatch, InvalidDbc, InvalidDefinition }
+public sealed record DbdSchemaAuditRow(string Table, DbdAuditStatus Status, int ActualFields, int? DbdFields, int? XmlFields, string Message,
+    string? Container = null, int? RecordSize = null, bool? ByteIdenticalRoundTrip = null, string? SourceSha256 = null, string? RoundTripSha256 = null);
 public sealed record DbdSchemaAuditSummary(int Build, string DefinitionsRoot, string DbcRoot, IReadOnlyList<DbdSchemaAuditRow> Rows)
 {
     public int Matches => Rows.Count(row => row.Status == DbdAuditStatus.Match);
     public int EmptyPlaceholders => Rows.Count(row => row.Status == DbdAuditStatus.EmptyPlaceholder);
     public int Failures => Rows.Count(row => row.Status is not DbdAuditStatus.Match and not DbdAuditStatus.EmptyPlaceholder);
+    public int RoundTripVerified => Rows.Count(row => row.ByteIdenticalRoundTrip == true);
 }
 
 public static partial class DbdSchemaService
@@ -114,12 +117,15 @@ public static partial class DbdSchemaService
         return new(columns, DbcSchemaMatchKind.NamedMatch, columns.Count, key is null ? DbcRecordKeyStrategy.None : DbcRecordKeyStrategy.Physical(key.Index));
     }
 
-    public static DbdSchemaAuditSummary Audit(string definitionsRoot, string dbcRoot, int build, string? xmlSchemaPath = null)
+    public static DbdSchemaAuditSummary Audit(string definitionsRoot, string dbcRoot, int build, string? xmlSchemaPath = null, bool verifyRoundTrip = false)
     {
-        definitionsRoot = Path.GetFullPath(definitionsRoot); dbcRoot = Path.GetFullPath(dbcRoot);
-        if (!Directory.Exists(definitionsRoot)) throw new DirectoryNotFoundException($"DBD definitions folder not found: {definitionsRoot}");
+        var hasDefinitions = !string.IsNullOrWhiteSpace(definitionsRoot) && definitionsRoot != "-";
+        definitionsRoot = hasDefinitions ? Path.GetFullPath(definitionsRoot) : string.Empty; dbcRoot = Path.GetFullPath(dbcRoot);
+        if (hasDefinitions && !Directory.Exists(definitionsRoot)) throw new DirectoryNotFoundException($"DBD definitions folder not found: {definitionsRoot}");
         if (!Directory.Exists(dbcRoot)) throw new DirectoryNotFoundException($"Client-table folder not found: {dbcRoot}");
-        var xml = !string.IsNullOrWhiteSpace(xmlSchemaPath) && File.Exists(xmlSchemaPath) ? DbcSchemaCatalog.Load(xmlSchemaPath) : null; var rows = new List<DbdSchemaAuditRow>();
+        if (!string.IsNullOrWhiteSpace(xmlSchemaPath) && !File.Exists(xmlSchemaPath)) throw new FileNotFoundException("The WDBX XML schema does not exist.", xmlSchemaPath);
+        if (!hasDefinitions && string.IsNullOrWhiteSpace(xmlSchemaPath)) throw new ArgumentException("Select a WoWDBDefs folder, an exact WDBX XML schema, or both.");
+        var xml = string.IsNullOrWhiteSpace(xmlSchemaPath) ? null : DbcSchemaCatalog.Load(xmlSchemaPath); var rows = new List<DbdSchemaAuditRow>();
         var tablePaths = Directory.EnumerateFiles(dbcRoot, "*.dbc", SearchOption.TopDirectoryOnly).Concat(Directory.EnumerateFiles(dbcRoot, "*.db2", SearchOption.TopDirectoryOnly)).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
         if (tablePaths.Length == 0)
         {
@@ -133,31 +139,97 @@ public static partial class DbdSchemaService
         }
         foreach (var dbcPath in tablePaths)
         {
-            var table = Path.GetFileNameWithoutExtension(dbcPath); var dbdPath = Path.Combine(definitionsRoot, table + ".dbd");
+            var table = Path.GetFileNameWithoutExtension(dbcPath); var dbdPath = hasDefinitions ? Path.Combine(definitionsRoot, table + ".dbd") : null;
             if (new FileInfo(dbcPath).Length == 0)
             {
                 int? emptyDbdFields = null;
-                try { if (File.Exists(dbdPath)) { var definition = Load(dbdPath); if (definition.ForBuild(build) is not null) emptyDbdFields = ResolveColumns(definition, build).Count; } }
+                try { if (dbdPath is not null && File.Exists(dbdPath)) { var definition = Load(dbdPath); if (definition.ForBuild(build) is not null) emptyDbdFields = ResolveColumns(definition, build).Count; } }
                 catch { /* The placeholder itself remains valid; a separate non-empty file would surface a definition error. */ }
                 rows.Add(new(table, DbdAuditStatus.EmptyPlaceholder, 0, emptyDbdFields, null, "Intentional zero-byte placeholder; no client-table records exist to validate."));
                 continue;
             }
-            int actual;
-            try { actual = WdbcFile.Load(dbcPath).FieldCount; }
-            catch (Exception exception) { rows.Add(new(table, DbdAuditStatus.InvalidDbc, 0, null, null, exception.Message)); continue; }
-            var xmlFields = xml?.ResolveColumns(table, actual).DefinedFieldCount;
-            if (!File.Exists(dbdPath)) { rows.Add(new(table, DbdAuditStatus.MissingDefinition, actual, null, xmlFields, "No matching DBD file.")); continue; }
+            var magic = ReadMagic(dbcPath);
+            if (magic == "PTCH")
+            {
+                rows.Add(new(table, DbdAuditStatus.DeltaPatch, 0, null, null,
+                    "This archive entry is a Blizzard PTCH binary delta, not a standalone client table. Reconstruct the effective base-plus-update chain or select a full cache/base WDB2 before schema editing.", "PTCH"));
+                continue;
+            }
+            WdbcFile file;
+            try { file = WdbcFile.Load(dbcPath); }
+            catch (Exception exception) { rows.Add(new(table, DbdAuditStatus.InvalidDbc, 0, null, null, exception.Message, magic)); continue; }
+            var actual = file.FieldCount; var recordSize = file.RecordSize; var findings = new List<string>();
+            int? xmlFields = null; var xmlExact = false;
+            if (xml is not null)
+            {
+                var resolution = xml.ResolveColumns(table, actual); xmlFields = resolution.DefinedFieldCount;
+                if (resolution.MatchKind == DbcSchemaMatchKind.NamedMatch)
+                {
+                    var bytes = ResolvedRecordSize(resolution.Columns); xmlExact = resolution.Columns.Count == actual && bytes == recordSize;
+                    findings.Add(xmlExact
+                        ? $"WDBX XML exactly resolves {actual:N0} physical fields and {recordSize:N0} record bytes."
+                        : $"WDBX XML resolves {resolution.Columns.Count:N0} fields and {bytes:N0} bytes; client declares {actual:N0} fields and {recordSize:N0} bytes.");
+                }
+                else findings.Add(resolution.MatchKind == DbcSchemaMatchKind.MissingTableFallback ? "WDBX XML has no named table definition." : $"WDBX XML defines {resolution.DefinedFieldCount?.ToString("N0") ?? "an unknown number of"} fields, not {actual:N0}.");
+            }
+
+            int? dbdFields = null; var dbdExact = false; var dbdMissing = dbdPath is null || !File.Exists(dbdPath); var dbdMissingBuild = false; Exception? dbdError = null;
+            if (dbdMissing) findings.Add(hasDefinitions ? "WoWDBDefs has no matching DBD file." : "WoWDBDefs was not selected; XML is the active schema provider.");
+            else
             try
             {
-                var definition = Load(dbdPath); var layout = definition.ForBuild(build);
-                if (layout is null) { rows.Add(new(table, DbdAuditStatus.MissingBuild, actual, null, xmlFields, $"DBD has no layout covering build {build:N0}.")); continue; }
-                var dbdFields = ResolveColumns(definition, build).Count; var status = dbdFields == actual ? DbdAuditStatus.Match : DbdAuditStatus.FieldCountMismatch;
-                var xmlNote = xmlFields is null ? string.Empty : $" XML={xmlFields:N0}.";
-                rows.Add(new(table, status, actual, dbdFields, xmlFields, status == DbdAuditStatus.Match ? $"DBD and client table both expose {actual:N0} physical fields.{xmlNote}" : $"Client={actual:N0}, DBD={dbdFields:N0}.{xmlNote}"));
+                var definition = Load(dbdPath!); var layout = definition.ForBuild(build);
+                if (layout is null) { dbdMissingBuild = true; findings.Add($"WoWDBDefs has no layout covering build {build:N0}."); }
+                else
+                {
+                    var columns = ResolveColumns(definition, build); dbdFields = columns.Count; var bytes = ResolvedRecordSize(columns);
+                    dbdExact = columns.Count == actual && bytes == recordSize;
+                    findings.Add(dbdExact
+                        ? $"WoWDBDefs exactly resolves {actual:N0} physical fields and {recordSize:N0} record bytes."
+                        : $"WoWDBDefs resolves {columns.Count:N0} fields and {bytes:N0} bytes; client declares {actual:N0} fields and {recordSize:N0} bytes.");
+                }
             }
-            catch (Exception exception) { rows.Add(new(table, DbdAuditStatus.InvalidDefinition, actual, null, xmlFields, exception.Message)); }
+            catch (Exception exception) { dbdError = exception; findings.Add($"WoWDBDefs error: {exception.Message}"); }
+
+            bool? roundTrip = null; string? sourceHash = null; string? outputHash = null;
+            if (verifyRoundTrip)
+            {
+                try
+                {
+                    (roundTrip, sourceHash, outputHash) = VerifyRoundTrip(file, dbcPath);
+                    findings.Add(roundTrip == true ? $"Unchanged write is byte-identical (SHA-256 {sourceHash})." : $"Unchanged write differs: source {sourceHash}, output {outputHash}.");
+                }
+                catch (Exception exception) { roundTrip = false; findings.Add($"Round-trip verification failed: {exception.Message}"); }
+            }
+
+            var schemaExact = dbdExact || xmlExact;
+            var status = roundTrip == false ? DbdAuditStatus.RoundTripMismatch : schemaExact ? DbdAuditStatus.Match :
+                dbdError is not null ? DbdAuditStatus.InvalidDefinition : dbdMissingBuild ? DbdAuditStatus.MissingBuild : dbdMissing && xml is null ? DbdAuditStatus.MissingDefinition : DbdAuditStatus.FieldCountMismatch;
+            rows.Add(new(table, status, actual, dbdFields, xmlFields, string.Join(' ', findings), file.ContainerKind.ToString().ToUpperInvariant(), recordSize, roundTrip, sourceHash, outputHash));
         }
         return new(build, definitionsRoot, dbcRoot, rows);
+    }
+
+    private static int ResolvedRecordSize(IReadOnlyList<DbcColumn> columns) => columns.Count == 0 ? 0 : columns.Max(column => checked(column.Offset + column.Size));
+
+    private static string ReadMagic(string path)
+    {
+        Span<byte> magic = stackalloc byte[4];
+        using var stream = File.OpenRead(path); if (stream.Read(magic) != magic.Length) return "SHORT";
+        return System.Text.Encoding.ASCII.GetString(magic);
+    }
+
+    private static (bool Passed, string SourceSha256, string OutputSha256) VerifyRoundTrip(WdbcFile file, string sourcePath)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"crucible-table-roundtrip-{Guid.NewGuid():N}"); Directory.CreateDirectory(root);
+        try
+        {
+            var output = Path.Combine(root, Path.GetFileName(sourcePath)); file.Save(output, false);
+            using var source = File.OpenRead(sourcePath); using var written = File.OpenRead(output);
+            var sourceHash = Convert.ToHexString(SHA256.HashData(source)); var outputHash = Convert.ToHexString(SHA256.HashData(written));
+            return (sourceHash.Equals(outputHash, StringComparison.Ordinal), sourceHash, outputHash);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
 
     private static DbdColumnDefinition ParseColumn(string line)

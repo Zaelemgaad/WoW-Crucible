@@ -46,7 +46,7 @@ public static class TargetProfileCatalog
             "Primary target. WDBC editing and patch MPQ workflows are corpus tested."),
         new("cata-15595", "Cataclysm 4.3.4 (15595)", "Cataclysm", 15595, "Cata 4.3.4 (15595).xml",
             ClientTableFormat.Wdbc | ClientTableFormat.Db2, ArchiveFormat.Mpq, TargetSupportTier.Experimental,
-            "Cata uses a mixture of WDBC and fixed-layout WDB2 tables. WDB2 read/edit/write is available through matching WoWDBDefs DBD schemas; complete corpus verification and later DB2 families remain pending.")
+            "The real build-15595 cache corpus (20 WDBC + 5 fixed-layout WDB2 tables) is schema- and byte-round-trip-verified. Raw PTCH layers are recognized, but effective base-plus-delta reconstruction, complete base-corpus verification, and later DB2 families remain pending.")
     ];
 
     public static IReadOnlyList<TargetProfile> Load(string? userDirectory = null, string? applicationDirectory = null)

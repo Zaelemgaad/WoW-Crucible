@@ -322,6 +322,28 @@ SheatheType<32>
     var nestedTables = Path.Combine(wdb2FixtureRoot, "client", "DBFilesClient"); Directory.CreateDirectory(nestedTables); File.Copy(itemDb2, Path.Combine(nestedTables, "Item.db2"));
     var db2Audit = DbdSchemaService.Audit(wdb2FixtureRoot, nestedTables, 15595);
     if (db2Audit.Rows.Count != 1 || db2Audit.Matches != 1) throw new InvalidOperationException("The build-aware DBD audit did not validate a direct WDB2 table folder.");
+    var xmlOnlyTables = Path.Combine(wdb2FixtureRoot, "xml-only-tables"); Directory.CreateDirectory(xmlOnlyTables); File.Copy(itemDb2, Path.Combine(xmlOnlyTables, "Item.db2"));
+    var deltaPath = Path.Combine(xmlOnlyTables, "Item-sparse.db2"); File.WriteAllBytes(deltaPath, "PTCHfixture"u8.ToArray());
+    var cataXml = Path.Combine(wdb2FixtureRoot, "Cata-15595.xml");
+    File.WriteAllText(cataXml, """
+<DBDefinition>
+  <Table Name="Item" Build="15595">
+    <Field Name="ID" Type="int" IsIndex="true" />
+    <Field Name="ClassID" Type="int" />
+    <Field Name="SubclassID" Type="int" />
+    <Field Name="Sound_override_subclassID" Type="int" />
+    <Field Name="Material" Type="int" />
+    <Field Name="DisplayInfoID" Type="int" />
+    <Field Name="InventoryType" Type="int" />
+    <Field Name="SheatheType" Type="int" />
+  </Table>
+</DBDefinition>
+""");
+    var xmlAudit = DbdSchemaService.Audit("-", xmlOnlyTables, 15595, cataXml, true);
+    var xmlItemAudit = xmlAudit.Rows.Single(row => row.Table == "Item"); var deltaAudit = xmlAudit.Rows.Single(row => row.Table == "Item-sparse");
+    if (xmlItemAudit.Status != DbdAuditStatus.Match || xmlItemAudit.Container != "WDB2" || xmlItemAudit.RecordSize != 32 || xmlItemAudit.ByteIdenticalRoundTrip != true ||
+        xmlItemAudit.SourceSha256 != xmlItemAudit.RoundTripSha256 || xmlAudit.RoundTripVerified != 1 || deltaAudit.Status != DbdAuditStatus.DeltaPatch || deltaAudit.Container != "PTCH")
+        throw new InvalidOperationException("Build-specific XML fallback, byte-identical WDB2 corpus proof, or PTCH delta classification regressed.");
     try { _ = DbdSchemaService.Audit(wdb2FixtureRoot, Path.Combine(wdb2FixtureRoot, "client"), 15595); throw new InvalidOperationException("A schema audit one directory too high incorrectly reported zero successful results."); }
     catch (InvalidDataException exception) when (exception.Message.Contains("DBFilesClient", StringComparison.OrdinalIgnoreCase)) { }
 }
@@ -335,7 +357,7 @@ if(Directory.Exists(localDbdRoot))
     var itemDisplayDbd=DbdSchemaService.Load(Path.Combine(localDbdRoot,"ItemDisplayInfo.dbd"));var charSectionsDbd=DbdSchemaService.Load(Path.Combine(localDbdRoot,"CharSections.dbd"));var spellDbd=DbdSchemaService.Load(Path.Combine(localDbdRoot,"Spell.dbd"));
     if(DbdSchemaService.ResolveColumns(itemDisplayDbd,12340).Count!=25||DbdSchemaService.ResolveColumns(charSectionsDbd,12340).Count!=10||DbdSchemaService.ResolveColumns(spellDbd,12340).Count!=234)
         throw new InvalidOperationException("WoWDBDefs build-range resolution did not expand the real build-12340 ItemDisplayInfo, CharSections, and Spell layouts to their exact WDBC field counts.");
-    var dbdAudit=DbdSchemaService.Audit(localDbdRoot,args[1],12340,args[0]);if(dbdAudit.Rows.Count<246||dbdAudit.Matches<236||dbdAudit.EmptyPlaceholders!=1||dbdAudit.Failures!=9||dbdAudit.Rows.Count(row=>row.Status==DbdAuditStatus.InvalidDefinition)>0)
+    var dbdAudit=DbdSchemaService.Audit(localDbdRoot,args[1],12340,args[0]);if(dbdAudit.Rows.Count!=246||dbdAudit.Matches!=245||dbdAudit.EmptyPlaceholders!=1||dbdAudit.Failures!=0||dbdAudit.Rows.Count(row=>row.Status==DbdAuditStatus.InvalidDefinition)>0)
         throw new InvalidOperationException($"WoWDBDefs corpus audit was incomplete or invalid: rows={dbdAudit.Rows.Count}, matches={dbdAudit.Matches}, empty={dbdAudit.EmptyPlaceholders}, failures={dbdAudit.Failures}, invalid={dbdAudit.Rows.Count(row=>row.Status==DbdAuditStatus.InvalidDefinition)}.");
 }
 var spellTooltipCatalog=SpellTooltipService.Load(Path.Combine(args[1],"Spell.dbc"));
