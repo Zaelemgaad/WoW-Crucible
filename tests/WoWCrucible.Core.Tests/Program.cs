@@ -1856,8 +1856,16 @@ var itemSetPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { ItemSetId = 43
 var gapStatsPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(0, 0), new(7, 75)] }, trinityItemTable);
 if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Values["StatsCount"] is not 2 || trinityPlan.Values.ContainsKey("MaxDurability") || trinityPlan.Values["spellid_1"] is not 12345 || portablePlan.OmittedFields.Count != 0 || itemSetPlan.Values["itemset"] is not 4321u)
     throw new InvalidOperationException("Capability-aware item mapping or SQL escaping failed.");
+if (!azerothPlan.LosesSelectedSemantics || !azerothPlan.SelectedOmittedFields.Contains("spellcharges_1") || !trinityPlan.LosesSelectedSemantics || !trinityPlan.SelectedOmittedFields.Contains("MaxDurability") || portablePlan.LosesSelectedSemantics)
+    throw new InvalidOperationException("Item planning did not distinguish configured values lost by a target schema from harmless unavailable defaults.");
+try { trinityPlan.EnsureSelectedSemanticsAreRepresented(); throw new InvalidOperationException("Item planning allowed configured semantics to be silently omitted."); }
+catch (NotSupportedException exception) when (exception.Message.Contains("MaxDurability", StringComparison.OrdinalIgnoreCase) && exception.Message.Contains("refused", StringComparison.OrdinalIgnoreCase)) { }
 if (gapStatsPlan.Values["StatsCount"] is not 1 || gapStatsPlan.Values["stat_type1"] is not 7 || gapStatsPlan.Values["stat_value1"] is not 75 || gapStatsPlan.Values["stat_type2"] is not 0)
     throw new InvalidOperationException("Trinity item stat slots were not compacted before StatsCount was calculated.");
+try { _ = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(7, 0)] }, trinityItemTable); throw new InvalidOperationException("A selected zero-value stat was counted even though the client hides it."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("invisible in game", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(0, 50)] }, trinityItemTable); throw new InvalidOperationException("A stat value without a selected type was accepted."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("no stat type", StringComparison.OrdinalIgnoreCase)) { }
 if (ItemCatalogService.IsDirectLootItem(17, 1_072_025) || !ItemCatalogService.IsDirectLootItem(17, 0) ||
     !ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 7) || !ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 22) || ItemCatalogService.IsSmartPlayerItemGrant(57, 17333, 1, 7) ||
     ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 0, 7) || ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 1) || ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 21) ||

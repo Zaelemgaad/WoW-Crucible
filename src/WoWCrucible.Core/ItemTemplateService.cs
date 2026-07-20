@@ -12,8 +12,20 @@ public sealed record ItemDraft(
     float Armor, float DamageMin, float DamageMax, uint Delay, uint MaxDurability, string Description,
     IReadOnlyList<ItemStatDraft>? Stats = null, IReadOnlyList<ItemSpellDraft>? Spells = null, uint ItemSetId = 0);
 
-public sealed record ItemWritePlan(string Table, IReadOnlyDictionary<string, object> Values, IReadOnlyList<string> OmittedFields)
+public sealed record ItemWritePlan(
+    string Table,
+    IReadOnlyDictionary<string, object> Values,
+    IReadOnlyList<string> OmittedFields,
+    IReadOnlyList<string> SelectedOmittedFields)
 {
+    public bool LosesSelectedSemantics => SelectedOmittedFields.Count > 0;
+
+    public void EnsureSelectedSemanticsAreRepresented()
+    {
+        if (LosesSelectedSemantics)
+            throw new NotSupportedException($"The target item_template cannot represent configured field(s): {string.Join(", ", SelectedOmittedFields)}. Crucible refused the write instead of silently dropping those choices.");
+    }
+
     public string PreviewSql()
     {
         var names = string.Join(", ", Values.Keys.Select(QuoteIdentifier));
@@ -46,48 +58,59 @@ public static class ItemTemplateAdapter
     {
         if (!table.Name.Equals("item_template", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("The selected table is not item_template.");
         if (draft.Entry == 0 || string.IsNullOrWhiteSpace(draft.Name)) throw new InvalidDataException("Entry ID and name are required.");
-        var semanticValues = new (string Name, object Value)[]
+        var semanticValues = new (string Name, object Value, bool Selected)[]
         {
-            ("entry", draft.Entry), ("class", draft.Class), ("subclass", draft.Subclass), ("name", draft.Name.Trim()),
-            ("displayid", draft.DisplayId), ("Quality", draft.Quality), ("InventoryType", draft.InventoryType),
-            ("ItemLevel", draft.ItemLevel), ("RequiredLevel", draft.RequiredLevel), ("BuyPrice", draft.BuyPrice),
-            ("SellPrice", draft.SellPrice), ("bonding", draft.Bonding), ("Flags", draft.Flags), ("armor", draft.Armor),
-            ("dmg_min1", draft.DamageMin), ("dmg_max1", draft.DamageMax), ("dmg_type1", 0), ("delay", draft.Delay),
-            ("MaxDurability", draft.MaxDurability), ("description", draft.Description ?? string.Empty), ("itemset", draft.ItemSetId)
+            ("entry", draft.Entry, true), ("class", draft.Class, true), ("subclass", draft.Subclass, true), ("name", draft.Name.Trim(), true),
+            ("displayid", draft.DisplayId, true), ("Quality", draft.Quality, true), ("InventoryType", draft.InventoryType, true),
+            ("ItemLevel", draft.ItemLevel, draft.ItemLevel != 0), ("RequiredLevel", draft.RequiredLevel, draft.RequiredLevel != 0), ("BuyPrice", draft.BuyPrice, draft.BuyPrice != 0),
+            ("SellPrice", draft.SellPrice, draft.SellPrice != 0), ("bonding", draft.Bonding, draft.Bonding != 0), ("Flags", draft.Flags, draft.Flags != 0), ("armor", draft.Armor, draft.Armor != 0),
+            ("dmg_min1", draft.DamageMin, draft.DamageMin != 0), ("dmg_max1", draft.DamageMax, draft.DamageMax != 0), ("dmg_type1", 0, false), ("delay", draft.Delay, draft.Delay != 0),
+            ("MaxDurability", draft.MaxDurability, draft.MaxDurability != 0), ("description", draft.Description ?? string.Empty, !string.IsNullOrWhiteSpace(draft.Description)), ("itemset", draft.ItemSetId, draft.ItemSetId != 0)
         };
         var values = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         var omitted = new List<string>();
-        foreach (var (name, value) in semanticValues)
+        var selectedOmitted = new List<string>();
+        foreach (var (name, value, selected) in semanticValues)
         {
             var column = table.Find(name);
-            if (column is null) omitted.Add(name); else values[column.Name] = value;
+            if (column is null) { omitted.Add(name); if (selected) selectedOmitted.Add(name); } else values[column.Name] = value;
         }
-        // TrinityCore reads only the first StatsCount slots, so remove empty gaps before assigning slots.
-        var stats = (draft.Stats ?? []).Where(stat => stat.Type != 0 || stat.Value != 0).Take(10).ToArray();
+        // TrinityCore reads only the first StatsCount slots, so validate incomplete choices and compact real stats before assigning slots.
+        var requestedStats = (draft.Stats ?? []).Take(10).ToArray();
+        for (var index = 0; index < requestedStats.Length; index++)
+        {
+            if (requestedStats[index].Type == 0 && requestedStats[index].Value != 0)
+                throw new InvalidDataException($"Stat slot {index + 1} has value {requestedStats[index].Value} but no stat type. Choose a named stat or clear its value.");
+            if (requestedStats[index].Type != 0 && requestedStats[index].Value == 0)
+                throw new InvalidDataException($"Stat slot {index + 1} selects type {requestedStats[index].Type} with a zero value. That stat is invisible in game; enter a nonzero value or choose None.");
+        }
+        var stats = requestedStats.Where(stat => stat.Type != 0 && stat.Value != 0).ToArray();
         for (var slot = 1; slot <= 10; slot++)
         {
             var stat = slot <= stats.Length ? stats[slot - 1] : new ItemStatDraft(0, 0);
-            AddIfPresent(table, values, omitted, $"stat_type{slot}", stat.Type); AddIfPresent(table, values, omitted, $"stat_value{slot}", stat.Value);
+            var selected = slot <= stats.Length;
+            AddIfPresent(table, values, omitted, selectedOmitted, $"stat_type{slot}", stat.Type, selected); AddIfPresent(table, values, omitted, selectedOmitted, $"stat_value{slot}", stat.Value, selected);
         }
         var spells = draft.Spells ?? [];
         for (var slot = 1; slot <= 5; slot++)
         {
             var spell = slot <= spells.Count ? spells[slot - 1] : new ItemSpellDraft(0, 0, 0, 0, -1, 0, -1);
-            AddIfPresent(table, values, omitted, $"spellid_{slot}", spell.SpellId); AddIfPresent(table, values, omitted, $"spelltrigger_{slot}", spell.Trigger);
-            AddIfPresent(table, values, omitted, $"spellcharges_{slot}", spell.Charges); AddIfPresent(table, values, omitted, $"spellppmRate_{slot}", spell.ProcPerMinute);
-            AddIfPresent(table, values, omitted, $"spellcooldown_{slot}", spell.CooldownMs); AddIfPresent(table, values, omitted, $"spellcategory_{slot}", spell.Category);
-            AddIfPresent(table, values, omitted, $"spellcategorycooldown_{slot}", spell.CategoryCooldownMs);
+            var selected = spell.SpellId != 0 || spell.Trigger != 0 || spell.Charges != 0 || spell.ProcPerMinute != 0 || spell.CooldownMs != -1 || spell.Category != 0 || spell.CategoryCooldownMs != -1;
+            AddIfPresent(table, values, omitted, selectedOmitted, $"spellid_{slot}", spell.SpellId, selected); AddIfPresent(table, values, omitted, selectedOmitted, $"spelltrigger_{slot}", spell.Trigger, selected);
+            AddIfPresent(table, values, omitted, selectedOmitted, $"spellcharges_{slot}", spell.Charges, selected); AddIfPresent(table, values, omitted, selectedOmitted, $"spellppmRate_{slot}", spell.ProcPerMinute, selected);
+            AddIfPresent(table, values, omitted, selectedOmitted, $"spellcooldown_{slot}", spell.CooldownMs, selected); AddIfPresent(table, values, omitted, selectedOmitted, $"spellcategory_{slot}", spell.Category, selected);
+            AddIfPresent(table, values, omitted, selectedOmitted, $"spellcategorycooldown_{slot}", spell.CategoryCooldownMs, selected);
         }
         var statCount = table.Find("StatsCount");
         if (statCount is not null) values[statCount.Name] = stats.Length;
         foreach (var required in new[] { "entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType" })
             if (table.Find(required) is null) throw new NotSupportedException($"This item_template has no '{required}' column, so the item adapter cannot safely target it.");
-        return new(table.Name, values, omitted);
+        return new(table.Name, values, omitted.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), selectedOmitted.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
-    private static void AddIfPresent(DatabaseTableCapability table, Dictionary<string, object> values, List<string> omitted, string name, object value)
+    private static void AddIfPresent(DatabaseTableCapability table, Dictionary<string, object> values, List<string> omitted, List<string> selectedOmitted, string name, object value, bool selected)
     {
-        var column = table.Find(name); if (column is null) omitted.Add(name); else values[column.Name] = value;
+        var column = table.Find(name); if (column is null) { omitted.Add(name); if (selected) selectedOmitted.Add(name); } else values[column.Name] = value;
     }
 }
 
@@ -95,6 +118,7 @@ public sealed class ItemTemplateService
 {
     public async Task InsertAsync(DatabaseConnectionProfile profile, ItemWritePlan plan, CancellationToken cancellationToken = default)
     {
+        plan.EnsureSelectedSemanticsAreRepresented();
         await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile));
         await connection.OpenAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
