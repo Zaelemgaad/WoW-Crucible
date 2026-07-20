@@ -1507,6 +1507,8 @@ if (Directory.Exists(desktopSourceRoot))
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 17802", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Find exact ID(s) — bypass every filter", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("ItemIdQueryParser.Parse(query)", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("ShowPinnedExactItems(exactIds)", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("the catalog is not capped", StringComparison.Ordinal) ||
         itemWorkbenchSource.Contains("Inspect exact item ID", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("SqlFavoritesRequested", StringComparison.Ordinal) ||

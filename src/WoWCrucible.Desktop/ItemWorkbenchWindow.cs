@@ -22,7 +22,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _password = new() { PasswordChar = '●', HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
-    private readonly TextBox _search = new() { PlaceholderText = "Filter the selected catalog by item name, quality, level, set, or ID…" };
+    private readonly TextBox _search = new() { PlaceholderText = "Find items by text · a numeric-only search is an exact ID lookup that bypasses every filter…" };
     private readonly TextBox _exactIds = new() { PlaceholderText = "Exact item ID(s), always bypassing filters: 17 17802" };
     private readonly ComboBox _classification = new()
     {
@@ -193,7 +193,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var header = new StackPanel { Spacing = 7, Margin = new Thickness(0,0,0,8), Children = { new WrapPanel { Children = { audit, reset, _auditSummary } }, exactRow, _search, classificationRow, groupRow } };
         var rowActions = new WrapPanel { Children = { inspect, edit, fullSql, favorite } };
         var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
-        var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, and developer cheats. Exact-ID lookup has its own field and always bypasses every classification/review filter. The ordinary filter searches the selected catalog. Every row states which evidence was accepted or rejected; custom scripts and core code still require manual review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, and developer cheats. Type 17, 17802, or a numeric batch into either search field to pin those exact item_template rows above every classification/review filter; text searches remain broad. Every row states which evidence was accepted or rejected, can be favorited with optional DBC/DB2 and MPQ paths, opened in the decoded editor, or handed to the complete SQL row editor. Custom scripts and core code still require manual review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
         return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(rowActions, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
@@ -441,6 +441,15 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private void ApplyAuditFilter()
     {
         if (_audit is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _status.Text = CanQueryDatabase() ? "The acquisition catalog is loading, or press Scan acquisition paths to refresh it now." : "Connect the live world database above. This tab will then load automatically."; return; } var query = _search.Text?.Trim() ?? string.Empty;
+        if (query.Length > 0)
+        {
+            var exactIds = ItemIdQueryParser.Parse(query);
+            if (exactIds.Count > 0)
+            {
+                ShowPinnedExactItems(exactIds);
+                return;
+            }
+        }
         var mode = _classification.SelectedIndex;
         IEnumerable<ItemCatalogEntry> rows = mode switch
         {
@@ -463,7 +472,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         if (result.Length > 0) { _items.SelectedItem = result[0]; _items.ScrollIntoView(result[0]); }
         var label = mode switch { 1 => "known-path", 2 => "total", _ => "no-known-path" };
         var group = mode == 0 && _reviewGroup.SelectedIndex > 0 ? $" · {Convert.ToString(_reviewGroup.SelectedItem)}" : string.Empty;
-        _status.Text = $"Showing all {result.Length:N0} matching {label} item(s){group}; the catalog is not capped. Use Exact item ID(s) for a guaranteed filter-bypassing lookup.";
+        _status.Text = $"Showing all {result.Length:N0} matching {label} item(s){group}; the catalog is not capped. A numeric-only search or the exact-ID field bypasses every filter.";
     }
 
     private void ShowPinnedExactItems(IReadOnlyList<uint> entries)
