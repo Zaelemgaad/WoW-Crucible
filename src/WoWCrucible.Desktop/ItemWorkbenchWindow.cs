@@ -37,6 +37,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         HorizontalAlignment = HorizontalAlignment.Stretch
     };
     private readonly TextBox _acquisitionDbc = new() { PlaceholderText = "Optional server DBC folder for CharStartOutfit.dbc coverage…" };
+    private readonly TextBox _coreSource = new() { PlaceholderText = "Optional AzerothCore/TrinityCore source root for direct C++/module grant review…" };
     private readonly Button _openLoadedCompleteRow = new() { Content = "Open every SQL field for this item", IsEnabled = false };
     private readonly TextBox _favoriteMpq = new() { PlaceholderText = "Optional related MPQ path saved with favorites…" };
     private readonly ListBox _items = new();
@@ -150,9 +151,9 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
         var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
-        var sqlStudio = AccentButton("SQL Studio — full database"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
-        var sqlFavorites = new Button { Content = "★ SQL row favorites" }; sqlFavorites.Click += async (_, _) => await OpenSqlFavoritesAsync();
-        var mpqMerge = new Button { Content = "Merge MPQ patches" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
+        var sqlStudio = AccentButton("SQL Studio — every database, table & row"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
+        var sqlFavorites = new Button { Content = "★ Saved SQL row favorites" }; sqlFavorites.Click += async (_, _) => await OpenSqlFavoritesAsync();
+        var mpqMerge = new Button { Content = "Merge MPQ patches — byte-safe" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
         _openLoadedCompleteRow.Click += (_, _) =>
         {
             if (_loadedSqlRow is null) { _status.Text = "Load an existing item_template row into the decoded editor first."; return; }
@@ -193,6 +194,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         _database.TextChanged += (_, _) => InvalidateAuditIfTargetChanged();
         _port.ValueChanged += (_, _) => InvalidateAuditIfTargetChanged();
         _acquisitionDbc.TextChanged += (_, _) => InvalidateAuditIfTargetChanged();
+        _coreSource.TextChanged += (_, _) => InvalidateAuditIfTargetChanged();
         Grid.SetRow(_tabs, 2); root.Children.Add(_tabs);
         var statusBorder = new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,1,0,0), Padding = new Thickness(14,7), Child = _status };
         Grid.SetRow(statusBorder, 3); root.Children.Add(statusBorder); Content = root;
@@ -226,14 +228,15 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         var fullSql = new Button { Content = "Open complete SQL row" }; fullSql.Click += async (_, _) => await OpenSelectedInSqlAsync();
         var favorite = new Button { Content = "★ Favorite selected row" }; favorite.Click += async (_, _) => await OpenSelectedItemAsync(true);
         var browseDbc = new Button { Content = "DBC folder…" }; browseDbc.Click += async (_, _) => await PickFolderAsync(_acquisitionDbc, "Select the server DBC folder");
+        var browseCore = new Button { Content = "Core source…" }; browseCore.Click += async (_, _) => { await PickFolderAsync(_coreSource, "Select the AzerothCore or TrinityCore source root"); _session.Settings.CoreSourcePath = _coreSource.Text ?? string.Empty; _session.Settings.Save(); };
         var browseMpq = new Button { Content = "Related MPQ…" }; browseMpq.Click += async (_, _) => await PickFileAsync(_favoriteMpq, "Select an optional related MPQ", "*.mpq");
         var exactRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { _exactIds, WithColumn(findExact, 1) } };
         var classificationRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Show", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_classification, 1) } };
         var groupRow = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 7, Children = { new TextBlock { Text = "Review group", VerticalAlignment = VerticalAlignment.Center }, WithColumn(_reviewGroup, 1) } };
         var header = new StackPanel { Spacing = 7, Margin = new Thickness(0,0,0,8), Children = { new WrapPanel { Children = { audit, reset, _auditSummary } }, exactRow, _search, classificationRow, groupRow } };
         var rowActions = new WrapPanel { Children = { inspect, edit, fullSql, favorite } };
-        var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_favoriteMpq, 1), WithRow(WithColumn(browseMpq, 1), 1) } };
-        var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, and developer cheats. Type 17, 17802, or a numeric batch into either search field to pin those exact item_template rows above every classification/review filter; text searches remain broad. Every row states which evidence was accepted or rejected, can be favorited with optional DBC/DB2 and MPQ paths, opened in the decoded editor, or handed to the complete SQL row editor. Proven SmartAI player grants and reachable spell-script create-item commands are included; unrecognized custom scripts and direct core code still require manual review.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
+        var paths = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 6, Margin = new Thickness(0,0,0,8), Children = { _acquisitionDbc, WithColumn(browseDbc, 1), WithRow(_coreSource, 1), WithRow(WithColumn(browseCore, 1), 1), WithRow(_favoriteMpq, 2), WithRow(WithColumn(browseMpq, 1), 2) } };
+        var note = new TextBlock { Text = "This is an acquisition audit, not a short hand-picked cut-item list. The complete stock/custom world can legitimately contain thousands of no-path rows: player candidates, NPC equipment, deprecated content, tests, and developer cheats. Type 17, 17802, or a numeric batch into either search field to pin those exact item_template rows above every classification/review filter; text searches remain broad. Every row states which evidence was accepted or rejected, can be favorited with optional DBC/DB2 and MPQ paths, opened in the decoded editor, or handed to the complete SQL row editor. Proven SmartAI player grants and reachable spell-script create-item commands are included. When core source is configured, exact direct C++/module grant sites are shown with file and line as review evidence; they remain no-path until runtime registration and an in-game trigger are proven.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), Margin = new Thickness(0,0,0,10) };
         return new Grid { RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,*"), Margin = new Thickness(4), Children = { header, WithRow(rowActions, 1), WithRow(paths, 2), WithRow(note, 3), WithRow(_inspection, 4), WithRow(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Child = _items }, 5) } };
     }
 
@@ -365,11 +368,11 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         if (_auditLoading) return;
         _auditLoading = true;
         SetBusy(automatic ? "Loading the complete acquisition catalog…" : "Scanning every known SQL and DBC acquisition source…");
-        DesktopCrashLogger.Debug("ITEM", "acquisition-audit-start", ("host", _host.Text), ("database", _database.Text), ("dbc", _acquisitionDbc.Text), ("automatic", automatic));
+        DesktopCrashLogger.Debug("ITEM", "acquisition-audit-start", ("host", _host.Text), ("database", _database.Text), ("dbc", _acquisitionDbc.Text), ("core_source", _coreSource.Text), ("automatic", automatic));
         try
         {
             var profile = Profile();
-            _audit = await new ItemCatalogService().AuditAsync(profile, EmptyNull(_acquisitionDbc.Text));
+            _audit = await new ItemCatalogService().AuditAsync(profile, EmptyNull(_acquisitionDbc.Text), EmptyNull(_coreSource.Text));
             _auditById = _audit.AllItems.ToDictionary(item => item.Entry);
             _auditIdentity = AuditIdentity(profile);
             ApplyAuditFilter();
@@ -631,7 +634,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     }
     private bool CanQueryDatabase() => !string.IsNullOrWhiteSpace(_user.Text) && (!string.IsNullOrWhiteSpace(_password.Text) || _session.DatabaseProfile is not null);
     private string AuditIdentity(DatabaseConnectionProfile profile)
-        => $"{profile.Host.ToUpperInvariant()}|{profile.Port}|{profile.User.ToUpperInvariant()}|{profile.Database.ToUpperInvariant()}|{NormalizeIdentityPath(_acquisitionDbc.Text)}";
+        => $"{profile.Host.ToUpperInvariant()}|{profile.Port}|{profile.User.ToUpperInvariant()}|{profile.Database.ToUpperInvariant()}|{NormalizeIdentityPath(_acquisitionDbc.Text)}|{NormalizeIdentityPath(_coreSource.Text)}";
     private static string NormalizeIdentityPath(string? path)
     {
         var value = path?.Trim() ?? string.Empty;
@@ -644,7 +647,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         if (_audit is null || _auditLoading) return;
         if (_auditIdentity.Equals(AuditIdentity(Profile()), StringComparison.Ordinal)) return;
         _audit = null; _auditById = new Dictionary<uint, ItemCatalogEntry>(); _auditIdentity = string.Empty; _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _auditSummary.Text = "Target changed · refresh required";
-        _status.Text = "The database or DBC target changed. Reopen this tab or press Scan acquisition paths to load fresh evidence.";
+        _status.Text = "The database, DBC, or core-source target changed. Reopen this tab or press Scan acquisition paths to load fresh evidence.";
     }
     private async Task ConnectDatabaseAsync(bool openStudio)
     {
@@ -677,7 +680,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         => _session.DatabaseTested && _session.DatabaseProfile is { } connected &&
            connected.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) && connected.Port == profile.Port &&
            connected.User.Equals(profile.User, StringComparison.OrdinalIgnoreCase) && connected.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase);
-    private void LoadDefaults() { try { var path = CruciblePaths.SettingsFileForRead; if (!File.Exists(path)) return; using var json = JsonDocument.Parse(File.ReadAllText(path)); var root = json.RootElement; if (root.TryGetProperty("DatabaseHost", out var host)) _host.Text = host.GetString(); if (root.TryGetProperty("DatabasePort", out var port)) _port.Value = port.GetUInt32(); if (root.TryGetProperty("DatabaseUser", out var user)) _user.Text = user.GetString(); if (root.TryGetProperty("WorldDatabase", out var db)) _database.Text = db.GetString(); if (root.TryGetProperty("SchemaDefinitionPath", out var schema)) _schemaPath.Text = schema.GetString(); if (root.TryGetProperty("CoreDbcPath", out var dbc)) { var directory = dbc.GetString(); _acquisitionDbc.Text = directory; if (Directory.Exists(directory)) { _itemSetPath.Text = Path.Combine(directory, "ItemSet.dbc"); _spellPath.Text = Path.Combine(directory, "Spell.dbc"); } } } catch (Exception exception) { DesktopCrashLogger.Debug("SETTINGS", "item-workbench-defaults-load-failed", ("error", exception.Message)); } }
+    private void LoadDefaults() { try { var path = CruciblePaths.SettingsFileForRead; if (!File.Exists(path)) return; using var json = JsonDocument.Parse(File.ReadAllText(path)); var root = json.RootElement; if (root.TryGetProperty("DatabaseHost", out var host)) _host.Text = host.GetString(); if (root.TryGetProperty("DatabasePort", out var port)) _port.Value = port.GetUInt32(); if (root.TryGetProperty("DatabaseUser", out var user)) _user.Text = user.GetString(); if (root.TryGetProperty("WorldDatabase", out var db)) _database.Text = db.GetString(); if (root.TryGetProperty("SchemaDefinitionPath", out var schema)) _schemaPath.Text = schema.GetString(); if (root.TryGetProperty("CoreSourcePath", out var source)) _coreSource.Text = source.GetString(); if (root.TryGetProperty("CoreDbcPath", out var dbc)) { var directory = dbc.GetString(); _acquisitionDbc.Text = directory; if (Directory.Exists(directory)) { _itemSetPath.Text = Path.Combine(directory, "ItemSet.dbc"); _spellPath.Text = Path.Combine(directory, "Spell.dbc"); } } } catch (Exception exception) { DesktopCrashLogger.Debug("SETTINGS", "item-workbench-defaults-load-failed", ("error", exception.Message)); } }
     private void LoadClientItemDefaults() { var directory = EmptyNull(_acquisitionDbc.Text) ?? _session.Settings.CoreDbcPath; if (!string.IsNullOrWhiteSpace(directory)) { _clientItemPath.Text = Path.Combine(directory, "Item.dbc"); _clientItemDisplayPath.Text = Path.Combine(directory, "ItemDisplayInfo.dbc"); } _clientItemSchemaPath.Text = EmptyNull(_schemaPath.Text) ?? _session.Settings.SchemaDefinitionPath; }
     private async Task PickFileAsync(TextBox target, string title, string pattern) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = false, FileTypeFilter = [new FilePickerFileType(title) { Patterns = [pattern] }] }); var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }
     private async Task PickFolderAsync(TextBox target, string title) { var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The item workspace is not attached to the main window."); var folders = await storage.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = title, AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) target.Text = path; }

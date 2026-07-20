@@ -99,8 +99,11 @@ public sealed class ItemCatalogService
         => AuditAsync(profile, null, cancellationToken);
 
     public async Task<ItemAcquisitionAudit> AuditAsync(DatabaseConnectionProfile profile, string? dbcFolder, CancellationToken cancellationToken = default)
+        => await AuditAsync(profile, dbcFolder, null, cancellationToken);
+
+    public async Task<ItemAcquisitionAudit> AuditAsync(DatabaseConnectionProfile profile, string? dbcFolder, string? coreSourceFolder, CancellationToken cancellationToken = default)
     {
-        var scan = await ScanAsync(profile, dbcFolder, cancellationToken);
+        var scan = await ScanAsync(profile, dbcFolder, coreSourceFolder, cancellationToken);
         var unavailable = scan.Items.Where(item => !item.HasKnownAcquisitionPath).ToArray();
         return new(profile.Database, DateTimeOffset.UtcNow, scan.CheckedSources, scan.MissingSources, scan.Items.Count, scan.Items.Count - unavailable.Length, unavailable, scan.Items);
     }
@@ -109,9 +112,12 @@ public sealed class ItemCatalogService
         => InspectAsync(profile, entry, null, cancellationToken);
 
     public async Task<ItemAcquisitionInspection> InspectAsync(DatabaseConnectionProfile profile, uint entry, string? dbcFolder, CancellationToken cancellationToken = default)
+        => await InspectAsync(profile, entry, dbcFolder, null, cancellationToken);
+
+    public async Task<ItemAcquisitionInspection> InspectAsync(DatabaseConnectionProfile profile, uint entry, string? dbcFolder, string? coreSourceFolder, CancellationToken cancellationToken = default)
     {
         if (entry == 0) throw new ArgumentOutOfRangeException(nameof(entry), "Item ID must be positive.");
-        var scan = await ScanAsync(profile, dbcFolder, cancellationToken);
+        var scan = await ScanAsync(profile, dbcFolder, coreSourceFolder, cancellationToken);
         var item = scan.Items.FirstOrDefault(candidate => candidate.Entry == entry);
         var accepted = item?.AcquisitionSources.Select(source => $"Accepted · {source}").ToArray() ?? [];
         var rejected = item?.NoPathReview.Count > 0
@@ -122,7 +128,7 @@ public sealed class ItemCatalogService
         return new(item, accepted, rejected, scan.CheckedSources, scan.MissingSources);
     }
 
-    private async Task<AcquisitionScan> ScanAsync(DatabaseConnectionProfile profile, string? dbcFolder, CancellationToken cancellationToken)
+    private async Task<AcquisitionScan> ScanAsync(DatabaseConnectionProfile profile, string? dbcFolder, string? coreSourceFolder, CancellationToken cancellationToken)
     {
         await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile));
         await connection.OpenAsync(cancellationToken);
@@ -188,6 +194,8 @@ public sealed class ItemCatalogService
         foreach (var grant in scriptedSpellGrants.Where(grant => !reachableSpells.Contains(grant.SpellId)))
             AddRejected(rejected, grant.ItemId, $"Ignored · {grant.Table} SCRIPT_COMMAND_CREATE_ITEM grants this item from spell {grant.SpellId}, but that spell is not reachable through the checked trainer, quest, item-use, or trigger graph.");
 
+        await CollectCppGrantCandidatesAsync(coreSourceFolder, rejected, checkedSources, missingSources, cancellationToken);
+
         var itemColumns = schema[itemTable];
         var entryColumn = RequireColumn(itemColumns, "entry"); var nameColumn = RequireColumn(itemColumns, "name");
         var qualityColumn = ResolveColumn(itemColumns, "Quality", "quality"); var levelColumn = ResolveColumn(itemColumns, "ItemLevel", "itemlevel"); var setColumn = ResolveColumn(itemColumns, "itemset", "ItemSet");
@@ -212,7 +220,30 @@ public sealed class ItemCatalogService
             missingSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
-    private const string NoEvidenceMessage = "No accepted acquisition row was found in the checked SQL, SmartAI/script-command, and DBC coverage. Unrecognized custom scripts and direct core code still require manual review.";
+    private const string NoEvidenceMessage = "No accepted acquisition row was found in the checked SQL, SmartAI/script-command, DBC, and configured source coverage. Direct source call sites remain review candidates until their runtime registration and trigger are proven.";
+
+    private static async Task CollectCppGrantCandidatesAsync(string? coreSourceFolder, Dictionary<uint, HashSet<string>> rejected,
+        ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(coreSourceFolder)) { missingSources.Add("C++/module direct item grants (configure core source)"); return; }
+        var root = Path.GetFullPath(coreSourceFolder);
+        if (!Directory.Exists(root)) { missingSources.Add($"C++/module direct item grants ({root} was not found)"); return; }
+        try
+        {
+            var report = await new CppItemGrantAuditService().ScanAsync(root, cancellationToken);
+            foreach (var grant in report.Grants)
+                AddRejected(rejected, grant.ItemId,
+                    $"Potential source grant · {grant.SourcePath}:{grant.Line} calls Player::{grant.Api} with {grant.ItemToken}={grant.ItemId}" +
+                    (grant.Count is { } count ? $" × {count}" : string.Empty) +
+                    ". The exact call site is proven, but runtime registration and an in-game trigger are not; it is not counted as obtainable.");
+            checkedSources.Add($"C++/module direct Player item-grant sites ({report.Grants.Count:N0} exact call(s), {report.UnresolvedCalls:N0} runtime/ambiguous call(s) not inferred, review-only)");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception exception)
+        {
+            missingSources.Add($"C++/module direct item grants ({exception.Message})");
+        }
+    }
 
     private static async Task<IReadOnlyList<ScriptedSpellGrant>> CollectScriptCreatedItemsAsync(MySqlConnection connection,
         Dictionary<string, List<string>> schema, Dictionary<uint, HashSet<string>> acquired, Dictionary<uint, HashSet<string>> rejected,

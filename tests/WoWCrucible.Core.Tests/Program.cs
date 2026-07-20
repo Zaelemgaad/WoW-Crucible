@@ -1623,6 +1623,8 @@ if (Directory.Exists(desktopSourceRoot))
         !itemWorkbenchSource.Contains("ItemIdQueryParser.Parse(query)", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("ShowPinnedExactItems(exactIds)", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("the catalog is not capped", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("Optional AzerothCore/TrinityCore source root", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("AuditAsync(profile, EmptyNull(_acquisitionDbc.Text), EmptyNull(_coreSource.Text))", StringComparison.Ordinal) ||
         itemWorkbenchSource.Contains("Inspect exact item ID", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("SqlFavoritesRequested", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("private readonly TextBox _clientItemSchemaPath", StringComparison.Ordinal) ||
@@ -1716,6 +1718,41 @@ if (!itemIdBatch.SequenceEqual(new uint[] { 17, 17802 }) ||
     !ItemIdQueryParser.TryParseSingle("17,802", out var groupedItemId) || groupedItemId != 17802 ||
     ItemIdQueryParser.TryParseSingle("17 17802", out _))
     throw new InvalidOperationException("Item ID query parsing confused exact batches with grouped single IDs.");
+var cppGrantRoot = Path.Combine(Path.GetTempPath(), $"crucible-cpp-grants-{Guid.NewGuid():N}");
+try
+{
+    var cppScripts = Path.Combine(cppGrantRoot, "src", "server", "scripts", "Fixture"); Directory.CreateDirectory(cppScripts);
+    File.WriteAllText(Path.Combine(cppScripts, "grants.h"), "const uint32 ITEM_HEADER = 24538;\n");
+    File.WriteAllText(Path.Combine(cppScripts, "grants.cpp"), """
+        enum FixtureItems
+        {
+            ITEM_LOCAL = 12345,
+            ITEM_WOLF = 32906
+        };
+        void Grant(Player* player, Loot* loot)
+        {
+            player->AddItem(ITEM_LOCAL, 1);
+            player->StoreNewItem(dest, 54321, true);
+            player->StoreNewItem(dest, ITEM_HEADER, true);
+            GetCaster()->ToPlayer()->AddItem(ITEM_WOLF, 1);
+            loot->AddItem(99999, 1);
+            player->AddItem(runtimeItem, 1);
+            // player->AddItem(77777, 1);
+            const char* ignored = "player->AddItem(88888, 1)";
+        }
+        """);
+    File.WriteAllText(Path.Combine(cppScripts, "ambiguous-a.h"), "enum { ITEM_AMBIGUOUS = 60001 };\n");
+    File.WriteAllText(Path.Combine(cppScripts, "ambiguous-b.h"), "enum { ITEM_AMBIGUOUS = 60002 };\n");
+    File.WriteAllText(Path.Combine(cppScripts, "ambiguous.cpp"), "void Grant(Player* player) { player->AddItem(ITEM_AMBIGUOUS, 1); }\n");
+    var cppGrants = new CppItemGrantAuditService().Scan(cppGrantRoot);
+    var grantIds = cppGrants.Grants.Select(grant => grant.ItemId).Order().ToArray();
+    if (!grantIds.SequenceEqual(new uint[] { 12_345, 24_538, 32_906, 54_321 }) ||
+        cppGrants.Grants.Single(grant => grant.ItemId == 12_345).Confidence != CppItemGrantConfidence.SameFileConstant ||
+        cppGrants.Grants.Single(grant => grant.ItemId == 24_538).Confidence != CppItemGrantConfidence.UniqueSourceConstant ||
+        cppGrants.Grants.Any(grant => grant.ItemId is 99_999 or 77_777 or 88_888 or 60_001 or 60_002) || cppGrants.UnresolvedCalls != 2)
+        throw new InvalidOperationException("Conservative C++ item-grant inspection inferred a non-player/runtime/ambiguous call or lost exact literal/constant evidence.");
+}
+finally { if (Directory.Exists(cppGrantRoot)) Directory.Delete(cppGrantRoot, true); }
 var lootGraph = new ItemCatalogService.LootReachabilityData(
     new Dictionary<string, IReadOnlyList<ItemCatalogService.LootRow>>(StringComparer.OrdinalIgnoreCase)
     {
