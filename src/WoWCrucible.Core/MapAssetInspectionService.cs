@@ -235,5 +235,5 @@ public static partial class MapAssetInspectionService
     }
 
     private static string DecodeChunkId(ReadOnlySpan<byte> raw) => new string(Encoding.ASCII.GetString(raw).Reverse().ToArray());
-    [GeneratedRegex(@"_(\d+)_(\d+)\.adt$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)] private static partial Regex AdtName();
+    [GeneratedRegex(@"_(\d+)_(\d+)(?:-[^\\/.]+)?\.adt$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)] private static partial Regex AdtName();
 }

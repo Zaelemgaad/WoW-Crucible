@@ -114,7 +114,7 @@ public static class AdtTextureStructureService
     private static void RewriteTopLevelReferences(IReadOnlyList<TopChunk> chunks)
     {
         var offsets = new int[chunks.Count]; var position = 0; for (var index = 0; index < chunks.Count; index++) { offsets[index] = position; position = checked(position + chunks[index].Bytes.Length); }
-        var mhdrIndex = chunks.Select((chunk, index) => (chunk, index)).Single(value => value.chunk.Id == "MHDR").index; var mhdr = chunks[mhdrIndex].Bytes; var mhdrBase = offsets[mhdrIndex] + 8; var names = new[] { "MCIN", "MTEX", "MMDX", "MMID", "MWMO", "MWID", "MDDF", "MODF", "MFBO", "MH2O", "MTFX" };
+        var mhdrIndex = chunks.Select((chunk, index) => (chunk, index)).Single(value => value.chunk.Id == "MHDR").index; var mhdr = chunks[mhdrIndex].Bytes; var mhdrBase = offsets[mhdrIndex] + 8; var names = new[] { "MCIN", "MTEX", "MMDX", "MMID", "MWMO", "MWID", "MDDF", "MODF", "MFBO", "MH2O", "MTXF" };
         for (var field = 0; field < names.Length; field++)
         {
             var target = chunks.Select((chunk, index) => (chunk, index)).FirstOrDefault(value => value.chunk.Id == names[field]); var fieldOffset = 8 + 4 + field * 4; if (target.chunk is null) { if (field >= 8) WriteU32(mhdr, fieldOffset, 0); continue; } WriteU32(mhdr, fieldOffset, checked((uint)(offsets[target.index] - mhdrBase)));
