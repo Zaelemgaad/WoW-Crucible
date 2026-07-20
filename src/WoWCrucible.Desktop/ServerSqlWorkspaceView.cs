@@ -25,6 +25,18 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         public LegacyDatabaseAuditValueState State { get; set; } = LegacyDatabaseAuditValueState.Unknown;
         public string Value { get; set; } = string.Empty;
     }
+    private sealed record BridgeExpansionChoice(int Index, string Label) { public override string ToString() => Label; }
+    private sealed record BridgeValueOption(DatabaseSyncExpansionValueSource? Source, string SourceColumn, string Label) { public override string ToString() => Label; }
+    private sealed class BridgeExpansionBindingChoice
+    {
+        public required string Target { get; init; }
+        public bool IsKey { get; init; }
+        public bool Required { get; init; }
+        public bool Included { get; set; }
+        public DatabaseSyncExpansionValue? KeyValue { get; set; }
+        public DatabaseSyncExpansionValue? Before { get; set; }
+        public DatabaseSyncExpansionValue? After { get; set; }
+    }
     private readonly DesktopWorkspaceSession _session;
     private readonly TextBox _serverRoot = new();
     private readonly TextBox _host = new();
@@ -53,12 +65,24 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly ComboBox _bridgeTargetTable = new();
     private readonly ListBox _bridgeColumns = new();
     private readonly ListBox _bridgeDefaults = new();
+    private readonly CheckBox _bridgeSuppressPrimary = new() { Content = "Suppress the primary row; emit reviewed structural rows only" };
+    private readonly ComboBox _bridgeExpansion = new();
+    private readonly TextBox _bridgeExpansionName = new() { PlaceholderText = "Expansion name" };
+    private readonly ComboBox _bridgeExpansionTargetTable = new();
+    private readonly ComboBox _bridgeExpansionTargetKind = new();
+    private readonly CheckBox _bridgeExpansionAdded = new() { Content = "Source Added" };
+    private readonly CheckBox _bridgeExpansionModified = new() { Content = "Source Modified" };
+    private readonly CheckBox _bridgeExpansionRemoved = new() { Content = "Source Removed" };
+    private readonly ListBox _bridgeExpansionBindings = new();
+    private readonly TextBlock _bridgeExpansionStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly TextBlock _bridgeStatus = new() { Text = "Generate or load a schema bridge to edit it here.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private DatabaseSyncTranslationProfile? _loadedBridge;
     private DatabaseCapabilities? _bridgeCapabilities;
     private int _bridgeRuleIndex = -1;
     private List<BridgeColumnChoice> _bridgeColumnRows = [];
     private List<BridgeDefaultChoice> _bridgeDefaultRows = [];
+    private List<BridgeExpansionBindingChoice> _bridgeExpansionRows = [];
+    private int _bridgeExpansionIndex = -1;
     private bool _bridgeUiChanging;
     private readonly Border _recoveryConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private DatabaseSyncPlan? _loadedRecoveryPlan;
@@ -242,7 +266,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                     audit,
                     new Border { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _legacyStatus },
                     new TextBlock { Text = "Compare and synchronize with the connected target", FontSize = 18, FontWeight = FontWeight.SemiBold },
-                    new TextBlock { Text = "A plan requires a verified matching-core baseline audit. For a different target layout, generate a schema bridge: unchanged names pass through automatically while table/column renames, omitted source fields, and required target defaults stay explicit. The bridge bytes and live target schema are hash-bound, and structural one-to-many conversions remain blocked instead of guessed. Dependency closure follows only exact relationships; occupied IDs remain conflicts unless remapping is enabled.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
+                    new TextBlock { Text = "A plan requires a verified matching-core baseline audit. For a different target layout, generate a schema bridge: unchanged names pass through automatically while table/column renames, omitted source fields, required target defaults, and deliberate one-to-many normalized row outputs stay explicit. The bridge bytes and live target schema are hash-bound; incomplete keys or values block instead of being guessed. Dependency closure follows only exact relationships and keeps every output from an included source row together; occupied IDs remain conflicts unless remapping is enabled.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
                     auditPath,
                     bridgePath,
                     new WrapPanel { Children = { _recoveryRemovals, _recoveryDependencyClosure, _recoveryAutoRemap, _recoveryRemapStart, buildPlan } },
@@ -640,14 +664,20 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         _bridgeTable.SelectionChanged += (_, _) =>
         {
             if (_bridgeUiChanging || _bridgeTable.SelectedItem is not BridgeTableChoice choice) return;
-            CommitBridgeRule(); _bridgeRuleIndex = choice.Index; RenderBridgeRule();
+            CommitBridgeExpansion(); CommitBridgeRule(); _bridgeRuleIndex = choice.Index; _bridgeExpansionIndex = -1; RenderBridgeRule();
         };
         _bridgeTargetTable.SelectionChanged += (_, _) =>
         {
             if (_bridgeUiChanging || _loadedBridge is null || _bridgeRuleIndex < 0) return;
-            CommitBridgeRule(); var selected = Convert.ToString(_bridgeTargetTable.SelectedItem) ?? unresolved;
+            CommitBridgeExpansion(); CommitBridgeRule(); var selected = Convert.ToString(_bridgeTargetTable.SelectedItem) ?? unresolved;
             var rules = _loadedBridge.Tables.ToArray(); rules[_bridgeRuleIndex] = rules[_bridgeRuleIndex] with { TargetTable = selected == unresolved ? string.Empty : selected, ColumnMappings = [], DroppedSourceColumns = [], TargetDefaults = [] };
             _loadedBridge = _loadedBridge with { Tables = rules }; RenderBridgeRule();
+        };
+        _bridgeSuppressPrimary.IsCheckedChanged += (_, _) =>
+        {
+            if (_bridgeUiChanging || _loadedBridge is null || _bridgeRuleIndex < 0) return;
+            var rules = _loadedBridge.Tables.ToArray(); rules[_bridgeRuleIndex] = rules[_bridgeRuleIndex] with { SuppressPrimaryOutput = _bridgeSuppressPrimary.IsChecked == true };
+            _loadedBridge = _loadedBridge with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion, Tables = rules }; RefreshBridgeStatus(); RefreshBridgeExpansionStatus();
         };
         var header = new StackPanel
         {
@@ -679,7 +709,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             value.IsEnabled = row.State is LegacyDatabaseAuditValueState.Scalar or LegacyDatabaseAuditValueState.Binary;
             return new Grid { Margin = new Thickness(8, 4), ColumnDefinitions = new("*,Auto,*"), ColumnSpacing = 8, Children = { new TextBlock { Text = row.Target, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap }, WithColumn(state, 1), WithColumn(value, 2) } };
         });
-        return new Grid
+        var primary = new Grid
         {
             RowDefinitions = new("Auto,Auto,*,Auto,*"),
             Children =
@@ -691,6 +721,230 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                 WithRow(_bridgeDefaults, 4)
             }
         };
+        return new TabControl
+        {
+            Items =
+            {
+                new TabItem { Header = "Primary row mapping", Content = primary },
+                new TabItem { Header = "Structural row expansions", Content = BuildStructuralExpansionEditor() }
+            }
+        };
+    }
+
+    private Control BuildStructuralExpansionEditor()
+    {
+        const string unresolved = "⟨unresolved — blocks planning⟩";
+        var add = AccentButton("Add structural output"); add.Click += (_, _) => AddBridgeExpansion();
+        var remove = new Button { Content = "Remove selected output" }; remove.Click += (_, _) => RemoveBridgeExpansion();
+        _bridgeExpansion.SelectionChanged += (_, _) =>
+        {
+            if (_bridgeUiChanging || _bridgeExpansion.SelectedItem is not BridgeExpansionChoice choice) return;
+            CommitBridgeExpansion(); _bridgeExpansionIndex = choice.Index; RenderBridgeExpansion();
+        };
+        _bridgeExpansionName.TextChanged += (_, _) => { if (!_bridgeUiChanging) { CommitBridgeExpansion(); RefreshBridgeExpansionChoice(); } };
+        _bridgeExpansionTargetTable.SelectionChanged += (_, _) =>
+        {
+            if (_bridgeUiChanging || CurrentBridgeExpansion() is null) return;
+            var selected = Convert.ToString(_bridgeExpansionTargetTable.SelectedItem) ?? unresolved; var rules = _loadedBridge!.Tables.ToArray(); var rule = rules[_bridgeRuleIndex]; var expansions = (rule.Expansions ?? []).ToArray();
+            expansions[_bridgeExpansionIndex] = expansions[_bridgeExpansionIndex] with { TargetTable = selected == unresolved ? string.Empty : selected, KeyBindings = [], FieldBindings = [] };
+            rules[_bridgeRuleIndex] = rule with { Expansions = expansions }; _loadedBridge = _loadedBridge with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion, Tables = rules }; RenderBridgeExpansion();
+        };
+        _bridgeExpansionTargetKind.ItemsSource = new[] { LegacyDatabaseRowChangeKind.Added, LegacyDatabaseRowChangeKind.Modified, LegacyDatabaseRowChangeKind.Removed };
+        _bridgeExpansionTargetKind.SelectionChanged += (_, _) => { if (!_bridgeUiChanging) { CommitBridgeExpansion(); RenderBridgeExpansionBindings(); } };
+        foreach (var sourceKind in new[] { _bridgeExpansionAdded, _bridgeExpansionModified, _bridgeExpansionRemoved })
+            sourceKind.IsCheckedChanged += (_, _) =>
+            {
+                if (_bridgeUiChanging) return;
+                if (_bridgeExpansionAdded.IsChecked != true && _bridgeExpansionModified.IsChecked != true && _bridgeExpansionRemoved.IsChecked != true)
+                { _bridgeUiChanging = true; sourceKind.IsChecked = true; _bridgeUiChanging = false; }
+                CommitBridgeExpansion(); RefreshBridgeExpansionStatus();
+            };
+        _bridgeExpansionBindings.ItemTemplate = new FuncDataTemplate<BridgeExpansionBindingChoice>((row, _) => row is null ? new TextBlock() : BuildBridgeExpansionBindingRow(row));
+        return new Grid
+        {
+            Margin = new Thickness(10), RowDefinitions = new("Auto,Auto,Auto,*"), RowSpacing = 8,
+            Children =
+            {
+                new StackPanel { Spacing = 7, Children =
+                {
+                    new TextBlock { Text = "Reviewed one-to-many row conversion", FontSize = 18, FontWeight = FontWeight.SemiBold },
+                    new TextBlock { Text = "A structural output converts one audited source row into an additional normalized target row. Select exactly which source change kinds produce it, its target operation kind, the complete target primary key, and every required before/after value. Each value comes from an audited source column or a typed constant; Crucible never infers joins or values.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) },
+                    _bridgeSuppressPrimary,
+                    new WrapPanel { Children = { add, remove } },
+                    _bridgeExpansionStatus
+                } },
+                WithRow(new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { _bridgeExpansion, WithColumn(_bridgeExpansionName, 1) } }, 1),
+                WithRow(new StackPanel { Spacing = 7, Children =
+                {
+                    new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { _bridgeExpansionTargetTable, WithColumn(_bridgeExpansionTargetKind, 1) } },
+                    new WrapPanel { Children = { _bridgeExpansionAdded, _bridgeExpansionModified, _bridgeExpansionRemoved } }
+                } }, 2),
+                WithRow(_bridgeExpansionBindings, 3)
+            }
+        };
+    }
+
+    private Control BuildBridgeExpansionBindingRow(BridgeExpansionBindingChoice row)
+    {
+        var expansion = CurrentBridgeExpansion(); var targetKind = expansion?.TargetKind ?? LegacyDatabaseRowChangeKind.Added;
+        var include = new CheckBox { Content = row.IsKey ? $"PRIMARY KEY · {row.Target}" : row.Required ? $"REQUIRED · {row.Target}" : row.Target, IsChecked = row.Included, IsEnabled = !row.IsKey && !row.Required };
+        var values = new StackPanel { Spacing = 5 };
+        if (row.IsKey) values.Children.Add(BuildBridgeExpansionValueEditor("Target key value", row.KeyValue, value => { row.KeyValue = value; RefreshBridgeExpansionStatus(); }));
+        else
+        {
+            if (targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Removed)
+                values.Children.Add(BuildBridgeExpansionValueEditor("Expected target preimage", row.Before, value => { row.Before = value; RefreshBridgeExpansionStatus(); }));
+            if (targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Added)
+                values.Children.Add(BuildBridgeExpansionValueEditor("Target postimage", row.After, value => { row.After = value; RefreshBridgeExpansionStatus(); }));
+        }
+        values.IsVisible = row.Included;
+        include.IsCheckedChanged += (_, _) => { row.Included = include.IsChecked == true; values.IsVisible = row.Included; RefreshBridgeExpansionStatus(); };
+        return new Border
+        {
+            Margin = new Thickness(4), Padding = new Thickness(8), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1),
+            Child = new StackPanel { Spacing = 6, Children = { include, values } }
+        };
+    }
+
+    private Control BuildBridgeExpansionValueEditor(string label, DatabaseSyncExpansionValue? current, Action<DatabaseSyncExpansionValue?> changed)
+    {
+        var observed = CurrentBridgeRule()?.ObservedSourceColumns ?? [];
+        var unresolved = new BridgeValueOption(null, string.Empty, "⟨unresolved — blocks planning⟩");
+        var constant = new BridgeValueOption(DatabaseSyncExpansionValueSource.Constant, string.Empty, "Typed constant");
+        var options = new[] { unresolved }
+            .Concat(observed.Select(column => new BridgeValueOption(DatabaseSyncExpansionValueSource.SourceBefore, column, $"Source before · {column}")))
+            .Concat(observed.Select(column => new BridgeValueOption(DatabaseSyncExpansionValueSource.SourceAfter, column, $"Source after · {column}")))
+            .Append(constant).ToArray();
+        var picker = new ComboBox { ItemsSource = options };
+        var state = new ComboBox { ItemsSource = new[] { LegacyDatabaseAuditValueState.Unknown, LegacyDatabaseAuditValueState.Scalar, LegacyDatabaseAuditValueState.Null, LegacyDatabaseAuditValueState.Binary } };
+        var value = new TextBox { PlaceholderText = "Scalar text or base64 bytes" };
+        DatabaseSyncExpansionValue? selected = current;
+        picker.SelectedItem = current is null ? unresolved : options.FirstOrDefault(option => option.Source == current.Source && (current.Source == DatabaseSyncExpansionValueSource.Constant || option.SourceColumn.Equals(current.SourceColumn, StringComparison.OrdinalIgnoreCase))) ?? unresolved;
+        state.SelectedItem = current?.Constant?.State ?? LegacyDatabaseAuditValueState.Unknown; value.Text = current?.Constant?.Value ?? string.Empty;
+        void RefreshConstant()
+        {
+            var isConstant = selected?.Source == DatabaseSyncExpansionValueSource.Constant; state.IsVisible = value.IsVisible = isConstant;
+            value.IsEnabled = isConstant && state.SelectedItem is LegacyDatabaseAuditValueState.Scalar or LegacyDatabaseAuditValueState.Binary;
+        }
+        picker.SelectionChanged += (_, _) =>
+        {
+            if (picker.SelectedItem is not BridgeValueOption option || option.Source is null) selected = null;
+            else if (option.Source == DatabaseSyncExpansionValueSource.Constant)
+                selected = new(DatabaseSyncExpansionValueSource.Constant, string.Empty, selected?.Constant ?? LegacyDatabaseAuditValue.Unknown);
+            else selected = new(option.Source.Value, option.SourceColumn);
+            RefreshConstant(); changed(selected);
+        };
+        state.SelectionChanged += (_, _) =>
+        {
+            if (selected?.Source != DatabaseSyncExpansionValueSource.Constant || state.SelectedItem is not LegacyDatabaseAuditValueState selectedState) return;
+            var typed = selectedState switch { LegacyDatabaseAuditValueState.Null => LegacyDatabaseAuditValue.Null, LegacyDatabaseAuditValueState.Scalar => new(selectedState, value.Text ?? string.Empty), LegacyDatabaseAuditValueState.Binary => new(selectedState, value.Text ?? string.Empty), _ => LegacyDatabaseAuditValue.Unknown };
+            selected = selected with { Constant = typed }; value.IsEnabled = selectedState is LegacyDatabaseAuditValueState.Scalar or LegacyDatabaseAuditValueState.Binary; changed(selected);
+        };
+        value.TextChanged += (_, _) =>
+        {
+            if (selected?.Source != DatabaseSyncExpansionValueSource.Constant || state.SelectedItem is not LegacyDatabaseAuditValueState selectedState || selectedState is not (LegacyDatabaseAuditValueState.Scalar or LegacyDatabaseAuditValueState.Binary)) return;
+            selected = selected with { Constant = new(selectedState, value.Text ?? string.Empty) }; changed(selected);
+        };
+        RefreshConstant();
+        return new StackPanel
+        {
+            Spacing = 4, Children =
+            {
+                new TextBlock { Text = label, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) }, picker,
+                new WrapPanel { Children = { state, value } }
+            }
+        };
+    }
+
+    private void AddBridgeExpansion()
+    {
+        if (_loadedBridge is null || _bridgeRuleIndex < 0) { _bridgeExpansionStatus.Text = "Load a bridge and select a source table first."; return; }
+        CommitBridgeExpansion(); CommitBridgeRule(); var rules = _loadedBridge.Tables.ToArray(); var rule = rules[_bridgeRuleIndex]; var expansions = (rule.Expansions ?? []).ToList();
+        var number = 1; string name; do name = $"Structural output {number++}"; while (expansions.Any(expansion => expansion.Name.Equals(name, StringComparison.OrdinalIgnoreCase)));
+        expansions.Add(new(name, string.Empty, [LegacyDatabaseRowChangeKind.Added], LegacyDatabaseRowChangeKind.Added, [], []));
+        rules[_bridgeRuleIndex] = rule with { Expansions = expansions }; _loadedBridge = _loadedBridge with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion, Tables = rules }; _bridgeExpansionIndex = expansions.Count - 1; RenderBridgeExpansionList();
+    }
+
+    private void RemoveBridgeExpansion()
+    {
+        if (_loadedBridge is null || _bridgeRuleIndex < 0 || _bridgeExpansionIndex < 0) return;
+        var rules = _loadedBridge.Tables.ToArray(); var rule = rules[_bridgeRuleIndex]; var expansions = (rule.Expansions ?? []).ToList(); if (_bridgeExpansionIndex >= expansions.Count) return;
+        expansions.RemoveAt(_bridgeExpansionIndex); rules[_bridgeRuleIndex] = rule with { Expansions = expansions }; _loadedBridge = _loadedBridge with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion, Tables = rules };
+        _bridgeExpansionIndex = expansions.Count == 0 ? -1 : Math.Min(_bridgeExpansionIndex, expansions.Count - 1); RenderBridgeExpansionList();
+    }
+
+    private void RenderBridgeExpansionList()
+    {
+        var expansions = CurrentBridgeRule()?.Expansions ?? []; if (_bridgeExpansionIndex >= expansions.Count) _bridgeExpansionIndex = expansions.Count == 0 ? -1 : 0;
+        _bridgeUiChanging = true; _bridgeExpansion.ItemsSource = expansions.Select((expansion, index) => new BridgeExpansionChoice(index, $"{expansion.Name} → {(string.IsNullOrWhiteSpace(expansion.TargetTable) ? "UNRESOLVED" : expansion.TargetTable)}")).ToArray(); _bridgeExpansion.SelectedIndex = _bridgeExpansionIndex; _bridgeUiChanging = false;
+        RenderBridgeExpansion();
+    }
+
+    private void RefreshBridgeExpansionChoice()
+    {
+        if (_loadedBridge is null || _bridgeExpansionIndex < 0) return; var selected = _bridgeExpansionIndex; var expansions = CurrentBridgeRule()?.Expansions ?? [];
+        _bridgeUiChanging = true; _bridgeExpansion.ItemsSource = expansions.Select((expansion, index) => new BridgeExpansionChoice(index, $"{expansion.Name} → {(string.IsNullOrWhiteSpace(expansion.TargetTable) ? "UNRESOLVED" : expansion.TargetTable)}")).ToArray(); _bridgeExpansion.SelectedIndex = selected; _bridgeUiChanging = false;
+    }
+
+    private void RenderBridgeExpansion()
+    {
+        const string unresolved = "⟨unresolved — blocks planning⟩"; var expansion = CurrentBridgeExpansion();
+        _bridgeUiChanging = true; _bridgeSuppressPrimary.IsChecked = CurrentBridgeRule()?.SuppressPrimaryOutput == true;
+        _bridgeExpansionTargetTable.ItemsSource = new[] { unresolved }.Concat(_bridgeCapabilities?.Tables.Keys.Order(StringComparer.OrdinalIgnoreCase) ?? Enumerable.Empty<string>()).ToArray();
+        _bridgeExpansionName.Text = expansion?.Name ?? string.Empty; _bridgeExpansionTargetTable.SelectedItem = expansion is null || string.IsNullOrWhiteSpace(expansion.TargetTable) ? unresolved : expansion.TargetTable;
+        _bridgeExpansionTargetKind.SelectedItem = expansion?.TargetKind ?? LegacyDatabaseRowChangeKind.Added;
+        _bridgeExpansionAdded.IsChecked = expansion?.SourceKinds.Contains(LegacyDatabaseRowChangeKind.Added) == true; _bridgeExpansionModified.IsChecked = expansion?.SourceKinds.Contains(LegacyDatabaseRowChangeKind.Modified) == true; _bridgeExpansionRemoved.IsChecked = expansion?.SourceKinds.Contains(LegacyDatabaseRowChangeKind.Removed) == true;
+        _bridgeUiChanging = false; RenderBridgeExpansionBindings();
+    }
+
+    private void RenderBridgeExpansionBindings()
+    {
+        var expansion = CurrentBridgeExpansion(); var target = expansion is null ? null : _bridgeCapabilities?.FindTable(expansion.TargetTable);
+        if (expansion is null || target is null) { _bridgeExpansionRows = []; _bridgeExpansionBindings.ItemsSource = null; RefreshBridgeExpansionStatus(); return; }
+        var keys = expansion.KeyBindings.ToDictionary(binding => binding.TargetColumn, StringComparer.OrdinalIgnoreCase); var fields = expansion.FieldBindings.ToDictionary(binding => binding.TargetColumn, StringComparer.OrdinalIgnoreCase);
+        var rows = new List<BridgeExpansionBindingChoice>();
+        foreach (var column in target.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase)).OrderBy(column => column.Ordinal))
+            rows.Add(new() { Target = column.Name, IsKey = true, Required = true, Included = true, KeyValue = keys.GetValueOrDefault(column.Name)?.Value });
+        foreach (var column in target.Columns.Where(column => !column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase) && !column.Extra.Contains("generated", StringComparison.OrdinalIgnoreCase)).OrderBy(column => column.Ordinal))
+        {
+            fields.TryGetValue(column.Name, out var existing); var required = expansion.TargetKind == LegacyDatabaseRowChangeKind.Removed || expansion.TargetKind == LegacyDatabaseRowChangeKind.Added && !column.Nullable && column.DefaultValue is null && !column.Extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase);
+            rows.Add(new() { Target = column.Name, Required = required, Included = required || existing is not null, Before = existing?.Before, After = existing?.After });
+        }
+        _bridgeExpansionRows = rows; _bridgeExpansionBindings.ItemsSource = rows; RefreshBridgeExpansionStatus();
+    }
+
+    private void CommitBridgeExpansion()
+    {
+        var expansion = CurrentBridgeExpansion(); if (_loadedBridge is null || expansion is null) return;
+        var sourceKinds = new List<LegacyDatabaseRowChangeKind>(); if (_bridgeExpansionAdded.IsChecked == true) sourceKinds.Add(LegacyDatabaseRowChangeKind.Added); if (_bridgeExpansionModified.IsChecked == true) sourceKinds.Add(LegacyDatabaseRowChangeKind.Modified); if (_bridgeExpansionRemoved.IsChecked == true) sourceKinds.Add(LegacyDatabaseRowChangeKind.Removed);
+        var targetKind = _bridgeExpansionTargetKind.SelectedItem is LegacyDatabaseRowChangeKind selectedKind ? selectedKind : LegacyDatabaseRowChangeKind.Added;
+        var keyBindings = _bridgeExpansionRows.Where(row => row.IsKey).Select(row => new DatabaseSyncExpansionKeyBinding(row.Target, row.KeyValue ?? new(DatabaseSyncExpansionValueSource.SourceAfter, string.Empty))).ToArray();
+        var fieldBindings = _bridgeExpansionRows.Where(row => !row.IsKey && row.Included).Select(row => new DatabaseSyncExpansionFieldBinding(row.Target,
+            targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Removed ? row.Before : null,
+            targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Added ? row.After : null)).ToArray();
+        var rules = _loadedBridge.Tables.ToArray(); var rule = rules[_bridgeRuleIndex]; var expansions = (rule.Expansions ?? []).ToArray();
+        expansions[_bridgeExpansionIndex] = expansion with { Name = string.IsNullOrWhiteSpace(_bridgeExpansionName.Text) ? expansion.Name : _bridgeExpansionName.Text.Trim(), SourceKinds = sourceKinds, TargetKind = targetKind, KeyBindings = keyBindings, FieldBindings = fieldBindings };
+        rules[_bridgeRuleIndex] = rule with { Expansions = expansions, SuppressPrimaryOutput = _bridgeSuppressPrimary.IsChecked == true }; _loadedBridge = _loadedBridge with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion, Tables = rules };
+    }
+
+    private DatabaseSyncTableTranslation? CurrentBridgeRule() => _loadedBridge is not null && _bridgeRuleIndex >= 0 && _bridgeRuleIndex < _loadedBridge.Tables.Count ? _loadedBridge.Tables[_bridgeRuleIndex] : null;
+    private DatabaseSyncRowExpansion? CurrentBridgeExpansion()
+    {
+        var expansions = CurrentBridgeRule()?.Expansions ?? []; return _bridgeExpansionIndex >= 0 && _bridgeExpansionIndex < expansions.Count ? expansions[_bridgeExpansionIndex] : null;
+    }
+
+    private void RefreshBridgeExpansionStatus()
+    {
+        var rule = CurrentBridgeRule(); var expansion = CurrentBridgeExpansion();
+        if (rule is null) { _bridgeExpansionStatus.Text = "Load a bridge and select a source table first."; return; }
+        if (expansion is null) { _bridgeExpansionStatus.Text = rule.SuppressPrimaryOutput ? $"{rule.SourceTable} suppresses its primary row but has no structural output; planning is blocked until an output is added or suppression is cleared." : $"{rule.SourceTable} has no structural outputs. Add one only when one audited row must produce another normalized target row."; return; }
+        var unresolvedKeys = _bridgeExpansionRows.Count(row => row.IsKey && Unresolved(row.KeyValue)); var targetKind = _bridgeExpansionTargetKind.SelectedItem is LegacyDatabaseRowChangeKind kind ? kind : expansion.TargetKind;
+        var unresolvedFields = _bridgeExpansionRows.Count(row => !row.IsKey && row.Included && ((targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Removed && Unresolved(row.Before)) || (targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Added && Unresolved(row.After))));
+        var missingKinds = _bridgeExpansionAdded.IsChecked != true && _bridgeExpansionModified.IsChecked != true && _bridgeExpansionRemoved.IsChecked != true;
+        _bridgeExpansionStatus.Text = $"{rule.SourceTable} · {(rule.Expansions?.Count ?? 0):N0} structural output(s) · '{expansion.Name}' → {(string.IsNullOrWhiteSpace(expansion.TargetTable) ? "UNRESOLVED" : expansion.TargetTable)} {targetKind}. {unresolvedKeys:N0} unresolved key binding(s), {unresolvedFields:N0} unresolved field binding(s){(missingKinds ? ", no source change kind selected" : string.Empty)}. Every unresolved value blocks planning.";
+        static bool Unresolved(DatabaseSyncExpansionValue? value) => value is null || value.Source == DatabaseSyncExpansionValueSource.Constant
+            ? value?.Constant is null || value.Constant.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing
+            : string.IsNullOrWhiteSpace(value.SourceColumn);
     }
 
     private async Task PickAndLoadSchemaBridgeAsync()
@@ -710,14 +964,14 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             if (!profile.TargetSchemaSha256.Equals(DatabaseSyncTranslationService.HashTargetSchema(capabilities), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("This bridge belongs to a different or older target schema. Generate a new bridge so mappings cannot silently drift.");
             _ = service.Translate([], profile, profile.SourceAuditSha256, capabilities); SetBridgeEditor(profile, capabilities, path);
         }
-        catch (Exception exception) { _loadedBridge = null; _bridgeCapabilities = null; _bridgeRuleIndex = -1; _bridgeColumns.ItemsSource = null; _bridgeDefaults.ItemsSource = null; _bridgeStatus.Text = $"Bridge load failed safely: {exception.Message}"; DesktopCrashLogger.Log("Database schema bridge load failed", exception); }
+        catch (Exception exception) { _loadedBridge = null; _bridgeCapabilities = null; _bridgeRuleIndex = _bridgeExpansionIndex = -1; _bridgeColumns.ItemsSource = null; _bridgeDefaults.ItemsSource = null; _bridgeExpansion.ItemsSource = null; _bridgeExpansionBindings.ItemsSource = null; _bridgeStatus.Text = $"Bridge load failed safely: {exception.Message}"; DesktopCrashLogger.Log("Database schema bridge load failed", exception); }
         finally { EndOperation(); }
     }
 
     private void SetBridgeEditor(DatabaseSyncTranslationProfile profile, DatabaseCapabilities capabilities, string path)
     {
-        _loadedBridge = profile; _bridgeCapabilities = capabilities; _bridgeRuleIndex = profile.Tables.Count == 0 ? -1 : 0; _recoveryTranslation.Text = Path.GetFullPath(path);
-        _bridgeUiChanging = true; _bridgeTable.ItemsSource = profile.Tables.Select((rule, index) => new BridgeTableChoice(index, $"{rule.SourceTable} → {(string.IsNullOrWhiteSpace(rule.TargetTable) ? "UNRESOLVED" : rule.TargetTable)}")).ToArray(); _bridgeTable.SelectedIndex = _bridgeRuleIndex; _bridgeUiChanging = false; RenderBridgeRule();
+        _loadedBridge = profile with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion }; _bridgeCapabilities = capabilities; _bridgeRuleIndex = profile.Tables.Count == 0 ? -1 : 0; _bridgeExpansionIndex = -1; _recoveryTranslation.Text = Path.GetFullPath(path);
+        _bridgeUiChanging = true; _bridgeTable.ItemsSource = _loadedBridge.Tables.Select((rule, index) => new BridgeTableChoice(index, $"{rule.SourceTable} → {(string.IsNullOrWhiteSpace(rule.TargetTable) ? "UNRESOLVED" : rule.TargetTable)}")).ToArray(); _bridgeTable.SelectedIndex = _bridgeRuleIndex; _bridgeUiChanging = false; RenderBridgeRule();
     }
 
     private async Task SaveSchemaBridgeEditorAsync()
@@ -725,7 +979,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         if (_loadedBridge is null || string.IsNullOrWhiteSpace(_recoveryTranslation.Text)) { _bridgeStatus.Text = "Load or generate a bridge before saving."; return; }
         try
         {
-            CommitBridgeRule(); await DatabaseSyncTranslationService.WriteAsync(_recoveryTranslation.Text, _loadedBridge, overwrite: true);
+            CommitBridgeExpansion(); CommitBridgeRule(); await DatabaseSyncTranslationService.WriteAsync(_recoveryTranslation.Text, _loadedBridge, overwrite: true);
             _bridgeUiChanging = true; _bridgeTable.ItemsSource = _loadedBridge.Tables.Select((rule, index) => new BridgeTableChoice(index, $"{rule.SourceTable} → {(string.IsNullOrWhiteSpace(rule.TargetTable) ? "UNRESOLVED" : rule.TargetTable)}")).ToArray(); _bridgeTable.SelectedIndex = _bridgeRuleIndex; _bridgeUiChanging = false;
             RefreshBridgeStatus("Saved atomically. ");
         }
@@ -737,7 +991,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         const string unresolved = "⟨unresolved — blocks planning⟩";
         if (_loadedBridge is null || _bridgeCapabilities is null || _bridgeRuleIndex < 0 || _bridgeRuleIndex >= _loadedBridge.Tables.Count) { _bridgeColumns.ItemsSource = null; _bridgeDefaults.ItemsSource = null; RefreshBridgeStatus(); return; }
         var rule = _loadedBridge.Tables[_bridgeRuleIndex]; var target = _bridgeCapabilities.FindTable(rule.TargetTable);
-        _bridgeUiChanging = true; _bridgeTargetTable.ItemsSource = new[] { unresolved }.Concat(_bridgeCapabilities.Tables.Keys.Order(StringComparer.OrdinalIgnoreCase)).ToArray(); _bridgeTargetTable.SelectedItem = target?.Name ?? unresolved; _bridgeUiChanging = false;
+        _bridgeUiChanging = true; _bridgeTargetTable.ItemsSource = new[] { unresolved }.Concat(_bridgeCapabilities.Tables.Keys.Order(StringComparer.OrdinalIgnoreCase)).ToArray(); _bridgeTargetTable.SelectedItem = target?.Name ?? unresolved; _bridgeSuppressPrimary.IsChecked = rule.SuppressPrimaryOutput; _bridgeUiChanging = false;
         var mappings = rule.ColumnMappings.ToDictionary(mapping => mapping.SourceColumn, StringComparer.OrdinalIgnoreCase); var drops = rule.DroppedSourceColumns.ToHashSet(StringComparer.OrdinalIgnoreCase); var keys = (rule.SourcePrimaryKeyColumns ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var observed = rule.ObservedSourceColumns ?? rule.ColumnMappings.Select(mapping => mapping.SourceColumn).Concat(rule.DroppedSourceColumns).Concat(rule.SourcePrimaryKeyColumns ?? []).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
         _bridgeColumnRows = observed.Select(source => new BridgeColumnChoice { Source = source, IsKey = keys.Contains(source), Drop = drops.Contains(source), Target = mappings.TryGetValue(source, out var mapping) ? mapping.TargetColumn : target?.Find(source)?.Name ?? string.Empty }).ToList();
@@ -752,7 +1006,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             var value = defaults.GetValueOrDefault(column)?.Value ?? LegacyDatabaseAuditValue.Unknown;
             return new BridgeDefaultChoice { Target = column, State = value.State, Value = value.Value ?? string.Empty };
         }).ToList();
-        _bridgeColumns.ItemsSource = _bridgeColumnRows; _bridgeDefaults.ItemsSource = _bridgeDefaultRows; RefreshBridgeStatus();
+        _bridgeColumns.ItemsSource = _bridgeColumnRows; _bridgeDefaults.ItemsSource = _bridgeDefaultRows; _bridgeExpansionIndex = (rule.Expansions?.Count ?? 0) == 0 ? -1 : Math.Clamp(_bridgeExpansionIndex, 0, rule.Expansions!.Count - 1); RenderBridgeExpansionList(); RefreshBridgeStatus();
     }
 
     private void RebuildBridgeDefaultRows()
@@ -787,9 +1041,12 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private void RefreshBridgeStatus(string prefix = "")
     {
         if (_loadedBridge is null) { _bridgeStatus.Text = prefix + "Generate or load a schema bridge to edit it here."; return; }
-        var tableGaps = _loadedBridge.Tables.Count(rule => string.IsNullOrWhiteSpace(rule.TargetTable));
-        var currentColumnGaps = _bridgeColumnRows.Count(row => !row.Drop && string.IsNullOrWhiteSpace(row.Target)); var currentDefaultGaps = _bridgeDefaultRows.Count(row => row.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing);
-        _bridgeStatus.Text = prefix + $"{_loadedBridge.Name} · {_loadedBridge.Tables.Count:N0} table rule(s) · {tableGaps:N0} unresolved table(s). Current table: {currentColumnGaps:N0} unresolved column(s), {currentDefaultGaps:N0} unresolved default(s). Unknown/blank values block planning.";
+        var tableGaps = _loadedBridge.Tables.Count(rule => !rule.SuppressPrimaryOutput && string.IsNullOrWhiteSpace(rule.TargetTable));
+        var structuralGaps = _loadedBridge.Tables.Count(rule => rule.SuppressPrimaryOutput && (rule.Expansions?.Count ?? 0) == 0);
+        var primarySuppressed = CurrentBridgeRule()?.SuppressPrimaryOutput == true;
+        var currentColumnGaps = primarySuppressed ? 0 : _bridgeColumnRows.Count(row => !row.Drop && string.IsNullOrWhiteSpace(row.Target)); var currentDefaultGaps = primarySuppressed ? 0 : _bridgeDefaultRows.Count(row => row.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing);
+        var expansionCount = _loadedBridge.Tables.Sum(rule => rule.Expansions?.Count ?? 0);
+        _bridgeStatus.Text = prefix + $"{_loadedBridge.Name} · {_loadedBridge.Tables.Count:N0} table rule(s) · {expansionCount:N0} structural output(s) · {tableGaps:N0} unresolved primary table(s) · {structuralGaps:N0} suppressed table(s) without an output. Current table: {currentColumnGaps:N0} unresolved column(s), {currentDefaultGaps:N0} unresolved default(s). Unknown/blank values block planning.";
     }
 
     private async Task LoadDatabaseSyncPlanAsync()

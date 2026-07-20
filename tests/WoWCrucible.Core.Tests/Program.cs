@@ -29,6 +29,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("wiki field help").FirstOrDefault()?.Command.Id != "workspace.knowledge" ||
     CrucibleCommandCatalog.Search("wdb cache parser").FirstOrDefault()?.Command.Id != "workspace.cache" ||
     CrucibleCommandCatalog.Search("cross core schema bridge").FirstOrDefault()?.Command.Id != "workspace.server" ||
+    CrucibleCommandCatalog.Search("structural one to many expansion").FirstOrDefault()?.Command.Id != "workspace.server" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
 
@@ -3219,7 +3220,8 @@ var bridgeTargetTable = new DatabaseTableCapability("new_items",
     new("power", "int", "int unsigned", false, null, "", "", 3)
 ]);
 var bridgeVendorTable = new DatabaseTableCapability("new_vendor", [new("owner_id", "int", "int unsigned", false, null, "PRI", "", 1), new("item_id", "int", "int unsigned", false, null, "PRI", "", 2)]);
-var bridgeCapabilities = new DatabaseCapabilities("fixture-mysql", "target_world", new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [bridgeTargetTable.Name] = bridgeTargetTable, [bridgeVendorTable.Name] = bridgeVendorTable },
+var bridgeMetadataTable = new DatabaseTableCapability("new_item_meta", [new("item_id", "int", "int unsigned", false, null, "PRI", "", 1), new("slot", "int", "int unsigned", false, null, "PRI", "", 2), new("label", "varchar", "varchar(255)", false, null, "", "", 3), new("score", "int", "int unsigned", false, null, "", "", 4)]);
+var bridgeCapabilities = new DatabaseCapabilities("fixture-mysql", "target_world", new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [bridgeTargetTable.Name] = bridgeTargetTable, [bridgeVendorTable.Name] = bridgeVendorTable, [bridgeMetadataTable.Name] = bridgeMetadataTable },
     [new("translated-item-vendor", "new_vendor", "item_id", "new_items", "id", false, "translated item vendor")]);
 var bridgeSourceHash = new string('b', 64);
 var bridgeAdded = new DatabaseSyncOperation("old_items", LegacyDatabaseContentDomain.ItemsAndSets, LegacyDatabaseRowChangeKind.Added,
@@ -3245,6 +3247,46 @@ if (bridgeTranslation.BlockedOperations != 0 || bridged.Table != "new_items" || 
     !bridged.Fields.Select(field => field.Column).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(["id", "title", "power"]) ||
     bridgeTranslation.Evidence.Select(item => item.Action).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(["Table", "Key", "Column", "Drop", "Default"]) == false)
     throw new InvalidOperationException("Cross-core schema bridge lost an exact table/key/field rename, explicit drop, or typed target default.");
+var bridgeExpansion = new DatabaseSyncRowExpansion("normalized metadata", "new_item_meta", [LegacyDatabaseRowChangeKind.Added], LegacyDatabaseRowChangeKind.Added,
+    [new("item_id", new(DatabaseSyncExpansionValueSource.SourceAfter, "entry")), new("slot", new(DatabaseSyncExpansionValueSource.Constant, "", DependencyValue(0)))],
+    [new("label", null, new(DatabaseSyncExpansionValueSource.SourceAfter, "name")), new("score", null, new(DatabaseSyncExpansionValueSource.Constant, "", DependencyValue(9)))]);
+var structuralBridge = resolvedBridge with { Tables = [resolvedBridge.Tables[0] with { Expansions = [bridgeExpansion] }] };
+var structuralTranslation = bridgeService.Translate([bridgeAdded], structuralBridge, bridgeSourceHash, bridgeCapabilities);
+if (structuralTranslation.BlockedOperations != 0 || structuralTranslation.Operations.Count != 2 || structuralTranslation.SourceOperationIndexes is not { Count: 2 } || structuralTranslation.SourceOperationIndexes.Any(index => index != 0) ||
+    structuralTranslation.Operations[1].Table != "new_item_meta" || structuralTranslation.Operations[1].Key.Count != 2 ||
+    !structuralTranslation.Operations[1].Fields.Select(field => field.Column).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(["item_id", "slot", "label", "score"]) ||
+    structuralTranslation.Evidence.All(item => item.Action != "Expansion") || structuralTranslation.Evidence.Count(item => item.Action == "ExpansionKey") != 2)
+    throw new InvalidOperationException("Reviewed one-to-many schema expansion lost its target row, exact key, fields, evidence, or source lineage.");
+var suppressedStructuralBridge = structuralBridge with { Tables = [structuralBridge.Tables[0] with { SuppressPrimaryOutput = true }] };
+var suppressedStructural = bridgeService.Translate([bridgeAdded], suppressedStructuralBridge, bridgeSourceHash, bridgeCapabilities);
+if (suppressedStructural.BlockedOperations != 0 || suppressedStructural.Operations.Count != 1 || suppressedStructural.Operations[0].Table != "new_item_meta")
+    throw new InvalidOperationException("Explicit structural-only schema conversion emitted an unwanted primary row.");
+var unresolvedStructuralBridge = structuralBridge with { Tables = [structuralBridge.Tables[0] with { Expansions = [bridgeExpansion with { FieldBindings = [new("label", null, new(DatabaseSyncExpansionValueSource.SourceAfter, "")), .. bridgeExpansion.FieldBindings.Skip(1)] }] }] };
+if (bridgeService.Translate([bridgeAdded], unresolvedStructuralBridge, bridgeSourceHash, bridgeCapabilities).BlockedOperations != 1)
+    throw new InvalidOperationException("Structural schema expansion invented a value for an unresolved source binding.");
+var duplicateStructuralBridge = structuralBridge with { Tables = [structuralBridge.Tables[0] with { SuppressPrimaryOutput = true, Expansions = [bridgeExpansion, bridgeExpansion with { Name = "same identity again" }] }] };
+var duplicateStructural = bridgeService.Translate([bridgeAdded], duplicateStructuralBridge, bridgeSourceHash, bridgeCapabilities);
+if (duplicateStructural.BlockedOperations != 2 || duplicateStructural.Operations.Any(operation => !operation.Finding.Contains("Multiple translated outputs", StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("Structural schema expansion allowed two outputs to collapse onto one target identity.");
+var bridgeModified = bridgeAdded with { Kind = LegacyDatabaseRowChangeKind.Modified, Fields = [new("name", new(LegacyDatabaseAuditValueState.Scalar, "Old Blade"), new(LegacyDatabaseAuditValueState.Scalar, "New Blade"))] };
+var modifiedExpansion = bridgeExpansion with { SourceKinds = [LegacyDatabaseRowChangeKind.Modified], TargetKind = LegacyDatabaseRowChangeKind.Modified, FieldBindings = [new("label", new(DatabaseSyncExpansionValueSource.SourceBefore, "name"), new(DatabaseSyncExpansionValueSource.SourceAfter, "name"))] };
+var modifiedStructuralBridge = structuralBridge with { Tables = [structuralBridge.Tables[0] with { SuppressPrimaryOutput = true, Expansions = [modifiedExpansion] }] };
+var modifiedStructural = bridgeService.Translate([bridgeModified], modifiedStructuralBridge, bridgeSourceHash, bridgeCapabilities).Operations.Single();
+if (modifiedStructural.Status == DatabaseSyncOperationStatus.Blocked || modifiedStructural.Fields.Single().Before.Value != "Old Blade" || modifiedStructural.Fields.Single().After.Value != "New Blade")
+    throw new InvalidOperationException("Structural UPDATE expansion did not preserve exact audited preimage and postimage values.");
+var bridgeRemoved = bridgeAdded with { Kind = LegacyDatabaseRowChangeKind.Removed, Fields = [new("entry", DependencyValue(5), LegacyDatabaseAuditValue.Missing), new("name", new(LegacyDatabaseAuditValueState.Scalar, "Bridge Blade"), LegacyDatabaseAuditValue.Missing)] };
+var removedExpansion = bridgeExpansion with { SourceKinds = [LegacyDatabaseRowChangeKind.Removed], TargetKind = LegacyDatabaseRowChangeKind.Removed,
+    FieldBindings = [new("label", new(DatabaseSyncExpansionValueSource.SourceBefore, "name"), null), new("score", new(DatabaseSyncExpansionValueSource.Constant, "", DependencyValue(9)), null)] };
+var removedBridge = structuralBridge with { Tables = [structuralBridge.Tables[0] with { SuppressPrimaryOutput = true, Expansions = [removedExpansion] }] };
+var removedStructural = bridgeService.Translate([bridgeRemoved], removedBridge, bridgeSourceHash, bridgeCapabilities).Operations.Single();
+if (removedStructural.Status == DatabaseSyncOperationStatus.Blocked || removedStructural.Fields.Count != 4)
+    throw new InvalidOperationException("Structural DELETE expansion failed to retain its complete exact rollback preimage.");
+var unsafeRemovedBridge = removedBridge with { Tables = [removedBridge.Tables[0] with { Expansions = [removedExpansion with { FieldBindings = [removedExpansion.FieldBindings[0]] }] }] };
+if (!bridgeService.Translate([bridgeRemoved], unsafeRemovedBridge, bridgeSourceHash, bridgeCapabilities).Operations.Single().Finding.Contains("every writable target column", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Structural DELETE expansion accepted an incomplete rollback preimage.");
+var invalidStructuralEnum = structuralBridge with { Tables = [structuralBridge.Tables[0] with { Expansions = [bridgeExpansion with { TargetKind = (LegacyDatabaseRowChangeKind)999 }] }] };
+try { _ = bridgeService.Translate([bridgeAdded], invalidStructuralEnum, bridgeSourceHash, bridgeCapabilities); throw new InvalidOperationException("Structural schema expansion accepted an undefined operation kind from hand-edited JSON."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("invalid source or target change kind", StringComparison.OrdinalIgnoreCase)) { }
 var bridgeVendor = new DatabaseSyncOperation("old_vendor", LegacyDatabaseContentDomain.VendorsAndLoot, LegacyDatabaseRowChangeKind.Added,
     [new("entry", DependencyValue(200)), new("item", DependencyValue(5))],
     [new("entry", LegacyDatabaseAuditValue.Missing, DependencyValue(200)), new("item", LegacyDatabaseAuditValue.Missing, DependencyValue(5))], DatabaseSyncOperationStatus.Ready, "fixture");
@@ -3261,15 +3303,19 @@ if (bridgeService.Translate([bridgeAdded], keyDropBridge, bridgeSourceHash, brid
     throw new InvalidOperationException("Cross-core schema bridge allowed a primary-key column to be dropped.");
 var collapsingSource = bridgeAdded with { Table = "old_items_alias" }; var collapsingBridge = resolvedBridge with { Tables = [.. resolvedBridge.Tables, resolvedBridge.Tables[0] with { SourceTable = "old_items_alias" }] };
 var collapsedRows = bridgeService.Translate([bridgeAdded, collapsingSource], collapsingBridge, bridgeSourceHash, bridgeCapabilities);
-if (collapsedRows.BlockedOperations != 2 || collapsedRows.Operations.Any(operation => !operation.Finding.Contains("Multiple changed source rows", StringComparison.OrdinalIgnoreCase)))
+if (collapsedRows.BlockedOperations != 2 || collapsedRows.Operations.Any(operation => !operation.Finding.Contains("Multiple translated outputs", StringComparison.OrdinalIgnoreCase)))
     throw new InvalidOperationException("Cross-core schema bridge allowed two source rows to collapse onto one target identity.");
-var changedBridgeCapabilities = bridgeCapabilities with { Tables = new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [bridgeTargetTable.Name] = bridgeTargetTable with { Columns = [.. bridgeTargetTable.Columns, new("later", "int", "int", true, null, "", "", 4)] }, [bridgeVendorTable.Name] = bridgeVendorTable } };
+var changedBridgeCapabilities = bridgeCapabilities with { Tables = new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [bridgeTargetTable.Name] = bridgeTargetTable with { Columns = [.. bridgeTargetTable.Columns, new("later", "int", "int", true, null, "", "", 4)] }, [bridgeVendorTable.Name] = bridgeVendorTable, [bridgeMetadataTable.Name] = bridgeMetadataTable } };
 try { _ = bridgeService.Translate([bridgeAdded], resolvedBridge, bridgeSourceHash, changedBridgeCapabilities); throw new InvalidOperationException("A stale schema bridge was accepted against a changed target schema."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("stale", StringComparison.OrdinalIgnoreCase)) { }
-var bridgeProfilePath = Path.Combine(layerRoot, "fixture.crucible-db-bridge.json"); DatabaseSyncTranslationService.WriteAsync(bridgeProfilePath, resolvedBridge).GetAwaiter().GetResult();
+var bridgeProfilePath = Path.Combine(layerRoot, "fixture.crucible-db-bridge.json"); DatabaseSyncTranslationService.WriteAsync(bridgeProfilePath, structuralBridge).GetAwaiter().GetResult();
 var loadedBridge = bridgeService.LoadAsync(bridgeProfilePath).GetAwaiter().GetResult();
-if (loadedBridge.Format != DatabaseSyncTranslationService.ProfileFormat || loadedBridge.Tables.Single().TargetDefaults.Single().Value.Value != "7")
+if (loadedBridge.Format != DatabaseSyncTranslationService.ProfileFormat || loadedBridge.Tables.Single().TargetDefaults.Single().Value.Value != "7" || loadedBridge.Tables.Single().Expansions?.Single().KeyBindings.Count != 2)
     throw new InvalidOperationException("Portable schema bridge profile did not preserve its typed reviewed mapping.");
+var bridgeV1Path = Path.Combine(layerRoot, "fixture-v1.crucible-db-bridge.json"); var bridgeV1 = resolvedBridge with { FormatVersion = 1 };
+DatabaseSyncTranslationService.WriteAsync(bridgeV1Path, bridgeV1).GetAwaiter().GetResult(); var loadedBridgeV1 = bridgeService.LoadAsync(bridgeV1Path).GetAwaiter().GetResult();
+if (loadedBridgeV1.FormatVersion != 1 || bridgeService.Translate([bridgeAdded], loadedBridgeV1, bridgeSourceHash, bridgeCapabilities).BlockedOperations != 0)
+    throw new InvalidOperationException("Schema bridge v2 support broke existing reviewed v1 profile readability.");
 var legacySyncTarget = new DatabaseSyncTarget("127.0.0.1", 3306, "fixture", "fixture_world", "fixture-server");
 var legacySyncSourceHash = new string('a', 64); var legacySyncPatterns = new[] { "item_template" }; var legacySyncRemaps = Array.Empty<DatabaseSyncIdRemap>(); var legacySyncOperations = new[] { dependencyItem };
 var legacySyncHashOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.General) { WriteIndented = false, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };

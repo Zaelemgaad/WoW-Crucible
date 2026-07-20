@@ -205,19 +205,25 @@ public sealed class DatabaseSynchronizationService
             IReadOnlyList<DatabaseSyncOperation> selectedSource = seeds;
             if (options.IncludeDependencyClosure && patterns.Length > 0)
             {
-                var translatedCandidates = translationService.Translate(candidateOperations, profile, sourceAuditSha256, capabilities).Operations;
-                var translatedSeeds = translatedCandidates.Where((_, index) => seedTableNames.Contains(candidateOperations[index].Table)).ToArray();
+                var candidateTranslation = translationService.Translate(candidateOperations, profile, sourceAuditSha256, capabilities);
+                var translatedCandidates = candidateTranslation.Operations;
+                var lineage = candidateTranslation.SourceOperationIndexes ?? throw new InvalidDataException("Schema bridge translation did not preserve source-row lineage.");
+                if (lineage.Count != translatedCandidates.Count) throw new InvalidDataException("Schema bridge translation returned inconsistent source-row lineage.");
+                var translatedSeeds = translatedCandidates.Where((_, index) => seedTableNames.Contains(candidateOperations[lineage[index]].Table)).ToArray();
                 var expanded = ExpandDependencyClosure(translatedSeeds, translatedCandidates, capabilities.Relationships, options.MaximumOperations, cancellationToken);
                 dependencyInclusions = expanded.Inclusions;
                 var selectedTargetIdentities = expanded.Operations.Select(OperationIdentity).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var paired = candidateOperations.Select((source, index) => (Source: source, TargetIdentity: OperationIdentity(translatedCandidates[index]))).ToArray();
-                var ambiguous = paired.Where(pair => selectedTargetIdentities.Contains(pair.TargetIdentity)).GroupBy(pair => pair.TargetIdentity, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
+                var selectedOutputs = translatedCandidates.Select((output, index) => (TargetIdentity: OperationIdentity(output), SourceIndex: lineage[index]))
+                    .Where(pair => selectedTargetIdentities.Contains(pair.TargetIdentity)).ToArray();
+                var ambiguous = selectedOutputs.GroupBy(pair => pair.TargetIdentity, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Select(pair => pair.SourceIndex).Distinct().Count() > 1);
                 if (ambiguous is not null) throw new InvalidDataException($"Schema bridge maps multiple changed source rows onto one target identity: {ambiguous.Key}.");
-                selectedSource = paired.Where(pair => selectedTargetIdentities.Contains(pair.TargetIdentity)).Select(pair => pair.Source).ToArray();
+                var selectedSourceIndexes = selectedOutputs.Select(pair => pair.SourceIndex).ToHashSet();
+                selectedSource = candidateOperations.Where((_, index) => selectedSourceIndexes.Contains(index)).ToArray();
             }
             var translation = translationService.Translate(selectedSource, profile, sourceAuditSha256, capabilities);
             sourceOperations = translation.Operations; schemaTranslations = translation.Evidence; translationProfileName = profile.Name;
             translationProfileSha256 = await DatabaseSyncTranslationService.Sha256FileAsync(translationPath, cancellationToken);
+            if (sourceOperations.Count > options.MaximumOperations) throw new InvalidOperationException($"Structural schema expansion produced {sourceOperations.Count:N0} target operations, exceeding the explicit {options.MaximumOperations:N0}-operation safety limit.");
         }
         else if (options.IncludeDependencyClosure && patterns.Length > 0)
         {
@@ -251,7 +257,7 @@ public sealed class DatabaseSynchronizationService
                 ? "Dependency closure was enabled, but no table filter was supplied; every eligible changed row was already selected."
                 : $"Dependency closure added {dependencyInclusions.Count:N0} exactly related changed row(s) through declared or named core relationships. Review every recorded causal edge before apply.");
         if (translationProfileSha256 is not null)
-            warnings.Add($"Schema bridge '{translationProfileName}' translated {schemaTranslations.Sum(item => item.Operations):N0} operation-field use(s). The exact profile bytes and target schema are hash-bound; every drop, default, and rename remains visible.");
+            warnings.Add($"Schema bridge '{translationProfileName}' applied {schemaTranslations.Sum(item => item.Operations):N0} reviewed mapping/binding use(s). The exact profile bytes and target schema are hash-bound; every drop, default, rename, expansion, and value binding remains visible.");
         if (manifest.Warnings.Count > 0) warnings.AddRange(manifest.Warnings.Select(warning => $"Source audit: {warning}"));
         var binding = new DatabaseSyncTarget(target.Host, target.Port, target.User, target.Database, capabilities.ServerVersion);
         var plan = new DatabaseSyncPlan(PlanFormat, FormatVersion, ToolVersion(), DateTimeOffset.UtcNow, sourceAuditSha256,
