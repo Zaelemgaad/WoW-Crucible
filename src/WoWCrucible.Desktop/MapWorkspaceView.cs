@@ -4,6 +4,7 @@ using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
+using System.Numerics;
 using WoWCrucible.Core;
 using WoWCrucible.Desktop.Controls;
 
@@ -54,6 +55,10 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly TextBox _wmoLibrary = new() { PlaceholderText = "Processed asset library root…" };
     private readonly ComboBox _wmoReferences = new() { PlaceholderText = "No placed or referenced objects loaded from this map" };
     private readonly ComboBox _wmoCandidates = new() { PlaceholderText = "Select an explicit provenance candidate" };
+    private readonly TextBox _placementX = new(); private readonly TextBox _placementY = new(); private readonly TextBox _placementZ = new();
+    private readonly TextBox _placementRotX = new(); private readonly TextBox _placementRotY = new(); private readonly TextBox _placementRotZ = new();
+    private readonly TextBox _placementScale = new();
+    private readonly TextBlock _placementStatus = Info("Select an existing MDDF or MODF placement to edit its transform safely.");
     private readonly TextBox _heightDelta = new() { Text = "0", PlaceholderText = "Signed terrain height delta" };
     private readonly TextBox _brushCenterX = new() { Text = "8", PlaceholderText = "Center X (0–16)" };
     private readonly TextBox _brushCenterY = new() { Text = "8", PlaceholderText = "Center Y (0–16)" };
@@ -86,6 +91,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private AdtTextureLayerPlan? _texturePlan;
     private AdtTextureStructurePlan? _textureStructurePlan;
     private AdtAlphaBrushPlan? _alphaPlan;
+    private AdtPlacementTransformPlan? _placementPlan;
     private uint? _pendingLightingId;
 
     public event EventHandler? BackRequested;
@@ -100,9 +106,12 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var openWmo = new Button { Content = "Preview extracted WMO…" }; openWmo.Click += async (_, _) => await PickWmoAsync();
         var chooseWmoLibrary = new Button { Content = "Choose processed library…" }; chooseWmoLibrary.Click += async (_, _) => await PickWmoLibraryAsync();
         var previewReference = new Button { Content = "Preview selected object" }; previewReference.Click += async (_, _) => await PreviewSelectedObjectAsync();
+        var previewPlacement = new Button { Content = "Preview placement transform" }; previewPlacement.Click += async (_, _) => await PreviewPlacementTransformAsync();
+        var savePlacement = new Button { Content = "Write placement-edited ADT…" }; savePlacement.Click += async (_, _) => await SavePlacementTransformAsync();
         var buildScene = new Button { Content = "Build terrain + placement scene" }; buildScene.Click += async (_, _) => await BuildMapSceneAsync(buildScene);
-        _wmoReferences.SelectionChanged += async (_, _) => await ResolveSelectedWmoAsync();
+        _wmoReferences.SelectionChanged += async (_, _) => { LoadPlacementFields(); await ResolveSelectedWmoAsync(); };
         _wmoCandidates.SelectionChanged += (_, _) => DescribeSelectedWmoCandidate();
+        foreach (var input in PlacementInputs()) input.TextChanged += (_, _) => _placementPlan = null;
         _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
         var selectAll = new Button { Content = "Select all present" }; selectAll.Click += (_, _) => _grid.SelectAllPresent();
         var clear = new Button { Content = "Clear selection" }; clear.Click += (_, _) => _grid.ClearSelection();
@@ -145,7 +154,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
                 Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable."), Label("ADT TEXTURE LAYER"), TextureFields(), new WrapPanel { Children = { previewTexture, saveTexture } }, Info("Reassigns an existing MCLY layer slot to one of this ADT's existing MTEX textures."), Label("ADD MTEX + MCLY LAYER"), NewTextureFields(), new WrapPanel { Children = { previewNewTexture, saveNewTexture } }, Info("Appends one client-relative BLP to MTEX and adds a matching MCLY/MCAL layer to every selected cell. Wrath's four-layer limit is enforced. Auto preserves the tile's existing packed-versus-8-bit alpha family; mixed or evidence-free tiles require an explicit encoding."), Label("ADT ALPHA TEXTURE BRUSH"), AlphaFields(), _alphaRestrict, new WrapPanel { Children = { previewAlpha, saveAlpha } }, Info("Uses the click-positioned center and radius above to paint an existing additional layer toward alpha 0–255. Packed, big, and RLE maps preserve their current fixed-width encoding; an RLE stroke that cannot fit is refused instead of shifting MCNK offsets."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
             }
         };
-        var wmoResolver = new StackPanel { Margin = new Thickness(7), Spacing = 5, Children = { _wmoLibrary, new WrapPanel { Children = { chooseWmoLibrary, previewReference, openWmo } }, _wmoReferences, _wmoCandidates } };
+        var wmoResolver = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(7), Spacing = 6, Children = { _wmoLibrary, new WrapPanel { Children = { chooseWmoLibrary, previewReference, openWmo } }, _wmoReferences, _wmoCandidates, Label("EXISTING PLACEMENT TRANSFORM"), PlacementFields(), new WrapPanel { Children = { previewPlacement, savePlacement } }, _placementStatus } } };
         var wmoFooter = new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _wmoStatus }; Grid.SetRow(wmoFooter, 2);
         var objectPreviewHost = new Grid { Children = { _wmoPreview, _m2Preview } }; Grid.SetRow(objectPreviewHost, 1);
         var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, objectPreviewHost, wmoFooter } };
@@ -181,7 +190,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             _path.Text = Path.GetFullPath(path!); _status.Text = $"Inspecting {Path.GetFileName(path)}…";
             var loaded = await Task.Run(() => { token.ThrowIfCancellationRequested(); var inspection = MapAssetInspectionService.Inspect(path!); var textureResult = inspection.Kind == MapAssetKind.Adt ? TryInspectTextures(path!) : (Inspection: (AdtTextureLayerInspection?)null, Error: (string?)null); var alphaResult = inspection.Kind == MapAssetKind.Adt ? TryInspectAlpha(path!) : (Inspection: (AdtAlphaMapInspection?)null, Error: (string?)null); return (inspection, textureResult, alphaResult); }, token); var inspection = loaded.inspection;
             if (token.IsCancellationRequested) return;
-            _inspection = inspection; _textureSourceInspection = _textureInspection = loaded.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = loaded.alphaResult.Inspection; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; _mapScene.ClearScene(); _sceneProvenance.ItemsSource = null; _sceneStatus.Text = inspection.Kind == MapAssetKind.Adt ? "ADT loaded. Build the composed scene to discover effective-client and raw-provenance coverage." : "Terrain scene composition requires an ADT tile."; SetTextureChoices(_textureInspection); _grid.SetInspection(inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(inspection); _selected.Text = "Select a present grid cell for exact terrain, texture-layer, and alpha-map metadata.";
+            _inspection = inspection; _textureSourceInspection = _textureInspection = loaded.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = loaded.alphaResult.Inspection; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; _placementPlan = null; _mapScene.ClearScene(); _sceneProvenance.ItemsSource = null; _sceneStatus.Text = inspection.Kind == MapAssetKind.Adt ? "ADT loaded. Build the composed scene to discover effective-client and raw-provenance coverage." : "Terrain scene composition requires an ADT tile."; SetTextureChoices(_textureInspection); _grid.SetInspection(inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(inspection); _selected.Text = "Select a present grid cell for exact terrain, texture-layer, and alpha-map metadata.";
             _chunks.ItemsSource = inspection.Chunks.Select(chunk => $"{chunk.Id} · {chunk.Occurrences:N0} chunk(s) · {chunk.PayloadBytes:N0} bytes").ToArray();
             _dependencies.ItemsSource = inspection.TexturePaths.Select(value => "Texture · " + value).Concat(inspection.ModelPaths.Select(value => "Model · " + value)).Concat(inspection.WmoPaths.Select(value => "WMO · " + value)).DefaultIfEmpty("No path-list dependencies in this file.").ToArray();
             _wmoCandidates.ItemsSource = null;
@@ -442,6 +451,87 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return;
         _wmoLibrary.Text = Path.GetFullPath(path); _wmoLibraryIndex = null; _session.Settings.ProcessedAssetLibraryPath = _wmoLibrary.Text; _session.Settings.Save(); await ResolveSelectedWmoAsync();
     }
+
+    private Control PlacementFields()
+    {
+        var grid = new Grid { ColumnDefinitions = new("Auto,*,*,*"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 6, RowSpacing = 5 };
+        AddPlacementRow(grid, 0, "Position X / Y / Z", _placementX, _placementY, _placementZ);
+        AddPlacementRow(grid, 1, "Rotation X / Y / Z", _placementRotX, _placementRotY, _placementRotZ);
+        var scaleLabel = Label("Scale"); Grid.SetRow(scaleLabel, 2); grid.Children.Add(scaleLabel); Grid.SetRow(_placementScale, 2); Grid.SetColumn(_placementScale, 1); Grid.SetColumnSpan(_placementScale, 3); grid.Children.Add(_placementScale);
+        return grid;
+    }
+
+    private static void AddPlacementRow(Grid grid, int row, string label, params Control[] controls)
+    {
+        var text = Label(label); Grid.SetRow(text, row); grid.Children.Add(text);
+        for (var index = 0; index < controls.Length; index++) { Grid.SetRow(controls[index], row); Grid.SetColumn(controls[index], index + 1); grid.Children.Add(controls[index]); }
+    }
+
+    private IEnumerable<TextBox> PlacementInputs() => [_placementX, _placementY, _placementZ, _placementRotX, _placementRotY, _placementRotZ, _placementScale];
+
+    private void LoadPlacementFields()
+    {
+        _placementPlan = null; var reference = _wmoReferences.SelectedItem as MapObjectReferenceChoice;
+        Vector3? position = reference?.M2Placement?.Position ?? reference?.WmoPlacement?.Position;
+        Vector3? orientation = reference?.M2Placement?.Orientation ?? reference?.WmoPlacement?.Orientation;
+        var scale = reference?.M2Placement?.Scale ?? reference?.WmoPlacement?.Scale;
+        if (position is null || orientation is null || scale is null)
+        {
+            foreach (var input in PlacementInputs()) { input.Text = string.Empty; input.IsEnabled = false; }
+            _placementStatus.Text = "This is a path reference without an MDDF/MODF placement record. Select a placed M2 or WMO to edit a transform."; return;
+        }
+        _placementX.Text = Format(position.Value.X); _placementY.Text = Format(position.Value.Y); _placementZ.Text = Format(position.Value.Z);
+        _placementRotX.Text = Format(orientation.Value.X); _placementRotY.Text = Format(orientation.Value.Y); _placementRotZ.Text = Format(orientation.Value.Z); _placementScale.Text = Format(scale.Value);
+        foreach (var input in new[] { _placementX, _placementY, _placementZ }) input.IsEnabled = true;
+        var isM2 = reference?.M2Placement is not null; foreach (var input in new[] { _placementRotX, _placementRotY, _placementRotZ, _placementScale }) input.IsEnabled = isM2;
+        _placementStatus.Text = isM2
+            ? $"MDDF index {reference!.M2Placement!.Index:N0} · UID {reference.M2Placement.UniqueId:N0}. Position, rotation, and fixed-point scale are editable."
+            : $"MODF index {reference!.WmoPlacement!.Index:N0} · UID {reference.WmoPlacement.UniqueId:N0}. Translation moves both world extents exactly; rotation/scale stay locked until geometry-bound bounds reconstruction is available.";
+    }
+
+    private async Task PreviewPlacementTransformAsync()
+    {
+        try
+        {
+            if (_inspection?.Kind != MapAssetKind.Adt) throw new InvalidOperationException("Load a WotLK ADT before editing object placements.");
+            if (_wmoReferences.SelectedItem is not MapObjectReferenceChoice reference || reference.M2Placement is null && reference.WmoPlacement is null) throw new InvalidOperationException("Select an existing MDDF or MODF placement row first.");
+            var position = new Vector3(Number(_placementX, "placement X"), Number(_placementY, "placement Y"), Number(_placementZ, "placement Z"));
+            AdtPlacementTransformPlan plan;
+            if (reference.M2Placement is { } m2)
+            {
+                var orientation = new Vector3(Number(_placementRotX, "rotation X"), Number(_placementRotY, "rotation Y"), Number(_placementRotZ, "rotation Z"));
+                var scale = Number(_placementScale, "placement scale"); var rawScale = AdtPlacementTransformService.EncodeScale(scale);
+                plan = await Task.Run(() => AdtPlacementTransformService.Plan(_inspection.Path, AdtPlacementKind.M2, m2.Index, position, orientation, rawScale));
+                if (_wmoCandidates.SelectedItem is AssetCandidateChoice choice) await LoadM2Async(choice.Location.SourcePath, m2 with { Position = plan.EditedPosition.ToVector3(), Orientation = plan.EditedOrientation.ToVector3(), ScaleRaw = plan.EditedScaleRaw });
+            }
+            else
+            {
+                var wmo = reference.WmoPlacement!; plan = await Task.Run(() => AdtPlacementTransformService.Plan(_inspection.Path, AdtPlacementKind.Wmo, wmo.Index, position));
+                _wmoPreview.SetPlacement(wmo with { Position = plan.EditedPosition.ToVector3(), MinimumExtent = plan.EditedMinimumExtent!.ToVector3(), MaximumExtent = plan.EditedMaximumExtent!.ToVector3() });
+            }
+            _placementPlan = plan;
+            _placementStatus.Text = $"Preview only · {plan.Kind} index {plan.Index:N0} / UID {plan.UniqueId:N0} · position {VectorText(plan.OriginalPosition)} → {VectorText(plan.EditedPosition)}" + (plan.Kind == AdtPlacementKind.M2 ? $" · rotation {VectorText(plan.OriginalOrientation)} → {VectorText(plan.EditedOrientation)} · scale {plan.OriginalScaleRaw / 1024f:0.###} → {plan.EditedScaleRaw / 1024f:0.###}" : " · MODF minimum/maximum extents translated by the same delta") + " · source bytes unchanged";
+            _status.Text = "Placement transform preview is ready. Write creates a separate hash-bound ADT plus receipt.";
+        }
+        catch (Exception exception) { _placementStatus.Text = exception.Message; DesktopCrashLogger.Log("ADT placement transform preview failed", exception); }
+    }
+
+    private async Task SavePlacementTransformAsync()
+    {
+        try
+        {
+            if (_placementPlan is null) { await PreviewPlacementTransformAsync(); if (_placementPlan is null) return; }
+            var top = TopLevel.GetTopLevel(this); if (top is null) return; var stem = Path.GetFileNameWithoutExtension(_placementPlan.InputPath);
+            var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Write a separate placement-edited ADT", SuggestedFileName = stem + "-placement-edit.adt", DefaultExtension = "adt", FileTypeChoices = [new FilePickerFileType("WoW ADT") { Patterns = ["*.adt"] }] });
+            var output = file?.TryGetLocalPath(); if (output is null) return; _placementStatus.Text = "Writing one placement record and verifying every MDDF/MODF row…";
+            var result = await Task.Run(() => AdtPlacementTransformService.Apply(_placementPlan, output, overwrite: false)); await OpenAsync(result.OutputPath);
+            _status.Text = $"Wrote {result.Kind} placement index {result.Index:N0} / UID {result.UniqueId:N0} atomically · receipt {Path.GetFileName(result.ReceiptPath)} · original retained";
+        }
+        catch (Exception exception) { _placementStatus.Text = exception.Message; DesktopCrashLogger.Log("ADT placement transform write failed", exception); }
+    }
+
+    private static string Format(float value) => value.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+    private static string VectorText(AdtPlacementVector value) => $"{value.X:0.###},{value.Y:0.###},{value.Z:0.###}";
 
     private async Task ResolveSelectedWmoAsync()
     {
