@@ -37,12 +37,14 @@ public sealed record StaticM2DownportPlan(
     public IReadOnlyList<ushort> OutputTransparencyLookup { get; init; } = [];
     public IReadOnlyList<ushort> OutputTextureAnimationLookup { get; init; } = [];
     public IReadOnlyList<string> OutputMaterialCombiners { get; init; } = [];
+    public IReadOnlyList<M2ParticleZSourceTranslation> ParticleZSourceTranslations { get; init; } = [];
     public int ParticleEmitterCount { get; init; }
     public bool UsesBlendOverrides => OutputBlendOverrides.Count > 0;
     public bool TranslatesMaterials => OutputMaterialCombiners.Count > 0;
 }
 
 public sealed record M2ResolvedTexturePath(int TextureIndex, uint FileDataId, string ClientPath);
+public sealed record M2ParticleZSourceTranslation(int ParticleIndex, float Value);
 
 public sealed record StaticM2DownportResult(
     int FormatVersion,
@@ -82,7 +84,7 @@ public sealed record StaticM2DownportScanResult(
 /// </summary>
 public static class StaticM2DownportService
 {
-    private const int PlanFormatVersion = 7;
+    private const int PlanFormatVersion = 8;
     private const int ReceiptFormatVersion = 1;
     private const uint ModernVersion = 274;
     private const uint WotlkVersion = 264;
@@ -124,6 +126,7 @@ public static class StaticM2DownportService
         var blockers = new List<string>(); var transformations = new List<string>(); var losses = new List<string>();
         var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0, globalSequenceCount = 0, animationSequenceCount = 0, particleEmitterCount = 0;
         byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false; var omittedSingleProfileLdv1 = false; var omittedNeutralExp2 = false; var constantColorTracks = 0;
+        IReadOnlyList<M2ParticleZSourceTranslation> particleZSourceTranslations = [];
         var materialTranslation = MaterialTranslation.None;
         FileDataIdListfileSnapshot? listfile = null; var resolvedTextures = new List<M2ResolvedTexturePath>();
 
@@ -198,7 +201,12 @@ public static class StaticM2DownportService
                     var textureCount = Count(payload, 0x50, "texture", blockers);
                     ValidateArray(payload, 0x50, 0x54, 16, "textures", blockers);
                     ValidateModernParticles(payload, particleEmitterCount, boneCount, textureCount, globalSequenceCount, blockers);
-                    if (exp2.Length == 1 && ValidateNeutralExp2(source, exp2[0], particleEmitterCount, blockers)) omittedNeutralExp2 = true;
+                    if (exp2.Length == 1)
+                    {
+                        var exp2Analysis = AnalyzeExp2(source, exp2[0], particleEmitterCount, animationSequenceCount, blockers);
+                        omittedNeutralExp2 = exp2Analysis.Valid && exp2Analysis.ZSourceTranslations.Count == 0;
+                        particleZSourceTranslations = exp2Analysis.ZSourceTranslations;
+                    }
                     ValidateArray(payload, 0x58, 0x5C, 20, "transparency tracks", blockers);
                     var textureOffset = Offset(payload, 0x54, "textures", blockers);
                     ValidateArray(payload, 0x70, 0x74, 4, "render flags", blockers);
@@ -282,7 +290,8 @@ public static class StaticM2DownportService
             transformations.Add("Pad material transparency/texture-animation lookup spans with explicit none values; dangling references to absent definitions are canonicalized to none.");
         }
         if (constantColorTracks > 0) transformations.Add($"Preserve {constantColorTracks:N0} single-key constant color track(s) after validating both nested RGB and opacity series.");
-        if (particleEmitterCount > 0) transformations.Add($"Repack {particleEmitterCount:N0} validated modern particle emitter record(s) from 492 to Wrath's 476-byte stride while preserving every legacy field and referenced animation/lifetime payload byte-for-byte.");
+        if (particleEmitterCount > 0) transformations.Add($"Repack {particleEmitterCount:N0} validated modern particle emitter record(s) from 492 to Wrath's 476-byte stride while preserving every untranslated legacy field and referenced animation/lifetime payload byte-for-byte.");
+        if (particleZSourceTranslations.Count > 0) transformations.Add($"Translate {particleZSourceTranslations.Count:N0} EXP2 Z-source override(s) into exact one-key Wrath particle tracks for every embedded animation sequence.");
         if (resolvedTextures.Count > 0) transformations.Add($"Embed {resolvedTextures.Count:N0} listfile-resolved texture path(s) into the Wrath M2 payload and remove the external FileDataID dependency.");
         transformations.Add("Repack modern SKIN v3 common arrays into the Wrath SKIN v2 header without changing their contents.");
         if (omittedEmptyTxac) transformations.Add("Omit the proven zero-filled TXAC extension chunk; it contains no texture-animation values to translate.");
@@ -296,6 +305,10 @@ public static class StaticM2DownportService
             transformations.Add("Omit the verified neutral EXP2 particle extension after proving every Z-source offset is zero, both multipliers are one, and every alpha-cutoff curve is empty.");
             losses.Add("Wrath has no EXP2 particle-extension chunk; only identity-valued EXP2 metadata with no visual effect is omitted.");
         }
+        else if (particleZSourceTranslations.Count > 0)
+        {
+            transformations.Add("Omit EXP2 only after migrating every nonzero Z-source override and proving its remaining color/alpha multipliers and alpha-cutoff curves are neutral.");
+        }
         var outputFlags = flags & ~ClearedModernFlagMask;
         if (materialTranslation.BlendOverrides.Count > 0) outputFlags |= 0x8;
         return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, listfile?.SourcePath, listfile?.SourceSha256, resolvedTextures, version, flags,
@@ -307,6 +320,7 @@ public static class StaticM2DownportService
             OutputTransparencyLookup = materialTranslation.TransparencyLookup,
             OutputTextureAnimationLookup = materialTranslation.TextureAnimationLookup,
             OutputMaterialCombiners = materialTranslation.MaterialCombiners,
+            ParticleZSourceTranslations = particleZSourceTranslations,
             ParticleEmitterCount = particleEmitterCount
         };
     }
@@ -396,7 +410,8 @@ public static class StaticM2DownportService
                 var bytes = Encoding.UTF8.GetBytes(resolved.ClientPath + "\0"); var pathOffset = payload.Length; Array.Resize(ref payload, checked(payload.Length + bytes.Length)); bytes.CopyTo(payload, pathOffset);
                 var item = checked(textureOffset + resolved.TextureIndex * 16); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(item + 8, 4), checked((uint)bytes.Length)); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(item + 12, 4), checked((uint)pathOffset));
             }
-            AppendLegacyParticles(ref payload, originalPayload, current.ParticleEmitterCount);
+            var outputParticleOffset = AppendLegacyParticles(ref payload, originalPayload, current.ParticleEmitterCount);
+            ApplyParticleZSourceTranslations(ref payload, outputParticleOffset, current.AnimationSequenceCount, current.ParticleZSourceTranslations);
             var outputColorBlockers = new List<string>(); var outputColorCount = Count(payload, 0x48, "output color track", outputColorBlockers);
             if (outputColorCount != current.ConstantColorTrackCount || (outputColorCount > 0 && !ValidateConstantColorTracks(payload, outputColorCount, outputColorBlockers)))
                 throw new InvalidDataException("Converted M2 color tracks failed independent constant-track validation: " + string.Join("; ", outputColorBlockers));
@@ -757,32 +772,42 @@ public static class StaticM2DownportService
         var count = U32(data, offset); if (count > MaximumArrayCount || !HasRange(data, UIntOffset(U32(data, offset + 4)), (int)count, stride)) blockers.Add($"{label} range is invalid.");
     }
 
-    private static bool ValidateNeutralExp2(byte[] source, Chunk chunk, int particleCount, List<string> blockers)
+    private static Exp2Analysis AnalyzeExp2(byte[] source, Chunk chunk, int particleCount, int animationSequenceCount, List<string> blockers)
     {
-        if (chunk.Size > int.MaxValue) { blockers.Add("EXP2 is too large to validate safely."); return false; }
+        if (chunk.Size > int.MaxValue) { blockers.Add("EXP2 is too large to validate safely."); return Exp2Analysis.Invalid; }
         var start = checked((int)chunk.DataOffset); var size = checked((int)chunk.Size);
-        if (size < 16) { blockers.Add("EXP2 is shorter than its verified 16-byte header."); return false; }
+        if (size < 16) { blockers.Add("EXP2 is shorter than its verified 16-byte header."); return Exp2Analysis.Invalid; }
         var count = U32(source, start); var relativeOffset = U32(source, start + 4);
-        if (count != particleCount || relativeOffset != 16) { blockers.Add($"EXP2 does not match the verified particle mapping: {count:N0} record(s) at relative offset {relativeOffset:N0} for {particleCount:N0} emitter(s)."); return false; }
-        if (source.AsSpan(start + 8, 8).IndexOfAnyExcept((byte)0) >= 0 || (long)relativeOffset + (long)count * 28 > size) { blockers.Add("EXP2 has an unsupported header or record range."); return false; }
-        var neutral = true; var records = start + (int)relativeOffset;
+        if (count != particleCount || relativeOffset != 16) { blockers.Add($"EXP2 does not match the verified particle mapping: {count:N0} record(s) at relative offset {relativeOffset:N0} for {particleCount:N0} emitter(s)."); return Exp2Analysis.Invalid; }
+        if (source.AsSpan(start + 8, 8).IndexOfAnyExcept((byte)0) >= 0 || (long)relativeOffset + (long)count * 28 > size) { blockers.Add("EXP2 has an unsupported header or record range."); return Exp2Analysis.Invalid; }
+        var valid = true; var translations = new List<M2ParticleZSourceTranslation>(); var records = start + (int)relativeOffset;
         for (var index = 0; index < count; index++)
         {
             var item = records + index * 28; var z = BitConverter.ToSingle(source, item); var color = BitConverter.ToSingle(source, item + 4); var alpha = BitConverter.ToSingle(source, item + 8);
             var timeCount = U32(source, item + 12); var timeOffset = U32(source, item + 16); var valueCount = U32(source, item + 20); var valueOffset = U32(source, item + 24);
-            if (!float.IsFinite(z) || !float.IsFinite(color) || !float.IsFinite(alpha) || z != 0 || color != 1 || alpha != 1 || timeCount != 0 || timeOffset != 0 || valueCount != 0 || valueOffset != 0)
+            if (!float.IsFinite(z) || !float.IsFinite(color) || !float.IsFinite(alpha))
             {
-                blockers.Add($"EXP2 record {index:N0} carries non-neutral Z-source, color/alpha multiplier, or alpha-cutoff data that Wrath cannot represent."); neutral = false;
+                blockers.Add($"EXP2 record {index:N0} contains a non-finite Z-source or color/alpha multiplier."); valid = false; continue;
             }
+            if (color != 1 || alpha != 1 || timeCount != 0 || timeOffset != 0 || valueCount != 0 || valueOffset != 0)
+            {
+                blockers.Add($"EXP2 record {index:N0} carries non-neutral color/alpha multiplier or alpha-cutoff data that has no verified Wrath representation."); valid = false; continue;
+            }
+            if (z == 0) continue;
+            if (animationSequenceCount == 0)
+            {
+                blockers.Add($"EXP2 record {index:N0} carries Z-source {z:R}, but the model has no animation sequence in which to author an exact Wrath track."); valid = false; continue;
+            }
+            translations.Add(new(index, z));
         }
         var logicalEnd = checked((int)relativeOffset + (int)count * 28);
-        if (source.AsSpan(start + logicalEnd, size - logicalEnd).IndexOfAnyExcept((byte)0) >= 0) { blockers.Add("EXP2 contains nonzero trailing extension bytes outside the verified records."); neutral = false; }
-        return neutral;
+        if (source.AsSpan(start + logicalEnd, size - logicalEnd).IndexOfAnyExcept((byte)0) >= 0) { blockers.Add("EXP2 contains nonzero trailing extension bytes outside the verified records."); valid = false; }
+        return valid ? new(true, translations) : Exp2Analysis.Invalid;
     }
 
-    private static void AppendLegacyParticles(ref byte[] payload, byte[] source, int count)
+    private static int AppendLegacyParticles(ref byte[] payload, byte[] source, int count)
     {
-        if (count == 0) return;
+        if (count == 0) return -1;
         var sourceOffset = checked((int)U32(source, 0x12C));
         if (!HasRange(source, sourceOffset, count, ModernParticleStride)) throw new InvalidDataException("Planned modern particle-emitter range is no longer valid.");
         var outputOffset = Align(payload.Length, 16); Array.Resize(ref payload, checked(outputOffset + count * WotlkParticleStride));
@@ -791,6 +816,40 @@ public static class StaticM2DownportService
         for (var index = 0; index < count; index++)
             if (!source.AsSpan(sourceOffset + index * ModernParticleStride, WotlkParticleStride).SequenceEqual(payload.AsSpan(outputOffset + index * WotlkParticleStride, WotlkParticleStride)))
                 throw new InvalidDataException($"Particle emitter {index:N0} was not preserved byte-for-byte while changing record stride.");
+        return outputOffset;
+    }
+
+    private static void ApplyParticleZSourceTranslations(ref byte[] payload, int particleOffset, int animationSequenceCount, IReadOnlyList<M2ParticleZSourceTranslation> translations)
+    {
+        if (translations.Count == 0) return;
+        if (particleOffset < 0 || animationSequenceCount <= 0) throw new InvalidDataException("The immutable EXP2 Z-source plan has no valid Wrath particle/animation target.");
+        foreach (var translation in translations)
+        {
+            if (translation.ParticleIndex < 0 || !HasRange(payload, particleOffset + translation.ParticleIndex * WotlkParticleStride, 1, WotlkParticleStride) || !float.IsFinite(translation.Value))
+                throw new InvalidDataException($"The immutable EXP2 Z-source translation for emitter {translation.ParticleIndex:N0} is invalid.");
+            var seriesBytes = checked(animationSequenceCount * 8);
+            var outerTimes = Align(payload.Length, 4); var outerValues = checked(outerTimes + seriesBytes);
+            var timeKey = checked(outerValues + seriesBytes); var valueKey = checked(timeKey + 4);
+            Array.Resize(ref payload, checked(valueKey + 4));
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(timeKey, 4), 0);
+            BitConverter.GetBytes(translation.Value).CopyTo(payload, valueKey);
+            for (var sequence = 0; sequence < animationSequenceCount; sequence++)
+            {
+                WriteArray(payload, outerTimes + sequence * 8, 1, timeKey);
+                WriteArray(payload, outerValues + sequence * 8, 1, valueKey);
+            }
+            var track = checked(particleOffset + translation.ParticleIndex * WotlkParticleStride + 240);
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(track, 2), 0);
+            BinaryPrimitives.WriteInt16LittleEndian(payload.AsSpan(track + 2, 2), -1);
+            WriteArray(payload, track + 4, animationSequenceCount, outerTimes);
+            WriteArray(payload, track + 12, animationSequenceCount, outerValues);
+        }
+
+        static void WriteArray(byte[] target, int offset, int count, int dataOffset)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(target.AsSpan(offset, 4), checked((uint)count));
+            BinaryPrimitives.WriteUInt32LittleEndian(target.AsSpan(offset + 4, 4), checked((uint)dataOffset));
+        }
     }
 
     private static int UIntOffset(uint value) => value > int.MaxValue ? -1 : (int)value;
@@ -898,6 +957,10 @@ public static class StaticM2DownportService
     private static int Align(int value, int alignment) => checked((value + alignment - 1) / alignment * alignment);
 
     private sealed record Chunk(string Id, long Offset, long DataOffset, uint Size);
+    private sealed record Exp2Analysis(bool Valid, IReadOnlyList<M2ParticleZSourceTranslation> ZSourceTranslations)
+    {
+        public static Exp2Analysis Invalid { get; } = new(false, []);
+    }
     private sealed record MaterialSource(ushort Shader, ushort Stages, ushort TransparencyCombo, ushort AnimationCombo);
     private sealed record MaterialTranslation(bool Enabled, IReadOnlyList<short> TextureCoordinates, IReadOnlyList<ushort> BlendOverrides,
         IReadOnlyList<ushort> MaterialShaderIds, IReadOnlyList<ushort> TransparencyLookup, IReadOnlyList<ushort> TextureAnimationLookup,

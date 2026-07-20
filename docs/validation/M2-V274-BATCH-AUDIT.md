@@ -80,16 +80,16 @@ The stable `G:\Crucible-Converted-Assets\classic-1-static-m2` payload now contai
 
 The 15 particle-bearing helmet models contained 37 emitters. Crucible now validates every modern 492-byte record, its ten scalar animation tracks, enabled track, five normalized lifetime/cell curves, optional filenames/spline array, bone/texture references, blend/type fields, and the 16-byte post-Cataclysm tail. Every tail in this corpus is zero. Conversion appends a new contiguous 476-byte Wrath emitter table and proves every output record is byte-identical to the legacy prefix of its source record; referenced payload offsets therefore remain unchanged. The native `0x00800000` packed-gravity flag and four-byte vector keys are preserved rather than passed through MultiConverter's disabled, mathematically incorrect expansion routine.
 
-Six particle models also carry EXP2. Three use identity Z/color/alpha values and empty alpha-cutoff curves, so that metadata is explicitly loss-accounted and omitted. The other three carry real Z-source or alpha-cutoff behavior and remain blocked. No non-neutral EXP2 value is guessed or stripped.
+Six particle models also carry EXP2. Three use identity Z/color/alpha values and empty alpha-cutoff curves, so that metadata is explicitly loss-accounted and omitted. One priest helmet uses two finite nonzero Z-source overrides with identity color/alpha multipliers and empty alpha-cutoff curves. Crucible now authors exact timestamp-zero, one-key native Wrath Z-source tracks for its single embedded animation sequence; the output independently reloads with `-1.1111112` and `-1.388889`. The other two models carry alpha-cutoff behavior and remain blocked. No multiplier or cutoff behavior is guessed or stripped.
 
 The same 112-model corpus then produced:
 
-- Eligible and converted M2/SKIN pairs: 106
-- Explicitly blocked: 6
+- Eligible and converted M2/SKIN pairs: 107
+- Explicitly blocked: 5
 - Read/parse/conversion failures: 0
 - Newly supported particle pairs: 12
-- Particle emitters validated: 37 across 15 source models; 30 were preserved across 12 outputs and the 7 emitters in 3 non-neutral EXP2 models remain blocked
-- Byte comparison against the previous payload: all 188 overlapping M2/SKIN files identical, 0 changed
-- New output files: 24 (12 M2 and 12 SKIN)
+- Particle emitters validated: 37 across 15 source models; 32 are represented across 13 outputs and the 5 emitters in 2 alpha-cutoff models remain blocked
+- Byte comparison against the preceding particle payload: all 212 overlapping M2/SKIN files identical, 0 changed
+- New output files: 2 (the newly translated M2 and its SKIN)
 
-The independently published audit tree is `G:\Crucible-Converted-Assets\classic-1-static-m2-particle-audit`. The six blockers are two full character models with multi-SKIN/AFID/BFID/camera/attachment/event requirements, one mixed packed/explicit-shader helmet, and three non-neutral EXP2 helmets.
+The independently published audit tree is `G:\Crucible-Converted-Assets\classic-1-static-m2-exp2-z-audit`. The five blockers are two full character models with multi-SKIN/AFID/BFID/camera/attachment/event requirements, one mixed packed/explicit-shader helmet, and two EXP2 alpha-cutoff helmets.
