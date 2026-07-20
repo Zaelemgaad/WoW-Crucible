@@ -13,10 +13,16 @@ public static class M2PreviewSceneService
         if (!Finite(orientationDegrees) || !float.IsFinite(scale) || scale < 0 || worldPosition is { } position && !Finite(position))
             throw new ArgumentException("Map-object orientation, scale, and optional position must be finite; scale cannot be negative.");
         static float Radians(float degrees) => degrees * MathF.PI / 180f;
+        // WMO/M2 vertices use the server/model axis order while ADT placement
+        // coordinates use world X/Y/Z. AzerothCore's extractor expresses the
+        // same rotation as Euler XYZ(-rot.z, -rot.x, -rot.y) under G3D's
+        // convention. With System.Numerics row vectors that is X(rot.z),
+        // Y(rot.x), Z(rot.y), followed by server (x,y,z) -> ADT (y,z,x).
+        var serverToAdt = new Matrix4x4(0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1);
         var result = Matrix4x4.CreateScale(scale) *
-            Matrix4x4.CreateRotationX(Radians(orientationDegrees.X)) *
-            Matrix4x4.CreateRotationY(Radians(orientationDegrees.Y)) *
-            Matrix4x4.CreateRotationZ(Radians(orientationDegrees.Z));
+            Matrix4x4.CreateRotationX(Radians(orientationDegrees.Z)) *
+            Matrix4x4.CreateRotationY(Radians(orientationDegrees.X)) *
+            Matrix4x4.CreateRotationZ(Radians(orientationDegrees.Y)) * serverToAdt;
         if (worldPosition is { } translation) result *= Matrix4x4.CreateTranslation(translation);
         return Finite(result) ? result : throw new InvalidDataException("Map-object placement produced a non-finite preview transform.");
     }

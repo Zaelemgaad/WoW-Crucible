@@ -32,7 +32,11 @@ public sealed record AdtPlacementTransformPlan(
     AdtPlacementVector? OriginalMinimumExtent,
     AdtPlacementVector? OriginalMaximumExtent,
     AdtPlacementVector? EditedMinimumExtent,
-    AdtPlacementVector? EditedMaximumExtent);
+    AdtPlacementVector? EditedMaximumExtent,
+    string? WmoRootPath = null,
+    string? WmoRootSha256 = null,
+    AdtPlacementVector? WmoDeclaredMinimum = null,
+    AdtPlacementVector? WmoDeclaredMaximum = null);
 
 public sealed record AdtPlacementTransformResult(
     string OutputPath,
@@ -45,10 +49,10 @@ public sealed record AdtPlacementTransformResult(
 
 /// <summary>
 /// Safely edits an existing Wrath ADT placement without rebuilding unrelated
-/// chunks. M2 placements may move, rotate, and scale. WMO placements may move;
-/// their already-world-space MODF extents are translated by the exact delta.
-/// WMO rotation/scale requires source-geometry bound extent reconstruction and
-/// is deliberately refused here instead of leaving stale collision bounds.
+/// chunks. M2 placements may move, rotate, and scale. WMO translation can
+/// retain its already-world-space bounds by exact delta; WMO rotation/scale is
+/// accepted only when an exact, hash-bound version-17 root reproduces the
+/// original MODF bounds and supplies its authoritative MOHD local bounds.
 /// </summary>
 public static class AdtPlacementTransformService
 {
@@ -65,7 +69,7 @@ public static class AdtPlacementTransformService
     }
 
     public static AdtPlacementTransformPlan Plan(string inputPath, AdtPlacementKind kind, int index,
-        Vector3? position = null, Vector3? orientation = null, ushort? scaleRaw = null)
+        Vector3? position = null, Vector3? orientation = null, ushort? scaleRaw = null, string? wmoRootPath = null)
     {
         inputPath = Path.GetFullPath(inputPath);
         var inspection = MapAssetInspectionService.Inspect(inputPath);
@@ -84,21 +88,31 @@ public static class AdtPlacementTransformService
             return new(FormatVersion, DateTimeOffset.UtcNow, inspection.Path, Sha256(inspection.Path), kind, index, source.UniqueId, source.NameId, source.ClientPath,
                 AdtPlacementVector.From(source.Position), AdtPlacementVector.From(source.Orientation), source.ScaleRaw,
                 AdtPlacementVector.From(editedPosition), AdtPlacementVector.From(editedOrientation), editedScale,
-                null, null, null, null);
+                null, null, null, null, null, null, null, null);
         }
 
         var wmo = inspection.WmoPlacements.ElementAtOrDefault(index) ?? throw new ArgumentOutOfRangeException(nameof(index), $"WMO placement index {index:N0} does not exist; this ADT has {inspection.WmoPlacements.Count:N0} WMO placements.");
         var wmoPosition = position ?? wmo.Position; var wmoOrientation = orientation ?? wmo.Orientation; var wmoScale = scaleRaw ?? wmo.ScaleRaw;
         RequireFinite(wmoPosition, "edited WMO position"); RequireFinite(wmoOrientation, "edited WMO orientation");
-        if (!Same(wmoOrientation, wmo.Orientation) || wmoScale != wmo.ScaleRaw)
-            throw new NotSupportedException("This guarded path moves WMO placements only. Rotation or scale would require recomputing MODF world extents from the exact WMO geometry, so Crucible refused to leave stale collision/visibility bounds.");
-        if (Same(wmoPosition, wmo.Position)) throw new InvalidOperationException("The edited WMO position is byte-identical to the current placement; no plan is required.");
-        var delta = wmoPosition - wmo.Position; var editedMinimum = wmo.MinimumExtent + delta; var editedMaximum = wmo.MaximumExtent + delta;
+        var transformChanged = !Same(wmoOrientation, wmo.Orientation) || wmoScale != wmo.ScaleRaw;
+        if (Same(wmoPosition, wmo.Position) && !transformChanged) throw new InvalidOperationException("The edited WMO transform is byte-identical to the current placement; no plan is required.");
+        if (transformChanged && string.IsNullOrWhiteSpace(wmoRootPath)) throw new NotSupportedException("WMO rotation/scale requires --wmo-root or an explicitly resolved WMO root in Maps & World so Crucible can reconstruct and verify the MODF world extents.");
+        WmoRootBoundsEvidence? root = null; Vector3 editedMinimum; Vector3 editedMaximum;
+        if (transformChanged)
+        {
+            root = WmoPlacementBoundsService.InspectRoot(wmoRootPath!); RequireMatchingWmoPath(wmo.ClientPath, root.RootPath); WmoPlacementBoundsService.RequireCalibrated(wmo, root);
+            var bounds = WmoPlacementBoundsService.Calculate(root, wmoPosition, wmoOrientation, Scale(wmoScale)); editedMinimum = bounds.Minimum; editedMaximum = bounds.Maximum;
+        }
+        else
+        {
+            var delta = wmoPosition - wmo.Position; editedMinimum = wmo.MinimumExtent + delta; editedMaximum = wmo.MaximumExtent + delta;
+        }
         RequireFinite(editedMinimum, "edited WMO minimum extent"); RequireFinite(editedMaximum, "edited WMO maximum extent");
         return new(FormatVersion, DateTimeOffset.UtcNow, inspection.Path, Sha256(inspection.Path), kind, index, wmo.UniqueId, wmo.NameId, wmo.ClientPath,
             AdtPlacementVector.From(wmo.Position), AdtPlacementVector.From(wmo.Orientation), wmo.ScaleRaw,
-            AdtPlacementVector.From(wmoPosition), AdtPlacementVector.From(wmo.Orientation), wmo.ScaleRaw,
-            AdtPlacementVector.From(wmo.MinimumExtent), AdtPlacementVector.From(wmo.MaximumExtent), AdtPlacementVector.From(editedMinimum), AdtPlacementVector.From(editedMaximum));
+            AdtPlacementVector.From(wmoPosition), AdtPlacementVector.From(wmoOrientation), wmoScale,
+            AdtPlacementVector.From(wmo.MinimumExtent), AdtPlacementVector.From(wmo.MaximumExtent), AdtPlacementVector.From(editedMinimum), AdtPlacementVector.From(editedMaximum),
+            root?.RootPath, root?.Sha256, root is null ? null : AdtPlacementVector.From(root.DeclaredMinimum), root is null ? null : AdtPlacementVector.From(root.DeclaredMaximum));
     }
 
     public static void SavePlan(AdtPlacementTransformPlan plan, string path, bool overwrite = false)
@@ -152,6 +166,7 @@ public static class AdtPlacementTransformService
             if (source.UniqueId != plan.UniqueId || source.NameId != plan.NameId || !string.Equals(source.ClientPath, plan.ClientPath, StringComparison.OrdinalIgnoreCase) || !Same(source.Position, plan.OriginalPosition.ToVector3()) || !Same(source.Orientation, plan.OriginalOrientation.ToVector3()) || source.ScaleRaw != plan.OriginalScaleRaw || plan.EditedScaleRaw == 0)
                 throw new InvalidDataException("The planned M2 placement identity or transform preimage no longer matches the source ADT.");
             if (plan.OriginalMinimumExtent is not null || plan.OriginalMaximumExtent is not null || plan.EditedMinimumExtent is not null || plan.EditedMaximumExtent is not null) throw new InvalidDataException("M2 placement plans cannot contain MODF extent edits.");
+            if (plan.WmoRootPath is not null || plan.WmoRootSha256 is not null || plan.WmoDeclaredMinimum is not null || plan.WmoDeclaredMaximum is not null) throw new InvalidDataException("M2 placement plans cannot contain WMO root evidence.");
             if (Same(source.Position, plan.EditedPosition.ToVector3()) && Same(source.Orientation, plan.EditedOrientation.ToVector3()) && source.ScaleRaw == plan.EditedScaleRaw) throw new InvalidDataException("M2 placement plan contains no transform change.");
         }
         else
@@ -159,12 +174,25 @@ public static class AdtPlacementTransformService
             var source = inspection.WmoPlacements.ElementAtOrDefault(plan.Index) ?? throw new InvalidDataException("The planned WMO placement index no longer exists.");
             if (source.UniqueId != plan.UniqueId || source.NameId != plan.NameId || !string.Equals(source.ClientPath, plan.ClientPath, StringComparison.OrdinalIgnoreCase) || !Same(source.Position, plan.OriginalPosition.ToVector3()) || !Same(source.Orientation, plan.OriginalOrientation.ToVector3()) || source.ScaleRaw != plan.OriginalScaleRaw)
                 throw new InvalidDataException("The planned WMO placement identity or transform preimage no longer matches the source ADT.");
-            if (!Same(plan.EditedOrientation.ToVector3(), source.Orientation) || plan.EditedScaleRaw != source.ScaleRaw) throw new InvalidDataException("WMO placement plans may translate only; rotation/scale requires geometry-bound extent reconstruction.");
-            if (Same(plan.EditedPosition.ToVector3(), source.Position)) throw new InvalidDataException("WMO placement plan contains no position change.");
             if (plan.OriginalMinimumExtent is null || plan.OriginalMaximumExtent is null || plan.EditedMinimumExtent is null || plan.EditedMaximumExtent is null ||
                 !Same(source.MinimumExtent, plan.OriginalMinimumExtent.ToVector3()) || !Same(source.MaximumExtent, plan.OriginalMaximumExtent.ToVector3())) throw new InvalidDataException("WMO placement plan extents do not match the source MODF record.");
-            var delta = plan.EditedPosition.ToVector3() - source.Position;
-            if (!Same(source.MinimumExtent + delta, plan.EditedMinimumExtent.ToVector3()) || !Same(source.MaximumExtent + delta, plan.EditedMaximumExtent.ToVector3())) throw new InvalidDataException("WMO placement plan did not translate both world extents by the exact position delta.");
+            var evidenceValues = new object?[] { plan.WmoRootPath, plan.WmoRootSha256, plan.WmoDeclaredMinimum, plan.WmoDeclaredMaximum }; var hasEvidence = evidenceValues.Any(value => value is not null);
+            if (hasEvidence && evidenceValues.Any(value => value is null)) throw new InvalidDataException("WMO placement root evidence is incomplete.");
+            var transformChanged = !Same(plan.EditedOrientation.ToVector3(), source.Orientation) || plan.EditedScaleRaw != source.ScaleRaw;
+            if (Same(plan.EditedPosition.ToVector3(), source.Position) && !transformChanged) throw new InvalidDataException("WMO placement plan contains no transform change.");
+            if (transformChanged && !hasEvidence) throw new InvalidDataException("WMO rotation/scale requires complete geometry-bound root evidence.");
+            if (hasEvidence)
+            {
+                var root = WmoPlacementBoundsService.InspectRoot(plan.WmoRootPath!); RequireMatchingWmoPath(source.ClientPath, root.RootPath);
+                if (!root.Sha256.Equals(plan.WmoRootSha256, StringComparison.OrdinalIgnoreCase) || !Same(root.DeclaredMinimum, plan.WmoDeclaredMinimum!.ToVector3()) || !Same(root.DeclaredMaximum, plan.WmoDeclaredMaximum!.ToVector3())) throw new InvalidDataException("WMO root hash or declared MOHD bounds no longer match the reviewed placement plan.");
+                WmoPlacementBoundsService.RequireCalibrated(source, root); var expected = WmoPlacementBoundsService.Calculate(root, plan.EditedPosition.ToVector3(), plan.EditedOrientation.ToVector3(), Scale(plan.EditedScaleRaw));
+                if (!Same(expected.Minimum, plan.EditedMinimumExtent.ToVector3()) || !Same(expected.Maximum, plan.EditedMaximumExtent.ToVector3())) throw new InvalidDataException("WMO placement plan extents do not match its hash-bound root geometry and edited transform.");
+            }
+            else
+            {
+                var delta = plan.EditedPosition.ToVector3() - source.Position;
+                if (!Same(source.MinimumExtent + delta, plan.EditedMinimumExtent.ToVector3()) || !Same(source.MaximumExtent + delta, plan.EditedMaximumExtent.ToVector3())) throw new InvalidDataException("WMO placement plan did not translate both world extents by the exact position delta.");
+            }
         }
         return inspection;
     }
@@ -179,7 +207,7 @@ public static class AdtPlacementTransformService
         }
         for (var index = 0; index < before.WmoPlacements.Count; index++)
         {
-            var expected = before.WmoPlacements[index]; if (plan.Kind == AdtPlacementKind.Wmo && index == plan.Index) expected = expected with { Position = plan.EditedPosition.ToVector3(), MinimumExtent = plan.EditedMinimumExtent!.ToVector3(), MaximumExtent = plan.EditedMaximumExtent!.ToVector3() };
+            var expected = before.WmoPlacements[index]; if (plan.Kind == AdtPlacementKind.Wmo && index == plan.Index) expected = expected with { Position = plan.EditedPosition.ToVector3(), Orientation = plan.EditedOrientation.ToVector3(), ScaleRaw = plan.EditedScaleRaw, MinimumExtent = plan.EditedMinimumExtent!.ToVector3(), MaximumExtent = plan.EditedMaximumExtent!.ToVector3() };
             if (after.WmoPlacements[index] != expected) throw new InvalidDataException($"Written ADT WMO placement {index:N0} did not re-parse to the exact reviewed record.");
         }
     }
@@ -204,6 +232,12 @@ public static class AdtPlacementTransformService
     }
     private static void WriteVector(byte[] bytes, int offset, AdtPlacementVector value) { BitConverter.GetBytes(value.X).CopyTo(bytes, offset); BitConverter.GetBytes(value.Y).CopyTo(bytes, offset + 4); BitConverter.GetBytes(value.Z).CopyTo(bytes, offset + 8); }
     private static bool Same(Vector3 left, Vector3 right) => BitConverter.SingleToInt32Bits(left.X) == BitConverter.SingleToInt32Bits(right.X) && BitConverter.SingleToInt32Bits(left.Y) == BitConverter.SingleToInt32Bits(right.Y) && BitConverter.SingleToInt32Bits(left.Z) == BitConverter.SingleToInt32Bits(right.Z);
+    private static float Scale(ushort raw) => raw == 0 ? 1f : raw / 1024f;
+    private static void RequireMatchingWmoPath(string? clientPath, string rootPath)
+    {
+        if (string.IsNullOrWhiteSpace(clientPath)) throw new InvalidDataException("The MODF row has no resolved MWMO client path, so an external WMO root cannot be identity-bound safely.");
+        if (!Path.GetFileName(clientPath.Replace('\\', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar)).Equals(Path.GetFileName(rootPath), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Selected WMO root '{Path.GetFileName(rootPath)}' does not match MODF client path '{clientPath}'.");
+    }
     private static void RequireFinite(Vector3 value, string label) { if (!float.IsFinite(value.X) || !float.IsFinite(value.Y) || !float.IsFinite(value.Z)) throw new InvalidDataException($"{label} must contain three finite values."); }
     private static string Decode(ReadOnlySpan<byte> raw) => new string(Encoding.ASCII.GetString(raw).Reverse().ToArray());
     private static string Sha256(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }

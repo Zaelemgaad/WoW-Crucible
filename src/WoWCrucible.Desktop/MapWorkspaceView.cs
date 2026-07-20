@@ -110,7 +110,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var savePlacement = new Button { Content = "Write placement-edited ADT…" }; savePlacement.Click += async (_, _) => await SavePlacementTransformAsync();
         var buildScene = new Button { Content = "Build terrain + placement scene" }; buildScene.Click += async (_, _) => await BuildMapSceneAsync(buildScene);
         _wmoReferences.SelectionChanged += async (_, _) => { LoadPlacementFields(); await ResolveSelectedWmoAsync(); };
-        _wmoCandidates.SelectionChanged += (_, _) => DescribeSelectedWmoCandidate();
+        _wmoCandidates.SelectionChanged += (_, _) => { _placementPlan = null; DescribeSelectedWmoCandidate(); };
         foreach (var input in PlacementInputs()) input.TextChanged += (_, _) => _placementPlan = null;
         _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
         var selectAll = new Button { Content = "Select all present" }; selectAll.Click += (_, _) => _grid.SelectAllPresent();
@@ -482,11 +482,11 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         }
         _placementX.Text = Format(position.Value.X); _placementY.Text = Format(position.Value.Y); _placementZ.Text = Format(position.Value.Z);
         _placementRotX.Text = Format(orientation.Value.X); _placementRotY.Text = Format(orientation.Value.Y); _placementRotZ.Text = Format(orientation.Value.Z); _placementScale.Text = Format(scale.Value);
-        foreach (var input in new[] { _placementX, _placementY, _placementZ }) input.IsEnabled = true;
-        var isM2 = reference?.M2Placement is not null; foreach (var input in new[] { _placementRotX, _placementRotY, _placementRotZ, _placementScale }) input.IsEnabled = isM2;
+        foreach (var input in PlacementInputs()) input.IsEnabled = true;
+        var isM2 = reference?.M2Placement is not null;
         _placementStatus.Text = isM2
             ? $"MDDF index {reference!.M2Placement!.Index:N0} · UID {reference.M2Placement.UniqueId:N0}. Position, rotation, and fixed-point scale are editable."
-            : $"MODF index {reference!.WmoPlacement!.Index:N0} · UID {reference.WmoPlacement.UniqueId:N0}. Translation moves both world extents exactly; rotation/scale stay locked until geometry-bound bounds reconstruction is available.";
+            : $"MODF index {reference!.WmoPlacement!.Index:N0} · UID {reference.WmoPlacement.UniqueId:N0}. Translation is always available. Rotation/scale bind the exact resolved version-17 WMO root and rebuild both world extents from its declared MOHD geometry bounds.";
     }
 
     private async Task PreviewPlacementTransformAsync()
@@ -506,11 +506,15 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             }
             else
             {
-                var wmo = reference.WmoPlacement!; plan = await Task.Run(() => AdtPlacementTransformService.Plan(_inspection.Path, AdtPlacementKind.Wmo, wmo.Index, position));
-                _wmoPreview.SetPlacement(wmo with { Position = plan.EditedPosition.ToVector3(), MinimumExtent = plan.EditedMinimumExtent!.ToVector3(), MaximumExtent = plan.EditedMaximumExtent!.ToVector3() });
+                var wmo = reference.WmoPlacement!; var orientation = new Vector3(Number(_placementRotX, "rotation X"), Number(_placementRotY, "rotation Y"), Number(_placementRotZ, "rotation Z"));
+                var scale = Number(_placementScale, "placement scale"); var rawScale = wmo.ScaleRaw == 0 && BitConverter.SingleToInt32Bits(scale) == BitConverter.SingleToInt32Bits(1f) ? (ushort)0 : AdtPlacementTransformService.EncodeScale(scale);
+                var rootPath = (_wmoCandidates.SelectedItem as AssetCandidateChoice)?.Location.SourcePath;
+                plan = await Task.Run(() => AdtPlacementTransformService.Plan(_inspection.Path, AdtPlacementKind.Wmo, wmo.Index, position, orientation, rawScale, rootPath));
+                var edited = wmo with { Position = plan.EditedPosition.ToVector3(), Orientation = plan.EditedOrientation.ToVector3(), ScaleRaw = plan.EditedScaleRaw, MinimumExtent = plan.EditedMinimumExtent!.ToVector3(), MaximumExtent = plan.EditedMaximumExtent!.ToVector3() };
+                if (rootPath is not null) await LoadWmoAsync(rootPath, edited); else _wmoPreview.SetPlacement(edited);
             }
             _placementPlan = plan;
-            _placementStatus.Text = $"Preview only · {plan.Kind} index {plan.Index:N0} / UID {plan.UniqueId:N0} · position {VectorText(plan.OriginalPosition)} → {VectorText(plan.EditedPosition)}" + (plan.Kind == AdtPlacementKind.M2 ? $" · rotation {VectorText(plan.OriginalOrientation)} → {VectorText(plan.EditedOrientation)} · scale {plan.OriginalScaleRaw / 1024f:0.###} → {plan.EditedScaleRaw / 1024f:0.###}" : " · MODF minimum/maximum extents translated by the same delta") + " · source bytes unchanged";
+            _placementStatus.Text = $"Preview only · {plan.Kind} index {plan.Index:N0} / UID {plan.UniqueId:N0} · position {VectorText(plan.OriginalPosition)} → {VectorText(plan.EditedPosition)} · rotation {VectorText(plan.OriginalOrientation)} → {VectorText(plan.EditedOrientation)} · scale {ScaleText(plan.OriginalScaleRaw)} → {ScaleText(plan.EditedScaleRaw)}" + (plan.Kind == AdtPlacementKind.Wmo ? plan.WmoRootPath is null ? " · MODF extents translated by exact delta" : $" · MODF extents rebuilt from hash-bound {Path.GetFileName(plan.WmoRootPath)} MOHD bounds" : string.Empty) + " · source bytes unchanged";
             _status.Text = "Placement transform preview is ready. Write creates a separate hash-bound ADT plus receipt.";
         }
         catch (Exception exception) { _placementStatus.Text = exception.Message; DesktopCrashLogger.Log("ADT placement transform preview failed", exception); }
@@ -532,6 +536,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
 
     private static string Format(float value) => value.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
     private static string VectorText(AdtPlacementVector value) => $"{value.X:0.###},{value.Y:0.###},{value.Z:0.###}";
+    private static string ScaleText(ushort raw) => (raw == 0 ? 1f : raw / 1024f).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
 
     private async Task ResolveSelectedWmoAsync()
     {
