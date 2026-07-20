@@ -1849,7 +1849,7 @@ if (Directory.Exists(desktopSourceRoot))
         !mapWorkspaceSource.Contains("Crucible never mixes patches", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("AdtTerrainMaterialService.Load", StringComparison.Ordinal) ||
         !mapWorkspaceSource.Contains("Preview add / clone", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("Review delete", StringComparison.Ordinal) ||
         !mapWorkspaceSource.Contains("AdtPlacementLifecycleService.PlanAdd", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("AdtPlacementLifecycleService.PlanDelete", StringComparison.Ordinal) ||
-        !mapWorkspaceSource.Contains("AdtPlacementLifecycleService.Apply", StringComparison.Ordinal) ||
+        !mapWorkspaceSource.Contains("AdtPlacementLifecycleService.Apply", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled", StringComparison.Ordinal) ||
         !mapSceneSource.Contains("M2PreviewSceneService.MapObjectTransform", StringComparison.Ordinal) || !mapSceneSource.Contains("MCLY/MCAL terrain materials", StringComparison.Ordinal) ||
         !mapSceneSource.Contains("SKVertices.CreateCopy", StringComparison.Ordinal))
         throw new InvalidOperationException("Same-window exact-provenance ADT terrain and placed-object scene composition regressed.");
