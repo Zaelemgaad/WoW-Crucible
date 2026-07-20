@@ -42,6 +42,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
     private readonly TextBox _raceToken = new() { PlaceholderText = "Client file/path token" };
     private readonly TextBox _raceMaleDisplay = new() { PlaceholderText = "Optional reviewed male CreatureDisplayInfo ID" };
     private readonly TextBox _raceFemaleDisplay = new() { PlaceholderText = "Optional reviewed female CreatureDisplayInfo ID" };
+    private readonly TextBox _raceAppearanceSource = new() { PlaceholderText = "Optional extracted source-layer DBC folder to promote from" };
     private readonly TextBox _raceAssetLibrary = new() { PlaceholderText = "Optional processed asset library for exact closure" };
     private readonly TextBox _raceAssetProvenance = new() { PlaceholderText = "Optional exact provenance; blank requires unambiguous bytes" };
     private readonly TextBox _raceOutput = new() { PlaceholderText = "New/empty bundle output folder…" };
@@ -66,7 +67,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         _root.TextChanged += (_, _) => { InvalidateClassPlan(); InvalidateRacePlan(); };
         _dbc.TextChanged += (_, _) => { InvalidateReport(); InvalidateClassPlan(); InvalidateRacePlan(); }; _schema.TextChanged += (_, _) => { InvalidateReport(); InvalidateClassPlan(); InvalidateRacePlan(); }; _manualIds.TextChanged += (_, _) => InvalidateReport();
         foreach (var field in new[] { _classSource, _classTarget, _className, _classToken, _classPower }) field.TextChanged += (_, _) => InvalidateClassPlan();
-        foreach (var field in new[] { _raceSource, _raceTarget, _raceName, _racePrefix, _raceToken, _raceMaleDisplay, _raceFemaleDisplay, _raceAssetLibrary, _raceAssetProvenance }) field.TextChanged += (_, _) => InvalidateRacePlan();
+        foreach (var field in new[] { _raceSource, _raceTarget, _raceName, _racePrefix, _raceToken, _raceMaleDisplay, _raceFemaleDisplay, _raceAppearanceSource, _raceAssetLibrary, _raceAssetProvenance }) field.TextChanged += (_, _) => InvalidateRacePlan();
 
         _sources.ItemTemplate = new FuncDataTemplate<ContentIdOccupancySource>((source, _) => source is null ? new TextBlock() : new Grid
         {
@@ -109,6 +110,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         var latestRace = new Button { Content = "Use latest reserved Race ID" }; latestRace.Click += (_, _) => UseLatestRaceReservation();
         var browseRaceOutput = new Button { Content = "Browse…" }; browseRaceOutput.Click += async (_, _) => await PickFolderAsync(_raceOutput, "Choose a new or empty playable-race bundle folder");
         var browseRaceAssets = new Button { Content = "Browse…" }; browseRaceAssets.Click += async (_, _) => await PickFolderAsync(_raceAssetLibrary, "Choose the processed asset library for exact race appearance closure");
+        var browseRaceAppearanceSource = new Button { Content = "Browse…" }; browseRaceAppearanceSource.Click += async (_, _) => await PickFolderAsync(_raceAppearanceSource, "Choose extracted source-layer DBCs containing the reviewed displays");
         var useProjectRaceAssets = new Button { Content = "Use project library" }; useProjectRaceAssets.Click += (_, _) => { if (string.IsNullOrWhiteSpace(_assetLibrary.Text)) _raceStatus.Text = "This project has no asset library configured."; else _raceAssetLibrary.Text = _assetLibrary.Text; };
         var racePlan = Accent("Create dependency plan"); racePlan.Click += async (_, _) => await PlanRaceAsync();
         var raceBuild = Accent("Build reviewed bundle"); raceBuild.Click += async (_, _) => await BuildRaceAsync();
@@ -138,13 +140,13 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         } } };
         var classEvidence = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Margin = new Thickness(12), Children = { new TextBlock { Text = "Dependency evidence", FontSize = 17, FontWeight = FontWeight.SemiBold }, WithRow(_classDetails, 1) } };
         var classBody = new ResponsiveSplitGrid(classConfiguration, classEvidence);
-        var raceForm = Form(("Source race ID", _raceSource), ("Reserved target ID", Row(_raceTarget, latestRace)), ("Race name", _raceName), ("Client prefix", _racePrefix), ("Client file token", _raceToken), ("Male display", _raceMaleDisplay), ("Female display", _raceFemaleDisplay), ("Asset library", Row(_raceAssetLibrary, new WrapPanel { Children = { useProjectRaceAssets, browseRaceAssets } })), ("Asset provenance", _raceAssetProvenance), ("Bundle output", Row(_raceOutput, browseRaceOutput)));
+        var raceForm = Form(("Source race ID", _raceSource), ("Reserved target ID", Row(_raceTarget, latestRace)), ("Race name", _raceName), ("Client prefix", _racePrefix), ("Client file token", _raceToken), ("Male display", _raceMaleDisplay), ("Female display", _raceFemaleDisplay), ("Display source DBCs", Row(_raceAppearanceSource, browseRaceAppearanceSource)), ("Asset library", Row(_raceAssetLibrary, new WrapPanel { Children = { useProjectRaceAssets, browseRaceAssets } })), ("Asset provenance", _raceAssetProvenance), ("Bundle output", Row(_raceOutput, browseRaceOutput)));
         var raceConfiguration = new ScrollViewer { Content = new StackPanel { Spacing = 10, Margin = new Thickness(12), Children =
         {
             new TextBlock { Text = "PLAYABLE RACE BUNDLE", FontSize = 17, FontWeight = FontWeight.SemiBold },
             Status("Clones the complete WotLK character-creation surface for one source race: race identity, playable classes, appearances, barber/hair/facial options, outfits, names, vocal/emote data, faction reputation masks, skills, talents, and recognized SQL starting/stat rows. Nothing is applied live."),
             raceForm, new WrapPanel { Children = { connectRace, racePlan, raceBuild, cancelRace } }, _raceStatus,
-            Status("Blank display fields reuse the source race. Reviewed overrides must already exist as complete CreatureDisplayInfo → CreatureModelData chains in the authoritative DBC folder. Supplying a processed library packages an exact same-provenance M2/SKIN/texture dependency closure; missing or different-byte ambiguity blocks the build.")
+            Status("Blank display fields reuse the source race. Without Display source DBCs, reviewed overrides must already exist in the authoritative folder. With a source DBC folder, both display fields identify source-layer records and Crucible promotes their complete model/display dependencies together with semantic deduplication and collision-safe ID/reference remapping. A processed library packages the exact same-provenance M2/SKIN/texture closure.")
         } } };
         var raceEvidence = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Margin = new Thickness(12), Children = { new TextBlock { Text = "Dependency evidence", FontSize = 17, FontWeight = FontWeight.SemiBold }, WithRow(_raceDetails, 1) } };
         var raceBody = new ResponsiveSplitGrid(raceConfiguration, raceEvidence);
@@ -320,12 +322,17 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         var root = RequiredPath(_root.Text, "Open or create a Crucible project first."); _ = CrucibleContentProjectService.Load(root); if (!uint.TryParse(_raceSource.Text, out var source) || source is 0 or > 31) throw new FormatException("Source race ID must be from 1 through 31."); if (!uint.TryParse(_raceTarget.Text, out var target) || target is 0 or > 31) throw new FormatException("Target race ID must be from 1 through 31.");
         var name = (_raceName.Text ?? string.Empty).Trim(); if (name.Length == 0) throw new FormatException("Enter the new race name."); var prefix = (_racePrefix.Text ?? string.Empty).Trim(); if (prefix.Length == 0) throw new FormatException("Enter the client prefix, such as Cr."); var token = (_raceToken.Text ?? string.Empty).Trim(); if (token.Length == 0) throw new FormatException("Enter the client file token, such as CrucibleRace.");
         uint? male = ParseOptionalDisplay(_raceMaleDisplay.Text, "Male"); uint? female = ParseOptionalDisplay(_raceFemaleDisplay.Text, "Female");
-        return (root, source, target, name, prefix, token, new(male, female, EmptyNull(_raceAssetLibrary.Text), EmptyNull(_raceAssetProvenance.Text)));
+        return (root, source, target, name, prefix, token, new(male, female, EmptyNull(_raceAssetLibrary.Text), EmptyNull(_raceAssetProvenance.Text), EmptyNull(_raceAppearanceSource.Text)));
     }
 
     private void ShowRacePlan(PlayableRaceClonePlan plan)
     {
         var details = new List<string> { $"SOURCE  {plan.SourceRaceId:N0} · {plan.SourceRaceName}", $"TARGET  {plan.TargetRaceId:N0} · {plan.TargetRaceName} · {plan.TargetClientPrefix} · {plan.TargetFileToken}", $"BINDING {plan.ContentSha256}" };
+        if (plan.AppearancePromotion is not null)
+        {
+            details.Add($"PROMOTE {plan.AppearancePromotion.SourceDbcRoot} → authoritative DBCs · add {plan.AppearancePromotion.AddedRows:N0} · reuse {plan.AppearancePromotion.ReusedRows:N0}");
+            details.AddRange(plan.AppearancePromotion.Bindings.Select(binding => $"MAP     {binding.Role.ToUpperInvariant()} · display {binding.SourceDisplayId:N0} → {binding.TargetDisplayId:N0} · model {binding.SourceModelId:N0} → {binding.TargetModelId:N0}"));
+        }
         details.AddRange(plan.DisplayBindings.Select(binding => $"DISPLAY {binding.Role.ToUpperInvariant()} · ID {binding.DisplayId:N0} · model {binding.ModelId:N0} · {binding.ModelClientPath} · provenance {binding.EffectiveProvenance ?? "target client assumed"} · {binding.Assets.Count:N0} packaged file(s)"));
         details.AddRange(plan.DisplayBindings.SelectMany(binding => binding.Assets).DistinctBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase).Select(asset => $"ASSET   {asset.ClientPath} · {asset.Provenance} · {asset.Sha256}"));
         details.AddRange(plan.DbcTables.Select(table => $"DBC     {table.Table} · {table.AffectedRows:N0} row(s) · {table.Action}")); details.AddRange(plan.SqlTables.Select(table => $"SQL     {table.Table} · source {table.SourceRows:N0} · plan {table.Rows.Count:N0} · covered {table.AlreadyCovered:N0} · conflicts {table.Conflicts:N0}")); details.AddRange(plan.Blockers.Select(value => $"BLOCKER {value}")); details.AddRange(plan.Warnings.Select(value => $"WARNING {value}")); _raceDetails.ItemsSource = details;

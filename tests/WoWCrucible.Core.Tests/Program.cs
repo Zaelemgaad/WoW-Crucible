@@ -2040,6 +2040,34 @@ try
     catch (InvalidDataException) { }
 }
 finally { if (File.Exists(boundAssetFixture)) File.Delete(boundAssetFixture); }
+var appearanceBatchRoot = Path.Combine(Path.GetTempPath(), $"crucible-appearance-batch-{Guid.NewGuid():N}");
+try
+{
+    var sourceRoot = Path.Combine(appearanceBatchRoot, "source"); var targetRoot = Path.Combine(appearanceBatchRoot, "target"); Directory.CreateDirectory(sourceRoot); Directory.CreateDirectory(targetRoot);
+    foreach (var table in new[] { "CreatureDisplayInfo", "CreatureModelData" })
+    {
+        File.Copy(Path.Combine(args[1], table + ".dbc"), Path.Combine(sourceRoot, table + ".dbc")); File.Copy(Path.Combine(args[1], table + ".dbc"), Path.Combine(targetRoot, table + ".dbc"));
+    }
+    var batchSourceDisplay = WdbcFile.Load(Path.Combine(sourceRoot, "CreatureDisplayInfo.dbc")); var batchSourceModel = WdbcFile.Load(Path.Combine(sourceRoot, "CreatureModelData.dbc"));
+    var batchDisplayResolution = creatureSchemas.ResolveColumns("CreatureDisplayInfo", batchSourceDisplay.FieldCount); var batchModelResolution = creatureSchemas.ResolveColumns("CreatureModelData", batchSourceModel.FieldCount);
+    var batchDisplayIdColumn = batchDisplayResolution.Columns.First(column => column.Name.Equals("ID", StringComparison.OrdinalIgnoreCase)); var batchDisplayModelColumn = batchDisplayResolution.Columns.First(column => column.Name.Equals("ModelID", StringComparison.OrdinalIgnoreCase)); var batchExtraColumn = batchDisplayResolution.Columns.First(column => column.Name.Equals("ExtendedDisplayInfoID", StringComparison.OrdinalIgnoreCase)); var batchAlphaColumn = batchDisplayResolution.Columns.First(column => column.Name.Equals("CreatureModelAlpha", StringComparison.OrdinalIgnoreCase));
+    var batchModelIdColumn = batchModelResolution.Columns.First(column => column.Name.Equals("ID", StringComparison.OrdinalIgnoreCase)); var batchModelScaleColumn = batchModelResolution.Columns.First(column => column.Name.Equals("ModelScale", StringComparison.OrdinalIgnoreCase));
+    var batchModelRows = DbcRecordIdentity.IndexRows(batchSourceModel, batchModelResolution.Columns, batchModelResolution.KeyStrategy);
+    var sharedModelGroup = Enumerable.Range(0, batchSourceDisplay.RowCount).Where(row => batchSourceDisplay.GetRaw(row, batchExtraColumn) == 0 && batchModelRows.ContainsKey(batchSourceDisplay.GetRaw(row, batchDisplayModelColumn))).GroupBy(row => batchSourceDisplay.GetRaw(row, batchDisplayModelColumn)).First(group => group.Select(row => batchSourceDisplay.GetRaw(row, batchDisplayIdColumn)).Distinct().Count() >= 2);
+    var batchDisplayRows = sharedModelGroup.Take(2).ToArray(); var batchSourceDisplayIds = batchDisplayRows.Select(row => batchSourceDisplay.GetRaw(row, batchDisplayIdColumn)).ToArray(); var batchSourceModelId = sharedModelGroup.Key; var batchSourceModelRow = batchModelRows[batchSourceModelId];
+    batchSourceModel.SetDisplayValue(batchSourceModelRow, batchModelScaleColumn, 1.2345f); batchSourceDisplay.SetRaw(batchDisplayRows[0], batchAlphaColumn, 254); batchSourceDisplay.SetRaw(batchDisplayRows[1], batchAlphaColumn, 253); batchSourceModel.Save(Path.Combine(sourceRoot, "CreatureModelData.dbc"), true); batchSourceDisplay.Save(Path.Combine(sourceRoot, "CreatureDisplayInfo.dbc"), true);
+    var batchPlan = CreatureAppearancePortService.CreateBatchPlan(sourceRoot, targetRoot, args[0], [new("male", batchSourceDisplayIds[0]), new("female", batchSourceDisplayIds[1])]);
+    var maleBatchBinding = batchPlan.Bindings.Single(binding => binding.Role == "male"); var femaleBatchBinding = batchPlan.Bindings.Single(binding => binding.Role == "female");
+    if (batchPlan.AddedRows != 3 || batchPlan.ChangedTables.Count != 2 || maleBatchBinding.TargetModelId != femaleBatchBinding.TargetModelId || maleBatchBinding.TargetModelId == batchSourceModelId || maleBatchBinding.TargetDisplayId == femaleBatchBinding.TargetDisplayId ||
+        batchPlan.Rows.Count(row => row.Table == "CreatureModelData" && row.AddsRow) != 1 || batchPlan.Rows.Count(row => row.Table == "CreatureDisplayInfo" && row.AddsRow) != 2)
+        throw new InvalidOperationException("Coordinated male/female appearance promotion did not share a collision-remapped model or preserve two genuinely different display rows.");
+    var batchResult = CreatureAppearancePortService.ApplyBatch(batchPlan, Path.Combine(appearanceBatchRoot, "output"));
+    var appliedModels = WdbcFile.Load(batchResult.OutputFiles["CreatureModelData"]); var appliedDisplays = WdbcFile.Load(batchResult.OutputFiles["CreatureDisplayInfo"]); var appliedModelRows = DbcRecordIdentity.IndexRows(appliedModels, batchModelResolution.Columns, batchModelResolution.KeyStrategy); var appliedDisplayRows = DbcRecordIdentity.IndexRows(appliedDisplays, batchDisplayResolution.Columns, batchDisplayResolution.KeyStrategy);
+    if (appliedModels.RowCount != creatureModelFile.RowCount + 1 || appliedDisplays.RowCount != creatureDisplayFile.RowCount + 2 || !appliedModelRows.ContainsKey(maleBatchBinding.TargetModelId) ||
+        appliedDisplays.GetRaw(appliedDisplayRows[maleBatchBinding.TargetDisplayId], batchDisplayModelColumn) != maleBatchBinding.TargetModelId || appliedDisplays.GetRaw(appliedDisplayRows[femaleBatchBinding.TargetDisplayId], batchDisplayModelColumn) != femaleBatchBinding.TargetModelId)
+        throw new InvalidOperationException("Applied appearance batch did not publish the exact collision-remapped model/display graph declared by the plan.");
+}
+finally { if (Directory.Exists(appearanceBatchRoot)) Directory.Delete(appearanceBatchRoot, true); }
 var modelCreatureDisplays = creatureDisplayService.ResolveModelDisplays(args[1], args[0], Path.ChangeExtension(creatureDisplay.ModelClientPath, ".mdx"));
 if (!modelCreatureDisplays.Any(display => display.DisplayId == creatureDisplayId) || modelCreatureDisplays.Any(display => !display.ModelClientPath.Equals(creatureDisplay.ModelClientPath, StringComparison.OrdinalIgnoreCase)))
     throw new InvalidOperationException("Creature model-path appearance lookup did not normalize MDX/M2 paths and return every matching display record.");
@@ -2087,6 +2115,10 @@ foreach (var table in new[] { "CreatureDisplayInfo", "CreatureModelData", "Creat
 var identicalAppearancePlan = CreatureAppearancePortService.CreatePlan(appearancePortSource, appearancePortTarget, args[0], 115);
 if (identicalAppearancePlan.TargetDisplayId != 115 || identicalAppearancePlan.Rows.Count != 9 || identicalAppearancePlan.Rows.Any(row => row.Action != CreatureAppearancePortAction.ReuseSameId) || identicalAppearancePlan.RequiredAssets.Count == 0 || identicalAppearancePlan.ChangedTables.Count != 0)
     throw new InvalidOperationException("Identical creature appearance DBC chains were not reused without producing duplicate rows.");
+var identicalAppearanceBatch = CreatureAppearancePortService.CreateBatchPlan(appearancePortSource, appearancePortTarget, args[0], [new("male", 115), new("female", 115)]);
+if (identicalAppearanceBatch.Bindings.Count != 2 || identicalAppearanceBatch.Bindings.Any(binding => binding.TargetDisplayId != 115) || identicalAppearanceBatch.Rows.Count != 18 || identicalAppearanceBatch.Rows.Any(row => row.Action != CreatureAppearancePortAction.ReuseSameId) || identicalAppearanceBatch.RequiredAssets.Count == 0 || identicalAppearanceBatch.ChangedTables.Count != 0 ||
+    !identicalAppearanceBatch.Rows.Any(row => row.Table.Equals("CreatureDisplayInfoExtra", StringComparison.OrdinalIgnoreCase)) || !identicalAppearanceBatch.Rows.Any(row => row.Table.Equals("ItemDisplayInfo", StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("Coordinated appearance planning did not traverse and semantically reuse a complete display/model/extra/item-display chain for both roles.");
 
 var targetItemDisplayPath = Path.Combine(appearancePortTarget, "ItemDisplayInfo.dbc");
 var targetItemDisplay = WdbcFile.Load(targetItemDisplayPath); var targetItemDisplayColumns = creatureSchemas.ResolveColumns("ItemDisplayInfo", targetItemDisplay.FieldCount).Columns;
