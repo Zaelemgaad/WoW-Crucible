@@ -58,7 +58,8 @@ public sealed record DatabaseSyncPlan(
     string? TargetSchemaSha256 = null,
     string? TranslationProfileName = null,
     string? TranslationProfileSha256 = null,
-    IReadOnlyList<DatabaseSyncTranslationEvidence>? SchemaTranslations = null)
+    IReadOnlyList<DatabaseSyncTranslationEvidence>? SchemaTranslations = null,
+    IReadOnlyList<DatabaseSyncLookupEvidence>? LookupEvidence = null)
 {
     public int Ready => Operations.Count(operation => operation.Status == DatabaseSyncOperationStatus.Ready);
     public int AlreadyApplied => Operations.Count(operation => operation.Status == DatabaseSyncOperationStatus.AlreadyApplied);
@@ -99,7 +100,7 @@ public sealed class DatabaseSynchronizationService
 {
     public const string PlanFormat = "wow-crucible-database-sync-plan";
     public const string ReceiptFormat = "wow-crucible-database-sync-receipt";
-    public const int FormatVersion = 4;
+    public const int FormatVersion = 5;
     public const int ReceiptFormatVersion = 1;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.General)
     {
@@ -197,15 +198,32 @@ public sealed class DatabaseSynchronizationService
         var seeds = candidateOperations.Where(operation => seedTableNames.Contains(operation.Table)).ToArray();
         var sourceAuditSha256 = await Sha256FileAsync(audit, cancellationToken); var targetSchemaSha256 = DatabaseSyncTranslationService.HashTargetSchema(capabilities);
         IReadOnlyList<DatabaseSyncOperation> sourceOperations = seeds; IReadOnlyList<DatabaseSyncDependencyInclusion> dependencyInclusions = [];
-        string? translationProfileName = null; string? translationProfileSha256 = null; IReadOnlyList<DatabaseSyncTranslationEvidence> schemaTranslations = [];
+        string? translationProfileName = null; string? translationProfileSha256 = null; IReadOnlyList<DatabaseSyncTranslationEvidence> schemaTranslations = []; IReadOnlyList<DatabaseSyncLookupEvidence> lookupEvidence = [];
         if (!string.IsNullOrWhiteSpace(options.TranslationProfilePath))
         {
             var translationPath = Path.GetFullPath(options.TranslationProfilePath);
             var translationService = new DatabaseSyncTranslationService(); var profile = await translationService.LoadAsync(translationPath, cancellationToken);
+            var lookupCorpus = candidateOperations.ToList(); var lookupIdentities = lookupCorpus.Select(OperationIdentity).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var auditLookupTables = profile.Tables.SelectMany(rule => rule.Lookups ?? []).Where(lookup => lookup.Source == DatabaseSyncLookupSource.AuditChanges)
+                .Select(lookup => lookup.Table).Where(table => !string.IsNullOrWhiteSpace(table)).Distinct(StringComparer.OrdinalIgnoreCase).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var lookupTable in eligibleTables.Where(table => auditLookupTables.Contains(table.Name)))
+            {
+                await foreach (var change in auditService.ReadChangesAsync(audit, lookupTable.Name, cancellationToken))
+                {
+                    if (change.Kind == LegacyDatabaseRowChangeKind.UnattributedCandidate) continue; var operation = FromAuditChange(change);
+                    if (!lookupIdentities.Add(OperationIdentity(operation))) continue;
+                    if (lookupCorpus.Count >= options.MaximumOperations) throw new InvalidOperationException($"The named-lookup audit corpus exceeded the explicit {options.MaximumOperations:N0}-operation safety limit. Narrow the bridge or raise the limit deliberately.");
+                    lookupCorpus.Add(operation);
+                }
+            }
+            var auditLookups = translationService.ResolveAuditLookups(candidateOperations, profile, sourceAuditSha256, capabilities, lookupCorpus);
+            var targetLookupRequests = translationService.BuildTargetLookupRequests(candidateOperations, profile, sourceAuditSha256, capabilities, lookupCorpus);
+            var targetLookups = await ResolveTargetLookupsAsync(connection, null, target, capabilities, targetLookupRequests, lockRows: false, cancellationToken);
+            var resolvedLookups = auditLookups.Concat(targetLookups).ToArray();
             IReadOnlyList<DatabaseSyncOperation> selectedSource = seeds;
             if (options.IncludeDependencyClosure && patterns.Length > 0)
             {
-                var candidateTranslation = translationService.Translate(candidateOperations, profile, sourceAuditSha256, capabilities);
+                var candidateTranslation = translationService.Translate(candidateOperations, profile, sourceAuditSha256, capabilities, lookupCorpus, resolvedLookups);
                 var translatedCandidates = candidateTranslation.Operations;
                 var lineage = candidateTranslation.SourceOperationIndexes ?? throw new InvalidDataException("Schema bridge translation did not preserve source-row lineage.");
                 if (lineage.Count != translatedCandidates.Count) throw new InvalidDataException("Schema bridge translation returned inconsistent source-row lineage.");
@@ -220,8 +238,8 @@ public sealed class DatabaseSynchronizationService
                 var selectedSourceIndexes = selectedOutputs.Select(pair => pair.SourceIndex).ToHashSet();
                 selectedSource = candidateOperations.Where((_, index) => selectedSourceIndexes.Contains(index)).ToArray();
             }
-            var translation = translationService.Translate(selectedSource, profile, sourceAuditSha256, capabilities);
-            sourceOperations = translation.Operations; schemaTranslations = translation.Evidence; translationProfileName = profile.Name;
+            var translation = translationService.Translate(selectedSource, profile, sourceAuditSha256, capabilities, lookupCorpus, resolvedLookups);
+            sourceOperations = translation.Operations; schemaTranslations = translation.Evidence; lookupEvidence = translation.LookupEvidence ?? []; translationProfileName = profile.Name;
             translationProfileSha256 = await DatabaseSyncTranslationService.Sha256FileAsync(translationPath, cancellationToken);
             if (sourceOperations.Count > options.MaximumOperations) throw new InvalidOperationException($"Structural schema expansion produced {sourceOperations.Count:N0} target operations, exceeding the explicit {options.MaximumOperations:N0}-operation safety limit.");
         }
@@ -258,13 +276,14 @@ public sealed class DatabaseSynchronizationService
                 : $"Dependency closure added {dependencyInclusions.Count:N0} exactly related changed row(s) through declared or named core relationships. Review every recorded causal edge before apply.");
         if (translationProfileSha256 is not null)
             warnings.Add($"Schema bridge '{translationProfileName}' applied {schemaTranslations.Sum(item => item.Operations):N0} reviewed mapping/binding use(s). The exact profile bytes and target schema are hash-bound; every drop, default, rename, expansion, and value binding remains visible.");
+        if (lookupEvidence.Count > 0) warnings.Add($"Resolved {lookupEvidence.Count:N0} exact named row lookup(s): {lookupEvidence.Count(value => value.Source == DatabaseSyncLookupSource.AuditChanges):N0} from audited changed rows and {lookupEvidence.Count(value => value.Source == DatabaseSyncLookupSource.TargetDatabase):N0} from the live target. Target lookups are rechecked under row locks before apply.");
         if (manifest.Warnings.Count > 0) warnings.AddRange(manifest.Warnings.Select(warning => $"Source audit: {warning}"));
         var binding = new DatabaseSyncTarget(target.Host, target.Port, target.User, target.Database, capabilities.ServerVersion);
         var plan = new DatabaseSyncPlan(PlanFormat, FormatVersion, ToolVersion(), DateTimeOffset.UtcNow, sourceAuditSha256,
             binding, options.IncludeRemovals, patterns, remaps, ordered,
             HashPlanContent(sourceAuditSha256, binding, options.IncludeRemovals, patterns, remaps, ordered, options.IncludeDependencyClosure, dependencyInclusions,
-                targetSchemaSha256, translationProfileName, translationProfileSha256, schemaTranslations), warnings,
-            options.IncludeDependencyClosure, dependencyInclusions, targetSchemaSha256, translationProfileName, translationProfileSha256, schemaTranslations);
+                targetSchemaSha256, translationProfileName, translationProfileSha256, schemaTranslations, lookupEvidence), warnings,
+            options.IncludeDependencyClosure, dependencyInclusions, targetSchemaSha256, translationProfileName, translationProfileSha256, schemaTranslations, lookupEvidence);
         await WriteAtomicAsync(output, plan, options.Overwrite, cancellationToken);
         return new(output, plan, new FileInfo(output).Length);
     }
@@ -273,13 +292,15 @@ public sealed class DatabaseSynchronizationService
     {
         await using var stream = new FileStream(Path.GetFullPath(path), FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         var plan = await JsonSerializer.DeserializeAsync<DatabaseSyncPlan>(stream, Json, cancellationToken) ?? throw new InvalidDataException("Synchronization plan is empty.");
-        if (plan.Format != PlanFormat || plan.FormatVersion is not 2 and not 3 and not FormatVersion) throw new InvalidDataException($"Unsupported synchronization plan format {plan.Format} v{plan.FormatVersion}.");
+        if (plan.Format != PlanFormat || plan.FormatVersion is < 2 or > FormatVersion) throw new InvalidDataException($"Unsupported synchronization plan format {plan.Format} v{plan.FormatVersion}.");
         var contentHash = plan.FormatVersion switch
         {
             2 => HashPlanContentV2(plan.SourceAuditSha256, plan.Target, plan.RemovalsIncluded, plan.IncludePatterns, plan.IdRemaps, plan.Operations),
             3 => HashPlanContentV3(plan.SourceAuditSha256, plan.Target, plan.RemovalsIncluded, plan.IncludePatterns, plan.IdRemaps, plan.Operations, plan.DependencyClosureIncluded, plan.DependencyInclusions ?? []),
+            4 => HashPlanContentV4(plan.SourceAuditSha256, plan.Target, plan.RemovalsIncluded, plan.IncludePatterns, plan.IdRemaps, plan.Operations, plan.DependencyClosureIncluded, plan.DependencyInclusions ?? [],
+                plan.TargetSchemaSha256, plan.TranslationProfileName, plan.TranslationProfileSha256, plan.SchemaTranslations ?? []),
             _ => HashPlanContent(plan.SourceAuditSha256, plan.Target, plan.RemovalsIncluded, plan.IncludePatterns, plan.IdRemaps, plan.Operations, plan.DependencyClosureIncluded, plan.DependencyInclusions ?? [],
-                plan.TargetSchemaSha256, plan.TranslationProfileName, plan.TranslationProfileSha256, plan.SchemaTranslations ?? [])
+                plan.TargetSchemaSha256, plan.TranslationProfileName, plan.TranslationProfileSha256, plan.SchemaTranslations ?? [], plan.LookupEvidence ?? [])
         };
         if (!contentHash.Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Synchronization plan content hash mismatch.");
         return plan;
@@ -363,6 +384,7 @@ public sealed class DatabaseSynchronizationService
         var applied = new List<DatabaseSyncOperation>(); var already = 0; var committed = false; string? pendingReceipt = null;
         try
         {
+            await VerifyTargetLookupEvidenceAsync(connection, transaction, target, capabilities, plan.LookupEvidence ?? [], cancellationToken);
             foreach (var planned in OrderOperations(plan.Operations.Where(operation => operation.Status is DatabaseSyncOperationStatus.Ready or DatabaseSyncOperationStatus.AlreadyApplied), capabilities))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -421,6 +443,7 @@ public sealed class DatabaseSynchronizationService
         var builder = new StringBuilder(); builder.AppendLine("-- WoW Crucible target-bound database synchronization preview"); builder.AppendLine($"-- Target: {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}"); builder.AppendLine("-- Apply through Crucible for transactional row locking, exact preimage verification, and a rollback receipt.");
         if (plan.TranslationProfileSha256 is not null) builder.AppendLine($"-- SCHEMA BRIDGE: {plan.TranslationProfileName} · profile SHA-256 {plan.TranslationProfileSha256} · target schema SHA-256 {plan.TargetSchemaSha256}");
         foreach (var translation in plan.SchemaTranslations ?? []) builder.AppendLine($"-- TRANSLATION: {translation.Action} {translation.SourceTable}.{translation.SourceColumn} -> {translation.TargetTable}.{translation.TargetColumn}; {translation.Operations:N0} operation(s). {translation.Description}");
+        foreach (var lookup in plan.LookupEvidence ?? []) builder.AppendLine($"-- LOOKUP: {lookup.SourceDisplayIdentity}; {lookup.LookupName}; {lookup.Source} {lookup.LookupTable} where {string.Join(", ", lookup.Match.Select(part => $"{part.Column}={DisplayLookupValue(part.Value)}"))}; {lookup.ResultColumn}={DisplayLookupValue(lookup.Result)}; matched {lookup.MatchedIdentity}.");
         foreach (var inclusion in plan.DependencyInclusions ?? []) builder.AppendLine($"-- DEPENDENCY: {inclusion.IncludedIdentity} via {inclusion.Relation} ({inclusion.SelectedEndpoint} = {inclusion.IncludedEndpoint} = {inclusion.MatchedValue}); triggered by {inclusion.SelectedIdentity}.");
         foreach (var remap in plan.IdRemaps) builder.AppendLine($"-- ID REMAP: {remap.Table}.{remap.Column} {remap.SourceId} -> {remap.TargetId}; {remap.RewrittenReferences:N0} recognized selected reference(s) rewritten.");
         builder.AppendLine("START TRANSACTION;");
@@ -525,6 +548,75 @@ public sealed class DatabaseSynchronizationService
         public bool Equals((string Table, string Column) x, (string Table, string Column) y) => x.Table.Equals(y.Table, StringComparison.OrdinalIgnoreCase) && x.Column.Equals(y.Column, StringComparison.OrdinalIgnoreCase);
         public int GetHashCode((string Table, string Column) value) => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(value.Table), StringComparer.OrdinalIgnoreCase.GetHashCode(value.Column));
     }
+
+    private sealed record TargetLookupRead(LegacyDatabaseAuditValue? Value, string? MatchedIdentity, string? Finding);
+
+    private static async Task<IReadOnlyList<DatabaseSyncResolvedLookup>> ResolveTargetLookupsAsync(MySqlConnection connection, MySqlTransaction? transaction,
+        DatabaseConnectionProfile target, DatabaseCapabilities capabilities, IReadOnlyList<DatabaseSyncTargetLookupRequest> requests, bool lockRows, CancellationToken cancellationToken)
+    {
+        var results = new List<DatabaseSyncResolvedLookup>(requests.Count); var cache = new Dictionary<string, TargetLookupRead>(StringComparer.Ordinal);
+        foreach (var request in requests)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (request.Finding is not null) { results.Add(new(request.SourceOperationIdentity, request.LookupName, null, request.Finding)); continue; }
+            var cacheKey = Hash(new { request.TargetTable, Match = request.Match.OrderBy(part => part.Column, StringComparer.OrdinalIgnoreCase).ToArray(), request.ResultColumn, lockRows });
+            if (!cache.TryGetValue(cacheKey, out var read))
+            {
+                read = await ReadTargetLookupAsync(connection, transaction, target, capabilities, request.TargetTable, request.Match, request.ResultColumn, lockRows, cancellationToken);
+                cache[cacheKey] = read;
+            }
+            if (read.Finding is not null || read.Value is null)
+            { results.Add(new(request.SourceOperationIdentity, request.LookupName, null, $"Target lookup '{request.LookupName}': {read.Finding ?? "returned no typed value."}")); continue; }
+            var evidence = new DatabaseSyncLookupEvidence(request.SourceOperationIdentity, request.SourceDisplayIdentity, request.LookupName, DatabaseSyncLookupSource.TargetDatabase,
+                request.TargetTable, request.Match, request.ResultColumn, read.Value, read.MatchedIdentity ?? request.TargetTable);
+            results.Add(new(request.SourceOperationIdentity, request.LookupName, read.Value, Evidence: evidence));
+        }
+        return results;
+    }
+
+    private static async Task<TargetLookupRead> ReadTargetLookupAsync(MySqlConnection connection, MySqlTransaction? transaction, DatabaseConnectionProfile target,
+        DatabaseCapabilities capabilities, string tableName, IReadOnlyList<LegacyDatabaseAuditKeyPart> match, string resultColumn, bool lockRow, CancellationToken cancellationToken)
+    {
+        var table = capabilities.FindTable(tableName); if (table is null) return new(null, null, $"table {tableName} does not exist in the bound target schema.");
+        var result = table.Find(resultColumn); if (result is null) return new(null, null, $"result column {table.Name}.{resultColumn} does not exist.");
+        if (match.Count == 0) return new(null, null, "no exact match columns were supplied.");
+        foreach (var part in match) if (table.Find(part.Column) is null) return new(null, null, $"match column {table.Name}.{part.Column} does not exist.");
+        var primaryKey = table.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase)).OrderBy(column => column.Ordinal).ToArray();
+        var selected = match.Select(part => table.Find(part.Column)!).Append(result).Concat(primaryKey).DistinctBy(column => column.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+        var where = string.Join(" AND ", match.Select((part, index) => $"{Quote(part.Column)} <=> @lookup{index}"));
+        var sql = $"SELECT {string.Join(',', selected.Select(column => Quote(column.Name)))} FROM {Qualified(target.Database, table.Name)} WHERE {where} LIMIT 2{(lockRow ? " FOR UPDATE" : string.Empty)}";
+        await using var command = new MySqlCommand(sql, connection, transaction); for (var index = 0; index < match.Count; index++) command.Parameters.AddWithValue($"@lookup{index}", Decode(match[index].Value));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken); var rows = new List<Dictionary<string, LegacyDatabaseAuditValue>>(2);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var values = new Dictionary<string, LegacyDatabaseAuditValue>(StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < selected.Length; index++) values[selected[index].Name] = Encode(reader.IsDBNull(index) ? null : reader.GetValue(index)); rows.Add(values);
+        }
+        if (rows.Count == 0) return new(null, null, $"no {table.Name} row matched every reviewed value.");
+        if (rows.Count > 1) return new(null, null, $"more than one {table.Name} row matched; ambiguous live joins are blocked.");
+        var row = rows[0]; var identity = primaryKey.Length == 0
+            ? $"{table.Name} · {string.Join(", ", match.Select(part => $"{part.Column}={DisplayLookupValue(part.Value)}"))}"
+            : $"{table.Name} · {string.Join(", ", primaryKey.Select(column => $"{column.Name}={DisplayLookupValue(row[column.Name])}"))}";
+        return new(row[result.Name], identity, null);
+    }
+
+    private static async Task VerifyTargetLookupEvidenceAsync(MySqlConnection connection, MySqlTransaction transaction, DatabaseConnectionProfile target,
+        DatabaseCapabilities capabilities, IReadOnlyList<DatabaseSyncLookupEvidence> evidence, CancellationToken cancellationToken)
+    {
+        foreach (var lookup in evidence.Where(value => value.Source == DatabaseSyncLookupSource.TargetDatabase))
+        {
+            var live = await ReadTargetLookupAsync(connection, transaction, target, capabilities, lookup.LookupTable, lookup.Match, lookup.ResultColumn, lockRow: true, cancellationToken);
+            if (live.Finding is not null || live.Value is null || !Equal(live.Value, lookup.Result) || !string.Equals(live.MatchedIdentity, lookup.MatchedIdentity, StringComparison.Ordinal))
+                throw new DBConcurrencyException($"Target lookup '{lookup.LookupName}' for {lookup.SourceDisplayIdentity} changed after plan review: {live.Finding ?? "matched row/result no longer equals the hash-bound evidence."}");
+        }
+    }
+
+    private static string DisplayLookupValue(LegacyDatabaseAuditValue value) => value.State switch
+    {
+        LegacyDatabaseAuditValueState.Null => "NULL",
+        LegacyDatabaseAuditValueState.Binary => $"<binary {Convert.FromBase64String(value.Value ?? string.Empty).Length:N0} bytes>",
+        _ => value.Value ?? value.State.ToString()
+    };
 
     private static async Task<DatabaseSyncOperation> AnalyzeAsync(MySqlConnection connection, MySqlTransaction? transaction, DatabaseConnectionProfile target,
         DatabaseCapabilities capabilities, DatabaseSyncOperation operation, bool lockRow, CancellationToken cancellationToken)
@@ -669,9 +761,12 @@ public sealed class DatabaseSynchronizationService
         => Hash(new { sourceAuditSha256, target, removalsIncluded, patterns, remaps, operations });
     private static string HashPlanContentV3(string sourceAuditSha256, DatabaseSyncTarget target, bool removalsIncluded, IReadOnlyList<string> patterns, IReadOnlyList<DatabaseSyncIdRemap> remaps, IReadOnlyList<DatabaseSyncOperation> operations, bool dependencyClosureIncluded, IReadOnlyList<DatabaseSyncDependencyInclusion> dependencyInclusions)
         => Hash(new { sourceAuditSha256, target, removalsIncluded, patterns, remaps, operations, dependencyClosureIncluded, dependencyInclusions });
-    private static string HashPlanContent(string sourceAuditSha256, DatabaseSyncTarget target, bool removalsIncluded, IReadOnlyList<string> patterns, IReadOnlyList<DatabaseSyncIdRemap> remaps, IReadOnlyList<DatabaseSyncOperation> operations, bool dependencyClosureIncluded, IReadOnlyList<DatabaseSyncDependencyInclusion> dependencyInclusions,
+    private static string HashPlanContentV4(string sourceAuditSha256, DatabaseSyncTarget target, bool removalsIncluded, IReadOnlyList<string> patterns, IReadOnlyList<DatabaseSyncIdRemap> remaps, IReadOnlyList<DatabaseSyncOperation> operations, bool dependencyClosureIncluded, IReadOnlyList<DatabaseSyncDependencyInclusion> dependencyInclusions,
         string? targetSchemaSha256, string? translationProfileName, string? translationProfileSha256, IReadOnlyList<DatabaseSyncTranslationEvidence> schemaTranslations)
         => Hash(new { sourceAuditSha256, target, removalsIncluded, patterns, remaps, operations, dependencyClosureIncluded, dependencyInclusions, targetSchemaSha256, translationProfileName, translationProfileSha256, schemaTranslations });
+    private static string HashPlanContent(string sourceAuditSha256, DatabaseSyncTarget target, bool removalsIncluded, IReadOnlyList<string> patterns, IReadOnlyList<DatabaseSyncIdRemap> remaps, IReadOnlyList<DatabaseSyncOperation> operations, bool dependencyClosureIncluded, IReadOnlyList<DatabaseSyncDependencyInclusion> dependencyInclusions,
+        string? targetSchemaSha256, string? translationProfileName, string? translationProfileSha256, IReadOnlyList<DatabaseSyncTranslationEvidence> schemaTranslations, IReadOnlyList<DatabaseSyncLookupEvidence> lookupEvidence)
+        => Hash(new { sourceAuditSha256, target, removalsIncluded, patterns, remaps, operations, dependencyClosureIncluded, dependencyInclusions, targetSchemaSha256, translationProfileName, translationProfileSha256, schemaTranslations, lookupEvidence });
     private static string HashReceiptContent(string planSha256, DatabaseSyncTarget target, IReadOnlyList<DatabaseSyncOperation> operations)
         => Hash(new { planSha256, target, operations });
     private static string Hash<T>(T value) => Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(value, HashJson))).ToLowerInvariant();

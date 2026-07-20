@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -7,11 +8,29 @@ namespace WoWCrucible.Core;
 
 public sealed record DatabaseSyncColumnTranslation(string SourceColumn, string TargetColumn);
 public sealed record DatabaseSyncTargetDefault(string TargetColumn, LegacyDatabaseAuditValue Value);
-public enum DatabaseSyncExpansionValueSource { SourceBefore, SourceAfter, Constant }
+public enum DatabaseSyncExpansionValueSource { SourceBefore, SourceAfter, Constant, Lookup }
+public enum DatabaseSyncValueTransformKind { None, NumericAdd, NumericMultiply, StringPrefix, StringSuffix, ExactMap, NullFallback }
+public sealed record DatabaseSyncValueMap(LegacyDatabaseAuditValue Match, LegacyDatabaseAuditValue Result);
+public sealed record DatabaseSyncValueTransform(
+    DatabaseSyncValueTransformKind Kind,
+    string Operand = "",
+    IReadOnlyList<DatabaseSyncValueMap>? Mappings = null,
+    LegacyDatabaseAuditValue? Fallback = null);
 public sealed record DatabaseSyncExpansionValue(
     DatabaseSyncExpansionValueSource Source,
     string SourceColumn,
-    LegacyDatabaseAuditValue? Constant = null);
+    LegacyDatabaseAuditValue? Constant = null,
+    string? LookupName = null,
+    DatabaseSyncValueTransform? Transform = null);
+public enum DatabaseSyncLookupSource { AuditChanges, TargetDatabase }
+public sealed record DatabaseSyncLookupMatch(string LookupColumn, DatabaseSyncExpansionValue Input);
+public sealed record DatabaseSyncRowLookup(
+    string Name,
+    DatabaseSyncLookupSource Source,
+    string Table,
+    IReadOnlyList<DatabaseSyncLookupMatch> Matches,
+    string ResultColumn,
+    DatabaseSyncExpansionValueSource ResultVersion = DatabaseSyncExpansionValueSource.SourceAfter);
 public sealed record DatabaseSyncExpansionKeyBinding(string TargetColumn, DatabaseSyncExpansionValue Value);
 public sealed record DatabaseSyncExpansionFieldBinding(
     string TargetColumn,
@@ -34,7 +53,8 @@ public sealed record DatabaseSyncTableTranslation(
     IReadOnlyList<string>? SourcePrimaryKeyColumns = null,
     bool RequiresInsertDefaults = false,
     bool SuppressPrimaryOutput = false,
-    IReadOnlyList<DatabaseSyncRowExpansion>? Expansions = null);
+    IReadOnlyList<DatabaseSyncRowExpansion>? Expansions = null,
+    IReadOnlyList<DatabaseSyncRowLookup>? Lookups = null);
 public sealed record DatabaseSyncTranslationProfile(
     string Format,
     int FormatVersion,
@@ -56,18 +76,45 @@ public sealed record DatabaseSyncTranslationResult(
     IReadOnlyList<DatabaseSyncOperation> Operations,
     IReadOnlyList<DatabaseSyncTranslationEvidence> Evidence,
     int BlockedOperations,
-    IReadOnlyList<int>? SourceOperationIndexes = null);
+    IReadOnlyList<int>? SourceOperationIndexes = null,
+    IReadOnlyList<DatabaseSyncLookupEvidence>? LookupEvidence = null);
+public sealed record DatabaseSyncTargetLookupRequest(
+    string SourceOperationIdentity,
+    string SourceDisplayIdentity,
+    string SourceTable,
+    string LookupName,
+    string TargetTable,
+    IReadOnlyList<LegacyDatabaseAuditKeyPart> Match,
+    string ResultColumn,
+    string? Finding = null);
+public sealed record DatabaseSyncLookupEvidence(
+    string SourceOperationIdentity,
+    string SourceDisplayIdentity,
+    string LookupName,
+    DatabaseSyncLookupSource Source,
+    string LookupTable,
+    IReadOnlyList<LegacyDatabaseAuditKeyPart> Match,
+    string ResultColumn,
+    LegacyDatabaseAuditValue Result,
+    string MatchedIdentity);
+public sealed record DatabaseSyncResolvedLookup(
+    string SourceOperationIdentity,
+    string LookupName,
+    LegacyDatabaseAuditValue? Value,
+    string? Finding = null,
+    DatabaseSyncLookupEvidence? Evidence = null);
 
 /// <summary>
 /// Exact schema bridge used by legacy database recovery. Primary rows support explicit table/column renames,
 /// reviewed source-column drops, and typed target defaults. Structural outputs are separately reviewed row
-/// templates: every target key/preimage/postimage value names a source value or a typed constant. Nothing is
-/// inferred from column similarity, and an incomplete expansion blocks instead of inventing content.
+/// templates: every target key/preimage/postimage value names a source value, typed constant, or explicitly
+/// matched named row lookup. Bounded deterministic transforms are review data, not executable code. Nothing is
+/// inferred from column similarity, and an incomplete or ambiguous expansion blocks instead of inventing content.
 /// </summary>
 public sealed class DatabaseSyncTranslationService
 {
     public const string ProfileFormat = "wow-crucible-database-schema-bridge";
-    public const int ProfileFormatVersion = 2;
+    public const int ProfileFormatVersion = 3;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.General)
     {
         WriteIndented = true,
@@ -106,12 +153,16 @@ public sealed class DatabaseSyncTranslationService
         IReadOnlyList<DatabaseSyncOperation> operations,
         DatabaseSyncTranslationProfile profile,
         string sourceAuditSha256,
-        DatabaseCapabilities target)
+        DatabaseCapabilities target,
+        IReadOnlyList<DatabaseSyncOperation>? lookupCorpus = null,
+        IReadOnlyList<DatabaseSyncResolvedLookup>? resolvedTargetLookups = null)
     {
         ValidateProfile(profile, sourceAuditSha256, target);
         var rules = profile.Tables.ToDictionary(rule => rule.SourceTable, StringComparer.OrdinalIgnoreCase);
         var translated = new List<DatabaseSyncOperation>(operations.Count);
         var sourceIndexes = new List<int>(operations.Count);
+        lookupCorpus ??= operations;
+        var resolvedLookups = (resolvedTargetLookups ?? []).ToDictionary(value => LookupIdentity(value.SourceOperationIdentity, value.LookupName), StringComparer.OrdinalIgnoreCase);
         var evidenceCounts = new Dictionary<(string SourceTable, string TargetTable, string Action, string SourceColumn, string TargetColumn, string Description), int>();
         for (var sourceIndex = 0; sourceIndex < operations.Count; sourceIndex++)
         {
@@ -133,7 +184,7 @@ public sealed class DatabaseSyncTranslationService
             }
             foreach (var expansion in matchingExpansions)
             {
-                Add(TranslateExpansion(operation, expansion, target, (action, sourceColumn, targetColumn, description) =>
+                Add(TranslateExpansion(operation, rule, expansion, target, lookupCorpus, resolvedLookups, (action, sourceColumn, targetColumn, description) =>
                     Count(operation.Table, expansion.TargetTable, action, sourceColumn, targetColumn, description)));
             }
 
@@ -154,8 +205,85 @@ public sealed class DatabaseSyncTranslationService
                 translated[value.index] = Block(value.operation, $"Multiple translated outputs map onto target identity {value.operation.Identity}; source rows and structural siblings may never collapse.");
         var evidence = evidenceCounts.OrderBy(pair => pair.Key.SourceTable, StringComparer.OrdinalIgnoreCase).ThenBy(pair => pair.Key.Action, StringComparer.OrdinalIgnoreCase).ThenBy(pair => pair.Key.SourceColumn, StringComparer.OrdinalIgnoreCase)
             .Select(pair => new DatabaseSyncTranslationEvidence(pair.Key.SourceTable, pair.Key.TargetTable, pair.Key.Action, pair.Key.SourceColumn, pair.Key.TargetColumn, pair.Value, pair.Key.Description)).ToArray();
-        return new(translated, evidence, translated.Count(operation => operation.Status == DatabaseSyncOperationStatus.Blocked), sourceIndexes);
+        var sourceIdentities = operations.Select(SourceOperationIdentity).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var lookupEvidence = resolvedLookups.Values.Where(value => value.Evidence is not null && sourceIdentities.Contains(value.SourceOperationIdentity)).Select(value => value.Evidence!)
+            .DistinctBy(value => LookupIdentity(value.SourceOperationIdentity, value.LookupName), StringComparer.OrdinalIgnoreCase).OrderBy(value => value.SourceDisplayIdentity, StringComparer.OrdinalIgnoreCase).ThenBy(value => value.LookupName, StringComparer.OrdinalIgnoreCase).ToArray();
+        return new(translated, evidence, translated.Count(operation => operation.Status == DatabaseSyncOperationStatus.Blocked), sourceIndexes, lookupEvidence);
     }
+
+    public IReadOnlyList<DatabaseSyncTargetLookupRequest> BuildTargetLookupRequests(
+        IReadOnlyList<DatabaseSyncOperation> operations,
+        DatabaseSyncTranslationProfile profile,
+        string sourceAuditSha256,
+        DatabaseCapabilities target,
+        IReadOnlyList<DatabaseSyncOperation>? lookupCorpus = null)
+    {
+        ValidateProfile(profile, sourceAuditSha256, target); lookupCorpus ??= operations;
+        var rules = profile.Tables.ToDictionary(rule => rule.SourceTable, StringComparer.OrdinalIgnoreCase); var requests = new List<DatabaseSyncTargetLookupRequest>();
+        foreach (var operation in operations)
+        {
+            if (!rules.TryGetValue(operation.Table, out var rule)) continue;
+            var usedNames = (rule.Expansions ?? []).Where(expansion => expansion.SourceKinds.Contains(operation.Kind)).SelectMany(ExpansionValues)
+                .Where(value => value.Source == DatabaseSyncExpansionValueSource.Lookup && !string.IsNullOrWhiteSpace(value.LookupName)).Select(value => value.LookupName!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            foreach (var name in usedNames)
+            {
+                var lookup = (rule.Lookups ?? []).FirstOrDefault(item => item.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                if (lookup is null || lookup.Source != DatabaseSyncLookupSource.TargetDatabase) continue;
+                var sourceIdentity = SourceOperationIdentity(operation); var match = new List<LegacyDatabaseAuditKeyPart>(); string? finding = null;
+                var targetTable = string.IsNullOrWhiteSpace(lookup.Table) ? null : target.FindTable(lookup.Table);
+                if (targetTable is null) finding = string.IsNullOrWhiteSpace(lookup.Table) ? $"Target lookup '{lookup.Name}' has no table selected." : $"Target lookup '{lookup.Name}' table {lookup.Table} does not exist in the bound schema.";
+                else if (targetTable.Find(lookup.ResultColumn) is null) finding = $"Target lookup '{lookup.Name}' result column {targetTable.Name}.{lookup.ResultColumn} does not exist.";
+                else if (lookup.Matches.Count == 0) finding = $"Target lookup '{lookup.Name}' has no exact match columns.";
+                if (finding is null)
+                {
+                    foreach (var binding in lookup.Matches)
+                    {
+                        if (targetTable!.Find(binding.LookupColumn) is null) { finding = $"Target lookup '{lookup.Name}' match column {targetTable.Name}.{binding.LookupColumn} does not exist."; break; }
+                        if (!TryResolveExpansionValue(operation, rule, binding.Input, lookupCorpus, new Dictionary<string, DatabaseSyncResolvedLookup>(), out var value, out var inputFinding))
+                        { finding = $"Target lookup '{lookup.Name}' match {binding.LookupColumn}: {inputFinding}"; break; }
+                        match.Add(new(binding.LookupColumn, value));
+                    }
+                }
+                requests.Add(new(sourceIdentity, operation.Identity, operation.Table, lookup.Name, lookup.Table, match, lookup.ResultColumn, finding));
+            }
+        }
+        return requests;
+    }
+
+    public IReadOnlyList<DatabaseSyncResolvedLookup> ResolveAuditLookups(
+        IReadOnlyList<DatabaseSyncOperation> operations,
+        DatabaseSyncTranslationProfile profile,
+        string sourceAuditSha256,
+        DatabaseCapabilities target,
+        IReadOnlyList<DatabaseSyncOperation>? lookupCorpus = null)
+    {
+        ValidateProfile(profile, sourceAuditSha256, target); lookupCorpus ??= operations;
+        var rules = profile.Tables.ToDictionary(rule => rule.SourceTable, StringComparer.OrdinalIgnoreCase); var results = new List<DatabaseSyncResolvedLookup>();
+        foreach (var operation in operations)
+        {
+            if (!rules.TryGetValue(operation.Table, out var rule)) continue;
+            foreach (var name in UsedLookupNames(rule, operation, DatabaseSyncLookupSource.AuditChanges))
+            {
+                var lookup = (rule.Lookups ?? []).Single(item => item.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                if (TryResolveAuditLookup(operation, rule, lookup, lookupCorpus, out var value, out var finding, out var evidence))
+                    results.Add(new(SourceOperationIdentity(operation), lookup.Name, value, Evidence: evidence));
+                else results.Add(new(SourceOperationIdentity(operation), lookup.Name, null, finding));
+            }
+        }
+        return results;
+    }
+
+    private static IEnumerable<DatabaseSyncExpansionValue> ExpansionValues(DatabaseSyncRowExpansion expansion)
+    {
+        foreach (var binding in expansion.KeyBindings) yield return binding.Value;
+        foreach (var binding in expansion.FieldBindings) { if (binding.Before is not null) yield return binding.Before; if (binding.After is not null) yield return binding.After; }
+    }
+
+    private static IEnumerable<string> UsedLookupNames(DatabaseSyncTableTranslation rule, DatabaseSyncOperation operation, DatabaseSyncLookupSource source) =>
+        (rule.Expansions ?? []).Where(expansion => expansion.SourceKinds.Contains(operation.Kind)).SelectMany(ExpansionValues)
+            .Where(value => value.Source == DatabaseSyncExpansionValueSource.Lookup && !string.IsNullOrWhiteSpace(value.LookupName))
+            .Select(value => value.LookupName!).Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(name => (rule.Lookups ?? []).Any(lookup => lookup.Source == source && lookup.Name.Equals(name, StringComparison.OrdinalIgnoreCase)));
 
     public async Task<DatabaseSyncTranslationProfile> LoadAsync(string path, CancellationToken cancellationToken = default)
     {
@@ -260,8 +388,11 @@ public sealed class DatabaseSyncTranslationService
 
     private static DatabaseSyncOperation TranslateExpansion(
         DatabaseSyncOperation source,
+        DatabaseSyncTableTranslation rule,
         DatabaseSyncRowExpansion expansion,
         DatabaseCapabilities target,
+        IReadOnlyList<DatabaseSyncOperation> lookupCorpus,
+        IReadOnlyDictionary<string, DatabaseSyncResolvedLookup> resolvedTargetLookups,
         Action<string, string, string, string> count)
     {
         var targetTable = string.IsNullOrWhiteSpace(expansion.TargetTable) ? null : target.FindTable(expansion.TargetTable);
@@ -283,7 +414,7 @@ public sealed class DatabaseSyncTranslationService
         {
             var column = targetTable.Find(binding.TargetColumn);
             if (column is null) return Block(source, $"Structural expansion '{expansion.Name}' key targets missing column {targetTable.Name}.{binding.TargetColumn}.");
-            if (!TryResolveExpansionValue(source, binding.Value, out var value, out var finding)) return Block(source, $"Structural expansion '{expansion.Name}' key {column.Name}: {finding}");
+            if (!TryResolveExpansionValue(source, rule, binding.Value, lookupCorpus, resolvedTargetLookups, out var value, out var finding)) return Block(source, $"Structural expansion '{expansion.Name}' key {column.Name}: {finding}");
             if (value.State is LegacyDatabaseAuditValueState.Null or LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing)
                 return Block(source, $"Structural expansion '{expansion.Name}' key {column.Name} resolved to invalid state {value.State}.");
             key.Add(new(column.Name, value));
@@ -302,7 +433,7 @@ public sealed class DatabaseSyncTranslationService
             {
                 before = LegacyDatabaseAuditValue.Missing;
                 if (binding.After is null) return Block(source, $"Structural expansion '{expansion.Name}' INSERT value {column.Name}: an After binding is required.");
-                if (!TryResolveExpansionValue(source, binding.After, out after, out var finding))
+                if (!TryResolveExpansionValue(source, rule, binding.After, lookupCorpus, resolvedTargetLookups, out after, out var finding))
                     return Block(source, $"Structural expansion '{expansion.Name}' INSERT value {column.Name}: {finding}");
                 CountBinding("ExpansionAfter", column.Name, binding.After);
             }
@@ -310,17 +441,17 @@ public sealed class DatabaseSyncTranslationService
             {
                 after = LegacyDatabaseAuditValue.Missing;
                 if (binding.Before is null) return Block(source, $"Structural expansion '{expansion.Name}' DELETE preimage {column.Name}: a Before binding is required.");
-                if (!TryResolveExpansionValue(source, binding.Before, out before, out var finding))
+                if (!TryResolveExpansionValue(source, rule, binding.Before, lookupCorpus, resolvedTargetLookups, out before, out var finding))
                     return Block(source, $"Structural expansion '{expansion.Name}' DELETE preimage {column.Name}: {finding}");
                 CountBinding("ExpansionBefore", column.Name, binding.Before);
             }
             else
             {
                 if (binding.Before is null) return Block(source, $"Structural expansion '{expansion.Name}' UPDATE preimage {column.Name}: a Before binding is required.");
-                if (!TryResolveExpansionValue(source, binding.Before, out before, out var beforeFinding))
+                if (!TryResolveExpansionValue(source, rule, binding.Before, lookupCorpus, resolvedTargetLookups, out before, out var beforeFinding))
                     return Block(source, $"Structural expansion '{expansion.Name}' UPDATE preimage {column.Name}: {beforeFinding}");
                 if (binding.After is null) return Block(source, $"Structural expansion '{expansion.Name}' UPDATE postimage {column.Name}: an After binding is required.");
-                if (!TryResolveExpansionValue(source, binding.After, out after, out var afterFinding))
+                if (!TryResolveExpansionValue(source, rule, binding.After, lookupCorpus, resolvedTargetLookups, out after, out var afterFinding))
                     return Block(source, $"Structural expansion '{expansion.Name}' UPDATE postimage {column.Name}: {afterFinding}");
                 CountBinding("ExpansionBefore", column.Name, binding.Before); CountBinding("ExpansionAfter", column.Name, binding.After);
             }
@@ -350,33 +481,141 @@ public sealed class DatabaseSyncTranslationService
 
         void CountBinding(string action, string targetColumn, DatabaseSyncExpansionValue value)
         {
-            var sourceColumn = value.Source == DatabaseSyncExpansionValueSource.Constant ? string.Empty : value.SourceColumn;
-            var origin = value.Source == DatabaseSyncExpansionValueSource.Constant ? $"typed constant {DisplayValue(value.Constant!)}" : $"{value.Source} {source.Table}.{value.SourceColumn}";
-            count(action, sourceColumn, targetColumn, $"Structural expansion '{expansion.Name}' binds {targetTable.Name}.{targetColumn} from {origin}.");
+            var sourceColumn = value.Source is DatabaseSyncExpansionValueSource.Constant or DatabaseSyncExpansionValueSource.Lookup ? string.Empty : value.SourceColumn;
+            var origin = value.Source switch
+            {
+                DatabaseSyncExpansionValueSource.Constant => $"typed constant {DisplayValue(value.Constant!)}",
+                DatabaseSyncExpansionValueSource.Lookup => $"named lookup '{value.LookupName}'",
+                _ => $"{value.Source} {source.Table}.{value.SourceColumn}"
+            };
+            var transform = value.Transform is null or { Kind: DatabaseSyncValueTransformKind.None } ? string.Empty : $" through {value.Transform.Kind}";
+            count(action, sourceColumn, targetColumn, $"Structural expansion '{expansion.Name}' binds {targetTable.Name}.{targetColumn} from {origin}{transform}.");
         }
     }
 
-    private static bool TryResolveExpansionValue(DatabaseSyncOperation source, DatabaseSyncExpansionValue binding, out LegacyDatabaseAuditValue value, out string? finding)
+    private static bool TryResolveExpansionValue(
+        DatabaseSyncOperation source,
+        DatabaseSyncTableTranslation rule,
+        DatabaseSyncExpansionValue binding,
+        IReadOnlyList<DatabaseSyncOperation> lookupCorpus,
+        IReadOnlyDictionary<string, DatabaseSyncResolvedLookup> resolvedTargetLookups,
+        out LegacyDatabaseAuditValue value,
+        out string? finding)
     {
         if (binding.Source == DatabaseSyncExpansionValueSource.Constant)
         {
             value = binding.Constant ?? LegacyDatabaseAuditValue.Unknown;
             if (value.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing)
             { finding = "the typed constant is unresolved."; return false; }
-            finding = null; return true;
+            return TryApplyTransform(value, binding.Transform, out value, out finding);
+        }
+        if (binding.Source == DatabaseSyncExpansionValueSource.Lookup)
+        {
+            if (string.IsNullOrWhiteSpace(binding.LookupName)) { value = LegacyDatabaseAuditValue.Unknown; finding = "the lookup name is blank."; return false; }
+            var lookup = (rule.Lookups ?? []).FirstOrDefault(item => item.Name.Equals(binding.LookupName, StringComparison.OrdinalIgnoreCase));
+            if (lookup is null) { value = LegacyDatabaseAuditValue.Unknown; finding = $"lookup '{binding.LookupName}' is not declared for source table {rule.SourceTable}."; return false; }
+            if (lookup.Source == DatabaseSyncLookupSource.AuditChanges)
+            {
+                var identity = LookupIdentity(SourceOperationIdentity(source), lookup.Name);
+                if (resolvedTargetLookups.TryGetValue(identity, out var resolved))
+                {
+                    if (resolved.Finding is not null || resolved.Value is null) { value = LegacyDatabaseAuditValue.Unknown; finding = resolved.Finding ?? $"audit lookup '{lookup.Name}' returned no value."; return false; }
+                    value = resolved.Value;
+                }
+                else if (!TryResolveAuditLookup(source, rule, lookup, lookupCorpus, out value, out finding, out _)) return false;
+            }
+            else
+            {
+                var identity = LookupIdentity(SourceOperationIdentity(source), lookup.Name);
+                if (!resolvedTargetLookups.TryGetValue(identity, out var resolved)) { value = LegacyDatabaseAuditValue.Unknown; finding = $"target lookup '{lookup.Name}' was not resolved against the bound database."; return false; }
+                if (resolved.Finding is not null || resolved.Value is null) { value = LegacyDatabaseAuditValue.Unknown; finding = resolved.Finding ?? $"target lookup '{lookup.Name}' returned no value."; return false; }
+                value = resolved.Value;
+            }
+            return TryApplyTransform(value, binding.Transform, out value, out finding);
         }
         if (string.IsNullOrWhiteSpace(binding.SourceColumn))
         { value = LegacyDatabaseAuditValue.Unknown; finding = "the source column is blank."; return false; }
-        var key = source.Key.FirstOrDefault(part => part.Column.Equals(binding.SourceColumn, StringComparison.OrdinalIgnoreCase));
-        if (key is not null) { value = key.Value; finding = null; return value.State is not LegacyDatabaseAuditValueState.Unknown and not LegacyDatabaseAuditValueState.Missing; }
-        var field = source.Fields.FirstOrDefault(item => item.Column.Equals(binding.SourceColumn, StringComparison.OrdinalIgnoreCase));
-        if (field is null)
-        { value = LegacyDatabaseAuditValue.Unknown; finding = $"source column {source.Table}.{binding.SourceColumn} is not present in this audited operation."; return false; }
-        value = binding.Source == DatabaseSyncExpansionValueSource.SourceBefore ? field.Before : field.After;
-        if (value.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing)
-        { finding = $"{binding.Source} {source.Table}.{binding.SourceColumn} is {value.State}."; return false; }
+        if (!TryOperationValue(source, binding.SourceColumn, binding.Source, out value, out finding)) return false;
+        return TryApplyTransform(value, binding.Transform, out value, out finding);
+    }
+
+    private static bool TryResolveAuditLookup(DatabaseSyncOperation source, DatabaseSyncTableTranslation sourceRule, DatabaseSyncRowLookup lookup,
+        IReadOnlyList<DatabaseSyncOperation> corpus, out LegacyDatabaseAuditValue value, out string? finding, out DatabaseSyncLookupEvidence? evidence)
+    {
+        evidence = null;
+        var matches = new List<(string Column, LegacyDatabaseAuditValue Value)>();
+        foreach (var match in lookup.Matches)
+        {
+            if (!TryResolveExpansionValue(source, sourceRule, match.Input, corpus, new Dictionary<string, DatabaseSyncResolvedLookup>(), out var expected, out var inputFinding))
+            { value = LegacyDatabaseAuditValue.Unknown; finding = $"audit lookup '{lookup.Name}' match {match.LookupColumn}: {inputFinding}"; return false; }
+            matches.Add((match.LookupColumn, expected));
+        }
+        var candidates = new List<DatabaseSyncOperation>();
+        foreach (var candidate in corpus.Where(operation => operation.Table.Equals(lookup.Table, StringComparison.OrdinalIgnoreCase)))
+        {
+            var matched = true;
+            foreach (var match in matches)
+            {
+                if (!TryOperationValue(candidate, match.Column, lookup.ResultVersion, out var actual, out _) || !EqualValue(actual, match.Value)) { matched = false; break; }
+            }
+            if (matched) candidates.Add(candidate);
+            if (candidates.Count > 1) break;
+        }
+        if (candidates.Count == 0) { value = LegacyDatabaseAuditValue.Unknown; finding = $"audit lookup '{lookup.Name}' found no changed {lookup.Table} row matching every reviewed value."; return false; }
+        if (candidates.Count > 1) { value = LegacyDatabaseAuditValue.Unknown; finding = $"audit lookup '{lookup.Name}' matched more than one changed {lookup.Table} row; ambiguous joins are blocked."; return false; }
+        if (!TryOperationValue(candidates[0], lookup.ResultColumn, lookup.ResultVersion, out value, out var resultFinding))
+        { finding = $"audit lookup '{lookup.Name}' result {lookup.Table}.{lookup.ResultColumn}: {resultFinding}"; return false; }
+        evidence = new(SourceOperationIdentity(source), source.Identity, lookup.Name, DatabaseSyncLookupSource.AuditChanges, lookup.Table,
+            matches.Select(match => new LegacyDatabaseAuditKeyPart(match.Column, match.Value)).ToArray(), lookup.ResultColumn, value, candidates[0].Identity);
         finding = null; return true;
     }
+
+    private static bool TryOperationValue(DatabaseSyncOperation operation, string column, DatabaseSyncExpansionValueSource version, out LegacyDatabaseAuditValue value, out string? finding)
+    {
+        var key = operation.Key.FirstOrDefault(part => part.Column.Equals(column, StringComparison.OrdinalIgnoreCase));
+        if (key is not null) { value = key.Value; finding = null; return value.State is not LegacyDatabaseAuditValueState.Unknown and not LegacyDatabaseAuditValueState.Missing; }
+        var field = operation.Fields.FirstOrDefault(item => item.Column.Equals(column, StringComparison.OrdinalIgnoreCase));
+        if (field is null) { value = LegacyDatabaseAuditValue.Unknown; finding = $"column {operation.Table}.{column} is not present in this audited operation."; return false; }
+        value = version == DatabaseSyncExpansionValueSource.SourceBefore ? field.Before : field.After;
+        if (value.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing)
+        { finding = $"{version} {operation.Table}.{column} is {value.State}."; return false; }
+        finding = null; return true;
+    }
+
+    private static bool TryApplyTransform(LegacyDatabaseAuditValue input, DatabaseSyncValueTransform? transform, out LegacyDatabaseAuditValue value, out string? finding)
+    {
+        value = input; finding = null; if (transform is null || transform.Kind == DatabaseSyncValueTransformKind.None) return true;
+        try
+        {
+            switch (transform.Kind)
+            {
+                case DatabaseSyncValueTransformKind.NumericAdd:
+                case DatabaseSyncValueTransformKind.NumericMultiply:
+                    if (input.State != LegacyDatabaseAuditValueState.Scalar || !decimal.TryParse(input.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) || !decimal.TryParse(transform.Operand, NumberStyles.Float, CultureInfo.InvariantCulture, out var operand))
+                    { finding = $"{transform.Kind} requires finite invariant decimal scalar input and operand."; return false; }
+                    var numeric = transform.Kind == DatabaseSyncValueTransformKind.NumericAdd ? checked(number + operand) : checked(number * operand);
+                    value = new(LegacyDatabaseAuditValueState.Scalar, numeric.ToString("G29", CultureInfo.InvariantCulture)); return true;
+                case DatabaseSyncValueTransformKind.StringPrefix:
+                case DatabaseSyncValueTransformKind.StringSuffix:
+                    if (input.State != LegacyDatabaseAuditValueState.Scalar) { finding = $"{transform.Kind} requires scalar text input."; return false; }
+                    value = new(LegacyDatabaseAuditValueState.Scalar, transform.Kind == DatabaseSyncValueTransformKind.StringPrefix ? transform.Operand + input.Value : input.Value + transform.Operand); return true;
+                case DatabaseSyncValueTransformKind.ExactMap:
+                    var mappings = transform.Mappings ?? []; var mapped = mappings.FirstOrDefault(item => EqualValue(item.Match, input));
+                    if (mapped is null) { finding = "ExactMap has no typed entry for the resolved input value."; return false; }
+                    value = mapped.Result; if (value.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing) { finding = "ExactMap result is unresolved."; return false; } return true;
+                case DatabaseSyncValueTransformKind.NullFallback:
+                    if (input.State != LegacyDatabaseAuditValueState.Null) return true;
+                    value = transform.Fallback ?? LegacyDatabaseAuditValue.Unknown; if (value.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing) { finding = "NullFallback has no typed fallback value."; return false; } return true;
+                default: finding = $"Unsupported value transform {transform.Kind}."; return false;
+            }
+        }
+        catch (OverflowException) { finding = $"{transform.Kind} overflowed the deterministic decimal range."; return false; }
+    }
+
+    private static bool EqualValue(LegacyDatabaseAuditValue left, LegacyDatabaseAuditValue right) => left.State == right.State &&
+        (left.State is LegacyDatabaseAuditValueState.Null or LegacyDatabaseAuditValueState.Missing or LegacyDatabaseAuditValueState.Unknown || string.Equals(left.Value, right.Value, StringComparison.Ordinal));
+    private static string LookupIdentity(string sourceOperationIdentity, string lookupName) => $"{sourceOperationIdentity}\u001c{lookupName}";
+    public static string SourceOperationIdentity(DatabaseSyncOperation operation) => TargetIdentity(operation);
 
     private static string DisplayValue(LegacyDatabaseAuditValue value) => value.State switch
     {
@@ -430,7 +669,26 @@ public sealed class DatabaseSyncTranslationService
             var unknownKey = (rule.SourcePrimaryKeyColumns ?? []).Except(rule.ObservedSourceColumns ?? [], StringComparer.OrdinalIgnoreCase).FirstOrDefault();
             if (unknownKey is not null) throw new InvalidDataException($"Schema bridge {rule.SourceTable} marks unobserved column {unknownKey} as a source key.");
             var expansions = rule.Expansions ?? [];
+            var lookups = rule.Lookups ?? [];
             if (profile.FormatVersion == 1 && (rule.SuppressPrimaryOutput || expansions.Count > 0)) throw new InvalidDataException($"Schema bridge v1 cannot contain structural expansions for {rule.SourceTable}.");
+            if (profile.FormatVersion < 3 && (lookups.Count > 0 || expansions.SelectMany(ExpansionValues).Any(value => value.Source == DatabaseSyncExpansionValueSource.Lookup || value.Transform is not null and not { Kind: DatabaseSyncValueTransformKind.None })))
+                throw new InvalidDataException($"Schema bridge v{profile.FormatVersion} cannot contain lookups or value transforms for {rule.SourceTable}.");
+            var duplicateLookup = lookups.GroupBy(lookup => lookup.Name, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
+            if (duplicateLookup is not null) throw new InvalidDataException($"Schema bridge {rule.SourceTable} contains duplicate lookup name {duplicateLookup.Key}.");
+            foreach (var lookup in lookups)
+            {
+                if (string.IsNullOrWhiteSpace(lookup.Name)) throw new InvalidDataException($"Schema bridge {rule.SourceTable} contains an unnamed row lookup.");
+                if (!Enum.IsDefined(lookup.Source)) throw new InvalidDataException($"Schema bridge {rule.SourceTable} lookup {lookup.Name} has an invalid source.");
+                if (lookup.Source == DatabaseSyncLookupSource.AuditChanges && lookup.ResultVersion is not (DatabaseSyncExpansionValueSource.SourceBefore or DatabaseSyncExpansionValueSource.SourceAfter))
+                    throw new InvalidDataException($"Schema bridge {rule.SourceTable} audit lookup {lookup.Name} must select a Before or After result version.");
+                var duplicateMatch = lookup.Matches.GroupBy(match => match.LookupColumn, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
+                if (duplicateMatch is not null) throw new InvalidDataException($"Schema bridge {rule.SourceTable} lookup {lookup.Name} repeats match column {duplicateMatch.Key}.");
+                foreach (var match in lookup.Matches)
+                {
+                    if (match.Input.Source == DatabaseSyncExpansionValueSource.Lookup) throw new InvalidDataException($"Schema bridge {rule.SourceTable} lookup {lookup.Name} cannot recursively depend on another lookup.");
+                    ValidateValue(rule, match.Input, $"lookup {lookup.Name} match {match.LookupColumn}");
+                }
+            }
             var duplicateExpansion = expansions.GroupBy(expansion => expansion.Name, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
             if (duplicateExpansion is not null) throw new InvalidDataException($"Schema bridge {rule.SourceTable} contains duplicate structural expansion name {duplicateExpansion.Key}.");
             foreach (var expansion in expansions)
@@ -455,21 +713,50 @@ public sealed class DatabaseSyncTranslationService
                 }
             }
         }
+        var sourceRules = profile.Tables.ToDictionary(rule => rule.SourceTable, StringComparer.OrdinalIgnoreCase);
+        foreach (var rule in profile.Tables)
+            foreach (var lookup in (rule.Lookups ?? []).Where(lookup => lookup.Source == DatabaseSyncLookupSource.AuditChanges && !string.IsNullOrWhiteSpace(lookup.Table)))
+            {
+                if (!sourceRules.TryGetValue(lookup.Table, out var lookupRule)) throw new InvalidDataException($"Schema bridge {rule.SourceTable} audit lookup {lookup.Name} references source table {lookup.Table}, which has no audited bridge rule/corpus description.");
+                var observed = (lookupRule.ObservedSourceColumns ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrWhiteSpace(lookup.ResultColumn) && !observed.Contains(lookup.ResultColumn)) throw new InvalidDataException($"Schema bridge {rule.SourceTable} audit lookup {lookup.Name} result column {lookup.Table}.{lookup.ResultColumn} was not observed in the audit.");
+                var unknownMatch = lookup.Matches.FirstOrDefault(match => !string.IsNullOrWhiteSpace(match.LookupColumn) && !observed.Contains(match.LookupColumn));
+                if (unknownMatch is not null) throw new InvalidDataException($"Schema bridge {rule.SourceTable} audit lookup {lookup.Name} match column {lookup.Table}.{unknownMatch.LookupColumn} was not observed in the audit.");
+            }
     }
 
     private static void ValidateExpansionValue(DatabaseSyncTableTranslation rule, DatabaseSyncRowExpansion expansion, DatabaseSyncExpansionValue value, string location)
     {
-        if (!Enum.IsDefined(value.Source)) throw new InvalidDataException($"Structural expansion {rule.SourceTable}/{expansion.Name} {location} uses an invalid value source.");
+        ValidateValue(rule, value, $"structural expansion {expansion.Name} {location}");
+        if (value.Source == DatabaseSyncExpansionValueSource.Lookup && !string.IsNullOrWhiteSpace(value.LookupName) && !(rule.Lookups ?? []).Any(lookup => lookup.Name.Equals(value.LookupName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException($"Structural expansion {rule.SourceTable}/{expansion.Name} {location} references undeclared lookup {value.LookupName}.");
+    }
+
+    private static void ValidateValue(DatabaseSyncTableTranslation rule, DatabaseSyncExpansionValue value, string location)
+    {
+        if (!Enum.IsDefined(value.Source)) throw new InvalidDataException($"Schema bridge {rule.SourceTable} {location} uses an invalid value source.");
         if (value.Source == DatabaseSyncExpansionValueSource.Constant)
         {
-            if (value.Constant is not null && !Enum.IsDefined(value.Constant.State)) throw new InvalidDataException($"Structural expansion {rule.SourceTable}/{expansion.Name} {location} uses an invalid constant value state.");
+            if (value.Constant is not null && !Enum.IsDefined(value.Constant.State)) throw new InvalidDataException($"Schema bridge {rule.SourceTable} {location} uses an invalid constant value state.");
             if (value.Constant?.State == LegacyDatabaseAuditValueState.Binary)
                 try { _ = Convert.FromBase64String(value.Constant.Value ?? string.Empty); }
-                catch (FormatException exception) { throw new InvalidDataException($"Structural expansion {rule.SourceTable}/{expansion.Name} {location} contains invalid base64 bytes.", exception); }
-            return;
+                catch (FormatException exception) { throw new InvalidDataException($"Schema bridge {rule.SourceTable} {location} contains invalid base64 bytes.", exception); }
         }
-        if (string.IsNullOrWhiteSpace(value.SourceColumn)) return;
-        if (!(rule.ObservedSourceColumns ?? []).Contains(value.SourceColumn, StringComparer.OrdinalIgnoreCase))
-            throw new InvalidDataException($"Structural expansion {rule.SourceTable}/{expansion.Name} {location} references unobserved source column {value.SourceColumn}.");
+        else if (value.Source is DatabaseSyncExpansionValueSource.SourceBefore or DatabaseSyncExpansionValueSource.SourceAfter && !string.IsNullOrWhiteSpace(value.SourceColumn) && !(rule.ObservedSourceColumns ?? []).Contains(value.SourceColumn, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Schema bridge {rule.SourceTable} {location} references unobserved source column {value.SourceColumn}.");
+        if (value.Transform is null) return;
+        if (!Enum.IsDefined(value.Transform.Kind)) throw new InvalidDataException($"Schema bridge {rule.SourceTable} {location} uses an invalid transform kind.");
+        var duplicateMap = (value.Transform.Mappings ?? []).GroupBy(mapping => $"{(int)mapping.Match.State}\u001d{mapping.Match.Value}", StringComparer.Ordinal).FirstOrDefault(group => group.Count() > 1);
+        if (duplicateMap is not null) throw new InvalidDataException($"Schema bridge {rule.SourceTable} {location} repeats an ExactMap input.");
+        foreach (var mapping in value.Transform.Mappings ?? []) { ValidateTypedValue(mapping.Match, $"{rule.SourceTable} {location} map input"); ValidateTypedValue(mapping.Result, $"{rule.SourceTable} {location} map result"); }
+        if (value.Transform.Fallback is not null) ValidateTypedValue(value.Transform.Fallback, $"{rule.SourceTable} {location} fallback");
+    }
+
+    private static void ValidateTypedValue(LegacyDatabaseAuditValue value, string location)
+    {
+        if (!Enum.IsDefined(value.State)) throw new InvalidDataException($"Schema bridge {location} uses an invalid typed value state.");
+        if (value.State == LegacyDatabaseAuditValueState.Binary)
+            try { _ = Convert.FromBase64String(value.Value ?? string.Empty); }
+            catch (FormatException exception) { throw new InvalidDataException($"Schema bridge {location} contains invalid base64 bytes.", exception); }
     }
 }

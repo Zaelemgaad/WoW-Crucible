@@ -5,6 +5,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using MySqlConnector;
+using System.Globalization;
 using WoWCrucible.Core;
 
 namespace WoWCrucible.Desktop;
@@ -26,7 +27,14 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         public string Value { get; set; } = string.Empty;
     }
     private sealed record BridgeExpansionChoice(int Index, string Label) { public override string ToString() => Label; }
-    private sealed record BridgeValueOption(DatabaseSyncExpansionValueSource? Source, string SourceColumn, string Label) { public override string ToString() => Label; }
+    private sealed record BridgeLookupChoice(int Index, string Label) { public override string ToString() => Label; }
+    private sealed record BridgeValueOption(DatabaseSyncExpansionValueSource? Source, string SourceColumn, string Label, string? LookupName = null) { public override string ToString() => Label; }
+    private sealed class BridgeLookupMatchChoice
+    {
+        public required string LookupColumn { get; init; }
+        public bool Included { get; set; }
+        public DatabaseSyncExpansionValue? Input { get; set; }
+    }
     private sealed class BridgeExpansionBindingChoice
     {
         public required string Target { get; init; }
@@ -75,6 +83,14 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly CheckBox _bridgeExpansionRemoved = new() { Content = "Source Removed" };
     private readonly ListBox _bridgeExpansionBindings = new();
     private readonly TextBlock _bridgeExpansionStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
+    private readonly ComboBox _bridgeLookup = new();
+    private readonly TextBox _bridgeLookupName = new() { PlaceholderText = "Lookup name" };
+    private readonly ComboBox _bridgeLookupSource = new();
+    private readonly ComboBox _bridgeLookupTable = new();
+    private readonly ComboBox _bridgeLookupResultColumn = new();
+    private readonly ComboBox _bridgeLookupResultVersion = new();
+    private readonly ListBox _bridgeLookupMatches = new();
+    private readonly TextBlock _bridgeLookupStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly TextBlock _bridgeStatus = new() { Text = "Generate or load a schema bridge to edit it here.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private DatabaseSyncTranslationProfile? _loadedBridge;
     private DatabaseCapabilities? _bridgeCapabilities;
@@ -83,6 +99,8 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private List<BridgeDefaultChoice> _bridgeDefaultRows = [];
     private List<BridgeExpansionBindingChoice> _bridgeExpansionRows = [];
     private int _bridgeExpansionIndex = -1;
+    private List<BridgeLookupMatchChoice> _bridgeLookupRows = [];
+    private int _bridgeLookupIndex = -1;
     private bool _bridgeUiChanging;
     private readonly Border _recoveryConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private DatabaseSyncPlan? _loadedRecoveryPlan;
@@ -664,12 +682,12 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         _bridgeTable.SelectionChanged += (_, _) =>
         {
             if (_bridgeUiChanging || _bridgeTable.SelectedItem is not BridgeTableChoice choice) return;
-            CommitBridgeExpansion(); CommitBridgeRule(); _bridgeRuleIndex = choice.Index; _bridgeExpansionIndex = -1; RenderBridgeRule();
+            CommitBridgeExpansion(); CommitBridgeLookup(); CommitBridgeRule(); _bridgeRuleIndex = choice.Index; _bridgeExpansionIndex = _bridgeLookupIndex = -1; RenderBridgeRule();
         };
         _bridgeTargetTable.SelectionChanged += (_, _) =>
         {
             if (_bridgeUiChanging || _loadedBridge is null || _bridgeRuleIndex < 0) return;
-            CommitBridgeExpansion(); CommitBridgeRule(); var selected = Convert.ToString(_bridgeTargetTable.SelectedItem) ?? unresolved;
+            CommitBridgeExpansion(); CommitBridgeLookup(); CommitBridgeRule(); var selected = Convert.ToString(_bridgeTargetTable.SelectedItem) ?? unresolved;
             var rules = _loadedBridge.Tables.ToArray(); rules[_bridgeRuleIndex] = rules[_bridgeRuleIndex] with { TargetTable = selected == unresolved ? string.Empty : selected, ColumnMappings = [], DroppedSourceColumns = [], TargetDefaults = [] };
             _loadedBridge = _loadedBridge with { Tables = rules }; RenderBridgeRule();
         };
@@ -726,7 +744,8 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             Items =
             {
                 new TabItem { Header = "Primary row mapping", Content = primary },
-                new TabItem { Header = "Structural row expansions", Content = BuildStructuralExpansionEditor() }
+                new TabItem { Header = "Structural row expansions", Content = BuildStructuralExpansionEditor() },
+                new TabItem { Header = "Named row lookups", Content = BuildBridgeLookupEditor() }
             }
         };
     }
@@ -806,33 +825,173 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         };
     }
 
-    private Control BuildBridgeExpansionValueEditor(string label, DatabaseSyncExpansionValue? current, Action<DatabaseSyncExpansionValue?> changed)
+    private Control BuildBridgeLookupEditor()
     {
-        var observed = CurrentBridgeRule()?.ObservedSourceColumns ?? [];
+        const string unresolved = "⟨unresolved — blocks planning⟩";
+        var add = AccentButton("Add named lookup"); add.Click += (_, _) => AddBridgeLookup();
+        var remove = new Button { Content = "Remove selected lookup" }; remove.Click += (_, _) => RemoveBridgeLookup();
+        _bridgeLookupSource.ItemsSource = Enum.GetValues<DatabaseSyncLookupSource>();
+        _bridgeLookupResultVersion.ItemsSource = new[] { DatabaseSyncExpansionValueSource.SourceBefore, DatabaseSyncExpansionValueSource.SourceAfter };
+        _bridgeLookup.SelectionChanged += (_, _) =>
+        {
+            if (_bridgeUiChanging || _bridgeLookup.SelectedItem is not BridgeLookupChoice choice) return;
+            CommitBridgeLookup(); _bridgeLookupIndex = choice.Index; RenderBridgeLookup();
+        };
+        _bridgeLookupName.TextChanged += (_, _) => { if (!_bridgeUiChanging) { CommitBridgeLookup(); RefreshBridgeLookupList(); } };
+        _bridgeLookupSource.SelectionChanged += (_, _) =>
+        {
+            if (_bridgeUiChanging || CurrentBridgeLookup() is null || _bridgeLookupSource.SelectedItem is not DatabaseSyncLookupSource source) return;
+            CommitBridgeLookup(); ReplaceBridgeLookup(CurrentBridgeLookup()! with { Source = source, Table = string.Empty, ResultColumn = string.Empty, Matches = [] }); RenderBridgeLookup();
+        };
+        _bridgeLookupTable.SelectionChanged += (_, _) =>
+        {
+            if (_bridgeUiChanging || CurrentBridgeLookup() is null) return;
+            var selected = Convert.ToString(_bridgeLookupTable.SelectedItem) ?? unresolved;
+            CommitBridgeLookup(); ReplaceBridgeLookup(CurrentBridgeLookup()! with { Table = selected == unresolved ? string.Empty : selected, ResultColumn = string.Empty, Matches = [] }); RenderBridgeLookup();
+        };
+        _bridgeLookupResultColumn.SelectionChanged += (_, _) => { if (!_bridgeUiChanging) { CommitBridgeLookup(); RefreshBridgeLookupStatus(); } };
+        _bridgeLookupResultVersion.SelectionChanged += (_, _) => { if (!_bridgeUiChanging) { CommitBridgeLookup(); RefreshBridgeLookupStatus(); } };
+        _bridgeLookupMatches.ItemTemplate = new FuncDataTemplate<BridgeLookupMatchChoice>((row, _) =>
+        {
+            if (row is null) return new TextBlock();
+            var include = new CheckBox { Content = row.LookupColumn, IsChecked = row.Included };
+            var editor = BuildBridgeExpansionValueEditor("Exact match input", row.Input, value => { row.Input = value; RefreshBridgeLookupStatus(); }, allowLookup: false);
+            editor.IsVisible = row.Included;
+            include.IsCheckedChanged += (_, _) => { row.Included = include.IsChecked == true; editor.IsVisible = row.Included; RefreshBridgeLookupStatus(); };
+            return new Border { Margin = new Thickness(4), Padding = new Thickness(8), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = new StackPanel { Spacing = 5, Children = { include, editor } } };
+        });
+        return new Grid
+        {
+            Margin = new Thickness(10), RowDefinitions = new("Auto,Auto,Auto,*"), RowSpacing = 8,
+            Children =
+            {
+                new StackPanel { Spacing = 7, Children =
+                {
+                    new TextBlock { Text = "Exact named row lookups", FontSize = 18, FontWeight = FontWeight.SemiBold },
+                    new TextBlock { Text = "A lookup may resolve one value from another audited changed row or from the bound live target database. Every match is typed and exact. Zero matches, multiple matches, missing columns, or a changed live result block the plan/apply; arbitrary SQL and recursive lookups are never accepted.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) },
+                    new WrapPanel { Children = { add, remove } }, _bridgeLookupStatus
+                } },
+                WithRow(new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { _bridgeLookup, WithColumn(_bridgeLookupName, 1) } }, 1),
+                WithRow(new Grid { ColumnDefinitions = new("*,*,*,*"), ColumnSpacing = 8, Children = { _bridgeLookupSource, WithColumn(_bridgeLookupTable, 1), WithColumn(_bridgeLookupResultColumn, 2), WithColumn(_bridgeLookupResultVersion, 3) } }, 2),
+                WithRow(_bridgeLookupMatches, 3)
+            }
+        };
+    }
+
+    private void AddBridgeLookup()
+    {
+        if (_loadedBridge is null || _bridgeRuleIndex < 0) { _bridgeLookupStatus.Text = "Load a bridge and select a source table first."; return; }
+        CommitBridgeExpansion(); CommitBridgeLookup(); CommitBridgeRule(); var rules = _loadedBridge.Tables.ToArray(); var rule = rules[_bridgeRuleIndex]; var lookups = (rule.Lookups ?? []).ToList();
+        var number = 1; string name; do name = $"Lookup {number++}"; while (lookups.Any(lookup => lookup.Name.Equals(name, StringComparison.OrdinalIgnoreCase)));
+        lookups.Add(new(name, DatabaseSyncLookupSource.AuditChanges, string.Empty, [], string.Empty)); rules[_bridgeRuleIndex] = rule with { Lookups = lookups };
+        _loadedBridge = _loadedBridge with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion, Tables = rules }; _bridgeLookupIndex = lookups.Count - 1; RenderBridgeLookupList(); RenderBridgeExpansionBindings();
+    }
+
+    private void RemoveBridgeLookup()
+    {
+        if (_loadedBridge is null || _bridgeRuleIndex < 0 || _bridgeLookupIndex < 0) return;
+        var rules = _loadedBridge.Tables.ToArray(); var rule = rules[_bridgeRuleIndex]; var lookups = (rule.Lookups ?? []).ToList(); if (_bridgeLookupIndex >= lookups.Count) return;
+        var removed = lookups[_bridgeLookupIndex].Name; lookups.RemoveAt(_bridgeLookupIndex); rules[_bridgeRuleIndex] = rule with { Lookups = lookups };
+        _loadedBridge = _loadedBridge with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion, Tables = rules }; _bridgeLookupIndex = lookups.Count == 0 ? -1 : Math.Min(_bridgeLookupIndex, lookups.Count - 1); RenderBridgeLookupList(); RenderBridgeExpansionBindings();
+        _bridgeLookupStatus.Text = $"Removed '{removed}'. Any structural value still naming it will remain visibly unresolved until reassigned.";
+    }
+
+    private void RenderBridgeLookupList()
+    {
+        var lookups = CurrentBridgeRule()?.Lookups ?? []; if (_bridgeLookupIndex >= lookups.Count) _bridgeLookupIndex = lookups.Count == 0 ? -1 : 0;
+        _bridgeUiChanging = true; _bridgeLookup.ItemsSource = lookups.Select((lookup, index) => new BridgeLookupChoice(index, $"{lookup.Name} · {lookup.Source} → {(string.IsNullOrWhiteSpace(lookup.Table) ? "UNRESOLVED" : lookup.Table)}.{lookup.ResultColumn}")).ToArray(); _bridgeLookup.SelectedIndex = _bridgeLookupIndex; _bridgeUiChanging = false; RenderBridgeLookup();
+    }
+
+    private void RefreshBridgeLookupList()
+    {
+        if (_loadedBridge is null) return; var selected = _bridgeLookupIndex; var lookups = CurrentBridgeRule()?.Lookups ?? [];
+        _bridgeUiChanging = true; _bridgeLookup.ItemsSource = lookups.Select((lookup, index) => new BridgeLookupChoice(index, $"{lookup.Name} · {lookup.Source} → {(string.IsNullOrWhiteSpace(lookup.Table) ? "UNRESOLVED" : lookup.Table)}.{lookup.ResultColumn}")).ToArray(); _bridgeLookup.SelectedIndex = selected; _bridgeUiChanging = false;
+    }
+
+    private void RenderBridgeLookup()
+    {
+        const string unresolved = "⟨unresolved — blocks planning⟩"; var lookup = CurrentBridgeLookup();
+        _bridgeUiChanging = true; _bridgeLookupName.Text = lookup?.Name ?? string.Empty; _bridgeLookupSource.SelectedItem = lookup?.Source ?? DatabaseSyncLookupSource.AuditChanges;
+        var tables = lookup?.Source == DatabaseSyncLookupSource.TargetDatabase
+            ? _bridgeCapabilities?.Tables.Keys.Order(StringComparer.OrdinalIgnoreCase) ?? Enumerable.Empty<string>()
+            : _loadedBridge?.Tables.Select(rule => rule.SourceTable).Order(StringComparer.OrdinalIgnoreCase) ?? Enumerable.Empty<string>();
+        _bridgeLookupTable.ItemsSource = new[] { unresolved }.Concat(tables).ToArray(); _bridgeLookupTable.SelectedItem = lookup is null || string.IsNullOrWhiteSpace(lookup.Table) ? unresolved : lookup.Table;
+        var columns = LookupColumns(lookup).ToArray(); _bridgeLookupResultColumn.ItemsSource = new[] { unresolved }.Concat(columns).ToArray(); _bridgeLookupResultColumn.SelectedItem = lookup is null || string.IsNullOrWhiteSpace(lookup.ResultColumn) ? unresolved : lookup.ResultColumn;
+        _bridgeLookupResultVersion.SelectedItem = lookup?.ResultVersion ?? DatabaseSyncExpansionValueSource.SourceAfter; _bridgeLookupResultVersion.IsVisible = lookup?.Source == DatabaseSyncLookupSource.AuditChanges; _bridgeUiChanging = false;
+        var matches = (lookup?.Matches ?? []).ToDictionary(match => match.LookupColumn, StringComparer.OrdinalIgnoreCase);
+        _bridgeLookupRows = columns.Select(column => new BridgeLookupMatchChoice { LookupColumn = column, Included = matches.ContainsKey(column), Input = matches.GetValueOrDefault(column)?.Input }).ToList(); _bridgeLookupMatches.ItemsSource = _bridgeLookupRows; RefreshBridgeLookupStatus();
+    }
+
+    private IEnumerable<string> LookupColumns(DatabaseSyncRowLookup? lookup)
+    {
+        if (lookup is null || string.IsNullOrWhiteSpace(lookup.Table)) return [];
+        if (lookup.Source == DatabaseSyncLookupSource.TargetDatabase) return _bridgeCapabilities?.FindTable(lookup.Table)?.Columns.Select(column => column.Name) ?? [];
+        return _loadedBridge?.Tables.FirstOrDefault(rule => rule.SourceTable.Equals(lookup.Table, StringComparison.OrdinalIgnoreCase))?.ObservedSourceColumns ?? [];
+    }
+
+    private void CommitBridgeLookup()
+    {
+        var lookup = CurrentBridgeLookup(); if (_loadedBridge is null || lookup is null) return; const string unresolved = "⟨unresolved — blocks planning⟩";
+        var source = _bridgeLookupSource.SelectedItem is DatabaseSyncLookupSource selectedSource ? selectedSource : lookup.Source; var table = Convert.ToString(_bridgeLookupTable.SelectedItem) ?? string.Empty; var result = Convert.ToString(_bridgeLookupResultColumn.SelectedItem) ?? string.Empty;
+        var matches = _bridgeLookupRows.Where(row => row.Included).Select(row => new DatabaseSyncLookupMatch(row.LookupColumn, row.Input ?? new(DatabaseSyncExpansionValueSource.SourceAfter, string.Empty))).ToArray();
+        ReplaceBridgeLookup(lookup with { Name = string.IsNullOrWhiteSpace(_bridgeLookupName.Text) ? lookup.Name : _bridgeLookupName.Text.Trim(), Source = source, Table = table == unresolved ? string.Empty : table, ResultColumn = result == unresolved ? string.Empty : result, ResultVersion = _bridgeLookupResultVersion.SelectedItem is DatabaseSyncExpansionValueSource version ? version : DatabaseSyncExpansionValueSource.SourceAfter, Matches = matches });
+    }
+
+    private void ReplaceBridgeLookup(DatabaseSyncRowLookup lookup)
+    {
+        if (_loadedBridge is null || _bridgeRuleIndex < 0 || _bridgeLookupIndex < 0) return; var rules = _loadedBridge.Tables.ToArray(); var rule = rules[_bridgeRuleIndex]; var lookups = (rule.Lookups ?? []).ToArray(); if (_bridgeLookupIndex >= lookups.Length) return;
+        lookups[_bridgeLookupIndex] = lookup; rules[_bridgeRuleIndex] = rule with { Lookups = lookups }; _loadedBridge = _loadedBridge with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion, Tables = rules };
+    }
+
+    private DatabaseSyncRowLookup? CurrentBridgeLookup()
+    {
+        var lookups = CurrentBridgeRule()?.Lookups ?? []; return _bridgeLookupIndex >= 0 && _bridgeLookupIndex < lookups.Count ? lookups[_bridgeLookupIndex] : null;
+    }
+
+    private void RefreshBridgeLookupStatus()
+    {
+        var rule = CurrentBridgeRule(); var lookup = CurrentBridgeLookup(); if (rule is null) { _bridgeLookupStatus.Text = "Load a bridge and select a source table first."; return; }
+        if (lookup is null) { _bridgeLookupStatus.Text = $"{rule.SourceTable} has no named lookups. Add one only when a structural output requires a value from another exact row."; return; }
+        var matches = _bridgeLookupRows.Count(row => row.Included); var unresolvedMatches = _bridgeLookupRows.Count(row => row.Included && ExpansionValueUnresolved(row.Input, allowLookup: false));
+        _bridgeLookupStatus.Text = $"{rule.SourceTable} · {(rule.Lookups?.Count ?? 0):N0} lookup(s) · '{lookup.Name}' reads {lookup.Source} {(string.IsNullOrWhiteSpace(lookup.Table) ? "UNRESOLVED" : lookup.Table)}.{(string.IsNullOrWhiteSpace(lookup.ResultColumn) ? "UNRESOLVED" : lookup.ResultColumn)} with {matches:N0} exact match(s), {unresolvedMatches:N0} unresolved input(s). Zero or multiple matching rows block planning.";
+    }
+
+    private Control BuildBridgeExpansionValueEditor(string label, DatabaseSyncExpansionValue? current, Action<DatabaseSyncExpansionValue?> changed, bool allowLookup = true)
+    {
+        var rule = CurrentBridgeRule(); var observed = rule?.ObservedSourceColumns ?? [];
         var unresolved = new BridgeValueOption(null, string.Empty, "⟨unresolved — blocks planning⟩");
         var constant = new BridgeValueOption(DatabaseSyncExpansionValueSource.Constant, string.Empty, "Typed constant");
         var options = new[] { unresolved }
             .Concat(observed.Select(column => new BridgeValueOption(DatabaseSyncExpansionValueSource.SourceBefore, column, $"Source before · {column}")))
             .Concat(observed.Select(column => new BridgeValueOption(DatabaseSyncExpansionValueSource.SourceAfter, column, $"Source after · {column}")))
+            .Concat(allowLookup ? (rule?.Lookups ?? []).Select(lookup => new BridgeValueOption(DatabaseSyncExpansionValueSource.Lookup, string.Empty, $"Named lookup · {lookup.Name}", lookup.Name)) : [])
             .Append(constant).ToArray();
         var picker = new ComboBox { ItemsSource = options };
         var state = new ComboBox { ItemsSource = new[] { LegacyDatabaseAuditValueState.Unknown, LegacyDatabaseAuditValueState.Scalar, LegacyDatabaseAuditValueState.Null, LegacyDatabaseAuditValueState.Binary } };
         var value = new TextBox { PlaceholderText = "Scalar text or base64 bytes" };
+        var transformKind = new ComboBox { ItemsSource = Enum.GetValues<DatabaseSyncValueTransformKind>() };
+        var transformValue = new TextBox { PlaceholderText = "Transform operand" };
         DatabaseSyncExpansionValue? selected = current;
-        picker.SelectedItem = current is null ? unresolved : options.FirstOrDefault(option => option.Source == current.Source && (current.Source == DatabaseSyncExpansionValueSource.Constant || option.SourceColumn.Equals(current.SourceColumn, StringComparison.OrdinalIgnoreCase))) ?? unresolved;
+        picker.SelectedItem = current is null ? unresolved : options.FirstOrDefault(option => option.Source == current.Source && (current.Source == DatabaseSyncExpansionValueSource.Constant || current.Source == DatabaseSyncExpansionValueSource.Lookup ? string.Equals(option.LookupName, current.LookupName, StringComparison.OrdinalIgnoreCase) : option.SourceColumn.Equals(current.SourceColumn, StringComparison.OrdinalIgnoreCase))) ?? unresolved;
         state.SelectedItem = current?.Constant?.State ?? LegacyDatabaseAuditValueState.Unknown; value.Text = current?.Constant?.Value ?? string.Empty;
-        void RefreshConstant()
+        transformKind.SelectedItem = current?.Transform?.Kind ?? DatabaseSyncValueTransformKind.None; transformValue.Text = TransformEditorText(current?.Transform);
+        void RefreshEditors()
         {
             var isConstant = selected?.Source == DatabaseSyncExpansionValueSource.Constant; state.IsVisible = value.IsVisible = isConstant;
             value.IsEnabled = isConstant && state.SelectedItem is LegacyDatabaseAuditValueState.Scalar or LegacyDatabaseAuditValueState.Binary;
+            var hasValue = selected is not null; transformKind.IsVisible = hasValue; transformValue.IsVisible = hasValue && transformKind.SelectedItem is DatabaseSyncValueTransformKind kind && kind != DatabaseSyncValueTransformKind.None;
+            transformValue.PlaceholderText = transformKind.SelectedItem switch { DatabaseSyncValueTransformKind.NumericAdd or DatabaseSyncValueTransformKind.NumericMultiply => "Invariant decimal operand", DatabaseSyncValueTransformKind.StringPrefix or DatabaseSyncValueTransformKind.StringSuffix => "Text", DatabaseSyncValueTransformKind.ExactMap => "old=new; other=replacement", DatabaseSyncValueTransformKind.NullFallback => "Scalar fallback", _ => "Transform operand" };
         }
         picker.SelectionChanged += (_, _) =>
         {
+            var transform = selected?.Transform;
             if (picker.SelectedItem is not BridgeValueOption option || option.Source is null) selected = null;
             else if (option.Source == DatabaseSyncExpansionValueSource.Constant)
-                selected = new(DatabaseSyncExpansionValueSource.Constant, string.Empty, selected?.Constant ?? LegacyDatabaseAuditValue.Unknown);
-            else selected = new(option.Source.Value, option.SourceColumn);
-            RefreshConstant(); changed(selected);
+                selected = new(DatabaseSyncExpansionValueSource.Constant, string.Empty, selected?.Constant ?? LegacyDatabaseAuditValue.Unknown, Transform: transform);
+            else if (option.Source == DatabaseSyncExpansionValueSource.Lookup)
+                selected = new(DatabaseSyncExpansionValueSource.Lookup, string.Empty, LookupName: option.LookupName, Transform: transform);
+            else selected = new(option.Source.Value, option.SourceColumn, Transform: transform);
+            RefreshEditors(); changed(selected);
         };
         state.SelectionChanged += (_, _) =>
         {
@@ -845,14 +1004,60 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             if (selected?.Source != DatabaseSyncExpansionValueSource.Constant || state.SelectedItem is not LegacyDatabaseAuditValueState selectedState || selectedState is not (LegacyDatabaseAuditValueState.Scalar or LegacyDatabaseAuditValueState.Binary)) return;
             selected = selected with { Constant = new(selectedState, value.Text ?? string.Empty) }; changed(selected);
         };
-        RefreshConstant();
+        transformKind.SelectionChanged += (_, _) =>
+        {
+            if (selected is null || transformKind.SelectedItem is not DatabaseSyncValueTransformKind kind) return;
+            selected = selected with { Transform = TransformFromEditor(kind, transformValue.Text ?? string.Empty) }; RefreshEditors(); changed(selected);
+        };
+        transformValue.TextChanged += (_, _) =>
+        {
+            if (selected is null || transformKind.SelectedItem is not DatabaseSyncValueTransformKind kind || kind == DatabaseSyncValueTransformKind.None) return;
+            selected = selected with { Transform = TransformFromEditor(kind, transformValue.Text ?? string.Empty) }; changed(selected);
+        };
+        RefreshEditors();
         return new StackPanel
         {
             Spacing = 4, Children =
             {
                 new TextBlock { Text = label, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) }, picker,
-                new WrapPanel { Children = { state, value } }
+                new WrapPanel { Children = { state, value } },
+                new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 5, Children = { transformKind, WithColumn(transformValue, 1) } }
             }
+        };
+    }
+
+    private static DatabaseSyncValueTransform? TransformFromEditor(DatabaseSyncValueTransformKind kind, string text) => kind switch
+    {
+        DatabaseSyncValueTransformKind.None => null,
+        DatabaseSyncValueTransformKind.ExactMap => new(kind, Mappings: text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(part => part.Split('=', 2, StringSplitOptions.TrimEntries)).Where(parts => parts.Length == 2).Select(parts => new DatabaseSyncValueMap(new(LegacyDatabaseAuditValueState.Scalar, parts[0]), new(LegacyDatabaseAuditValueState.Scalar, parts[1]))).ToArray()),
+        DatabaseSyncValueTransformKind.NullFallback => new(kind, Fallback: new(LegacyDatabaseAuditValueState.Scalar, text)),
+        _ => new(kind, text)
+    };
+
+    private static string TransformEditorText(DatabaseSyncValueTransform? transform) => transform?.Kind switch
+    {
+        null or DatabaseSyncValueTransformKind.None => string.Empty,
+        DatabaseSyncValueTransformKind.ExactMap => string.Join("; ", (transform.Mappings ?? []).Select(mapping => $"{mapping.Match.Value}={mapping.Result.Value}")),
+        DatabaseSyncValueTransformKind.NullFallback => transform.Fallback?.Value ?? string.Empty,
+        _ => transform.Operand
+    };
+
+    private static bool ExpansionValueUnresolved(DatabaseSyncExpansionValue? value, bool allowLookup = true)
+    {
+        if (value is null) return true;
+        var sourceUnresolved = value.Source switch
+        {
+            DatabaseSyncExpansionValueSource.Constant => value.Constant is null || value.Constant.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing,
+            DatabaseSyncExpansionValueSource.Lookup => !allowLookup || string.IsNullOrWhiteSpace(value.LookupName),
+            _ => string.IsNullOrWhiteSpace(value.SourceColumn)
+        };
+        if (sourceUnresolved || value.Transform is null or { Kind: DatabaseSyncValueTransformKind.None }) return sourceUnresolved;
+        return value.Transform.Kind switch
+        {
+            DatabaseSyncValueTransformKind.NumericAdd or DatabaseSyncValueTransformKind.NumericMultiply => !decimal.TryParse(value.Transform.Operand, NumberStyles.Float, CultureInfo.InvariantCulture, out _),
+            DatabaseSyncValueTransformKind.ExactMap => (value.Transform.Mappings?.Count ?? 0) == 0,
+            DatabaseSyncValueTransformKind.NullFallback => value.Transform.Fallback is null || value.Transform.Fallback.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing,
+            _ => false
         };
     }
 
@@ -938,13 +1143,10 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         var rule = CurrentBridgeRule(); var expansion = CurrentBridgeExpansion();
         if (rule is null) { _bridgeExpansionStatus.Text = "Load a bridge and select a source table first."; return; }
         if (expansion is null) { _bridgeExpansionStatus.Text = rule.SuppressPrimaryOutput ? $"{rule.SourceTable} suppresses its primary row but has no structural output; planning is blocked until an output is added or suppression is cleared." : $"{rule.SourceTable} has no structural outputs. Add one only when one audited row must produce another normalized target row."; return; }
-        var unresolvedKeys = _bridgeExpansionRows.Count(row => row.IsKey && Unresolved(row.KeyValue)); var targetKind = _bridgeExpansionTargetKind.SelectedItem is LegacyDatabaseRowChangeKind kind ? kind : expansion.TargetKind;
-        var unresolvedFields = _bridgeExpansionRows.Count(row => !row.IsKey && row.Included && ((targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Removed && Unresolved(row.Before)) || (targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Added && Unresolved(row.After))));
+        var unresolvedKeys = _bridgeExpansionRows.Count(row => row.IsKey && ExpansionValueUnresolved(row.KeyValue)); var targetKind = _bridgeExpansionTargetKind.SelectedItem is LegacyDatabaseRowChangeKind kind ? kind : expansion.TargetKind;
+        var unresolvedFields = _bridgeExpansionRows.Count(row => !row.IsKey && row.Included && ((targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Removed && ExpansionValueUnresolved(row.Before)) || (targetKind is LegacyDatabaseRowChangeKind.Modified or LegacyDatabaseRowChangeKind.Added && ExpansionValueUnresolved(row.After))));
         var missingKinds = _bridgeExpansionAdded.IsChecked != true && _bridgeExpansionModified.IsChecked != true && _bridgeExpansionRemoved.IsChecked != true;
-        _bridgeExpansionStatus.Text = $"{rule.SourceTable} · {(rule.Expansions?.Count ?? 0):N0} structural output(s) · '{expansion.Name}' → {(string.IsNullOrWhiteSpace(expansion.TargetTable) ? "UNRESOLVED" : expansion.TargetTable)} {targetKind}. {unresolvedKeys:N0} unresolved key binding(s), {unresolvedFields:N0} unresolved field binding(s){(missingKinds ? ", no source change kind selected" : string.Empty)}. Every unresolved value blocks planning.";
-        static bool Unresolved(DatabaseSyncExpansionValue? value) => value is null || value.Source == DatabaseSyncExpansionValueSource.Constant
-            ? value?.Constant is null || value.Constant.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing
-            : string.IsNullOrWhiteSpace(value.SourceColumn);
+        _bridgeExpansionStatus.Text = $"{rule.SourceTable} · {(rule.Expansions?.Count ?? 0):N0} structural output(s) · '{expansion.Name}' → {(string.IsNullOrWhiteSpace(expansion.TargetTable) ? "UNRESOLVED" : expansion.TargetTable)} {targetKind}. {unresolvedKeys:N0} unresolved key binding(s), {unresolvedFields:N0} unresolved field binding(s){(missingKinds ? ", no source change kind selected" : string.Empty)}. Values may use audited columns, typed constants, named exact lookups, and bounded transforms; every unresolved value blocks planning.";
     }
 
     private async Task PickAndLoadSchemaBridgeAsync()
@@ -964,13 +1166,13 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             if (!profile.TargetSchemaSha256.Equals(DatabaseSyncTranslationService.HashTargetSchema(capabilities), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("This bridge belongs to a different or older target schema. Generate a new bridge so mappings cannot silently drift.");
             _ = service.Translate([], profile, profile.SourceAuditSha256, capabilities); SetBridgeEditor(profile, capabilities, path);
         }
-        catch (Exception exception) { _loadedBridge = null; _bridgeCapabilities = null; _bridgeRuleIndex = _bridgeExpansionIndex = -1; _bridgeColumns.ItemsSource = null; _bridgeDefaults.ItemsSource = null; _bridgeExpansion.ItemsSource = null; _bridgeExpansionBindings.ItemsSource = null; _bridgeStatus.Text = $"Bridge load failed safely: {exception.Message}"; DesktopCrashLogger.Log("Database schema bridge load failed", exception); }
+        catch (Exception exception) { _loadedBridge = null; _bridgeCapabilities = null; _bridgeRuleIndex = _bridgeExpansionIndex = _bridgeLookupIndex = -1; _bridgeColumns.ItemsSource = null; _bridgeDefaults.ItemsSource = null; _bridgeExpansion.ItemsSource = null; _bridgeExpansionBindings.ItemsSource = null; _bridgeLookup.ItemsSource = null; _bridgeLookupMatches.ItemsSource = null; _bridgeStatus.Text = $"Bridge load failed safely: {exception.Message}"; DesktopCrashLogger.Log("Database schema bridge load failed", exception); }
         finally { EndOperation(); }
     }
 
     private void SetBridgeEditor(DatabaseSyncTranslationProfile profile, DatabaseCapabilities capabilities, string path)
     {
-        _loadedBridge = profile with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion }; _bridgeCapabilities = capabilities; _bridgeRuleIndex = profile.Tables.Count == 0 ? -1 : 0; _bridgeExpansionIndex = -1; _recoveryTranslation.Text = Path.GetFullPath(path);
+        _loadedBridge = profile with { FormatVersion = DatabaseSyncTranslationService.ProfileFormatVersion }; _bridgeCapabilities = capabilities; _bridgeRuleIndex = profile.Tables.Count == 0 ? -1 : 0; _bridgeExpansionIndex = _bridgeLookupIndex = -1; _recoveryTranslation.Text = Path.GetFullPath(path);
         _bridgeUiChanging = true; _bridgeTable.ItemsSource = _loadedBridge.Tables.Select((rule, index) => new BridgeTableChoice(index, $"{rule.SourceTable} → {(string.IsNullOrWhiteSpace(rule.TargetTable) ? "UNRESOLVED" : rule.TargetTable)}")).ToArray(); _bridgeTable.SelectedIndex = _bridgeRuleIndex; _bridgeUiChanging = false; RenderBridgeRule();
     }
 
@@ -979,7 +1181,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         if (_loadedBridge is null || string.IsNullOrWhiteSpace(_recoveryTranslation.Text)) { _bridgeStatus.Text = "Load or generate a bridge before saving."; return; }
         try
         {
-            CommitBridgeExpansion(); CommitBridgeRule(); await DatabaseSyncTranslationService.WriteAsync(_recoveryTranslation.Text, _loadedBridge, overwrite: true);
+            CommitBridgeExpansion(); CommitBridgeLookup(); CommitBridgeRule(); await DatabaseSyncTranslationService.WriteAsync(_recoveryTranslation.Text, _loadedBridge, overwrite: true);
             _bridgeUiChanging = true; _bridgeTable.ItemsSource = _loadedBridge.Tables.Select((rule, index) => new BridgeTableChoice(index, $"{rule.SourceTable} → {(string.IsNullOrWhiteSpace(rule.TargetTable) ? "UNRESOLVED" : rule.TargetTable)}")).ToArray(); _bridgeTable.SelectedIndex = _bridgeRuleIndex; _bridgeUiChanging = false;
             RefreshBridgeStatus("Saved atomically. ");
         }
@@ -1006,7 +1208,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             var value = defaults.GetValueOrDefault(column)?.Value ?? LegacyDatabaseAuditValue.Unknown;
             return new BridgeDefaultChoice { Target = column, State = value.State, Value = value.Value ?? string.Empty };
         }).ToList();
-        _bridgeColumns.ItemsSource = _bridgeColumnRows; _bridgeDefaults.ItemsSource = _bridgeDefaultRows; _bridgeExpansionIndex = (rule.Expansions?.Count ?? 0) == 0 ? -1 : Math.Clamp(_bridgeExpansionIndex, 0, rule.Expansions!.Count - 1); RenderBridgeExpansionList(); RefreshBridgeStatus();
+        _bridgeColumns.ItemsSource = _bridgeColumnRows; _bridgeDefaults.ItemsSource = _bridgeDefaultRows; _bridgeExpansionIndex = (rule.Expansions?.Count ?? 0) == 0 ? -1 : Math.Clamp(_bridgeExpansionIndex, 0, rule.Expansions!.Count - 1); _bridgeLookupIndex = (rule.Lookups?.Count ?? 0) == 0 ? -1 : Math.Clamp(_bridgeLookupIndex, 0, rule.Lookups!.Count - 1); RenderBridgeExpansionList(); RenderBridgeLookupList(); RefreshBridgeStatus();
     }
 
     private void RebuildBridgeDefaultRows()
@@ -1045,8 +1247,8 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         var structuralGaps = _loadedBridge.Tables.Count(rule => rule.SuppressPrimaryOutput && (rule.Expansions?.Count ?? 0) == 0);
         var primarySuppressed = CurrentBridgeRule()?.SuppressPrimaryOutput == true;
         var currentColumnGaps = primarySuppressed ? 0 : _bridgeColumnRows.Count(row => !row.Drop && string.IsNullOrWhiteSpace(row.Target)); var currentDefaultGaps = primarySuppressed ? 0 : _bridgeDefaultRows.Count(row => row.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing);
-        var expansionCount = _loadedBridge.Tables.Sum(rule => rule.Expansions?.Count ?? 0);
-        _bridgeStatus.Text = prefix + $"{_loadedBridge.Name} · {_loadedBridge.Tables.Count:N0} table rule(s) · {expansionCount:N0} structural output(s) · {tableGaps:N0} unresolved primary table(s) · {structuralGaps:N0} suppressed table(s) without an output. Current table: {currentColumnGaps:N0} unresolved column(s), {currentDefaultGaps:N0} unresolved default(s). Unknown/blank values block planning.";
+        var expansionCount = _loadedBridge.Tables.Sum(rule => rule.Expansions?.Count ?? 0); var lookupCount = _loadedBridge.Tables.Sum(rule => rule.Lookups?.Count ?? 0);
+        _bridgeStatus.Text = prefix + $"{_loadedBridge.Name} · {_loadedBridge.Tables.Count:N0} table rule(s) · {expansionCount:N0} structural output(s) · {lookupCount:N0} named lookup(s) · {tableGaps:N0} unresolved primary table(s) · {structuralGaps:N0} suppressed table(s) without an output. Current table: {currentColumnGaps:N0} unresolved column(s), {currentDefaultGaps:N0} unresolved default(s). Unknown/blank values block planning.";
     }
 
     private async Task LoadDatabaseSyncPlanAsync()
@@ -1063,18 +1265,22 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         _loadedRecoveryPlan = plan; _recoveryOperations.ItemsSource = plan.Operations;
         var dependencyInclusions = plan.DependencyInclusions ?? [];
         var schemaTranslations = plan.SchemaTranslations ?? [];
+        var lookupEvidence = plan.LookupEvidence ?? [];
         var dependencyLines = dependencyInclusions.Take(500).Select(inclusion => $"{inclusion.IncludedIdentity} ← {inclusion.Relation} ({inclusion.SelectedEndpoint} = {inclusion.IncludedEndpoint} = {inclusion.MatchedValue}) from {inclusion.SelectedIdentity}").ToList();
         if (dependencyInclusions.Count > dependencyLines.Count) dependencyLines.Add($"… {dependencyInclusions.Count - dependencyLines.Count:N0} more causal edges remain in the hash-bound plan artifact and CLI inspection output.");
         var translationLines = schemaTranslations.Take(500).Select(item => $"{item.Action}: {item.SourceTable}.{item.SourceColumn} → {item.TargetTable}.{item.TargetColumn} · {item.Operations:N0} operation(s)").ToList();
         if (schemaTranslations.Count > translationLines.Count) translationLines.Add($"… {schemaTranslations.Count - translationLines.Count:N0} more translation rules remain in the hash-bound plan artifact and CLI inspection output.");
-        _recoveryRemapSummary.IsVisible = plan.IdRemaps.Count > 0 || dependencyInclusions.Count > 0 || schemaTranslations.Count > 0;
+        var lookupLines = lookupEvidence.Take(500).Select(item => $"{item.SourceDisplayIdentity} · {item.LookupName} · {item.Source} {item.LookupTable} ({string.Join(", ", item.Match.Select(part => $"{part.Column}={part.Value.Value}"))}) → {item.ResultColumn}={item.Result.Value} · matched {item.MatchedIdentity}").ToList();
+        if (lookupEvidence.Count > lookupLines.Count) lookupLines.Add($"… {lookupEvidence.Count - lookupLines.Count:N0} more exact lookup results remain in the hash-bound plan artifact and CLI inspection output.");
+        _recoveryRemapSummary.IsVisible = plan.IdRemaps.Count > 0 || dependencyInclusions.Count > 0 || schemaTranslations.Count > 0 || lookupEvidence.Count > 0;
         _recoveryRemapSummary.Text = string.Join(Environment.NewLine + Environment.NewLine, new[]
         {
             plan.IdRemaps.Count == 0 ? string.Empty : "ID remaps — review before apply:\n" + string.Join(Environment.NewLine, plan.IdRemaps.Select(remap => $"{remap.Table}.{remap.Column}: {remap.SourceId} → {remap.TargetId} · {remap.RewrittenReferences:N0} recognized reference(s) rewritten")),
             dependencyInclusions.Count == 0 ? string.Empty : "Dependency additions — exact causal edges:\n" + string.Join(Environment.NewLine, dependencyLines),
-            schemaTranslations.Count == 0 ? string.Empty : $"Schema bridge — {plan.TranslationProfileName} · {plan.TranslationProfileSha256}:\n" + string.Join(Environment.NewLine, translationLines)
+            schemaTranslations.Count == 0 ? string.Empty : $"Schema bridge — {plan.TranslationProfileName} · {plan.TranslationProfileSha256}:\n" + string.Join(Environment.NewLine, translationLines),
+            lookupEvidence.Count == 0 ? string.Empty : "Exact named row lookups — rechecked under locks before apply:\n" + string.Join(Environment.NewLine, lookupLines)
         }.Where(section => section.Length > 0));
-        _legacyStatus.Text = $"Verified target plan for {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}.\n{plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already applied · {plan.Conflicts:N0} conflicts · {plan.Blocked:N0} blocked · {plan.IdRemaps.Count:N0} ID remaps · {(plan.DependencyInclusions?.Count ?? 0):N0} dependency additions · {schemaTranslations.Count:N0} translation rules · {plan.Operations.Count:N0} total.\nTarget schema: {plan.TargetSchemaSha256 ?? "legacy plan without schema binding"}. {(plan.RemovalsIncluded ? "Explicit removals are included." : "Removals are excluded.")}";
+        _legacyStatus.Text = $"Verified target plan for {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}.\n{plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already applied · {plan.Conflicts:N0} conflicts · {plan.Blocked:N0} blocked · {plan.IdRemaps.Count:N0} ID remaps · {(plan.DependencyInclusions?.Count ?? 0):N0} dependency additions · {schemaTranslations.Count:N0} translation rules · {lookupEvidence.Count:N0} exact lookups · {plan.Operations.Count:N0} total.\nTarget schema: {plan.TargetSchemaSha256 ?? "legacy plan without schema binding"}. {(plan.RemovalsIncluded ? "Explicit removals are included." : "Removals are excluded.")}";
     }
 
     private async Task ExportDatabaseSyncPreviewAsync()

@@ -30,6 +30,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("wdb cache parser").FirstOrDefault()?.Command.Id != "workspace.cache" ||
     CrucibleCommandCatalog.Search("cross core schema bridge").FirstOrDefault()?.Command.Id != "workspace.server" ||
     CrucibleCommandCatalog.Search("structural one to many expansion").FirstOrDefault()?.Command.Id != "workspace.server" ||
+    CrucibleCommandCatalog.Search("cross row lookup exact map").FirstOrDefault()?.Command.Id != "workspace.server" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
 
@@ -1745,6 +1746,7 @@ if (Directory.Exists(desktopSourceRoot))
         throw new InvalidOperationException($"Single-window/responsive desktop contract regressed. Feature windows: {string.Join(", ", featureWindows)}; window markup: {string.Join(", ", windowMarkup)}; C# rigid constraints: {string.Join(", ", rigidConstraints)}; markup constraints: {string.Join(", ", markupConstraints)}; permanent horizontal splitters: {string.Join(", ", permanentHorizontalSplitters)}; responsive splitter uses: {responsiveSplitters}.");
     var itemWorkbenchSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ItemWorkbenchWindow.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var sqlWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("SqlWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var serverSqlWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ServerSqlWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var clientWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ClientWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var appSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("App.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
@@ -1796,6 +1798,10 @@ if (Directory.Exists(desktopSourceRoot))
         !mainWindowMarkup.Contains("x:Name=\"NavigationPaneButton\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"InspectorPaneButton\"", StringComparison.Ordinal))
         throw new InvalidOperationException("Cut-item navigation, SQL-row favorites, same-window authenticated client releases, or their direct workspace routes regressed.");
+    if (!serverSqlWorkspaceSource.Contains("Named row lookups", StringComparison.Ordinal) || !serverSqlWorkspaceSource.Contains("BuildBridgeLookupEditor", StringComparison.Ordinal) ||
+        !serverSqlWorkspaceSource.Contains("NumericAdd", StringComparison.Ordinal) || !serverSqlWorkspaceSource.Contains("ExactMap", StringComparison.Ordinal) ||
+        !serverSqlWorkspaceSource.Contains("Zero or multiple matching rows block planning", StringComparison.Ordinal))
+        throw new InvalidOperationException("Same-window exact schema-lookup or bounded value-transform authoring regressed.");
 }
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
@@ -3257,6 +3263,57 @@ if (structuralTranslation.BlockedOperations != 0 || structuralTranslation.Operat
     !structuralTranslation.Operations[1].Fields.Select(field => field.Column).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(["item_id", "slot", "label", "score"]) ||
     structuralTranslation.Evidence.All(item => item.Action != "Expansion") || structuralTranslation.Evidence.Count(item => item.Action == "ExpansionKey") != 2)
     throw new InvalidOperationException("Reviewed one-to-many schema expansion lost its target row, exact key, fields, evidence, or source lineage.");
+var transformedExpansion = bridgeExpansion with
+{
+    FieldBindings =
+    [
+        new("label", null, new(DatabaseSyncExpansionValueSource.SourceAfter, "name", Transform: new(DatabaseSyncValueTransformKind.StringSuffix, " (ported)"))),
+        new("score", null, new(DatabaseSyncExpansionValueSource.SourceAfter, "entry", Transform: new(DatabaseSyncValueTransformKind.NumericAdd, "10")))
+    ]
+};
+var transformedBridge = resolvedBridge with { Tables = [resolvedBridge.Tables[0] with { SuppressPrimaryOutput = true, Expansions = [transformedExpansion] }] };
+var transformedOutput = bridgeService.Translate([bridgeAdded], transformedBridge, bridgeSourceHash, bridgeCapabilities).Operations.Single();
+if (transformedOutput.Status == DatabaseSyncOperationStatus.Blocked || transformedOutput.Fields.Single(field => field.Column == "label").After.Value != "Bridge Blade (ported)" || transformedOutput.Fields.Single(field => field.Column == "score").After.Value != "15")
+    throw new InvalidOperationException("Deterministic schema-bridge string/numeric transforms lost or invented a value.");
+var exactMapExpansion = transformedExpansion with
+{
+    FieldBindings =
+    [
+        new("label", null, new(DatabaseSyncExpansionValueSource.SourceAfter, "name", Transform: new(DatabaseSyncValueTransformKind.ExactMap, Mappings: [new(new(LegacyDatabaseAuditValueState.Scalar, "Bridge Blade"), new(LegacyDatabaseAuditValueState.Scalar, "Mapped Blade"))]))),
+        new("score", null, new(DatabaseSyncExpansionValueSource.Constant, string.Empty, LegacyDatabaseAuditValue.Null, Transform: new(DatabaseSyncValueTransformKind.NullFallback, Fallback: DependencyValue(77))))
+    ]
+};
+var exactMapBridge = transformedBridge with { Tables = [transformedBridge.Tables[0] with { Expansions = [exactMapExpansion] }] };
+var exactMapOutput = bridgeService.Translate([bridgeAdded], exactMapBridge, bridgeSourceHash, bridgeCapabilities).Operations.Single();
+if (exactMapOutput.Status == DatabaseSyncOperationStatus.Blocked || exactMapOutput.Fields.Single(field => field.Column == "label").After.Value != "Mapped Blade" || exactMapOutput.Fields.Single(field => field.Column == "score").After.Value != "77")
+    throw new InvalidOperationException("Typed exact-map or null-fallback schema-bridge transform regressed.");
+var bridgeAddedWithCode = bridgeAdded with { Fields = [.. bridgeAdded.Fields, new("code", LegacyDatabaseAuditValue.Missing, new(LegacyDatabaseAuditValueState.Scalar, "blade"))] };
+var bridgeCodeRow = new DatabaseSyncOperation("old_item_codes", LegacyDatabaseContentDomain.ItemsAndSets, LegacyDatabaseRowChangeKind.Added,
+    [new("code", new(LegacyDatabaseAuditValueState.Scalar, "blade"))], [new("normalized_id", LegacyDatabaseAuditValue.Missing, DependencyValue(42))], DatabaseSyncOperationStatus.Ready, "fixture");
+var auditLookup = new DatabaseSyncRowLookup("normalized score", DatabaseSyncLookupSource.AuditChanges, "old_item_codes",
+    [new("code", new(DatabaseSyncExpansionValueSource.SourceAfter, "code"))], "normalized_id");
+var lookupExpansion = bridgeExpansion with { FieldBindings = [new("label", null, new(DatabaseSyncExpansionValueSource.SourceAfter, "name")), new("score", null, new(DatabaseSyncExpansionValueSource.Lookup, string.Empty, LookupName: auditLookup.Name))] };
+var lookupRule = resolvedBridge.Tables[0] with { ObservedSourceColumns = [.. resolvedBridge.Tables[0].ObservedSourceColumns ?? [], "code"], SuppressPrimaryOutput = true, Expansions = [lookupExpansion], Lookups = [auditLookup] };
+var auditLookupBridge = resolvedBridge with { Tables = [lookupRule, new("old_item_codes", string.Empty, [], [], [], ["code", "normalized_id"], ["code"])] };
+var auditLookupResolutions = bridgeService.ResolveAuditLookups([bridgeAddedWithCode], auditLookupBridge, bridgeSourceHash, bridgeCapabilities, [bridgeAddedWithCode, bridgeCodeRow]);
+var auditLookupTranslation = bridgeService.Translate([bridgeAddedWithCode], auditLookupBridge, bridgeSourceHash, bridgeCapabilities, [bridgeAddedWithCode, bridgeCodeRow], auditLookupResolutions);
+if (auditLookupResolutions.Single().Value?.Value != "42" || auditLookupTranslation.BlockedOperations != 0 || auditLookupTranslation.LookupEvidence?.Single().MatchedIdentity != bridgeCodeRow.Identity || auditLookupTranslation.Operations.Single().Fields.Single(field => field.Column == "score").After.Value != "42")
+    throw new InvalidOperationException("Exact changed-row schema lookup did not preserve its typed result and matched-row evidence.");
+var ambiguousCodeRow = bridgeCodeRow with { Fields = [new("normalized_id", LegacyDatabaseAuditValue.Missing, DependencyValue(43))] };
+var ambiguousResolution = bridgeService.ResolveAuditLookups([bridgeAddedWithCode], auditLookupBridge, bridgeSourceHash, bridgeCapabilities, [bridgeAddedWithCode, bridgeCodeRow, ambiguousCodeRow]);
+if (ambiguousResolution.Single().Finding?.Contains("more than one", StringComparison.OrdinalIgnoreCase) != true || bridgeService.Translate([bridgeAddedWithCode], auditLookupBridge, bridgeSourceHash, bridgeCapabilities, [bridgeAddedWithCode, bridgeCodeRow, ambiguousCodeRow], ambiguousResolution).BlockedOperations != 1)
+    throw new InvalidOperationException("Ambiguous changed-row schema lookup was not blocked.");
+var targetLookup = new DatabaseSyncRowLookup("live power", DatabaseSyncLookupSource.TargetDatabase, "new_items",
+    [new("title", new(DatabaseSyncExpansionValueSource.SourceAfter, "name"))], "power");
+var targetLookupRule = resolvedBridge.Tables[0] with { SuppressPrimaryOutput = true, Expansions = [lookupExpansion with { FieldBindings = [new("label", null, new(DatabaseSyncExpansionValueSource.SourceAfter, "name")), new("score", null, new(DatabaseSyncExpansionValueSource.Lookup, string.Empty, LookupName: targetLookup.Name))] }], Lookups = [targetLookup] };
+var targetLookupBridge = resolvedBridge with { Tables = [targetLookupRule] };
+var targetRequests = bridgeService.BuildTargetLookupRequests([bridgeAdded], targetLookupBridge, bridgeSourceHash, bridgeCapabilities);
+var targetRequest = targetRequests.Single();
+var targetEvidence = new DatabaseSyncLookupEvidence(targetRequest.SourceOperationIdentity, targetRequest.SourceDisplayIdentity, targetRequest.LookupName, DatabaseSyncLookupSource.TargetDatabase, targetRequest.TargetTable, targetRequest.Match, targetRequest.ResultColumn, DependencyValue(7), "new_items · id=5");
+var targetResolution = new DatabaseSyncResolvedLookup(targetRequest.SourceOperationIdentity, targetRequest.LookupName, targetEvidence.Result, Evidence: targetEvidence);
+var targetLookupTranslation = bridgeService.Translate([bridgeAdded], targetLookupBridge, bridgeSourceHash, bridgeCapabilities, [bridgeAdded], [targetResolution]);
+if (targetRequest.Match.Single().Column != "title" || targetRequest.Match.Single().Value.Value != "Bridge Blade" || targetLookupTranslation.LookupEvidence?.Single().MatchedIdentity != "new_items · id=5" || targetLookupTranslation.Operations.Single().Fields.Single(field => field.Column == "score").After.Value != "7")
+    throw new InvalidOperationException("Target-database lookup request, typed result, or hash-bound evidence regressed.");
 var suppressedStructuralBridge = structuralBridge with { Tables = [structuralBridge.Tables[0] with { SuppressPrimaryOutput = true }] };
 var suppressedStructural = bridgeService.Translate([bridgeAdded], suppressedStructuralBridge, bridgeSourceHash, bridgeCapabilities);
 if (suppressedStructural.BlockedOperations != 0 || suppressedStructural.Operations.Count != 1 || suppressedStructural.Operations[0].Table != "new_item_meta")
@@ -3324,19 +3381,36 @@ var legacySyncHash = Convert.ToHexString(System.Security.Cryptography.SHA256.Has
 var legacySyncPlan = new DatabaseSyncPlan(DatabaseSynchronizationService.PlanFormat, 2, "fixture", DateTimeOffset.UtcNow, legacySyncSourceHash, legacySyncTarget, false, legacySyncPatterns, legacySyncRemaps, legacySyncOperations, legacySyncHash, ["legacy fixture"]);
 var legacySyncPath = Path.Combine(layerRoot, "legacy-v2-sync-plan.json");
 var legacySyncJsonOptions = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
-var legacySyncJson = System.Text.Json.JsonSerializer.SerializeToNode(legacySyncPlan, legacySyncJsonOptions)!.AsObject(); legacySyncJson.Remove("DependencyClosureIncluded"); legacySyncJson.Remove("DependencyInclusions"); legacySyncJson.Remove("TargetSchemaSha256"); legacySyncJson.Remove("TranslationProfileName"); legacySyncJson.Remove("TranslationProfileSha256"); legacySyncJson.Remove("SchemaTranslations");
+var legacySyncJson = System.Text.Json.JsonSerializer.SerializeToNode(legacySyncPlan, legacySyncJsonOptions)!.AsObject(); legacySyncJson.Remove("DependencyClosureIncluded"); legacySyncJson.Remove("DependencyInclusions"); legacySyncJson.Remove("TargetSchemaSha256"); legacySyncJson.Remove("TranslationProfileName"); legacySyncJson.Remove("TranslationProfileSha256"); legacySyncJson.Remove("SchemaTranslations"); legacySyncJson.Remove("LookupEvidence");
 File.WriteAllText(legacySyncPath, legacySyncJson.ToJsonString(legacySyncJsonOptions));
 var loadedLegacySync = new DatabaseSynchronizationService().LoadPlanAsync(legacySyncPath).GetAwaiter().GetResult();
 if (loadedLegacySync.FormatVersion != 2 || loadedLegacySync.Operations.Count != 1 || loadedLegacySync.DependencyClosureIncluded || loadedLegacySync.DependencyInclusions is not null)
-    throw new InvalidOperationException("Database synchronization format v4 broke verified readability of an existing v2 plan.");
+    throw new InvalidOperationException("Database synchronization format v5 broke verified readability of an existing v2 plan.");
 var legacyV3Inclusions = new[] { new DatabaseSyncDependencyInclusion("fixture-relation", false, dependencyItem.Identity, dependencyVendor.Identity, "item_template.entry", "npc_vendor.item", "100", "fixture") };
 var legacyV3Content = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { sourceAuditSha256 = legacySyncSourceHash, target = legacySyncTarget, removalsIncluded = false, patterns = legacySyncPatterns, remaps = legacySyncRemaps, operations = legacySyncOperations, dependencyClosureIncluded = true, dependencyInclusions = legacyV3Inclusions }, legacySyncHashOptions);
 var legacyV3Hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(legacyV3Content)).ToLowerInvariant();
 var legacyV3Plan = new DatabaseSyncPlan(DatabaseSynchronizationService.PlanFormat, 3, "fixture", DateTimeOffset.UtcNow, legacySyncSourceHash, legacySyncTarget, false, legacySyncPatterns, legacySyncRemaps, legacySyncOperations, legacyV3Hash, ["legacy v3 fixture"], true, legacyV3Inclusions);
-var legacyV3Path = Path.Combine(layerRoot, "legacy-v3-sync-plan.json"); var legacyV3Json = System.Text.Json.JsonSerializer.SerializeToNode(legacyV3Plan, legacySyncJsonOptions)!.AsObject(); legacyV3Json.Remove("TargetSchemaSha256"); legacyV3Json.Remove("TranslationProfileName"); legacyV3Json.Remove("TranslationProfileSha256"); legacyV3Json.Remove("SchemaTranslations"); File.WriteAllText(legacyV3Path, legacyV3Json.ToJsonString(legacySyncJsonOptions));
+var legacyV3Path = Path.Combine(layerRoot, "legacy-v3-sync-plan.json"); var legacyV3Json = System.Text.Json.JsonSerializer.SerializeToNode(legacyV3Plan, legacySyncJsonOptions)!.AsObject(); legacyV3Json.Remove("TargetSchemaSha256"); legacyV3Json.Remove("TranslationProfileName"); legacyV3Json.Remove("TranslationProfileSha256"); legacyV3Json.Remove("SchemaTranslations"); legacyV3Json.Remove("LookupEvidence"); File.WriteAllText(legacyV3Path, legacyV3Json.ToJsonString(legacySyncJsonOptions));
 var loadedLegacyV3 = new DatabaseSynchronizationService().LoadPlanAsync(legacyV3Path).GetAwaiter().GetResult();
 if (loadedLegacyV3.FormatVersion != 3 || loadedLegacyV3.DependencyInclusions?.Count != 1 || loadedLegacyV3.TargetSchemaSha256 is not null)
-    throw new InvalidOperationException("Database synchronization format v4 broke verified readability of an existing v3 plan.");
+    throw new InvalidOperationException("Database synchronization format v5 broke verified readability of an existing v3 plan.");
+var legacyV4SchemaHash = DatabaseSyncTranslationService.HashTargetSchema(bridgeCapabilities); var legacyV4ProfileHash = new string('c', 64); var legacyV4Translations = structuralTranslation.Evidence;
+var legacyV4Content = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { sourceAuditSha256 = legacySyncSourceHash, target = legacySyncTarget, removalsIncluded = false, patterns = legacySyncPatterns, remaps = legacySyncRemaps, operations = legacySyncOperations, dependencyClosureIncluded = true, dependencyInclusions = legacyV3Inclusions, targetSchemaSha256 = legacyV4SchemaHash, translationProfileName = "fixture bridge", translationProfileSha256 = legacyV4ProfileHash, schemaTranslations = legacyV4Translations }, legacySyncHashOptions);
+var legacyV4Hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(legacyV4Content)).ToLowerInvariant();
+var legacyV4Plan = new DatabaseSyncPlan(DatabaseSynchronizationService.PlanFormat, 4, "fixture", DateTimeOffset.UtcNow, legacySyncSourceHash, legacySyncTarget, false, legacySyncPatterns, legacySyncRemaps, legacySyncOperations, legacyV4Hash, ["legacy v4 fixture"], true, legacyV3Inclusions, legacyV4SchemaHash, "fixture bridge", legacyV4ProfileHash, legacyV4Translations);
+var legacyV4Path = Path.Combine(layerRoot, "legacy-v4-sync-plan.json"); var legacyV4Json = System.Text.Json.JsonSerializer.SerializeToNode(legacyV4Plan, legacySyncJsonOptions)!.AsObject(); legacyV4Json.Remove("LookupEvidence"); File.WriteAllText(legacyV4Path, legacyV4Json.ToJsonString(legacySyncJsonOptions));
+var loadedLegacyV4 = new DatabaseSynchronizationService().LoadPlanAsync(legacyV4Path).GetAwaiter().GetResult();
+if (loadedLegacyV4.FormatVersion != 4 || loadedLegacyV4.SchemaTranslations?.Count != legacyV4Translations.Count || loadedLegacyV4.LookupEvidence is not null)
+    throw new InvalidOperationException("Database synchronization format v5 broke verified readability of an existing v4 plan.");
+var currentLookupEvidence = new[] { targetEvidence }; var currentV5Content = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { sourceAuditSha256 = legacySyncSourceHash, target = legacySyncTarget, removalsIncluded = false, patterns = legacySyncPatterns, remaps = legacySyncRemaps, operations = legacySyncOperations, dependencyClosureIncluded = true, dependencyInclusions = legacyV3Inclusions, targetSchemaSha256 = legacyV4SchemaHash, translationProfileName = "fixture bridge", translationProfileSha256 = legacyV4ProfileHash, schemaTranslations = legacyV4Translations, lookupEvidence = currentLookupEvidence }, legacySyncHashOptions);
+var currentV5Hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(currentV5Content)).ToLowerInvariant();
+var currentV5Plan = new DatabaseSyncPlan(DatabaseSynchronizationService.PlanFormat, 5, "fixture", DateTimeOffset.UtcNow, legacySyncSourceHash, legacySyncTarget, false, legacySyncPatterns, legacySyncRemaps, legacySyncOperations, currentV5Hash, ["v5 fixture"], true, legacyV3Inclusions, legacyV4SchemaHash, "fixture bridge", legacyV4ProfileHash, legacyV4Translations, currentLookupEvidence);
+var currentV5Path = Path.Combine(layerRoot, "current-v5-sync-plan.json"); File.WriteAllText(currentV5Path, System.Text.Json.JsonSerializer.Serialize(currentV5Plan, legacySyncJsonOptions));
+var loadedCurrentV5 = new DatabaseSynchronizationService().LoadPlanAsync(currentV5Path).GetAwaiter().GetResult();
+if (loadedCurrentV5.LookupEvidence?.Single().Result.Value != "7") throw new InvalidOperationException("Current synchronization plan did not preserve its hash-bound lookup evidence.");
+var tamperedV5Json = System.Text.Json.JsonSerializer.SerializeToNode(currentV5Plan, legacySyncJsonOptions)!.AsObject(); tamperedV5Json["LookupEvidence"]![0]!["Result"]!["Value"] = "8"; File.WriteAllText(currentV5Path, tamperedV5Json.ToJsonString(legacySyncJsonOptions));
+try { _ = new DatabaseSynchronizationService().LoadPlanAsync(currentV5Path).GetAwaiter().GetResult(); throw new InvalidOperationException("Synchronization plan accepted tampered lookup evidence."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("hash mismatch", StringComparison.OrdinalIgnoreCase)) { }
 using (var stream = File.Create(snapshotArtifact))
 using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Create))
 {
