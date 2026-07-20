@@ -246,7 +246,7 @@ internal sealed class PetLevelCurveView : UserControl, IDisposable
         try
         {
             status.Text = $"Loading {Path.GetFileName(choice.Source.ModelPath)} from {choice.Source.Provenance}…";
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(choice.Source.ModelPath, choice.Source.SkinPath, M2PreviewVisibilityMode.BaseAppearance), token); token.ThrowIfCancellationRequested();
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(choice.Source.ModelPath, choice.Source.SkinPath, M2PreviewVisibilityMode.Automatic), token); token.ThrowIfCancellationRequested();
             var used = geometry.UsedTextureDefinitionIndices.ToHashSet();
             var textures = new Dictionary<int, RgbaTexture>();
             foreach (var slot in geometry.TextureSlots.Where(slot => used.Contains(slot.Index)))

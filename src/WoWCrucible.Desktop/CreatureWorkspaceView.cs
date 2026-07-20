@@ -458,7 +458,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
             var display = await Task.Run(() => new CreatureDisplayPreviewService().ResolveDisplay(dbc, schema, entry.DisplayId, library, operation.Token), operation.Token); var source = display.Sources.FirstOrDefault(value => value.Ready) ?? throw new FileNotFoundException($"{display.Finding} Configure the processed asset library in Client workshop or Assets & compare.");
             var loaded = await Task.Run(() =>
             {
-                var geometry = M2PreviewGeometryService.Load(source.ModelPath, source.SkinPath, M2PreviewVisibilityMode.BaseAppearance); var used = geometry.UsedTextureDefinitionIndices.ToHashSet(); var textures = new Dictionary<int, RgbaTexture>();
+                var geometry = M2PreviewGeometryService.Load(source.ModelPath, source.SkinPath, M2PreviewVisibilityMode.Automatic); var used = geometry.UsedTextureDefinitionIndices.ToHashSet(); var textures = new Dictionary<int, RgbaTexture>();
                 foreach (var slot in geometry.TextureSlots.Where(slot => used.Contains(slot.Index)))
                 {
                     operation.Token.ThrowIfCancellationRequested(); string? texturePath = slot.Type switch
@@ -655,7 +655,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         {
             var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose an extracted WotLK creature M2", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("WotLK M2") { Patterns = ["*.m2"] }] });
             var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _modelStatus.Text = "Loading model…";
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); _model.SetGeometry(geometry); _model.SetDecodedTextures(new Dictionary<int, RgbaTexture>()); _model.SetSceneTransform(Matrix4x4.Identity); RefreshAttachmentPoints(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} base geosets · {geometry.TriangleIndices.Count / 3:N0} triangles · {geometry.Attachments.Count:N0} attachment points";
+            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path)); _model.SetGeometry(geometry); _model.SetDecodedTextures(new Dictionary<int, RgbaTexture>()); _model.SetSceneTransform(Matrix4x4.Identity); RefreshAttachmentPoints(geometry); _modelStatus.Text = $"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} geosets · {geometry.VisibilityMode} · {geometry.TriangleIndices.Count / 3:N0} triangles · {geometry.Attachments.Count:N0} attachment points";
         }
         catch (Exception exception) { _modelStatus.Text = $"Model load failed: {exception.Message}"; }
     }

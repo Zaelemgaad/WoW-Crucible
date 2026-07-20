@@ -833,7 +833,7 @@ static int Asset(string[] args)
             }
         }
         var selection = selectedGroups.Count == 0 ? null : new M2GeosetSelection(selectedGroups, naked ? "naked CLI export preset" : "explicit CLI export selection");
-        var geometry = M2PreviewGeometryService.Load(exportModelPath, skinPath, allGeosets ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance, selection);
+        var geometry = M2PreviewGeometryService.Load(exportModelPath, skinPath, allGeosets ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.Automatic, selection);
         M2AnimationPose? pose = null;
         if (animationText is not null)
         {
@@ -1028,7 +1028,7 @@ static int Asset(string[] args)
         if (known.Length != previewOptions.Length) return Fail($"Unknown preview-info option: {previewOptions.Except(known).First()}");
         var allGeosets = previewOptions.Contains("--all-geosets", StringComparer.OrdinalIgnoreCase); var naked = previewOptions.Contains("--naked", StringComparer.OrdinalIgnoreCase); var groupText = Option(previewOptions, "--groups=");
         if (allGeosets && (naked || groupText is not null)) return Fail("--all-geosets cannot be combined with --naked or --groups because it intentionally shows every variant.");
-        var mode = allGeosets ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
+        var mode = allGeosets ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.Automatic;
         var dbcFolder = Option(previewOptions, "--dbc="); var hairText = Option(previewOptions, "--hair="); var facialText = Option(previewOptions, "--facial-hair=");
         if (naked && (hairText is not null || facialText is not null)) return Fail("--naked cannot be combined with --hair or --facial-hair.");
         var selectedGroups = naked ? new Dictionary<int, int>(M2GeosetCatalog.NakedCharacterSelection) : new Dictionary<int, int>(); var selectionSource = naked ? "naked character preset" : string.Empty;
@@ -1050,6 +1050,7 @@ static int Asset(string[] args)
         var geometry = M2PreviewGeometryService.Load(previewModelPath, Option(previewOptions, "--skin="), mode, selection);
         Console.WriteLine($"Model\t{geometry.ModelPath}\nSkin\t{geometry.SkinPath}\nVertices\t{geometry.Vertices.Count:N0}\nBones\t{geometry.Bones.Count:N0}\nAttachments\t{geometry.Attachments.Count:N0}\nCameras\t{geometry.Cameras.Count:N0}\nLights\t{geometry.Lights.Count:N0}\nParticle emitters\t{geometry.ParticleEmitters.Count:N0}\nRibbon emitters\t{geometry.RibbonEmitters.Count:N0}\nGeosets\t{geometry.Submeshes.Count(section => section.Visible):N0}/{geometry.Submeshes.Count:N0} ({geometry.VisibilityMode})\nTriangles\t{geometry.TriangleIndices.Count / 3:N0}/{geometry.TotalTriangleIndices / 3:N0}\nMinimum\t{geometry.Minimum}\nMaximum\t{geometry.Maximum}");
         if (geometry.GeosetSelection is not null) Console.WriteLine($"GEOSET_SELECTION\t{geometry.GeosetSelection.Source}\t{string.Join(",", geometry.GeosetSelection.GroupVariants.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value}"))}");
+        foreach (var finding in geometry.GeosetSelectionFindings) Console.WriteLine($"GEOSET_SELECTION_RESULT\tgroup={finding.Group}\tname={finding.GroupName}\trequested={finding.RequestedVariant}\tgeoset={finding.RequestedGeoset}\tavailable={(finding.AvailableVariants.Count == 0 ? "<none>" : string.Join(',', finding.AvailableVariants))}\tmatching={finding.MatchingSubmeshes}\tapplied={finding.Applied}\tmissing={finding.Missing}");
         foreach (var group in M2GeosetCatalog.Describe(geometry.Submeshes)) Console.WriteLine($"GEOSET_GROUP\t{group.Group}\t{group.Name}\tvariants={string.Join(',', group.Variants.Select(variant => variant.Variant))}\tvisible={string.Join(',', group.Variants.Where(variant => variant.Visible).Select(variant => variant.Variant))}");
         foreach (var section in geometry.Submeshes) Console.WriteLine($"SUBMESH\t{section.Index}\tgeoset={section.GeosetId}\tgroup={section.GeosetGroup}:{section.GeosetGroupName}\tvariant={section.GeosetVariant}\tvisible={section.Visible}\ttriangles={section.TriangleIndexCount / 3}");
         foreach (var slot in geometry.TextureSlots) Console.WriteLine($"TEXTURE\t{slot.Index}\t{slot.Type}\t{slot.Flags}\t{slot.EmbeddedPath ?? "<external appearance binding>"}");

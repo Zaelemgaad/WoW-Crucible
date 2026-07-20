@@ -46,7 +46,7 @@ public sealed record M2PreviewRibbonEmitter(int Index, int BoneIndex, Vector3 Po
 {
     public override string ToString() => $"Ribbon · bone {BoneIndex:N0} · texture {TextureDefinitionIndex:N0} · {EdgesPerSecond:0.##} edges/s for {EdgeLifetimeSeconds:0.###} s";
 }
-public enum M2PreviewVisibilityMode { BaseAppearance, AllGeosets }
+public enum M2PreviewVisibilityMode { Automatic, BaseAppearance, AllGeosets }
 public enum M2PreviewTextureCoordinateSource { Primary, Secondary, Environment, Unsupported }
 public enum M2PreviewTextureStageBlend { Source, Modulate, Modulate2X, Add, AddNoAlpha, Unsupported }
 public enum M2PreviewTextureCombinerKind
@@ -74,6 +74,14 @@ public sealed record M2PreviewTextureCombiner(string Name, bool Supported, bool 
     public M2PreviewTextureCombinerKind Kind { get; init; } = M2PreviewTextureCombinerKind.Standard;
 }
 public sealed record M2GeosetSelection(IReadOnlyDictionary<int, int> GroupVariants, string Source);
+public sealed record M2GeosetSelectionFinding(int Group, string GroupName, int RequestedVariant, IReadOnlyList<int> AvailableVariants, int MatchingSubmeshes, bool Applied)
+{
+    public string RequestedGeoset => Group == 0 ? RequestedVariant.ToString(System.Globalization.CultureInfo.InvariantCulture) : checked(Group * 100 + RequestedVariant).ToString(System.Globalization.CultureInfo.InvariantCulture);
+    public bool Missing => RequestedVariant > 0 && MatchingSubmeshes == 0;
+    public override string ToString() => Missing
+        ? $"{GroupName} group {Group:N0} requested variant {RequestedVariant:N0} (geoset {RequestedGeoset}) but the selected SKIN has {(AvailableVariants.Count == 0 ? "no variants" : $"variants {string.Join(", ", AvailableVariants)}")}."
+        : $"{GroupName} group {Group:N0} variant {RequestedVariant:N0} {(RequestedVariant == 0 ? "hidden" : $"applied to {MatchingSubmeshes:N0} section(s)")}.";
+}
 public sealed record M2PreviewSubmesh(int Index, ushort GeosetId, ushort Level, int VertexStart, int VertexCount, int TriangleStart, int TriangleIndexCount, bool Visible)
 {
     public int GeosetGroup => M2GeosetCatalog.Group(GeosetId);
@@ -109,8 +117,9 @@ public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadO
     public IReadOnlyList<M2PreviewSequence> Sequences { get; init; } = [];
     public IReadOnlyList<Vector2> SecondaryTextureCoordinates { get; init; } = [];
     public int TotalTriangleIndices { get; init; } = TriangleIndices.Count;
-    public M2PreviewVisibilityMode VisibilityMode { get; init; } = M2PreviewVisibilityMode.BaseAppearance;
+    public M2PreviewVisibilityMode VisibilityMode { get; init; } = M2PreviewVisibilityMode.Automatic;
     public M2GeosetSelection? GeosetSelection { get; init; }
+    public IReadOnlyList<M2GeosetSelectionFinding> GeosetSelectionFindings { get; init; } = [];
     internal M2AnimationRig? AnimationRig { get; init; }
     internal M2ParticleRig? ParticleRig { get; init; }
     internal M2RibbonRig? RibbonRig { get; init; }
@@ -122,11 +131,12 @@ public static class M2PreviewGeometryService
     private const int MaximumVertices = 5_000_000;
     private const int MaximumTriangleIndices = 15_000_000;
 
-    public static M2PreviewGeometry Load(string modelPath, string? skinPath = null, M2PreviewVisibilityMode visibilityMode = M2PreviewVisibilityMode.BaseAppearance,
+    public static M2PreviewGeometry Load(string modelPath, string? skinPath = null, M2PreviewVisibilityMode visibilityMode = M2PreviewVisibilityMode.Automatic,
         M2GeosetSelection? geosetSelection = null)
     {
         modelPath = Path.GetFullPath(modelPath);
         if (!File.Exists(modelPath)) throw new FileNotFoundException("The M2 model does not exist.", modelPath);
+        visibilityMode = ResolveVisibilityMode(modelPath, visibilityMode, geosetSelection);
         var model = File.ReadAllBytes(modelPath);
         if (model.Length < 0x130 || FourCc(model, 0) != "MD20") throw new InvalidDataException("Embedded preview currently requires a complete unwrapped MD20 model header.");
         var version = ReadUInt(model, 4);
@@ -178,7 +188,7 @@ public static class M2PreviewGeometryService
             allTriangles[index] = vertexIndex;
         }
         var materialUnits = ReadMaterialUnits(skin, textureLookup, textureCoordinateLookup, transparencyLookup, textureAnimationLookup, blendOverrides, usesBlendOverrides, textureSlots.Count, renderFlags.Count);
-        var (submeshes, triangles, batches) = ReadVisibleSubmeshes(skin, allTriangles, materialUnits, renderFlags, visibilityMode, geosetSelection);
+        var (submeshes, triangles, batches, geosetSelectionFindings) = ReadVisibleSubmeshes(skin, allTriangles, materialUnits, renderFlags, visibilityMode, geosetSelection);
         if (triangles.Length > 0)
         {
             minimum = new Vector3(float.PositiveInfinity); maximum = new Vector3(float.NegativeInfinity);
@@ -204,6 +214,7 @@ public static class M2PreviewGeometryService
             TotalTriangleIndices = allTriangles.Length,
             VisibilityMode = visibilityMode,
             GeosetSelection = geosetSelection,
+            GeosetSelectionFindings = geosetSelectionFindings,
             AnimationRig = animationRig,
             ParticleRig = particleRig,
             RibbonRig = ribbonRig
@@ -215,6 +226,16 @@ public static class M2PreviewGeometryService
         modelPath = Path.GetFullPath(modelPath); if (!File.Exists(modelPath)) throw new FileNotFoundException("The M2 model does not exist.", modelPath);
         var model = File.ReadAllBytes(modelPath); if (model.Length < 8 || FourCc(model, 0) != "MD20" || ReadUInt(model, 4) != 264) throw new InvalidDataException("Texture-slot inspection requires an unwrapped Wrath MD20 version 264 model.");
         return ReadTextureSlots(model);
+    }
+
+    public static M2PreviewVisibilityMode ResolveVisibilityMode(string modelPath, M2PreviewVisibilityMode requested, M2GeosetSelection? geosetSelection = null)
+    {
+        if (requested != M2PreviewVisibilityMode.Automatic) return requested;
+        if (geosetSelection is not null) return M2PreviewVisibilityMode.BaseAppearance;
+        var fullPath = Path.GetFullPath(modelPath);
+        return CharacterAppearanceService.Infer(Path.GetDirectoryName(fullPath) ?? string.Empty, Path.GetFileName(fullPath)) is null
+            ? M2PreviewVisibilityMode.AllGeosets
+            : M2PreviewVisibilityMode.BaseAppearance;
     }
 
     private static IReadOnlyList<M2TextureSlot> ReadTextureSlots(byte[] model)
@@ -497,13 +518,13 @@ public static class M2PreviewGeometryService
         };
     }
 
-    private static (IReadOnlyList<M2PreviewSubmesh> Submeshes, int[] Triangles, IReadOnlyList<M2PreviewBatch> Batches) ReadVisibleSubmeshes(byte[] skin, int[] allTriangles, IReadOnlyList<M2PreviewMaterialUnit> materialUnits, IReadOnlyList<M2PreviewRenderFlag> renderFlags, M2PreviewVisibilityMode visibilityMode, M2GeosetSelection? geosetSelection)
+    private static (IReadOnlyList<M2PreviewSubmesh> Submeshes, int[] Triangles, IReadOnlyList<M2PreviewBatch> Batches, IReadOnlyList<M2GeosetSelectionFinding> SelectionFindings) ReadVisibleSubmeshes(byte[] skin, int[] allTriangles, IReadOnlyList<M2PreviewMaterialUnit> materialUnits, IReadOnlyList<M2PreviewRenderFlag> renderFlags, M2PreviewVisibilityMode visibilityMode, M2GeosetSelection? geosetSelection)
     {
         const int CountOffset = 28; const int DataOffset = 32; const int SubmeshStride = 48; const int MaximumSubmeshes = 131_072;
-        if (skin.Length < DataOffset + 4) return ([], allTriangles, [new(0, 0, 0, allTriangles.Length, null, null)]);
+        if (skin.Length < DataOffset + 4) return ([], allTriangles, [new(0, 0, 0, allTriangles.Length, null, null)], []);
         var count = CheckedCount(ReadUInt(skin, CountOffset), MaximumSubmeshes, "SKIN submesh");
         var offset = CheckedOffset(ReadUInt(skin, DataOffset), "SKIN submesh");
-        if (count == 0) return ([], allTriangles, [new(0, 0, 0, allTriangles.Length, null, null)]);
+        if (count == 0) return ([], allTriangles, [new(0, 0, 0, allTriangles.Length, null, null)], []);
         RequireRange(skin, offset, count, SubmeshStride, "SKIN submeshes");
 
         var raw = new (ushort Id, ushort Level, int VertexStart, int VertexCount, int TriangleStart, int TriangleCount)[count];
@@ -550,6 +571,16 @@ public static class M2PreviewGeometryService
             visible[fallback >= 0 ? fallback : 0] = true;
         }
 
+        IReadOnlyList<M2GeosetSelectionFinding> findings = geosetSelection is null ? [] : geosetSelection.GroupVariants.OrderBy(pair => pair.Key).Select(pair =>
+        {
+            var available = raw.Where(section => pair.Key == 0 ? section.Id is > 0 and < 100 : section.Id / 100 == pair.Key)
+                .Select(section => pair.Key == 0 ? (int)section.Id : section.Id % 100).Distinct().Order().ToArray();
+            var requestedId = pair.Key == 0 ? pair.Value : checked(pair.Key * 100 + pair.Value);
+            var matching = pair.Value == 0 ? 0 : raw.Count(section => section.Id == requestedId);
+            var applied = pair.Value == 0 || raw.Where((section, index) => section.Id == requestedId && visible[index]).Count() == matching && matching > 0;
+            return new M2GeosetSelectionFinding(pair.Key, M2GeosetCatalog.GroupName(pair.Key), pair.Value, available, matching, applied);
+        }).ToArray();
+
         var submeshes = new M2PreviewSubmesh[count]; var triangles = new List<int>(allTriangles.Length); var batches = new List<M2PreviewBatch>(count);
         for (var index = 0; index < count; index++)
         {
@@ -575,7 +606,7 @@ public static class M2PreviewGeometryService
                 }
             }
         }
-        return (submeshes, triangles.ToArray(), batches);
+        return (submeshes, triangles.ToArray(), batches, findings);
     }
 
     internal static bool IsBaseAppearanceGeoset(ushort geosetId)

@@ -49,7 +49,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly ComboBox _modelSkinPicker = new() { PlaceholderText = "No compatible SKIN views" };
     private readonly TextBox _modelSearch = new() { PlaceholderText = "Filter discovered M2 models…" };
     private readonly ComboBox _modelFilter = new() { ItemsSource = new[] { "Ready models", "All models" }, SelectedIndex = 0 };
-    private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Character appearance (DBC-driven)", "Naked base (no hair or facial hair)", "Manual: exactly one variant per group", "Everything stacked (diagnostic only)" }, SelectedIndex = 0 };
+    private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Automatic: character DBC / complete generic model", "Naked character (no hair or facial hair)", "Manual: exactly one variant per group", "Everything stacked (diagnostic only)" }, SelectedIndex = 0 };
     private readonly ItemsControl _geosetGroups = new();
     private readonly TextBlock _geosetInspectorStatus = new() { Text = "Load a compatible character M2 to inspect its named geoset groups.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), FontSize = 11 };
     private readonly CheckBox _showAttachmentPoints = new() { Content = "Show native attachment points" };
@@ -570,7 +570,12 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             var requestedSkin = _skinPicker.SelectedItem as CharacterBaseSkin; var requestedFace = _facePicker.SelectedItem as CharacterSection; var requestedFacialHair = _facialHairPicker.SelectedItem as CharacterSection; var requestedHair = _hairPicker.SelectedItem as CharacterSection; var requestedSource = (_appearanceSourcePicker.SelectedItem as AppearanceSourceChoice)?.FullPath; var requestedCreatureDisplayId = (_creatureAppearancePicker.SelectedItem as CreatureAppearanceChoice)?.Display.DisplayId;
             var appearance = await Task.Run(() => BuildAppearancePlan(model, requestedSkin, requestedFace, requestedFacialHair, requestedHair, requestedSource, token), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             var geosetMode = _geosetMode.SelectedIndex;
-            var visibilityMode = geosetMode == 3 ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.BaseAppearance;
+            var visibilityMode = geosetMode switch
+            {
+                0 => M2PreviewVisibilityMode.Automatic,
+                3 => M2PreviewVisibilityMode.AllGeosets,
+                _ => M2PreviewVisibilityMode.BaseAppearance
+            };
             M2GeosetSelection? geosetSelection = geosetMode switch
             {
                 0 when appearance.Geosets is { GroupVariants.Count: > 0 } geosets => new(geosets.GroupVariants, "CharHairGeosets.dbc + CharacterFacialHairStyles.dbc"),
@@ -584,6 +589,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             var graph = _index is null ? null : await Task.Run(() => AssetDependencyGraphService.AnalyzeModel(_index, selectedModel), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
             ApplyAppearancePlan(appearance);
             ApplyCreatureAppearancePlan(creatureAppearance);
+            AppendGeosetSelectionCoverage(geometry);
             var embeddedTextures = new Dictionary<int, RgbaTexture>(); string? embeddedTexturePath = null;
             _appearanceComposed = false; _creatureAppearanceBound = false;
             if (_selectedTexture is null)
@@ -680,6 +686,15 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         finally { _suppressAppearanceSelection = false; }
     }
 
+    private void AppendGeosetSelectionCoverage(M2PreviewGeometry geometry)
+    {
+        if (geometry.GeosetSelectionFindings.Count == 0) return;
+        var missing = geometry.GeosetSelectionFindings.Where(finding => finding.Missing).ToArray();
+        _appearanceStatus.Text += missing.Length == 0
+            ? $" All {geometry.GeosetSelectionFindings.Count(finding => finding.RequestedVariant > 0):N0} requested visible geoset variant(s) exist in the selected SKIN."
+            : $" MISSING MODEL GEOSETS: {string.Join(" ", missing.Select(finding => finding.ToString()))} No substitute was guessed.";
+    }
+
     private CreatureAppearancePlan BuildCreatureAppearancePlan(AssetComparisonModel model, M2PreviewGeometry geometry, uint? requestedDisplayId, CancellationToken token)
     {
         var replaceable = geometry.TextureSlots.Where(slot => slot.Type is >= 11 and <= 13).Select(slot => slot.Type).Distinct().Order().ToArray();
@@ -735,7 +750,9 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var editable = groups.Where(group => group.Variants.Any(variant => variant.Variant > 0)).ToArray();
         _geosetGroups.ItemsSource = editable.Select(BuildGeosetGroupRow).ToArray();
         var baseSections = groups.Where(group => group.Group == 0).SelectMany(group => group.Variants).FirstOrDefault(variant => variant.Variant == 0)?.SubmeshIndices.Count ?? 0;
+        var missing = geometry.GeosetSelectionFindings.Where(finding => finding.Missing).ToArray();
         _geosetInspectorStatus.Text = $"{groups.Count:N0} decoded group(s) · {editable.Sum(group => group.Variants.Count(variant => variant.Variant > 0)):N0} selectable variant(s) · {baseSections:N0} always-on base section(s). " +
+            (missing.Length == 0 ? string.Empty : $"{missing.Length:N0} requested DBC/manual variant(s) are absent from this SKIN: {string.Join("; ", missing.Select(finding => $"group {finding.Group:N0} variant {finding.RequestedVariant:N0}"))}. ") +
             (_geosetMode.SelectedIndex == 2 ? "Manual selections are live." : "Switch to Manual mode to change the selectors below without stacking variants.");
     }
 
@@ -836,6 +853,11 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             : $"Geosets: {_loadedModelGeometry.Submeshes.Count(section => section.Visible):N0} visible of {_loadedModelGeometry.Submeshes.Count:N0} · {_loadedModelGeometry.VisibilityMode} · {_loadedModelGeometry.TriangleIndices.Count / 3:N0} of {_loadedModelGeometry.TotalTriangleIndices / 3:N0} triangles" +
               (_loadedModelGeometry.GeosetSelection is null ? string.Empty : $" · {_loadedModelGeometry.GeosetSelection.Source}: {string.Join(", ", _loadedModelGeometry.GeosetSelection.GroupVariants.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value}"))}") +
               (_loadedModelGeometry.VisibilityMode == M2PreviewVisibilityMode.AllGeosets ? " · WARNING: mutually exclusive variants are intentionally stacked" : string.Empty);
+        if (_loadedModelGeometry is not null)
+        {
+            var missing = _loadedModelGeometry.GeosetSelectionFindings.Where(finding => finding.Missing).ToArray();
+            if (missing.Length > 0) geosets += $" · MISSING REQUESTED: {string.Join(", ", missing.Select(finding => $"{finding.Group}:{finding.RequestedVariant}"))} (no guessed substitute)";
+        }
         var visibleGeosets = _loadedModelGeometry is null ? string.Empty : string.Join(" · ", M2GeosetCatalog.Describe(_loadedModelGeometry.Submeshes)
             .SelectMany(group => group.Variants.Where(variant => variant.Visible).Select(variant => $"{group.Name}={variant.Variant}")));
         var previewNote = _appearanceComposed
