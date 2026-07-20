@@ -120,6 +120,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var previewPlacementDelete = new Button { Content = "Review delete" }; previewPlacementDelete.Click += async (_, _) => await PreviewPlacementDeleteAsync();
         var savePlacementDelete = new Button { Content = "Build multi-tile delete payload…" }; savePlacementDelete.Click += async (_, _) => await SavePlacementLifecycleAsync(AdtPlacementLifecycleOperation.Delete);
         var buildScene = new Button { Content = "Build terrain + placement scene" }; buildScene.Click += async (_, _) => await BuildMapSceneAsync(buildScene);
+        ToolTip.SetTip(buildScene, "One explicit provenance is used for the complete scene. Ambiguous or absent objects stay visibly unresolved; Crucible never mixes patches to make the view look complete.");
         var openPlacementControls = new Button { Content = "Open placement controls" }; openPlacementControls.Click += (_, _) => _visualTabs.SelectedIndex = 2;
         _wmoReferences.SelectionChanged += async (_, _) => { LoadPlacementFields(); await ResolveSelectedWmoAsync(); };
         _wmoCandidates.SelectionChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; DescribeSelectedWmoCandidate(); };
@@ -171,10 +172,10 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var wmoFooter = new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _wmoStatus }; Grid.SetRow(wmoFooter, 2);
         var objectPreviewHost = new Grid { Children = { _wmoPreview, _m2Preview } }; Grid.SetRow(objectPreviewHost, 1);
         var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, objectPreviewHost, wmoFooter } };
-        var sceneControls = new StackPanel { Margin = new Thickness(7), Spacing = 5, Children = { new WrapPanel { Children = { buildScene, openPlacementControls, _sceneProvenance, _scenePlacementLimit } }, Info("One explicit provenance is used for the complete scene. Ambiguous or absent objects stay visibly unresolved; Crucible never mixes patches to make the view look complete. Enable Pick placement position in the scene, click exact terrain, then open the placement controls to preview a coordinated add or transform.") } };
+        var sceneControls = new WrapPanel { Margin = new Thickness(7), Children = { buildScene, openPlacementControls, _sceneProvenance, _scenePlacementLimit } };
         var scenePage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { sceneControls, WithRow(_mapScene, 1), WithRow(new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _sceneStatus }, 2) } };
         _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Terrain + placement scene", Content = scenePage }); _visualTabs.Items.Add(new TabItem { Header = "Selected object preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
-        var body = new ResponsiveSplitGrid(_visualTabs, details, 3, 2);
+        var body = new ResponsiveSplitGrid(_visualTabs, details, 3, 2, compactFirstWeight: 4, compactSecondWeight: 1);
         var terrainPage = new Grid { RowDefinitions = new("Auto,*"), Children = { controls, body } }; Grid.SetRow(body, 1);
         _workspaceTabs.Items.Add(new TabItem { Header = "Terrain, objects & textures", Content = terrainPage }); _workspaceTabs.Items.Add(new TabItem { Header = "Lighting & skyboxes", Content = _lightingView }); _workspaceTabs.SelectedIndex = 0;
         var lightingLoadStarted = false;
