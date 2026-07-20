@@ -286,6 +286,29 @@ static int Knowledge(string[] args)
 static int Asset(string[] args)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["m2-material-audit", var materialRoot, .. var materialOptions])
+    {
+        var json = materialOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var workersText = Option(materialOptions, "--workers=") ?? "0"; var examplesText = Option(materialOptions, "--examples=") ?? "5";
+        var unknown = materialOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--workers=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--examples=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset m2-material-audit option: {unknown[0]}");
+        if (!int.TryParse(workersText, out var workers) || workers is < 0 or > M2MaterialAuditService.MaximumWorkers) return Fail($"--workers must be 1 through {M2MaterialAuditService.MaximumWorkers}, or zero for automatic.");
+        if (!int.TryParse(examplesText, out var examples) || examples is < 1 or > 100) return Fail("--examples must be 1 through 100.");
+        var audit = M2MaterialAuditService.Audit(materialRoot, workers, examples);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(audit, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"ROOT\t{audit.Root}\nWORKERS\t{audit.Workers:N0}\nDISCOVERED_SKINS\t{audit.DiscoveredSkinFiles:N0}\nSCANNED_WOTLK_SKINS\t{audit.ScannedSkinFiles:N0}\nWOTLK_MODELS\t{audit.WotlkModelFiles:N0}\nMISSING_MODELS\t{audit.MissingCompanionModels:N0}\nNON_WOTLK_MODELS\t{audit.NonWotlkModels:N0}\nINVALID_PAIRS\t{audit.InvalidPairs:N0}\nMATERIAL_UNITS\t{audit.MaterialUnits:N0}\nUNSUPPORTED_COMBINER_UNITS\t{audit.UnsupportedCombinerMaterialUnits:N0}\nUNSUPPORTED_EXPLICIT_COMBINER_UNITS\t{audit.UnsupportedExplicitCombinerMaterialUnits:N0}\nDURATION_MS\t{audit.DurationMilliseconds:0.###}");
+            foreach (var entry in audit.Entries)
+            {
+                var shader = entry.Encoding == M2MaterialEncoding.Explicit ? $"0x{entry.ShaderId:X4}/{entry.ShaderId & 0x7FFF}" : entry.ShaderId.ToString();
+                Console.WriteLine($"MATERIAL\t{entry.Encoding}\tshader={shader}\tstages={entry.TextureStages}\tunits={entry.MaterialUnits:N0}\tskins={entry.SkinFiles:N0}\tcombiner-supported={entry.CombinerSupported}\tcombiner-exact={entry.CombinerExact}\t{entry.Combiner}");
+                foreach (var example in entry.Examples) Console.WriteLine($"  EXAMPLE\t{example}");
+            }
+            foreach (var finding in audit.Findings) Console.WriteLine($"FINDING\t{finding}");
+        }
+        return audit.ScannedSkinFiles > 0 && audit.InvalidPairs == 0 ? 0 : 3;
+    }
     if (args[0].Equals("gameobject-index-plan", StringComparison.OrdinalIgnoreCase))
     {
         var options = args[1..]; var operands = options.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
@@ -1129,6 +1152,7 @@ Usage:
   wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
   wowcrucible asset texture-validate <file-or-folder> [--recursive]
   wowcrucible asset inspect <model.m2|building.wmo>...
+  wowcrucible asset m2-material-audit <wrath-m2-skin-root|file.skin> [--workers=N] [--examples=N] [--format=text|json]
   wowcrucible asset m2-downport-plan <modern.m2> [--skin=file.skin] [--listfile=id-path.csv] [--format=text|json]
   wowcrucible asset m2-downport-scan <file-or-folder>... [--listfile=id-path.csv] [--format=text|json]
   wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin] [--listfile=id-path.csv]

@@ -11,7 +11,7 @@ public static class M2TextureCombinerRenderPlanService
         ArgumentNullException.ThrowIfNull(combiner); ArgumentNullException.ThrowIfNull(stages);
         if (!combiner.Supported) throw new NotSupportedException($"{combiner.Name} has no validated render plan.");
         if (stages.Count == 0) return [];
-        if (combiner.Kind == M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlpha)
+        if (combiner.Kind is M2PreviewTextureCombinerKind.ExplicitOpaqueMod2xNaAlpha or M2PreviewTextureCombinerKind.ExplicitOpaqueModNaAlpha)
         {
             RequireTwo(stages, combiner);
             // lit * mix(base * environment * 2, base, base alpha)
@@ -23,7 +23,7 @@ public static class M2TextureCombinerRenderPlanService
             // lit * mix(base * environment * 2, base, base alpha) + additive.rgb * additive.a
             return [new(0, M2TextureRenderPassBlend.Source, true), new(1, M2TextureRenderPassBlend.Modulate, false), new(0, M2TextureRenderPassBlend.DestinationOut, false), new(0, M2TextureRenderPassBlend.Add, true), new(2, M2TextureRenderPassBlend.Add, false)];
         }
-        if (combiner.Kind is M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha or M2PreviewTextureCombinerKind.ExplicitModAddAlphaEnvironment or M2PreviewTextureCombinerKind.ExplicitModAddAlpha)
+        if (combiner.Kind is M2PreviewTextureCombinerKind.ExplicitOpaqueAddAlpha or M2PreviewTextureCombinerKind.ExplicitModAddAlphaEnvironment or M2PreviewTextureCombinerKind.ExplicitModAddAlpha or M2PreviewTextureCombinerKind.ExplicitModAddAlphaAlpha)
         {
             RequireTwo(stages, combiner);
             return [new(0, M2TextureRenderPassBlend.Source, true), new(1, M2TextureRenderPassBlend.Add, false)];

@@ -480,7 +480,18 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
 
     private void ApplyAuditFilter()
     {
-        if (_audit is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _status.Text = CanQueryDatabase() ? "The acquisition catalog is loading, or press Scan acquisition paths to refresh it now." : "Connect the live world database above. This tab will then load automatically."; return; } var query = _search.Text?.Trim() ?? string.Empty;
+        if (_audit is null) { _items.ItemsSource = Array.Empty<ItemCatalogEntry>(); _status.Text = CanQueryDatabase() ? "The acquisition catalog is loading, or press Scan acquisition paths to refresh it now." : "Connect the live world database above. This tab will then load automatically."; return; }
+        // The dedicated exact-ID field is authoritative even when its value was
+        // entered while the complete acquisition scan was still running. This
+        // also makes a completed automatic scan honor the pending lookup instead
+        // of silently falling back to the current classification filter.
+        var pinnedIds = ItemIdQueryParser.Parse(_exactIds.Text);
+        if (pinnedIds.Count > 0)
+        {
+            ShowPinnedExactItems(pinnedIds);
+            return;
+        }
+        var query = _search.Text?.Trim() ?? string.Empty;
         if (query.Length > 0)
         {
             var exactIds = ItemIdQueryParser.Parse(query);

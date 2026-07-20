@@ -61,6 +61,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var convert = Accent("Convert selected verified static M2"); convert.Click += async (_, _) => await ConvertSelectedAsync();
         var convertEligible = new Button { Content = "Convert all eligible snapshots" }; convertEligible.Click += async (_, _) => await ConvertEligibleAsync();
         var pathPayload = Accent("Build path-preserving payload"); pathPayload.Click += async (_, _) => await BuildPathPayloadAsync();
+        var materialAudit = new Button { Content = "Audit Wrath combiner coverage" }; materialAudit.Click += async (_, _) => await AuditMaterialsAsync();
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
         var browseListfile = new Button { Content = "Choose listfile" }; browseListfile.Click += async (_, _) => await ChooseListfileAsync();
         var autoListfile = new Button { Content = "Auto-detect" }; autoListfile.Click += async (_, _) => await AutoDetectListfileAsync();
@@ -69,7 +70,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var header = new Border
         {
             BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 8),
-            Child = new WrapPanel { Children = { back, new TextBlock { Text = "MODERN ASSET CONVERSION", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, addFiles, addFolder, remove, clear, create, open, convert, convertEligible, pathPayload, _publishReadyOnly, cancel } }
+            Child = new WrapPanel { Children = { back, new TextBlock { Text = "MODERN ASSET CONVERSION", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, addFiles, addFolder, remove, clear, create, open, convert, convertEligible, pathPayload, materialAudit, _publishReadyOnly, cancel } }
         };
 
         var dropTarget = new Border
@@ -110,6 +111,36 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         };
         var body = new ResponsiveSplitGrid(left, right, 1, 2) { Margin = new Thickness(12, 9, 12, 12) };
         Content = new Grid { RowDefinitions = new("Auto,Auto,Auto,*"), Children = { header, WithRow(listfileStrip, 1), WithRow(dropTarget, 2), WithRow(body, 3) } };
+    }
+
+    private async Task AuditMaterialsAsync()
+    {
+        var root = Directory.Exists(_settings.ProcessedAssetLibraryPath) ? Path.GetFullPath(_settings.ProcessedAssetLibraryPath) : null;
+        if (root is null)
+        {
+            root = (await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose an extracted WotLK M2/SKIN tree", AllowMultiple = false })).FirstOrDefault()?.TryGetLocalPath();
+            if (root is null) return;
+            root = Path.GetFullPath(root); _settings.ProcessedAssetLibraryPath = root; _settings.Save();
+        }
+        var operation = BeginOperation("Auditing build-264 M2/SKIN combiner coverage with bounded parallel header reads…"); var token = operation.Token;
+        try
+        {
+            var audit = await Task.Run(() => M2MaterialAuditService.Audit(root, cancellationToken: token), token);
+            var unsupported = audit.Entries.Where(entry => !entry.CombinerSupported).ToArray();
+            var supported = audit.Entries.Where(entry => entry.CombinerSupported).Take(24).ToArray();
+            _details.Text = $"WRATH M2 COMBINER COVERAGE\n\nRoot: {audit.Root}\nWorkers: {audit.Workers:N0}\nDuration: {audit.DurationMilliseconds / 1000:0.###} seconds\nDiscovered SKIN files: {audit.DiscoveredSkinFiles:N0}\nScanned build-264 SKIN files: {audit.ScannedSkinFiles:N0}\nBuild-264 companion models: {audit.WotlkModelFiles:N0}\nMissing companions: {audit.MissingCompanionModels:N0}\nNon-Wrath models: {audit.NonWotlkModels:N0}\nInvalid pairs: {audit.InvalidPairs:N0}\nMaterial units: {audit.MaterialUnits:N0}\nUnsupported combiner units: {audit.UnsupportedCombinerMaterialUnits:N0}\nUnsupported explicit combiner units: {audit.UnsupportedExplicitCombinerMaterialUnits:N0}\n\nUNSUPPORTED COMBINER FORMS\n{MaterialLines(unsupported)}\n\nMOST COMMON SUPPORTED COMBINER FORMS\n{MaterialLines(supported)}\n\nBOUNDED STRUCTURAL FINDINGS\n{Lines(audit.Findings)}";
+            _summary.Text = $"Material audit complete · {audit.MaterialUnits:N0} units across {audit.ScannedSkinFiles:N0} Wrath SKIN files · {audit.UnsupportedCombinerMaterialUnits:N0} unsupported combiner units · {audit.InvalidPairs:N0} structurally invalid pair(s).";
+            DesktopCrashLogger.Debug("M2", "material-audit-complete", ("root", root), ("skins", audit.ScannedSkinFiles), ("units", audit.MaterialUnits), ("unsupported_combiner", audit.UnsupportedCombinerMaterialUnits), ("invalid", audit.InvalidPairs), ("duration_ms", audit.DurationMilliseconds));
+        }
+        catch (OperationCanceledException) { _summary.Text = "M2 material audit cancelled; no source file was changed."; }
+        catch (Exception exception) { _summary.Text = $"M2 material audit failed: {exception.Message}"; DesktopCrashLogger.Log("M2 material audit failed", exception); }
+        finally { EndOperation(operation); }
+    }
+
+    private static string MaterialLines(IEnumerable<M2MaterialAuditEntry> entries)
+    {
+        var lines = entries.Select(entry => $"{entry.Encoding} · shader {(entry.Encoding == M2MaterialEncoding.Explicit ? $"0x{entry.ShaderId:X4}/{entry.ShaderId & 0x7FFF}" : entry.ShaderId)} · {entry.TextureStages} stage(s) · {entry.MaterialUnits:N0} unit(s) in {entry.SkinFiles:N0} SKIN(s) · {(entry.CombinerSupported ? entry.CombinerExact ? "exact combiner" : "supported combiner approximation" : "UNSUPPORTED COMBINER")} · {entry.Combiner}\n    {string.Join("\n    ", entry.Examples)}").ToArray();
+        return lines.Length == 0 ? "—" : string.Join("\n", lines);
     }
 
     private async Task ChooseListfileAsync()
