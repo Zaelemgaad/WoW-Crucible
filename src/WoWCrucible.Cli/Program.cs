@@ -2104,9 +2104,17 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
         foreach (var option in rawOptions.Where(option => option.StartsWith("--id=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--ids=", StringComparison.OrdinalIgnoreCase)))
         {
             var value = option[(option.IndexOf('=') + 1)..];
-            var pieces = value.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (pieces.Length == 0 || pieces.Any(piece => !uint.TryParse(piece, out var parsed) || parsed == 0)) return Fail($"Invalid positive item ID list: {value}");
-            foreach (var piece in pieces) { var parsed = uint.Parse(piece, System.Globalization.CultureInfo.InvariantCulture); if (!requestedIds.Contains(parsed)) requestedIds.Add(parsed); }
+            IReadOnlyList<uint> parsed;
+            if (option.StartsWith("--ids=", StringComparison.OrdinalIgnoreCase) && value.Contains(','))
+            {
+                var commaSeparated = value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                var values = commaSeparated.Select(piece => ItemIdQueryParser.TryParseSingle(piece, out var entry) ? entry : 0).ToArray();
+                if (values.Length == 0 || values.Any(entry => entry == 0)) return Fail($"Invalid positive item ID list: {value}");
+                parsed = values;
+            }
+            else parsed = ItemIdQueryParser.Parse(value);
+            if (parsed.Count == 0) return Fail($"Invalid positive item ID list: {value}");
+            foreach (var entry in parsed) if (!requestedIds.Contains(entry)) requestedIds.Add(entry);
         }
         var unknown = rawOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--core-source=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--id=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ids=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown item-audit option: {unknown[0]}");
