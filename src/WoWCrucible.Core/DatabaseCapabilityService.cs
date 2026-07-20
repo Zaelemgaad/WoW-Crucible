@@ -203,9 +203,10 @@ public sealed class DatabaseCapabilityService
     {
         if (string.IsNullOrWhiteSpace(profile.Host) || string.IsNullOrWhiteSpace(profile.User) || string.IsNullOrWhiteSpace(profile.Database))
             throw new ArgumentException("Host, user, and database are required.");
+        var endpoint = DatabaseConnectionTransportRegistry.Resolve(profile);
         return new MySqlConnectionStringBuilder
         {
-            Server = profile.Host, Port = profile.Port, UserID = profile.User, Password = profile.Password,
+            Server = endpoint.Host, Port = endpoint.Port, UserID = profile.User, Password = profile.Password,
             Database = profile.Database, SslMode = profile.SslMode, ConnectionTimeout = 5,
             DefaultCommandTimeout = 15, AllowUserVariables = false, Pooling = true
         }.ConnectionString;

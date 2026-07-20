@@ -92,7 +92,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); };
+        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -1081,7 +1081,7 @@ public partial class MainWindow : Window
             StatusText.Text = "Restoring the saved server workspace…";
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             await _workspaceSession.DetectServerAndConnectAsync(_workspaceSession.Settings.ServerRootPath, timeout.Token);
-            StatusText.Text = $"Server ready · {_workspaceSession.Server?.CoreFamily} · {_workspaceSession.DatabaseCapabilities?.Database} · MySQL {_workspaceSession.DatabaseCapabilities?.ServerVersion}";
+            StatusText.Text = $"Server ready · {_workspaceSession.Server?.CoreFamily} · {_workspaceSession.DatabaseCapabilities?.Database} · MySQL {_workspaceSession.DatabaseCapabilities?.ServerVersion} · {_workspaceSession.DatabaseTransportDescription}";
         }
         catch (Exception exception)
         {

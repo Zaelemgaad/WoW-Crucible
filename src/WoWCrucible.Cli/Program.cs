@@ -1867,7 +1867,9 @@ static async Task<int> Server(string[] args)
     Console.WriteLine($"DatabaseUser\t{workspace.WorldDatabase.User}"); Console.WriteLine($"Layout\t{(workspace.UsesWsl ? "WSL split" : "Native/local")}");
     if (action == "inspect")
     {
-        var capabilities = await new DatabaseCapabilityService().InspectAsync(workspace.WorldDatabase);
+        using var connection = await ServerDatabaseConnectionSession.ConnectAsync(workspace); var capabilities = connection.Capabilities;
+        Console.WriteLine($"DatabaseTransport\t{connection.TransportDescription}");
+        if (connection.DirectFailure is { } directFailure) Console.WriteLine($"DirectConnectionFinding\t{directFailure}");
         Console.WriteLine($"DatabaseServer\t{capabilities.ServerVersion}");
         foreach (var table in capabilities.Tables.Values.OrderBy(table => table.Name)) Console.WriteLine($"TABLE\t{table.Name}\t{table.Columns.Count} columns");
         foreach (var inspected in ServerTableBindingCatalog.AttachCapabilities(ServerTableBindingCatalog.BuiltIn(workspace.CoreFamily), capabilities).Where(item => item.Binding.Consumption == ServerTableConsumption.SqlOverlayed))

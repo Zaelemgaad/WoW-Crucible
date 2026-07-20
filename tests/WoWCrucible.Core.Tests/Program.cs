@@ -1802,6 +1802,7 @@ if (Directory.Exists(desktopSourceRoot))
     var clientWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ClientWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var appSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("App.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var desktopWorkspaceSessionSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("DesktopWorkspaceSession.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var desktopSettingsSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("DesktopSettings.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingEditorSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingBandEditorView.cs", StringComparison.OrdinalIgnoreCase)).Value;
@@ -1850,6 +1851,7 @@ if (Directory.Exists(desktopSourceRoot))
         !appSource.Contains("--client", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenSqlFavorites", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenMpqMergeWorkspace", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("_workspaceSession.Dispose()", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("ApplyShellPaneState", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("RootLayout.ColumnDefinitions[0].Width", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("RootLayout.ColumnDefinitions[4].Width", StringComparison.Ordinal) ||
@@ -1859,6 +1861,8 @@ if (Directory.Exists(desktopSourceRoot))
         !mainWindowMarkup.Contains("x:Name=\"InspectorPaneButton\"", StringComparison.Ordinal))
         throw new InvalidOperationException("Cut-item navigation, SQL-row favorites, same-window authenticated client releases, or their direct workspace routes regressed.");
     if (!serverSqlWorkspaceSource.Contains("Named row lookups", StringComparison.Ordinal) || !serverSqlWorkspaceSource.Contains("BuildBridgeLookupEditor", StringComparison.Ordinal) ||
+        !serverSqlWorkspaceSource.Contains("_session.DatabaseTransportDescription", StringComparison.Ordinal) ||
+        !desktopWorkspaceSessionSource.Contains("ServerDatabaseConnectionSession.ConnectAsync", StringComparison.Ordinal) ||
         !serverSqlWorkspaceSource.Contains("NumericAdd", StringComparison.Ordinal) || !serverSqlWorkspaceSource.Contains("ExactMap", StringComparison.Ordinal) ||
         !serverSqlWorkspaceSource.Contains("Zero or multiple matching rows block planning", StringComparison.Ordinal))
         throw new InvalidOperationException("Same-window exact schema-lookup or bounded value-transform authoring regressed.");
@@ -1911,6 +1915,19 @@ var detectedServer = ServerWorkspaceDetector.DetectLocal(serverFixture);
 if (detectedServer.WorldDatabase.Host != "127.0.0.1" || detectedServer.WorldDatabase.Port != 3307 || detectedServer.WorldDatabase.Password != "fixture_password" ||
     detectedServer.WorldDatabase.Database != "fixture_world" || !detectedServer.DbcPath.EndsWith(Path.Combine("data", "dbc")))
     throw new InvalidOperationException("Native server workspace detection failed.");
+var directConnection = new MySqlConnector.MySqlConnectionStringBuilder(DatabaseCapabilityService.BuildConnectionString(detectedServer.WorldDatabase));
+using (DatabaseConnectionTransportRegistry.Register(detectedServer.WorldDatabase, new("172.20.10.5", 49152, "fixture WSL bridge")))
+{
+    var bridgedConnection = new MySqlConnector.MySqlConnectionStringBuilder(DatabaseCapabilityService.BuildConnectionString(detectedServer.WorldDatabase));
+    var siblingSchemaConnection = new MySqlConnector.MySqlConnectionStringBuilder(DatabaseCapabilityService.BuildConnectionString(detectedServer.WorldDatabase with { User = "other_login", Database = "fixture_characters" }));
+    if (bridgedConnection.Server != "172.20.10.5" || bridgedConnection.Port != 49152 || bridgedConnection.UserID != "fixture_user" || bridgedConnection.Database != "fixture_world" || siblingSchemaConnection.Server != "172.20.10.5" || siblingSchemaConnection.Port != 49152 || siblingSchemaConnection.UserID != "other_login" || siblingSchemaConnection.Database != "fixture_characters")
+        throw new InvalidOperationException("Process-local database transport routing changed the declared identity or failed to substitute only the TCP endpoint.");
+}
+var restoredConnection = new MySqlConnector.MySqlConnectionStringBuilder(DatabaseCapabilityService.BuildConnectionString(detectedServer.WorldDatabase));
+if (directConnection.Server != "127.0.0.1" || directConnection.Port != 3307 || restoredConnection.Server != directConnection.Server || restoredConnection.Port != directConnection.Port)
+    throw new InvalidOperationException("Disposing a database transport route did not restore the installed server's declared endpoint.");
+if (!WslDatabaseLoopbackBridge.IsRequired(detectedServer with { UsesWsl = true, WslDistribution = "Fixture-Linux" }) || WslDatabaseLoopbackBridge.IsRequired(detectedServer) || WslDatabaseLoopbackBridge.IsRequired(detectedServer with { UsesWsl = true, WslDistribution = "Fixture-Linux", WorldDatabase = detectedServer.WorldDatabase with { Host = "10.0.0.5" } }))
+    throw new InvalidOperationException("WSL database bridge eligibility was not restricted to an explicit WSL loopback target.");
 Directory.CreateDirectory(Path.Combine(serverFixture, "configured-data", "dbc"));
 File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf"), """
     WorldDatabaseInfo = "localhost;3307;fixture_user;fixture_password;fixture_world"

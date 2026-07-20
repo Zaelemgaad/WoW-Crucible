@@ -1359,7 +1359,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             return;
         }
         var capabilities = _session.DatabaseCapabilities;
-        _summary.Text = $"Core family\t{server.CoreFamily}\nServer root\t{server.RootPath}\nConfiguration\t{server.ConfigLocation}\nLayout\t{(server.UsesWsl ? $"Windows + WSL ({server.WslDistribution})" : "Native/local")}\nServer DBCs\t{(string.IsNullOrWhiteSpace(server.DbcPath) ? "Not found" : server.DbcPath)}\nWorld database\t{server.WorldDatabase.Database} on {server.WorldDatabase.Host}:{server.WorldDatabase.Port}\nDatabase user\t{server.WorldDatabase.User}\nConnection\t{(capabilities is null ? "Not tested" : $"Verified · MySQL {capabilities.ServerVersion}")}\nRecognized tables\t{capabilities?.Tables.Count ?? 0:N0}\nDBC overlay tables\t{capabilities?.DbcOverlayTables.Count ?? 0:N0}";
+        _summary.Text = $"Core family\t{server.CoreFamily}\nServer root\t{server.RootPath}\nConfiguration\t{server.ConfigLocation}\nLayout\t{(server.UsesWsl ? $"Windows + WSL ({server.WslDistribution})" : "Native/local")}\nServer DBCs\t{(string.IsNullOrWhiteSpace(server.DbcPath) ? "Not found" : server.DbcPath)}\nWorld database\t{server.WorldDatabase.Database} on {server.WorldDatabase.Host}:{server.WorldDatabase.Port}\nDatabase user\t{server.WorldDatabase.User}\nConnection\t{(capabilities is null ? "Not tested" : $"Verified · MySQL {capabilities.ServerVersion}")}\nTransport\t{_session.DatabaseTransportDescription}\nRecognized tables\t{capabilities?.Tables.Count ?? 0:N0}\nDBC overlay tables\t{capabilities?.DbcOverlayTables.Count ?? 0:N0}";
     }
 
     public void Dispose() { _session.Changed -= SessionChanged; _operation?.Cancel(); _operation?.Dispose(); _lifecycle.Dispose(); }
