@@ -3,7 +3,8 @@ namespace WoWCrucible.Core;
 /// <summary>
 /// Parses the item-ID forms accepted by the desktop catalog.
 /// Commas are thousands separators only when every following group contains
-/// exactly three digits; spaces alone always separate a batch.
+/// exactly three digits; spaces alone always separate a batch. Human-readable
+/// batches such as "17 and 17802" are accepted as exact IDs too.
 /// </summary>
 public static class ItemIdQueryParser
 {
@@ -22,7 +23,7 @@ public static class ItemIdQueryParser
 
     public static IReadOnlyList<uint> Parse(string? text)
     {
-        var candidate = text?.Trim() ?? string.Empty;
+        var candidate = NormalizeConjunctions(text?.Trim() ?? string.Empty);
         if (candidate.Length == 0 || candidate.Any(character =>
                 !char.IsDigit(character) && character is not ',' and not '_' and not ' ' and not '#' and not ';' and not '\r' and not '\n' and not '\t'))
             return [];
@@ -45,5 +46,13 @@ public static class ItemIdQueryParser
             if (!result.Contains(entry)) result.Add(entry);
         }
         return result;
+    }
+
+    private static string NormalizeConjunctions(string candidate)
+    {
+        if (candidate.Length == 0) return candidate;
+        var words = candidate.Split([' ', '\r', '\n', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (words.Length == 0) return string.Empty;
+        return string.Join(' ', words.Select(word => word.Equals("and", StringComparison.OrdinalIgnoreCase) || word == "&" ? ";" : word));
     }
 }

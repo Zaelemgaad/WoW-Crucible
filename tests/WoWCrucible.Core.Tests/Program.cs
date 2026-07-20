@@ -1620,7 +1620,7 @@ if (Directory.Exists(desktopSourceRoot))
     var desktopSettingsSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("DesktopSettings.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowMarkup = desktopMarkup.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml", StringComparison.OrdinalIgnoreCase)).Value;
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
-        !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 17802", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 and 17802", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("_exactIds.TextChanged", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("var pinnedIds = ItemIdQueryParser.Parse(_exactIds.Text)", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("ShowPinnedExactItems(pinnedIds)", StringComparison.Ordinal) ||
@@ -1721,8 +1721,12 @@ var itemIdBatch = ItemIdQueryParser.Parse("17 17802");
 if (!itemIdBatch.SequenceEqual(new uint[] { 17, 17802 }) ||
     !ItemIdQueryParser.Parse("#17 #17802").SequenceEqual(itemIdBatch) ||
     !ItemIdQueryParser.Parse("17; 17802").SequenceEqual(itemIdBatch) ||
+    !ItemIdQueryParser.Parse("17802 and 17").SequenceEqual(new uint[] { 17802, 17 }) ||
+    !ItemIdQueryParser.Parse("17 AND 17802").SequenceEqual(itemIdBatch) ||
+    !ItemIdQueryParser.Parse("17 & 17802").SequenceEqual(itemIdBatch) ||
     !ItemIdQueryParser.TryParseSingle("17,802", out var groupedItemId) || groupedItemId != 17802 ||
-    ItemIdQueryParser.TryParseSingle("17 17802", out _))
+    ItemIdQueryParser.TryParseSingle("17 17802", out _) ||
+    ItemIdQueryParser.Parse("candy 17").Count != 0)
     throw new InvalidOperationException("Item ID query parsing confused exact batches with grouped single IDs.");
 var cppGrantRoot = Path.Combine(Path.GetTempPath(), $"crucible-cpp-grants-{Guid.NewGuid():N}");
 try

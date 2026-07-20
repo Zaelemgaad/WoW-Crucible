@@ -23,7 +23,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly TextBox _search = new() { PlaceholderText = "Find items by text · a numeric-only search is an exact ID lookup that bypasses every filter…" };
-    private readonly TextBox _exactIds = new() { PlaceholderText = "Exact item ID(s), always bypassing filters: 17 17802" };
+    private readonly TextBox _exactIds = new() { PlaceholderText = "Exact item ID(s), always bypassing filters: 17 and 17802" };
     private readonly ComboBox _classification = new()
     {
         ItemsSource = new[] { "No known acquisition path", "Known acquisition path", "All item_template rows" },
@@ -390,7 +390,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private async Task InspectExactAsync()
     {
         var selectedEntry = (_items.SelectedItem as ItemCatalogEntry)?.Entry;
-        if (!ItemIdQueryParser.TryParseSingle(_exactIds.Text, out var entry) && selectedEntry is null) { _inspection.Text = "Select a row, or enter one positive item ID in the exact-ID field. Plain, comma-grouped, and #prefixed forms are accepted (17802, 17,802, or #17802)."; return; }
+        if (!ItemIdQueryParser.TryParseSingle(_exactIds.Text, out var entry) && selectedEntry is null) { _inspection.Text = "Select a row, or enter one positive item ID in the exact-ID field. Plain, comma-grouped, #prefixed, and human-readable batches are accepted (17802, 17,802, #17802, or 17 and 17802)."; return; }
         entry = ItemIdQueryParser.TryParseSingle(_exactIds.Text, out var searchedEntry) ? searchedEntry : selectedEntry!.Value;
         SetBusy($"Locating exact item {entry:N0} in the complete acquisition catalog…");
         try
