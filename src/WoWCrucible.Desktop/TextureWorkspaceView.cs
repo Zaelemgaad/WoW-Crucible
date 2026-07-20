@@ -61,6 +61,21 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
     private readonly TextBox _compositionBackgroundG = new() { Text = "0", PlaceholderText = "Background G" };
     private readonly TextBox _compositionBackgroundB = new() { Text = "0", PlaceholderText = "Background B" };
     private readonly TextBox _compositionBackgroundA = new() { Text = "0", PlaceholderText = "Background A" };
+    private readonly TextBox _maskPath = new() { IsReadOnly = true, PlaceholderText = "Choose a BLP/image mask…" };
+    private readonly ComboBox _maskChannel = new() { ItemsSource = Enum.GetValues<TextureMaskChannel>().Select(TextureMaskTransformService.ChannelName).ToArray(), SelectedIndex = 0 };
+    private readonly CheckBox _maskInvert = new() { Content = "Invert mask" };
+    private readonly TextBox _maskStrength = new() { Text = "1", PlaceholderText = "Mask strength 0..1" };
+    private readonly TextBox _maskRedScale = new() { Text = "1", PlaceholderText = "R scale" };
+    private readonly TextBox _maskGreenScale = new() { Text = "1", PlaceholderText = "G scale" };
+    private readonly TextBox _maskBlueScale = new() { Text = "1", PlaceholderText = "B scale" };
+    private readonly TextBox _maskAlphaScale = new() { Text = "1", PlaceholderText = "A scale" };
+    private readonly TextBox _maskRedOffset = new() { Text = "0", PlaceholderText = "R offset" };
+    private readonly TextBox _maskGreenOffset = new() { Text = "0", PlaceholderText = "G offset" };
+    private readonly TextBox _maskBlueOffset = new() { Text = "0", PlaceholderText = "B offset" };
+    private readonly TextBox _maskAlphaOffset = new() { Text = "0", PlaceholderText = "A offset" };
+    private readonly Image _maskPreview = new() { Stretch = Stretch.Uniform };
+    private readonly Image _maskResultPreview = new() { Stretch = Stretch.Uniform };
+    private readonly TextBlock _maskSummary = Text("Load a mask and decode a base texture draft to transform exact RGBA channels.");
     private readonly List<byte[]> _undo = [];
     private CancellationTokenSource? _operation;
     private CancellationTokenSource? _statisticsOperation;
@@ -68,9 +83,13 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
     private WriteableBitmap? _proofPreviewBitmap;
     private WriteableBitmap? _proofDifferenceBitmap;
     private WriteableBitmap? _compositionBitmap;
+    private WriteableBitmap? _maskPreviewBitmap;
+    private WriteableBitmap? _maskResultBitmap;
     private BlpTextureInfo? _info;
     private TextureEncodingProof? _proof;
     private TextureCompositionResult? _composition;
+    private TextureMaskTransformResult? _maskResult;
+    private RgbaTexture? _maskTexture;
     private RgbaTexture? _editTexture;
     private RgbaTexture? _editBaseline;
     private int _editMip = -1;
@@ -122,6 +141,8 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         });
         _compositionLayers.SelectionChanged += (_, _) => LoadSelectedCompositionLayer();
         foreach (var field in new[] { _compositionWidth, _compositionHeight, _compositionBackgroundR, _compositionBackgroundG, _compositionBackgroundB, _compositionBackgroundA }) field.TextChanged += (_, _) => InvalidateComposition();
+        _maskChannel.SelectionChanged += (_, _) => InvalidateMaskResult(); _maskInvert.IsCheckedChanged += (_, _) => InvalidateMaskResult();
+        foreach (var field in new[] { _maskStrength, _maskRedScale, _maskGreenScale, _maskBlueScale, _maskAlphaScale, _maskRedOffset, _maskGreenOffset, _maskBlueOffset, _maskAlphaOffset }) field.TextChanged += (_, _) => InvalidateMaskResult();
 
         var heading = new Grid
         {
@@ -167,6 +188,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         _visualPages.Items.Add(new TabItem { Header = "Edit RGBA pixels", Content = BuildEditorPage() });
         _visualPages.Items.Add(new TabItem { Header = "Compression proof", Content = BuildProofPage() });
         _visualPages.Items.Add(new TabItem { Header = "Compose layers", Content = BuildCompositionPage() });
+        _visualPages.Items.Add(new TabItem { Header = "Mask & channels", Content = BuildMaskTransformPage() });
         var body = new ResponsiveSplitGrid(inspector, _visualPages, 2, 3);
         Content = new Grid
         {
@@ -400,6 +422,108 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         _composition = null; var bitmap = _compositionBitmap; _compositionBitmap = null; _compositionPreview.Source = null; bitmap?.Dispose(); _compositionSummary.Text = _compositionLayerDrafts.Count == 0 ? "Add one or more BLP/image layers, then render the ordered material stack." : "Layer stack or canvas changed · render again before saving or handing off.";
     }
 
+    private Control BuildMaskTransformPage()
+    {
+        var load = AccentButton("Load BLP / image mask…"); load.Click += async (_, _) => await LoadMaskAsync();
+        var apply = AccentButton("Preview exact channel transform"); apply.Click += async (_, _) => await ApplyMaskTransformAsync();
+        var use = new Button { Content = "Use result in RGBA editor" }; use.Click += (_, _) => UseMaskResultAsDraft();
+        var proof = new Button { Content = "Run compression proof on result" }; proof.Click += async (_, _) => await ProofMaskResultAsync();
+        var savePng = new Button { Content = "Save masked PNG…" }; savePng.Click += async (_, _) => await SaveMaskResultAsync(blp: false);
+        var saveBlp = new Button { Content = "Save masked BLP2…" }; saveBlp.Click += async (_, _) => await SaveMaskResultAsync(blp: true);
+        var controls = new StackPanel
+        {
+            Margin = new Thickness(10), Spacing = 7,
+            Children =
+            {
+                new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Children = { _maskPath, Column(load, 1) } },
+                new WrapPanel { Children = { Label("MASK SOURCE"), _maskChannel, _maskInvert, Label("STRENGTH"), _maskStrength } },
+                Label("RGBA SCALE"),
+                new ResponsiveFieldGrid(("R", _maskRedScale), ("G", _maskGreenScale), ("B", _maskBlueScale), ("A", _maskAlphaScale)),
+                Label("RGBA OFFSET · signed byte delta before mask interpolation"),
+                new ResponsiveFieldGrid(("R", _maskRedOffset), ("G", _maskGreenOffset), ("B", _maskBlueOffset), ("A", _maskAlphaOffset)),
+                new WrapPanel { Children = { apply, use, proof, savePng, saveBlp } },
+                new TextBlock { Text = "Each output channel is clamp(source × scale + offset), blended back through the selected mask byte and Strength. Differently sized masks use deterministic nearest-neighbor normalized sampling. The base draft, mask file, and loaded BLP remain immutable until you explicitly hand the result to the RGBA editor.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8E99AD"), FontSize = 11 },
+                _maskSummary
+            }
+        };
+        var mask = ProofImageCard("EXACT SELECTED MASK CHANNEL · grayscale", _maskPreview);
+        var result = ProofImageCard("MASKED RGBA RESULT · before encoding", _maskResultPreview);
+        return new Grid { RowDefinitions = new("Auto,*"), Children = { new ScrollViewer { VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = controls }, Row(new ResponsiveSplitGrid(mask, result, 1, 1, 1.7), 1) } };
+    }
+
+    private async Task LoadMaskAsync()
+    {
+        var path = await PickFileAsync("Load a texture mask", ["*.blp", "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga"]); if (path is null) return;
+        Begin("Decoding immutable texture mask…");
+        try
+        {
+            path = Path.GetFullPath(path); var texture = await Task.Run(() => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase) ? BlpTextureService.Decode(path) : BlpTextureService.DecodeImage(path), _operation!.Token);
+            _maskTexture = texture; _maskPath.Text = path; InvalidateMaskResult(); _maskSummary.Text = $"Loaded immutable mask · {texture.Width:N0}×{texture.Height:N0} · {texture.Pixels.Length:N0} RGBA bytes. Preview the transform to visualize the selected channel."; _status.Text = $"Texture mask decoded: {path}";
+        }
+        catch (OperationCanceledException) { } catch (Exception exception) { Fail("Texture mask load failed", exception); }
+    }
+
+    private async Task ApplyMaskTransformAsync()
+    {
+        if (_editTexture is null) { _status.Text = "Open a BLP or create an RGBA draft to provide the immutable base pixels first."; return; }
+        if (_maskTexture is null) { _status.Text = "Load a BLP or image mask first."; return; }
+        TextureMaskTransformSettings settings;
+        try { settings = ReadMaskSettings(); } catch (Exception exception) { _status.Text = exception.Message; return; }
+        var source = CloneEditTexture(); var mask = _maskTexture; Begin("Applying exact mask-driven RGBA transform…"); _editBusy = true; _editorCanvas.IsHitTestVisible = false;
+        try
+        {
+            var token = _operation!.Token; var pair = await Task.Run(() => (Result: TextureMaskTransformService.Apply(source, mask, settings, token), Preview: TextureMaskTransformService.CreateMaskPreview(mask, settings.MaskChannel, settings.InvertMask, token)), token); token.ThrowIfCancellationRequested();
+            var maskBitmap = CreateBitmap(pair.Preview); var resultBitmap = CreateBitmap(pair.Result.Texture); var previousMask = _maskPreviewBitmap; var previousResult = _maskResultBitmap;
+            _maskResult = pair.Result; _maskPreviewBitmap = maskBitmap; _maskResultBitmap = resultBitmap; _maskPreview.Source = maskBitmap; _maskResultPreview.Source = resultBitmap; previousMask?.Dispose(); previousResult?.Dispose();
+            _maskSummary.Text = $"Base {source.Width:N0}×{source.Height:N0} · mask {mask.Width:N0}×{mask.Height:N0} · {TextureMaskTransformService.ChannelName(settings.MaskChannel)}{(settings.InvertMask ? " inverted" : string.Empty)} · strength {settings.Strength:0.###}\nMask range {pair.Result.MinimumMask}..{pair.Result.MaximumMask} · {pair.Result.PixelsInfluenced:N0} influenced · {pair.Result.PixelsChanged:N0} changed · base and mask unchanged.";
+            _status.Text = $"Mask transform preview complete · {pair.Result.PixelsChanged:N0}/{source.Width * source.Height:N0} pixel(s) changed.";
+        }
+        catch (OperationCanceledException) { } catch (Exception exception) { Fail("Texture mask transform failed", exception); }
+        finally { _editBusy = false; _editorCanvas.IsHitTestVisible = true; }
+    }
+
+    private TextureMaskTransformSettings ReadMaskSettings()
+    {
+        var strength = ParseFinite(_maskStrength.Text, "Mask strength"); if (strength < 0 || strength > 1) throw new FormatException("Mask strength must be from 0 through 1.");
+        var transform = new TextureChannelTransform(
+            ParseFinite(_maskRedScale.Text, "Red scale"), ParseFinite(_maskGreenScale.Text, "Green scale"), ParseFinite(_maskBlueScale.Text, "Blue scale"), ParseFinite(_maskAlphaScale.Text, "Alpha scale"),
+            ParseFinite(_maskRedOffset.Text, "Red offset"), ParseFinite(_maskGreenOffset.Text, "Green offset"), ParseFinite(_maskBlueOffset.Text, "Blue offset"), ParseFinite(_maskAlphaOffset.Text, "Alpha offset"));
+        return new(_maskChannel.SelectedIndex >= 0 ? (TextureMaskChannel)_maskChannel.SelectedIndex : TextureMaskChannel.Alpha, _maskInvert.IsChecked == true, strength, transform);
+    }
+
+    private void UseMaskResultAsDraft()
+    {
+        if (_maskResult is null) { _status.Text = "Preview the mask transform before handing it to the editor."; return; }
+        var result = _maskResult.Texture; CaptureUndo(); _editTexture = new(result.Width, result.Height, result.Pixels.ToArray()); _editDirty = true; if (_editMip < 0) _editMip = 0; RefreshEditedPixels(); _visualPages.SelectedIndex = 1;
+        _status.Text = "Masked pixels copied into the RGBA editor as a mutable draft. The base snapshot and mask file remain unchanged.";
+    }
+
+    private async Task ProofMaskResultAsync()
+    {
+        if (_maskResult is null) { _status.Text = "Preview the mask transform before running compression proof."; return; }
+        UseMaskResultAsDraft(); _visualPages.SelectedIndex = 2; await AnalyzeProofAsync();
+    }
+
+    private async Task SaveMaskResultAsync(bool blp)
+    {
+        if (_maskResult is null) { _status.Text = "Preview the mask transform before saving it."; return; }
+        var output = await PickSaveFileAsync(blp ? "Save masked pixels as Wrath-compatible BLP2" : "Save masked pixels as PNG", blp ? "texture-masked.blp" : "texture-masked.png", blp ? "blp" : "png"); if (output is null) return; output = Path.GetFullPath(output);
+        if ((_maskPath.Text?.Equals(output, StringComparison.OrdinalIgnoreCase) ?? false) || (_info?.Path.Equals(output, StringComparison.OrdinalIgnoreCase) ?? false)) { _status.Text = "Masked output must not overwrite the mask or loaded BLP source."; return; }
+        Begin(blp ? "Encoding masked BLP2 atomically…" : "Writing masked PNG atomically…");
+        try
+        {
+            var texture = _maskResult.Texture; if (blp) await Task.Run(() => BlpTextureService.EncodeBlp2(texture, output, new(SelectedFormat(), _mipmaps.IsChecked == true, SelectedQuality()), overwrite: true), _operation!.Token); else await Task.Run(() => BlpTextureService.WritePng(output, texture, overwrite: true), _operation!.Token);
+            _status.Text = $"Masked texture saved: {output}";
+        }
+        catch (OperationCanceledException) { } catch (Exception exception) { Fail("Masked texture save failed", exception); }
+    }
+
+    private void InvalidateMaskResult()
+    {
+        _maskResult = null; var mask = _maskPreviewBitmap; var result = _maskResultBitmap; _maskPreviewBitmap = null; _maskResultBitmap = null; _maskPreview.Source = null; _maskResultPreview.Source = null; mask?.Dispose(); result?.Dispose();
+        _maskSummary.Text = _maskTexture is null ? "Load a mask and decode a base texture draft to transform exact RGBA channels." : "Mask, base draft, or transform settings changed · preview again before saving or handing off.";
+    }
+
     private async Task AnalyzeProofAsync()
     {
         if (_editTexture is null || _editBusy) { _status.Text = "Decode a BLP mip before analyzing compression loss."; return; }
@@ -531,7 +655,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
 
     private void RefreshChannelView() { _editorCanvas.SetChannelView(CurrentChannelView()); }
     private TextureChannelView CurrentChannelView() => new(_showRed.IsChecked == true, _showGreen.IsChecked == true, _showBlue.IsChecked == true, _showAlpha.IsChecked == true, _alphaGrayscale.IsChecked == true);
-    private void RefreshEditedPixels() { if (_editTexture is null) return; InvalidateProof(); _editorCanvas.SetTexture(_editTexture, CurrentChannelView()); _ = UpdateStatisticsAsync(_editTexture); }
+    private void RefreshEditedPixels() { if (_editTexture is null) return; InvalidateProof(); InvalidateMaskResult(); _editorCanvas.SetTexture(_editTexture, CurrentChannelView()); _ = UpdateStatisticsAsync(_editTexture); }
     private async Task UpdateStatisticsAsync(RgbaTexture texture)
     {
         _statisticsOperation?.Cancel(); _statisticsOperation?.Dispose(); var operation = _statisticsOperation = new();
@@ -698,6 +822,6 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
 
     public void Dispose()
     {
-        _operation?.Cancel(); _operation?.Dispose(); _statisticsOperation?.Cancel(); _statisticsOperation?.Dispose(); _bitmap?.Dispose(); _proofPreviewBitmap?.Dispose(); _proofDifferenceBitmap?.Dispose(); _compositionBitmap?.Dispose(); _editorCanvas.Dispose();
+        _operation?.Cancel(); _operation?.Dispose(); _statisticsOperation?.Cancel(); _statisticsOperation?.Dispose(); _bitmap?.Dispose(); _proofPreviewBitmap?.Dispose(); _proofDifferenceBitmap?.Dispose(); _compositionBitmap?.Dispose(); _maskPreviewBitmap?.Dispose(); _maskResultBitmap?.Dispose(); _editorCanvas.Dispose();
     }
 }
