@@ -40,6 +40,8 @@ public sealed record PlayableRaceClonePlan(
     public uint? MaleSourceDisplayId { get; init; }
     public uint? FemaleSourceDisplayId { get; init; }
     public CreatureAppearanceBatchPortPlan? AppearancePromotion { get; init; }
+    public uint? AppearanceSourceRaceId { get; init; }
+    public PlayableRaceCustomizationPromotionPlan? CustomizationPromotion { get; init; }
     public bool Ready => Blockers.Count == 0;
     public int SqlRows => SqlTables.Sum(table => table.Rows.Count);
     public int DbcRows => DbcTables.Sum(table => table.AffectedRows);
@@ -51,9 +53,10 @@ public sealed record PlayableRaceAppearanceOptions(
     uint? FemaleDisplayId = null,
     string? ProcessedAssetLibraryRoot = null,
     string? RequestedAssetProvenance = null,
-    string? SourceDbcRoot = null)
+    string? SourceDbcRoot = null,
+    uint? AppearanceSourceRaceId = null)
 {
-    public bool Enabled => MaleDisplayId.HasValue || FemaleDisplayId.HasValue || !string.IsNullOrWhiteSpace(ProcessedAssetLibraryRoot) || !string.IsNullOrWhiteSpace(RequestedAssetProvenance) || !string.IsNullOrWhiteSpace(SourceDbcRoot);
+    public bool Enabled => MaleDisplayId.HasValue || FemaleDisplayId.HasValue || !string.IsNullOrWhiteSpace(ProcessedAssetLibraryRoot) || !string.IsNullOrWhiteSpace(RequestedAssetProvenance) || !string.IsNullOrWhiteSpace(SourceDbcRoot) || AppearanceSourceRaceId.HasValue;
 }
 
 public sealed record PlayableRaceCloneResult(string OutputRoot, string PlanPath, string ReceiptPath, string SqlPath,
@@ -100,10 +103,13 @@ public sealed class PlayableRaceCloneService
             throw new ArgumentException("An exact appearance provenance requires a processed asset library.", nameof(appearance));
         if (!string.IsNullOrWhiteSpace(appearance.SourceDbcRoot) && (!appearance.MaleDisplayId.HasValue || !appearance.FemaleDisplayId.HasValue))
             throw new ArgumentException("Source-layer appearance promotion requires both male and female source display IDs.", nameof(appearance));
+        if (appearance.AppearanceSourceRaceId.HasValue && string.IsNullOrWhiteSpace(appearance.SourceDbcRoot)) throw new ArgumentException("A customization source race requires an appearance source DBC folder.", nameof(appearance));
+        if (appearance.AppearanceSourceRaceId is { } appearanceRace) ValidateRaceId(appearanceRace, nameof(appearance.AppearanceSourceRaceId));
         var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var plans = new List<PlayableBundleDbcTablePlan>(); var blockers = new List<string>(); var warnings = new List<string>(); var sourceName = $"Race {sourceRaceId}"; uint sourceMaleDisplay = 0; uint sourceFemaleDisplay = 0;
         foreach (var table in DbcTables)
         {
             cancellationToken.ThrowIfCancellationRequested(); var path = RequiredTablePath(dbcRoot, table); var file = WdbcFile.Load(path); var resolution = Exact(schema, table, file); hashes[table] = Hash(path);
+            if (appearance.AppearanceSourceRaceId.HasValue && PlayableRaceCustomizationPromotionService.TableNames.Contains(table)) continue;
             if (table == "ChrRaces")
             {
                 var rows = DbcRecordIdentity.IndexRows(file, resolution.Columns, resolution.KeyStrategy); if (!rows.TryGetValue(sourceRaceId, out var sourceRow)) blockers.Add($"ChrRaces.dbc has no source race ID {sourceRaceId:N0}.");
@@ -125,7 +131,7 @@ public sealed class PlayableRaceCloneService
             var affected = Enumerable.Range(0, file.RowCount).Count(row => maskColumns.Any(column => (file.GetRaw(row, column) & sourceMask) != 0 && (file.GetRaw(row, column) & targetMask) == 0));
             plans.Add(new(table, $"Add target race bit to {string.Join(", ", maskPlan.MaskColumns)} wherever source access exists", affected));
         }
-        var bindings = Array.Empty<CreatureDisplayBindingPlan>(); CreatureAppearanceBatchPortPlan? promotion = null; uint? finalMaleDisplay = appearance.MaleDisplayId; uint? finalFemaleDisplay = appearance.FemaleDisplayId; string? appearanceSourceRoot = null;
+        var bindings = Array.Empty<CreatureDisplayBindingPlan>(); CreatureAppearanceBatchPortPlan? promotion = null; PlayableRaceCustomizationPromotionPlan? customization = null; uint? finalMaleDisplay = appearance.MaleDisplayId; uint? finalFemaleDisplay = appearance.FemaleDisplayId; string? appearanceSourceRoot = null;
         if (appearance.Enabled)
         {
             var library = string.IsNullOrWhiteSpace(appearance.ProcessedAssetLibraryRoot) ? null : RequiredDirectory(appearance.ProcessedAssetLibraryRoot, "Processed asset library");
@@ -163,15 +169,32 @@ public sealed class PlayableRaceCloneService
                 blockers.Add($"Male/female appearance closures resolve client path {conflict.Key} to different bytes. Select one shared provenance before building.");
             foreach (var table in new[] { "CreatureDisplayInfo", "CreatureModelData" }) { var path = RequiredTablePath(dbcRoot, table); hashes[table] = Hash(path); }
             if (appearance.MaleDisplayId.HasValue || appearance.FemaleDisplayId.HasValue)
-                warnings.Add($"ChrRaces will bind reviewed target display IDs male {finalMaleDisplay ?? male:N0} and female {finalFemaleDisplay ?? female:N0}. Character customization rows are still cloned from {sourceName}; verify UVs, geosets, animations, armor attachment points, and GlueXML in-client.");
+                warnings.Add(appearance.AppearanceSourceRaceId is { } customizationRace
+                    ? $"ChrRaces will bind reviewed target display IDs male {finalMaleDisplay ?? male:N0} and female {finalFemaleDisplay ?? female:N0}. Character customization will be promoted from source race {customizationRace:N0}; verify UVs, geosets, animations, armor attachment points, and GlueXML in-client."
+                    : $"ChrRaces will bind reviewed target display IDs male {finalMaleDisplay ?? male:N0} and female {finalFemaleDisplay ?? female:N0}. Character customization rows are still cloned from {sourceName}; verify UVs, geosets, animations, armor attachment points, and GlueXML in-client.");
             else warnings.Add("The source male/female display IDs remain unchanged, but their selected processed-library asset closure is included in the bundle.");
+            if (appearance.AppearanceSourceRaceId is { } customizationSourceRace)
+            {
+                var maleProvenance = bindings.FirstOrDefault(binding => binding.Role.Equals("male", StringComparison.OrdinalIgnoreCase))?.EffectiveProvenance; var femaleProvenance = bindings.FirstOrDefault(binding => binding.Role.Equals("female", StringComparison.OrdinalIgnoreCase))?.EffectiveProvenance;
+                customization = PlayableRaceCustomizationPromotionService.CreatePlan(appearanceSourceRoot!, dbcRoot, schemaPath, customizationSourceRace, targetRaceId, library, appearance.RequestedAssetProvenance, maleProvenance, femaleProvenance, cancellationToken);
+                blockers.AddRange(customization.Blockers); warnings.AddRange(customization.Warnings); plans.AddRange(customization.Tables.Select(table => new PlayableBundleDbcTablePlan(table.Table, $"Promote race {customizationSourceRace:N0} customization rows; {table.KeyKind} identity with semantic reuse/collision-safe allocation", table.AddedRows)));
+                warnings.Add($"The target race uses customization rows promoted from source race {customizationSourceRace:N0}, not the gameplay/source-stat race {sourceRaceId:N0}. Missing source tables remain visibly empty; Crucible never substitutes unrelated appearance options.");
+            }
         }
         else warnings.Add("This first bundle deliberately reuses the source race's male/female display IDs and client assets. Import or author a complete model/texture/animation/GlueXML chain before claiming a visually distinct race.");
         var sql = await PlayableBundleSqlService.InspectAsync(PlayableBundleIdentityKind.Race, sourceRaceId, targetRaceId, RaceMask(sourceRaceId), RaceMask(targetRaceId), profile, capabilities, blockers, cancellationToken); warnings.AddRange(sql.Warnings);
+        if (customization is not null)
+        {
+            var customizationOverlays = PlayableRaceCustomizationPromotionService.TableNames.Select(table => table.ToLowerInvariant() + "_dbc").ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var table in sql.Tables.Where(table => customizationOverlays.Contains(table.Table) && (table.SourceRows > 0 || table.Rows.Count > 0 || table.AlreadyCovered > 0 || table.Conflicts > 0)))
+                blockers.Add($"Live SQL overlay {table.Table} contains race-customization data tied to gameplay/source race {sourceRaceId:N0} or target race {targetRaceId:N0}. It can override the promoted source-race-{customization.SourceRaceId:N0} DBC surface, so Crucible refuses to clone or mix it without a coordinated source SQL mapping.");
+        }
         warnings.Add(promotion is null
             ? "CreatureDisplayInfoExtra is NPC appearance data. Crucible does not create unreferenced duplicate NPC rows; promote a complete dependent CreatureDisplayInfo chain separately when the new race needs custom NPC appearances."
             : "Source-layer promotion includes CreatureDisplayInfoExtra and ItemDisplayInfo only when the selected male/female display chain actually references them; unrelated NPC appearance rows are never duplicated.");
         warnings.Add("Core race enums/masks, character-create GlueXML, faction behavior, language, cinematics, achievements, spells, and runtime handlers still require separate reviewed work before the new race is fully playable.");
+        foreach (var conflict in bindings.SelectMany(binding => binding.Assets).Concat(customization?.Assets ?? []).GroupBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase).Where(group => group.Select(asset => asset.Sha256).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1))
+            blockers.Add($"Display and customization closures resolve client path {conflict.Key} to different bytes. Select one coherent provenance before building.");
         warnings.Add("Building writes a new DBC/SQL/manifest/MPQ bundle only. It does not mutate the configured server, live database, or client.");
         var plan = new PlayableRaceClonePlan(PlanFormat, PlanFormatVersion, DateTimeOffset.UtcNow, projectRoot, project.Name, dbcRoot, schemaPath, sourceRaceId, targetRaceId, sourceName, targetRaceName, targetClientPrefix, targetFileToken, RaceMask(sourceRaceId), RaceMask(targetRaceId), Hash(schemaPath), hashes, sql.Target, plans, sql.Tables, blockers.Distinct(StringComparer.Ordinal).ToArray(), warnings.Distinct(StringComparer.Ordinal).ToArray(), string.Empty)
         {
@@ -183,7 +206,9 @@ public sealed class PlayableRaceCloneService
             AppearanceSourceDbcRoot = appearanceSourceRoot,
             MaleSourceDisplayId = appearanceSourceRoot is null ? null : appearance.MaleDisplayId,
             FemaleSourceDisplayId = appearanceSourceRoot is null ? null : appearance.FemaleDisplayId,
-            AppearancePromotion = promotion
+            AppearancePromotion = promotion,
+            AppearanceSourceRaceId = appearance.AppearanceSourceRaceId,
+            CustomizationPromotion = customization
         };
         return plan with { ContentSha256 = ContentHash(plan) };
     }
@@ -194,9 +219,9 @@ public sealed class PlayableRaceCloneService
     public async Task<PlayableRaceCloneResult> BuildAsync(PlayableRaceClonePlan plan, DatabaseConnectionProfile profile, string outputRoot, CancellationToken cancellationToken = default)
     {
         ValidatePlan(plan); if (!plan.Ready) throw new InvalidOperationException($"Playable race plan has {plan.Blockers.Count:N0} blocker(s); nothing was built."); ValidateTarget(plan.DatabaseTarget, profile);
-        CreatureDisplayBindingService.VerifyAssets(plan.DisplayBindings);
+        CreatureDisplayBindingService.VerifyAssets(plan.DisplayBindings); PlayableRaceCustomizationPromotionService.VerifyAssets(plan.CustomizationPromotion);
         var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, cancellationToken); var fresh = await CreatePlanAsync(plan.ProjectRoot, plan.DbcRoot, plan.SchemaPath, plan.SourceRaceId, plan.TargetRaceId, plan.TargetRaceName, plan.TargetClientPrefix, plan.TargetFileToken, profile, capabilities,
-            new(plan.AppearanceSourceDbcRoot is null ? plan.MaleDisplayIdOverride : plan.MaleSourceDisplayId, plan.AppearanceSourceDbcRoot is null ? plan.FemaleDisplayIdOverride : plan.FemaleSourceDisplayId, plan.ProcessedAssetLibraryRoot, plan.RequestedAssetProvenance, plan.AppearanceSourceDbcRoot), cancellationToken);
+            new(plan.AppearanceSourceDbcRoot is null ? plan.MaleDisplayIdOverride : plan.MaleSourceDisplayId, plan.AppearanceSourceDbcRoot is null ? plan.FemaleDisplayIdOverride : plan.FemaleSourceDisplayId, plan.ProcessedAssetLibraryRoot, plan.RequestedAssetProvenance, plan.AppearanceSourceDbcRoot, plan.AppearanceSourceRaceId), cancellationToken);
         if (!fresh.ContentSha256.Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("DBC, project reservation, database rows, or target schema changed after review; rebuild the race plan.");
         outputRoot = Path.GetFullPath(outputRoot); if (Directory.Exists(outputRoot) && Directory.EnumerateFileSystemEntries(outputRoot).Any()) throw new IOException($"Playable race output must be new or empty: {outputRoot}"); var parent = Path.GetDirectoryName(outputRoot) ?? throw new InvalidOperationException("Output folder has no parent."); Directory.CreateDirectory(parent);
         var staging = Path.Combine(parent, $".{Path.GetFileName(outputRoot)}.crucible-{Guid.NewGuid():N}"); Directory.CreateDirectory(staging);
@@ -206,6 +231,7 @@ public sealed class PlayableRaceCloneService
             var schema = DbcSchemaCatalog.Load(plan.SchemaPath); var entries = new List<PatchEntry>(); var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var table in DbcTables)
             {
+                if (plan.CustomizationPromotion is not null && PlayableRaceCustomizationPromotionService.TableNames.Contains(table)) continue;
                 cancellationToken.ThrowIfCancellationRequested(); var sourcePath = RequiredTablePath(plan.DbcRoot, table); var file = WdbcFile.Load(sourcePath); var resolution = Exact(schema, table, file); var changed = false;
                 if (table == "ChrRaces")
                 {
@@ -242,7 +268,20 @@ public sealed class PlayableRaceCloneService
                 }
                 finally { if (Directory.Exists(promotionOutput)) Directory.Delete(promotionOutput, true); }
             }
-            foreach (var asset in plan.DisplayBindings.SelectMany(binding => binding.Assets).GroupBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).OrderBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase))
+            if (plan.CustomizationPromotion is not null)
+            {
+                var customizationOutput = Path.Combine(staging, ".customization-promotion"); var promoted = PlayableRaceCustomizationPromotionService.Apply(plan.CustomizationPromotion, customizationOutput, cancellationToken);
+                try
+                {
+                    foreach (var pair in promoted.OutputFiles.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested(); var output = Path.Combine(dbcOutput, pair.Key + ".dbc"); if (File.Exists(output)) throw new InvalidDataException($"Customization promotion unexpectedly collided with another race-bundle output: {pair.Key}.dbc"); File.Copy(pair.Value, output, false);
+                        if (!Hash(output).Equals(promoted.OutputSha256[pair.Key], StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Copied promoted {pair.Key}.dbc failed SHA-256 validation."); hashes[Path.GetRelativePath(staging, output)] = promoted.OutputSha256[pair.Key]; entries.Add(new(output, $@"DBFilesClient\{pair.Key}.dbc"));
+                    }
+                }
+                finally { if (Directory.Exists(customizationOutput)) Directory.Delete(customizationOutput, true); }
+            }
+            foreach (var asset in plan.DisplayBindings.SelectMany(binding => binding.Assets).Concat(plan.CustomizationPromotion?.Assets ?? []).GroupBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).OrderBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase))
             {
                 cancellationToken.ThrowIfCancellationRequested(); var relative = asset.ClientPath.Replace('\\', Path.DirectorySeparatorChar); var output = Path.Combine(staging, "Assets", relative); Directory.CreateDirectory(Path.GetDirectoryName(output)!); File.Copy(asset.SourcePath, output, false);
                 if (!Hash(output).Equals(asset.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Copied appearance asset failed SHA-256 validation: {asset.ClientPath}"); hashes[Path.GetRelativePath(staging, output)] = asset.Sha256; entries.Add(new(output, asset.ClientPath));
@@ -292,7 +331,30 @@ public sealed class PlayableRaceCloneService
             plan.AppearancePromotion.Findings
         };
         var promotedIdentity = new { Previous = identity, plan.AppearanceSourceDbcRoot, plan.MaleSourceDisplayId, plan.FemaleSourceDisplayId, AppearancePromotion = promotionIdentity };
-        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(promotedIdentity, HashJson)));
+        if (plan.AppearanceSourceRaceId is null && plan.CustomizationPromotion is null) return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(promotedIdentity, HashJson)));
+        object? customizationPlanIdentity = plan.CustomizationPromotion is null ? null : new
+        {
+            plan.CustomizationPromotion.FormatVersion,
+            plan.CustomizationPromotion.SourceDbcRoot,
+            plan.CustomizationPromotion.TargetDbcRoot,
+            plan.CustomizationPromotion.SchemaPath,
+            plan.CustomizationPromotion.SchemaSha256,
+            plan.CustomizationPromotion.SourceRaceId,
+            plan.CustomizationPromotion.TargetRaceId,
+            plan.CustomizationPromotion.ProcessedAssetLibraryRoot,
+            plan.CustomizationPromotion.RequestedAssetProvenance,
+            plan.CustomizationPromotion.MaleAssetProvenance,
+            plan.CustomizationPromotion.FemaleAssetProvenance,
+            plan.CustomizationPromotion.SourceFileSha256,
+            plan.CustomizationPromotion.TargetFileSha256,
+            plan.CustomizationPromotion.Tables,
+            plan.CustomizationPromotion.RequiredTexturePaths,
+            plan.CustomizationPromotion.Assets,
+            plan.CustomizationPromotion.Blockers,
+            plan.CustomizationPromotion.Warnings
+        };
+        var customizationIdentity = new { Previous = promotedIdentity, plan.AppearanceSourceRaceId, CustomizationPromotion = customizationPlanIdentity };
+        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(customizationIdentity, HashJson)));
     }
     private static object LegacySqlIdentity(IReadOnlyList<PlayableBundleSqlTablePlan> tables) => tables.Select(table => new { table.Table, table.Selector, table.SourceRows, table.AlreadyCovered, table.Conflicts, Rows = table.Rows.Select(row => new { row.SourceKey, row.TargetKey, row.Values }).ToArray() }).ToArray();
     private static void ValidatePlan(PlayableRaceClonePlan plan) { if (plan.Format != PlanFormat || plan.FormatVersion != PlanFormatVersion) throw new InvalidDataException("Unsupported playable race plan format."); if (!ContentHash(plan).Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Playable race plan content hash is invalid."); }

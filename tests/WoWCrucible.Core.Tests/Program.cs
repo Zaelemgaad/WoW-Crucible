@@ -2068,6 +2068,40 @@ try
         throw new InvalidOperationException("Applied appearance batch did not publish the exact collision-remapped model/display graph declared by the plan.");
 }
 finally { if (Directory.Exists(appearanceBatchRoot)) Directory.Delete(appearanceBatchRoot, true); }
+var customizationPromotionRoot = Path.Combine(Path.GetTempPath(), $"crucible-race-customization-{Guid.NewGuid():N}");
+try
+{
+    var customizationSource = Path.Combine(customizationPromotionRoot, "source"); var customizationTarget = Path.Combine(customizationPromotionRoot, "target"); Directory.CreateDirectory(customizationSource); Directory.CreateDirectory(customizationTarget);
+    foreach (var table in PlayableRaceCustomizationPromotionService.TableNames)
+    {
+        File.Copy(Path.Combine(args[1], table + ".dbc"), Path.Combine(customizationSource, table + ".dbc")); File.Copy(Path.Combine(args[1], table + ".dbc"), Path.Combine(customizationTarget, table + ".dbc"));
+    }
+    var customizationPlan = PlayableRaceCustomizationPromotionService.CreatePlan(customizationSource, customizationTarget, args[0], 12, 22);
+    var expectedCustomizationRows = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase) { ["BarberShopStyle"] = 0, ["CharacterFacialHairStyles"] = 2, ["CharHairGeosets"] = 2, ["CharHairTextures"] = 2, ["CharSections"] = 16 };
+    if (!customizationPlan.Ready || customizationPlan.AddedRows != 22 || customizationPlan.ReusedRows != 0 || customizationPlan.RequiredTexturePaths.Count == 0 || customizationPlan.Assets.Count != 0 || customizationPlan.Tables.Any(table => table.SourceRows != expectedCustomizationRows[table.Table]) ||
+        customizationPlan.Tables.Single(table => table.Table == "CharacterFacialHairStyles").Rows.Any(row => row.Action != PlayableRaceCustomizationAction.AppendVirtualRow) || customizationPlan.Tables.Where(table => table.Table != "CharacterFacialHairStyles").SelectMany(table => table.Rows).Any(row => row.Action != PlayableRaceCustomizationAction.AddRemappedId))
+        throw new InvalidOperationException("Mixed physical/virtual character-customization promotion did not preserve the real race-12 surface or collision-remap it for race 22.");
+    var customizationLibrary = Path.Combine(customizationPromotionRoot, "processed"); var customizationContent = Path.Combine(customizationLibrary, "Archives", "Content"); const string customizationProvenance = "fixture-source";
+    foreach (var texture in customizationPlan.RequiredTexturePaths)
+    {
+        var path = Path.Combine(customizationContent, Path.GetDirectoryName(texture) ?? string.Empty, customizationProvenance, Path.GetFileName(texture)); Directory.CreateDirectory(Path.GetDirectoryName(path)!); var tint = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(texture)); var pixels = Enumerable.Range(0, 16).SelectMany(_ => new byte[] { tint[0], tint[1], tint[2], 255 }).ToArray(); BlpTextureService.EncodeBlp2(new RgbaTexture(4, 4, pixels), path, new(BlpOutputFormat.Dxt1, false, BlpOutputQuality.Fast));
+    }
+    var sourcedCustomizationPlan = PlayableRaceCustomizationPromotionService.CreatePlan(customizationSource, customizationTarget, args[0], 12, 22, customizationLibrary, customizationProvenance, customizationProvenance, customizationProvenance);
+    if (!sourcedCustomizationPlan.Ready || sourcedCustomizationPlan.Assets.Count != sourcedCustomizationPlan.RequiredTexturePaths.Count || sourcedCustomizationPlan.Assets.Any(asset => asset.Provenance != customizationProvenance))
+        throw new InvalidOperationException("Exact-provenance CharSections texture closure omitted or mixed source assets.");
+    PlayableRaceCustomizationPromotionService.VerifyAssets(sourcedCustomizationPlan); File.AppendAllText(sourcedCustomizationPlan.Assets[0].SourcePath, "stale");
+    try { PlayableRaceCustomizationPromotionService.VerifyAssets(sourcedCustomizationPlan); throw new InvalidOperationException("A stale reviewed CharSections texture was accepted."); }
+    catch (InvalidDataException exception) when (exception.Message.Contains("changed after review", StringComparison.OrdinalIgnoreCase)) { }
+    var customizationResult = PlayableRaceCustomizationPromotionService.Apply(customizationPlan, Path.Combine(customizationPromotionRoot, "output"));
+    if (customizationResult.OutputFiles.Count != 4 || customizationResult.OutputFiles.ContainsKey("BarberShopStyle") || !File.Exists(customizationResult.ReceiptPath) || File.ReadAllText(customizationResult.ReceiptPath).Contains(".crucible-", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Character-customization promotion emitted the wrong table set or retained temporary receipt paths.");
+    foreach (var tablePlan in customizationPlan.Tables.Where(table => table.AddedRows > 0))
+    {
+        var output = WdbcFile.Load(customizationResult.OutputFiles[tablePlan.Table]); var resolution = creatureSchemas.ResolveColumns(tablePlan.Table, output.FieldCount); var raceColumn = resolution.Columns.First(column => column.Name.Equals(tablePlan.RaceColumn, StringComparison.OrdinalIgnoreCase)); var targetRows = Enumerable.Range(0, output.RowCount).Count(row => output.GetRaw(row, raceColumn) == 22);
+        if (targetRows != tablePlan.SourceRows) throw new InvalidOperationException($"Promoted {tablePlan.Table}.dbc contains {targetRows:N0} race-22 rows; expected {tablePlan.SourceRows:N0}.");
+    }
+}
+finally { if (Directory.Exists(customizationPromotionRoot)) Directory.Delete(customizationPromotionRoot, true); }
 var modelCreatureDisplays = creatureDisplayService.ResolveModelDisplays(args[1], args[0], Path.ChangeExtension(creatureDisplay.ModelClientPath, ".mdx"));
 if (!modelCreatureDisplays.Any(display => display.DisplayId == creatureDisplayId) || modelCreatureDisplays.Any(display => !display.ModelClientPath.Equals(creatureDisplay.ModelClientPath, StringComparison.OrdinalIgnoreCase)))
     throw new InvalidOperationException("Creature model-path appearance lookup did not normalize MDX/M2 paths and return every matching display record.");
