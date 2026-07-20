@@ -1696,10 +1696,19 @@ if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Value
 if (gapStatsPlan.Values["StatsCount"] is not 1 || gapStatsPlan.Values["stat_type1"] is not 7 || gapStatsPlan.Values["stat_value1"] is not 75 || gapStatsPlan.Values["stat_type2"] is not 0)
     throw new InvalidOperationException("Trinity item stat slots were not compacted before StatsCount was calculated.");
 if (ItemCatalogService.IsDirectLootItem(17, 1_072_025) || !ItemCatalogService.IsDirectLootItem(17, 0) ||
+    !ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 7) || !ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 22) || ItemCatalogService.IsSmartPlayerItemGrant(57, 17333, 1, 7) ||
+    ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 0, 7) || ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 1) || ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 21) ||
+    !ItemCatalogService.IsScriptCreateItem(17, 33041, 1) || ItemCatalogService.IsScriptCreateItem(16, 33041, 1) || ItemCatalogService.IsScriptCreateItem(17, 33041, 0) ||
     ItemCatalogService.IsLinkedQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint>()) || !ItemCatalogService.IsLinkedQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }) ||
     ItemCatalogService.IsUsableQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }) ||
     !ItemCatalogService.IsUsableQuestReward(7561, new HashSet<uint> { 7561 }, new HashSet<uint> { 7561 }, new HashSet<uint>()))
     throw new InvalidOperationException("Item acquisition evidence confused loot references or unlinked quest rewards with direct player acquisition.");
+var scriptedAcquired = new Dictionary<uint, HashSet<string>>();
+ItemCatalogService.ApplyReachableScriptSpellItems(
+    [new(42287, 33041, 1, "spell_scripts"), new(99999, 17, 1, "spell_scripts")],
+    new HashSet<uint> { 42287 }, scriptedAcquired);
+if (!scriptedAcquired.ContainsKey(33041) || scriptedAcquired.ContainsKey(17) || !scriptedAcquired[33041].Single().Contains("reachable spell 42287", StringComparison.Ordinal))
+    throw new InvalidOperationException("Scripted spell item grants were not constrained to the proven reachable-spell graph.");
 var itemIdBatch = ItemIdQueryParser.Parse("17 17802");
 if (!itemIdBatch.SequenceEqual(new uint[] { 17, 17802 }) ||
     !ItemIdQueryParser.Parse("#17 #17802").SequenceEqual(itemIdBatch) ||

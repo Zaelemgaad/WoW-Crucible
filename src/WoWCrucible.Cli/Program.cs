@@ -2114,11 +2114,11 @@ static async Task<int> Database(string[] args, CancellationToken cancellationTok
         var selected = requestedIds.Count == 0 ? audit.NoKnownAcquisitionPath : requestedIds.Where(byId.ContainsKey).Select(entry => byId[entry]).ToArray();
         var missingRequested = requestedIds.Where(entry => !byId.ContainsKey(entry)).ToArray();
         var auditJsonOptions = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
-        if (json)
+        if (json && (output is null || requestedIds.Count > 0))
             Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { audit.Database, audit.AuditedUtc, audit.TotalItems, audit.ObtainableItems, NoKnownAcquisitionPath = audit.NoKnownAcquisitionPath.Count, audit.CheckedSources, audit.MissingSources, RequestedIds = requestedIds, MissingRequestedIds = missingRequested, Items = selected }, auditJsonOptions));
         else if (output is null || requestedIds.Count > 0)
             foreach (var item in selected) Console.WriteLine($"{item.Entry}\t{(item.HasKnownAcquisitionPath ? "KNOWN" : "NO_PATH")}\t{item.Quality}\t{item.ItemLevel}\t{item.ItemSetId}\t{item.ReviewGroup}\t{item.Name}\t{string.Join(" | ", item.HasKnownAcquisitionPath ? item.AcquisitionSources : item.NoPathReview)}");
-        if (output is not null) File.WriteAllText(output, System.Text.Json.JsonSerializer.Serialize(audit, auditJsonOptions));
+        if (output is not null) WriteTextAtomic(output, System.Text.Json.JsonSerializer.Serialize(audit, auditJsonOptions) + Environment.NewLine);
         Console.Error.WriteLine($"Item acquisition audit: {audit.NoKnownAcquisitionPath.Count:N0} of {audit.TotalItems:N0} item(s) have no known path across {audit.CheckedSources.Count:N0} available source table(s).{(requestedIds.Count == 0 ? string.Empty : $" Exact selection: {selected.Count:N0} found, {missingRequested.Length:N0} missing.")} Missing source families: {string.Join(", ", audit.MissingSources)}{(output is null ? string.Empty : $". Report: {Path.GetFullPath(output)}")}");
         foreach (var missing in missingRequested) Console.Error.WriteLine($"MISSING_ITEM\t{missing}");
         return missingRequested.Length == 0 ? 0 : 3;
@@ -2787,6 +2787,12 @@ static int Help()
 }
 
 static int Fail(string message) { Console.Error.WriteLine(message); return 2; }
+static void WriteTextAtomic(string path, string content)
+{
+    path = Path.GetFullPath(path); Directory.CreateDirectory(Path.GetDirectoryName(path)!); var temporary = path + $".{Guid.NewGuid():N}.tmp";
+    try { File.WriteAllText(temporary, content, new System.Text.UTF8Encoding(false)); File.Move(temporary, path, true); }
+    finally { if (File.Exists(temporary)) File.Delete(temporary); }
+}
 
 static string? Option(IEnumerable<string> options, string prefix) => options.FirstOrDefault(option => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))?[prefix.Length..];
 static IReadOnlyDictionary<string, object?> ParseStageBindings(IEnumerable<string> options)

@@ -63,6 +63,7 @@ public sealed class ItemCatalogService
         IReadOnlyList<string> CheckedSources, IReadOnlyList<string> MissingSources);
     private sealed record AcquisitionSpec(string Table, params string[] Columns);
     internal sealed record LootRow(uint Entry, uint Item, uint Reference);
+    internal sealed record ScriptedSpellGrant(uint SpellId, uint ItemId, uint Amount, string Table);
     internal sealed record LootReachabilityData(
         IReadOnlyDictionary<string, IReadOnlyList<LootRow>> Tables,
         IReadOnlyDictionary<uint, IReadOnlyList<LootRow>> ReferencePools,
@@ -83,6 +84,13 @@ public sealed class ItemCatalogService
     private static readonly string[] QuestRewardColumns = ["RewardItem1", "RewardItem2", "RewardItem3", "RewardItem4", "RewardChoiceItemID1", "RewardChoiceItemID2", "RewardChoiceItemID3", "RewardChoiceItemID4", "RewardChoiceItemID5", "RewardChoiceItemID6"];
 
     public static bool IsDirectLootItem(long item, long reference) => item > 0 && item <= uint.MaxValue && reference <= 0;
+    // AzerothCore and TrinityCore 3.3.5 share these SmartTarget IDs: action
+    // invoker, invoker party, player range, player distance, closest player,
+    // and loot recipients. Creature/GO/self/ambiguous target types are refused.
+    public static bool IsSmartPlayerItemGrant(long actionType, long item, long count, long targetType)
+        => actionType == 56 && item is > 0 and <= uint.MaxValue && count is > 0 and <= uint.MaxValue && targetType is 7 or 17 or 18 or 19 or 22 or 28;
+    public static bool IsScriptCreateItem(long command, long item, long count)
+        => command == 17 && item is > 0 and <= uint.MaxValue && count is > 0 and <= uint.MaxValue;
     public static bool IsLinkedQuestReward(uint questId, IReadOnlySet<uint> starters, IReadOnlySet<uint> enders) => starters.Contains(questId) && enders.Contains(questId);
     public static bool IsUsableQuestReward(uint questId, IReadOnlySet<uint> starters, IReadOnlySet<uint> enders, IReadOnlySet<uint> disabled)
         => IsLinkedQuestReward(questId, starters, enders) && !disabled.Contains(questId);
@@ -161,6 +169,7 @@ public sealed class ItemCatalogService
         }
         var reachableSpells = new HashSet<uint>();
         await CollectLinkedQuestRewardsAsync(connection, schema, acquired, rejected, reachableSpells, checkedSources, missingSources, cancellationToken);
+        var scriptedSpellGrants = await CollectScriptCreatedItemsAsync(connection, schema, acquired, rejected, checkedSources, missingSources, cancellationToken);
         CollectCharStartOutfitItems(dbcFolder, acquired, checkedSources, missingSources);
         var loot = await ReadLootReachabilityAsync(connection, schema, itemTable, dbcFolder, checkedSources, missingSources, cancellationToken);
         // Item loot and item-use/create-spell effects form a real graph: a reachable
@@ -172,9 +181,12 @@ public sealed class ItemCatalogService
             var itemCount = acquired.Count;
             var spellCount = reachableSpells.Count;
             await CollectReachableSpellCreatedItemsAsync(connection, schema, itemTable, dbcFolder, reachableSpells, acquired, checkedSources, missingSources, cancellationToken);
+            ApplyReachableScriptSpellItems(scriptedSpellGrants, reachableSpells, acquired);
             ApplyReachableLoot(loot, acquired, reachableSpells, rejected, cancellationToken);
             if (itemCount == acquired.Count && spellCount == reachableSpells.Count) break;
         }
+        foreach (var grant in scriptedSpellGrants.Where(grant => !reachableSpells.Contains(grant.SpellId)))
+            AddRejected(rejected, grant.ItemId, $"Ignored · {grant.Table} SCRIPT_COMMAND_CREATE_ITEM grants this item from spell {grant.SpellId}, but that spell is not reachable through the checked trainer, quest, item-use, or trigger graph.");
 
         var itemColumns = schema[itemTable];
         var entryColumn = RequireColumn(itemColumns, "entry"); var nameColumn = RequireColumn(itemColumns, "name");
@@ -200,7 +212,64 @@ public sealed class ItemCatalogService
             missingSources.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
-    private const string NoEvidenceMessage = "No accepted acquisition row was found in the checked SQL and DBC coverage. Custom scripts and core code still require manual review.";
+    private const string NoEvidenceMessage = "No accepted acquisition row was found in the checked SQL, SmartAI/script-command, and DBC coverage. Unrecognized custom scripts and direct core code still require manual review.";
+
+    private static async Task<IReadOnlyList<ScriptedSpellGrant>> CollectScriptCreatedItemsAsync(MySqlConnection connection,
+        Dictionary<string, List<string>> schema, Dictionary<uint, HashSet<string>> acquired, Dictionary<uint, HashSet<string>> rejected,
+        ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
+    {
+        var smartTable = ResolveTable(schema, "smart_scripts");
+        if (smartTable is null) missingSources.Add("smart_scripts SMART_ACTION_ADD_ITEM");
+        else
+        {
+            var columns = schema[smartTable];
+            var entry = ResolveColumn(columns, "entryorguid"); var sourceType = ResolveColumn(columns, "source_type"); var rowId = ResolveColumn(columns, "id");
+            var eventType = ResolveColumn(columns, "event_type"); var actionType = ResolveColumn(columns, "action_type");
+            var item = ResolveColumn(columns, "action_param1"); var count = ResolveColumn(columns, "action_param2"); var targetType = ResolveColumn(columns, "target_type");
+            if (new[] { entry, sourceType, rowId, eventType, actionType, item, count, targetType }.Any(value => value is null))
+                missingSources.Add("smart_scripts SMART_ACTION_ADD_ITEM columns");
+            else
+            {
+                await using var command = new MySqlCommand($"SELECT {Quote(entry!)},{Quote(sourceType!)},{Quote(rowId!)},{Quote(eventType!)},{Quote(actionType!)},{Quote(item!)},{Quote(count!)},{Quote(targetType!)} FROM {Quote(smartTable)} WHERE {Quote(actionType!)}=56 AND {Quote(item!)}>0", connection) { CommandTimeout = 120 };
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var rawEntry = Convert.ToInt64(reader.GetValue(0)); var rawSource = Convert.ToInt64(reader.GetValue(1)); var rawRow = Convert.ToInt64(reader.GetValue(2)); var rawEvent = Convert.ToInt64(reader.GetValue(3));
+                    var rawAction = Convert.ToInt64(reader.GetValue(4)); var rawItem = Convert.ToInt64(reader.GetValue(5)); var rawCount = Convert.ToInt64(reader.GetValue(6)); var rawTarget = Convert.ToInt64(reader.GetValue(7));
+                    if (rawItem is <= 0 or > uint.MaxValue) continue;
+                    var evidence = $"{smartTable} SMART_ACTION_ADD_ITEM (source {rawSource}:{rawEntry}, row {rawRow}, event {rawEvent}, player target {rawTarget})";
+                    if (IsSmartPlayerItemGrant(rawAction, rawItem, rawCount, rawTarget)) AddAcquired(acquired, (uint)rawItem, evidence);
+                    else AddRejected(rejected, (uint)rawItem, $"Ignored · {smartTable} action 56 row {rawSource}:{rawEntry}/{rawRow} does not have a positive amount and a proven player-capable target.");
+                }
+                checkedSources.Add($"{smartTable} SMART_ACTION_ADD_ITEM (positive player-target grants)");
+            }
+        }
+
+        var spellTable = ResolveTable(schema, "spell_scripts");
+        if (spellTable is null) { missingSources.Add("spell_scripts SCRIPT_COMMAND_CREATE_ITEM"); return []; }
+        var spellColumns = schema[spellTable]; var spellId = ResolveColumn(spellColumns, "id"); var scriptCommand = ResolveColumn(spellColumns, "command");
+        var scriptItem = ResolveColumn(spellColumns, "datalong"); var scriptCount = ResolveColumn(spellColumns, "datalong2");
+        if (new[] { spellId, scriptCommand, scriptItem, scriptCount }.Any(value => value is null)) { missingSources.Add("spell_scripts SCRIPT_COMMAND_CREATE_ITEM columns"); return []; }
+        var grants = new List<ScriptedSpellGrant>();
+        await using (var command = new MySqlCommand($"SELECT {Quote(spellId!)},{Quote(scriptCommand!)},{Quote(scriptItem!)},{Quote(scriptCount!)} FROM {Quote(spellTable)} WHERE {Quote(scriptCommand!)}=17 AND {Quote(scriptItem!)}>0", connection) { CommandTimeout = 120 })
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var rawSpell = Convert.ToInt64(reader.GetValue(0)); var rawCommand = Convert.ToInt64(reader.GetValue(1)); var rawItem = Convert.ToInt64(reader.GetValue(2)); var rawCount = Convert.ToInt64(reader.GetValue(3));
+                if (rawSpell is > 0 and <= uint.MaxValue && IsScriptCreateItem(rawCommand, rawItem, rawCount)) grants.Add(new((uint)rawSpell, (uint)rawItem, (uint)rawCount, spellTable));
+                else if (rawItem is > 0 and <= uint.MaxValue) AddRejected(rejected, (uint)rawItem, $"Ignored · {spellTable} command 17 has an invalid spell ID or non-positive amount.");
+            }
+        checkedSources.Add($"{spellTable} SCRIPT_COMMAND_CREATE_ITEM (reachable spells only)");
+        return grants;
+    }
+
+    internal static void ApplyReachableScriptSpellItems(IEnumerable<ScriptedSpellGrant> grants, IReadOnlySet<uint> reachableSpells,
+        Dictionary<uint, HashSet<string>> acquired)
+    {
+        foreach (var grant in grants)
+            if (reachableSpells.Contains(grant.SpellId))
+                AddAcquired(acquired, grant.ItemId, $"{grant.Table} SCRIPT_COMMAND_CREATE_ITEM from reachable spell {grant.SpellId} (amount {grant.Amount})");
+    }
 
     public static IReadOnlySet<uint> ReadCharStartOutfitItems(string path)
     {
@@ -645,7 +714,7 @@ public sealed class ItemCatalogService
         foreach (var item in acquired.Keys.ToArray()) if (itemSpells.TryGetValue(item, out var spells)) foreach (var spell in spells) Enqueue(spell);
         while (pending.TryDequeue(out var spell))
         {
-            cancellationToken.ThrowIfCancellationRequested(); queued.Remove(spell); if (!visited.Add(spell) || !graph.TryGetValue(spell, out var creation)) continue;
+            cancellationToken.ThrowIfCancellationRequested(); queued.Remove(spell); if (!visited.Add(spell)) continue; reachableSpells.Add(spell); if (!graph.TryGetValue(spell, out var creation)) continue;
             foreach (var learned in creation.TriggeredOrLearnedSpells) Enqueue(learned);
             foreach (var item in creation.CreatedItems)
             {
