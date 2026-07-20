@@ -1828,6 +1828,13 @@ if (Directory.Exists(desktopSourceRoot))
         !serverSqlWorkspaceSource.Contains("NumericAdd", StringComparison.Ordinal) || !serverSqlWorkspaceSource.Contains("ExactMap", StringComparison.Ordinal) ||
         !serverSqlWorkspaceSource.Contains("Zero or multiple matching rows block planning", StringComparison.Ordinal))
         throw new InvalidOperationException("Same-window exact schema-lookup or bounded value-transform authoring regressed.");
+    if (!sqlWorkspaceSource.Contains("Exact view/routine/trigger/event", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("Review exact CREATE / replacement", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("service.PrepareChangeAsync", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("SqlDatabaseObjectService().ApplyChangeAsync", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("RollbackChangeAsync", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("new ResponsiveSplitGrid(_databaseObjects, details", StringComparison.Ordinal))
+        throw new InvalidOperationException("Responsive same-window exact database-object authoring, recovery receipts, or stale-safe rollback wiring regressed.");
 }
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
@@ -2363,6 +2370,32 @@ try { _ = SqlDatabaseObjectService.BuildCreateOrReplaceViewSql("acore_world", "b
 catch (InvalidDataException exception) when (exception.Message.Contains("exactly one SELECT", StringComparison.OrdinalIgnoreCase)) { }
 try { _ = SqlDatabaseObjectService.BuildCreateOrReplaceViewSql("acore_world", "bad", "SELECT * FROM item_template INTO OUTFILE '/tmp/leak'"); throw new InvalidOperationException("Guided view creation accepted SELECT file output."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("exactly one SELECT", StringComparison.OrdinalIgnoreCase)) { }
+var exactObjectDefinitions = new Dictionary<SqlDatabaseObjectType, (string Name, string Sql)>
+{
+    [SqlDatabaseObjectType.View] = ("crucible_exact_view", "CREATE ALGORITHM=UNDEFINED DEFINER=`fixture`@`localhost` SQL SECURITY INVOKER VIEW `acore_world`.`crucible_exact_view` AS SELECT 1 AS `value`"),
+    [SqlDatabaseObjectType.Trigger] = ("crucible_exact_trigger", "CREATE DEFINER=`fixture`@`localhost` TRIGGER `acore_world`.`crucible_exact_trigger` BEFORE UPDATE ON `fixture_table` FOR EACH ROW BEGIN SET NEW.`value` = OLD.`value` + 1; SET NEW.`other` = 2; END"),
+    [SqlDatabaseObjectType.Procedure] = ("crucible_exact_procedure", "CREATE DEFINER=`fixture`@`localhost` PROCEDURE `acore_world`.`crucible_exact_procedure`() BEGIN SELECT 1; SELECT 'semi;colon'; END"),
+    [SqlDatabaseObjectType.Function] = ("crucible_exact_function", "CREATE DEFINER=`fixture`@`localhost` FUNCTION `acore_world`.`crucible_exact_function`() RETURNS int DETERMINISTIC RETURN 1"),
+    [SqlDatabaseObjectType.Event] = ("crucible_exact_event", "CREATE DEFINER=`fixture`@`localhost` EVENT `acore_world`.`crucible_exact_event` ON SCHEDULE EVERY 1 DAY DO BEGIN SELECT 1; END")
+};
+foreach (var definition in exactObjectDefinitions)
+{
+    var normalized = SqlDatabaseObjectService.ValidateCreateDefinition(definition.Key, "acore_world", definition.Value.Name, definition.Value.Sql);
+    if (!normalized.EndsWith(';') || !normalized.Contains(definition.Value.Name, StringComparison.Ordinal)) throw new InvalidOperationException($"Exact {definition.Key} definition validation lost its identity or server delimiter.");
+}
+try { _ = SqlDatabaseObjectService.ValidateCreateDefinition(SqlDatabaseObjectType.Procedure, "acore_world", "wrong", exactObjectDefinitions[SqlDatabaseObjectType.Function].Sql); throw new InvalidOperationException("Exact database-object validation accepted a mismatched type/name."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("creates Function", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = SqlDatabaseObjectService.ValidateCreateDefinition(SqlDatabaseObjectType.Procedure, "acore_world", "crucible_exact_procedure", "DELIMITER $$\n" + exactObjectDefinitions[SqlDatabaseObjectType.Procedure].Sql + "$$\nDELIMITER ;"); throw new InvalidOperationException("Exact database-object validation accepted mysql-client DELIMITER commands."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("DELIMITER", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = SqlDatabaseObjectService.ValidateCreateDefinition(SqlDatabaseObjectType.View, "acore_world", "crucible_exact_view", exactObjectDefinitions[SqlDatabaseObjectType.View].Sql + "; DROP TABLE item_template;"); throw new InvalidOperationException("Exact view validation accepted an appended SQL statement."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("one CREATE statement", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = SqlDatabaseObjectService.ValidateCreateDefinition(SqlDatabaseObjectType.Procedure, "acore_world", "crucible_exact_procedure", exactObjectDefinitions[SqlDatabaseObjectType.Procedure].Sql + "; DROP TABLE item_template;"); throw new InvalidOperationException("Exact compound-object validation accepted an appended SQL statement."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("one CREATE statement", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = SqlDatabaseObjectService.ValidateCreateDefinition(SqlDatabaseObjectType.Function, "acore_world", "crucible_exact_function", exactObjectDefinitions[SqlDatabaseObjectType.Function].Sql + "; BEGIN DROP TABLE item_template; END;"); throw new InvalidOperationException("Exact simple-object validation mistook an appended BEGIN block for its compound root."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("one CREATE statement", StringComparison.OrdinalIgnoreCase)) { }
+var nestedCompound = "CREATE PROCEDURE `acore_world`.`crucible_nested_procedure`() BEGIN IF 1 = 1 THEN BEGIN SELECT CASE WHEN 1 = 1 THEN 'END;DROP' ELSE 'BEGIN' END; END; END IF; END";
+if (!SqlDatabaseObjectService.ValidateCreateDefinition(SqlDatabaseObjectType.Procedure, "acore_world", "crucible_nested_procedure", nestedCompound).EndsWith(';'))
+    throw new InvalidOperationException("Exact compound-object validation rejected a nested BEGIN/IF/CASE body.");
 var syncKey = new[] { new LegacyDatabaseAuditKeyPart("entry", new(LegacyDatabaseAuditValueState.Scalar, "17")) };
 var syncFields = new[] { new DatabaseSyncField("name", new(LegacyDatabaseAuditValueState.Scalar, "Before"), new(LegacyDatabaseAuditValueState.Scalar, "After")) };
 var syncOperation = new DatabaseSyncOperation("item_template", LegacyDatabaseContentDomain.ItemsAndSets, LegacyDatabaseRowChangeKind.Modified, syncKey, syncFields, DatabaseSyncOperationStatus.Ready, "fixture");

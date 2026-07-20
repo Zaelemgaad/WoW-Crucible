@@ -78,6 +78,11 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _databaseObjectDefinition = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
     private readonly TextBox _viewName = new() { PlaceholderText = "View name" };
     private readonly TextBox _viewSelect = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "SELECT entry, name FROM item_template;" };
+    private readonly ComboBox _databaseObjectAuthorType = new() { ItemsSource = new[] { "View", "Trigger", "Procedure", "Function", "Event" }, SelectedIndex = 0 };
+    private readonly TextBox _databaseObjectAuthorName = new() { PlaceholderText = "Exact object name" };
+    private readonly TextBox _databaseObjectAuthorDefinition = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), PlaceholderText = "CREATE VIEW / TRIGGER / PROCEDURE / FUNCTION / EVENT ..." };
+    private readonly TextBox _databaseObjectAuthorPlan = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
+    private readonly TextBox _databaseObjectRollbackReceipt = new() { PlaceholderText = "Committed .crucible-sql-object.json receipt" };
     private readonly TextBox _accountUser = new() { PlaceholderText = "Database account user" };
     private readonly TextBox _accountHost = new() { Text = "localhost", PlaceholderText = "Account host" };
     private readonly TextBox _accountPassword = new() { PasswordChar = '●', PlaceholderText = "New password (memory only)" };
@@ -134,6 +139,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private SqlQueryResult? _queryResult;
     private SqlQueryBatch? _queryBatch;
     private IReadOnlyList<SqlDatabaseObjectInfo> _databaseObjectCache = [];
+    private SqlDatabaseObjectChangePlan? _databaseObjectChangePlan;
 
     public event EventHandler? BackRequested;
     public event EventHandler? ConnectionRequested;
@@ -165,6 +171,9 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _databaseObjectSearch.TextChanged += (_, _) => FilterDatabaseObjects();
         _databaseObjectType.SelectionChanged += (_, _) => FilterDatabaseObjects();
         _databaseObjects.SelectionChanged += async (_, _) => await LoadSelectedDatabaseObjectAsync();
+        _databaseObjectAuthorType.SelectionChanged += (_, _) => InvalidateDatabaseObjectPlan();
+        _databaseObjectAuthorName.TextChanged += (_, _) => InvalidateDatabaseObjectPlan();
+        _databaseObjectAuthorDefinition.TextChanged += (_, _) => InvalidateDatabaseObjectPlan();
         _structureColumns.SelectionChanged += (_, _) => SelectStructureColumn();
         _foreignKeys.SelectionChanged += (_, _) => SelectForeignKey();
         _checkConstraints.SelectionChanged += (_, _) => SelectCheckConstraint();
@@ -415,6 +424,10 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var enable = new Button { Content = "Review ENABLE event" }; enable.Click += (_, _) => PrepareEventState(true);
         var disable = new Button { Content = "Review DISABLE event" }; disable.Click += (_, _) => PrepareEventState(false);
         var reviewView = AccentButton("Review CREATE / REPLACE view"); reviewView.Click += (_, _) => PrepareCreateOrReplaceView();
+        var loadSelected = new Button { Content = "Load selected exact definition into draft" }; loadSelected.Click += (_, _) => LoadSelectedDatabaseObjectDraft();
+        var reviewExact = AccentButton("Review exact CREATE / replacement"); reviewExact.Click += async (_, _) => await PrepareDatabaseObjectChangeAsync();
+        var browseReceipt = new Button { Content = "Receipt…" }; browseReceipt.Click += async (_, _) => await PickDatabaseObjectReceiptAsync();
+        var reviewRollback = new Button { Content = "Review stale-safe rollback" }; reviewRollback.Click += async (_, _) => await PrepareDatabaseObjectRollbackAsync();
         var controls = new StackPanel { Spacing = 4, Children = { _databaseObjectSearch, new WrapPanel { Children = { refresh, _databaseObjectType, export, drop, enable, disable } } } };
         var selected = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 5, Children = { new TextBlock { Text = "Exact SHOW CREATE definition", FontWeight = FontWeight.SemiBold }, WithRow(_databaseObjectDefinition, 1) } };
         var viewEditor = new Grid
@@ -426,7 +439,21 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
                 WithRow(_viewName, 1), WithRow(_viewSelect, 2), WithRow(new WrapPanel { Children = { reviewView, new TextBlock { Text = "DDL may implicitly commit. The exact SQL is always shown before execution.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9"), VerticalAlignment = VerticalAlignment.Center } } }, 3)
             }
         };
-        var details = new Grid { RowDefinitions = new("2*,Auto,*"), RowSpacing = 5, Children = { selected, WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 1), WithRow(viewEditor, 2) } };
+        var receiptRow = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 6, Children = { _databaseObjectRollbackReceipt, WithColumn(browseReceipt, 1) } };
+        var exactEditor = new Grid
+        {
+            RowDefinitions = new("Auto,Auto,2*,Auto,*,Auto,Auto"), RowSpacing = 5,
+            Children =
+            {
+                new WrapPanel { Children = { loadSelected, _databaseObjectAuthorType, _databaseObjectAuthorName } },
+                WithRow(new TextBlock { Text = "One exact server CREATE definition. Compound routine/trigger bodies are supported; mysql-client DELIMITER lines are not server SQL and must be removed.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") }, 1),
+                WithRow(_databaseObjectAuthorDefinition, 2),
+                WithRow(new WrapPanel { Children = { reviewExact, new TextBlock { Text = "Existing objects are SHOW-CREATE hash-bound. Replacement failures trigger automatic exact-preimage restoration.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9"), VerticalAlignment = VerticalAlignment.Center } } }, 3),
+                WithRow(_databaseObjectAuthorPlan, 4), WithRow(receiptRow, 5), WithRow(new WrapPanel { Children = { reviewRollback, new TextBlock { Text = $"Committed receipts live under {CruciblePaths.SqlSchemaBackupDirectory}. Rollback refuses a changed live postimage.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9"), VerticalAlignment = VerticalAlignment.Center } } }, 6)
+            }
+        };
+        var editors = new TabControl { Items = { new TabItem { Header = "Exact view/routine/trigger/event", Content = exactEditor }, new TabItem { Header = "Guided SELECT view", Content = viewEditor } } };
+        var details = new Grid { RowDefinitions = new("2*,Auto,2*"), RowSpacing = 5, Children = { selected, WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 1), WithRow(editors, 2) } };
         var body = new ResponsiveSplitGrid(_databaseObjects, details, 1, 2);
         return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { controls, WithRow(body, 1) } };
     }
@@ -989,6 +1016,89 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Change this scheduled event's live execution state? MySQL DDL may implicitly commit.\n{sql}", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
         }
         catch (Exception exception) { _administrationStatus.Text = $"Cannot prepare event change: {exception.Message}"; }
+    }
+
+    private void InvalidateDatabaseObjectPlan()
+    {
+        _databaseObjectChangePlan = null; _databaseObjectAuthorPlan.Text = "Draft changed · review again before applying.";
+    }
+
+    private SqlDatabaseObjectType SelectedDatabaseObjectAuthorType() => _databaseObjectAuthorType.SelectedIndex switch
+    {
+        1 => SqlDatabaseObjectType.Trigger,
+        2 => SqlDatabaseObjectType.Procedure,
+        3 => SqlDatabaseObjectType.Function,
+        4 => SqlDatabaseObjectType.Event,
+        _ => SqlDatabaseObjectType.View
+    };
+
+    private void LoadSelectedDatabaseObjectDraft()
+    {
+        if (_databaseObjects.SelectedItem is not SqlDatabaseObjectInfo item || string.IsNullOrWhiteSpace(_databaseObjectDefinition.Text)) { _administrationStatus.Text = "Select a live object and wait for its exact SHOW CREATE definition first."; return; }
+        _databaseObjectAuthorType.SelectedIndex = item.Type switch { SqlDatabaseObjectType.Trigger => 1, SqlDatabaseObjectType.Procedure => 2, SqlDatabaseObjectType.Function => 3, SqlDatabaseObjectType.Event => 4, _ => 0 };
+        _databaseObjectAuthorName.Text = item.Name; _databaseObjectAuthorDefinition.Text = _databaseObjectDefinition.Text; _databaseObjectChangePlan = null; _databaseObjectAuthorPlan.Text = $"Loaded exact live {item.Type} {item.Database}.{item.Name}. Review creates a fresh hash-bound replacement plan.";
+    }
+
+    private async Task PrepareDatabaseObjectChangeAsync()
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        try
+        {
+            Begin("Binding the exact object draft to the live SHOW CREATE preimage…"); var service = new SqlDatabaseObjectService();
+            var plan = await service.PrepareChangeAsync(_profile, SelectedDatabaseObjectAuthorType(), _databaseObjectAuthorName.Text ?? string.Empty, _databaseObjectAuthorDefinition.Text ?? string.Empty, _operation!.Token); _databaseObjectChangePlan = plan;
+            _databaseObjectAuthorPlan.Text = $"{(plan.ReplacesExisting ? "REPLACE EXISTING" : "CREATE NEW")} · {plan.Type} {plan.Database}.{plan.Name}\nDesired SHA-256: {plan.DesiredCreateSqlSha256}\nExpected before SHA-256: {plan.ExpectedCreateSqlSha256 ?? "identity must remain absent"}\n\n{plan.ReviewSql}\n\n{string.Join("\n", plan.Warnings.Select(warning => "WARNING · " + warning))}";
+            End(); var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false; var confirm = AccentButton(plan.ReplacesExisting ? "Apply hash-bound replacement" : "Create exact object");
+            confirm.Click += async (_, _) => await ApplyDatabaseObjectChangeAsync(confirm, plan);
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"{(plan.ReplacesExisting ? "REPLACE LIVE DATABASE OBJECT" : "CREATE DATABASE OBJECT")}\n{plan.Type} {plan.Database}.{plan.Name}\n\nThe full exact SQL and warnings are visible in the plan preview. Apply rechecks the live identity/preimage and writes a recovery receipt before DDL.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+            _administrationStatus.Text = $"Prepared {(plan.ReplacesExisting ? "replacement" : "creation")} for {plan.Type} {plan.Database}.{plan.Name}. Review exact SQL below, then confirm.";
+        }
+        catch (OperationCanceledException) { _administrationStatus.Text = "SQL object planning cancelled."; }
+        catch (Exception exception) { Fail("SQL object planning failed", exception); _administrationStatus.Text = exception.Message; }
+        finally { End(); }
+    }
+
+    private async Task ApplyDatabaseObjectChangeAsync(Button button, SqlDatabaseObjectChangePlan plan)
+    {
+        if (_profile is null || !ReferenceEquals(plan, _databaseObjectChangePlan)) { _administrationStatus.Text = "The object draft changed after review. Prepare it again."; _confirmation.IsVisible = false; return; }
+        try
+        {
+            button.IsEnabled = false; Begin($"Applying exact {plan.Type} {plan.Name} with preimage recovery…"); var result = await new SqlDatabaseObjectService().ApplyChangeAsync(_profile, plan, _operation!.Token);
+            _confirmation.IsVisible = false; _databaseObjectRollbackReceipt.Text = result.ReceiptPath; _databaseObjectAuthorPlan.Text += $"\n\nCOMMITTED\nServer-normalized SHA-256: {result.Receipt.AfterCreateSqlSha256}\nReceipt: {result.ReceiptPath}"; _databaseObjectChangePlan = null;
+            await RefreshDatabaseObjectCacheAsync(plan.Type, plan.Name, CancellationToken.None); _administrationStatus.Text = $"Committed {plan.Type} {_profile.Database}.{plan.Name}. Exact before/after receipt: {result.ReceiptPath}";
+        }
+        catch (OperationCanceledException) { _administrationStatus.Text = "SQL object apply cancelled before completion; inspect the pending receipt and live object before retrying."; }
+        catch (Exception exception) { Fail("SQL object apply failed", exception); _administrationStatus.Text = exception.Message; }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private async Task RefreshDatabaseObjectCacheAsync(SqlDatabaseObjectType type, string name, CancellationToken cancellationToken)
+    {
+        if (_profile is null) return; _databaseObjectCache = await new SqlDatabaseObjectService().ListAsync(_profile, cancellationToken); FilterDatabaseObjects(); _databaseObjects.SelectedItem = (_databaseObjects.ItemsSource as IEnumerable<SqlDatabaseObjectInfo>)?.FirstOrDefault(item => item.Type == type && item.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task PickDatabaseObjectReceiptAsync()
+    {
+        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose a committed SQL object receipt", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("Crucible SQL object receipt") { Patterns = ["*.crucible-sql-object.json", "*.json"] }] });
+        if (files.FirstOrDefault()?.TryGetLocalPath() is { } path) _databaseObjectRollbackReceipt.Text = path;
+    }
+
+    private async Task PrepareDatabaseObjectRollbackAsync()
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        try
+        {
+            var path = _databaseObjectRollbackReceipt.Text ?? string.Empty; Begin("Validating SQL object rollback receipt…"); var service = new SqlDatabaseObjectService(); var receipt = await service.LoadReceiptAsync(path, _operation!.Token); End();
+            if (!receipt.Host.Equals(_profile.Host, StringComparison.OrdinalIgnoreCase) || receipt.Port != _profile.Port || !receipt.Database.Equals(_profile.Database, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("That receipt belongs to a different database target.");
+            var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false; var confirm = new Button { Content = receipt.BeforeCreateSql is null ? "Remove newly created object" : "Restore exact pre-change definition" };
+            confirm.Click += async (_, _) =>
+            {
+                try { confirm.IsEnabled = false; Begin($"Rolling back exact {receipt.Type} {receipt.Name}…"); var result = await service.RollbackChangeAsync(_profile, path, _operation!.Token); _confirmation.IsVisible = false; await RefreshDatabaseObjectCacheAsync(receipt.Type, receipt.Name, CancellationToken.None); _databaseObjectAuthorPlan.Text = $"ROLLED BACK · {receipt.Type} {receipt.Database}.{receipt.Name}\nReceipt: {result.ReceiptPath}"; _administrationStatus.Text = $"Rolled back {receipt.Type} {receipt.Database}.{receipt.Name}; receipt is now marked ROLLED_BACK."; } catch (Exception exception) { Fail("SQL object rollback failed", exception); _administrationStatus.Text = exception.Message; } finally { confirm.IsEnabled = true; End(); }
+            };
+            _confirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"ROLL BACK {receipt.Type} {receipt.Database}.{receipt.Name}\n\n{(receipt.BeforeCreateSql is null ? "This removes the object created by this receipt." : "This restores the exact SHOW CREATE preimage saved before replacement.")}\nCurrent live SHA-256 must still be {receipt.AfterCreateSqlSha256}; any later edit is refused.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _confirmation.IsVisible = true;
+        }
+        catch (OperationCanceledException) { _administrationStatus.Text = "SQL object rollback review cancelled."; }
+        catch (Exception exception) { Fail("SQL object rollback review failed", exception); _administrationStatus.Text = exception.Message; }
+        finally { End(); }
     }
 
     private async Task LoadProcessesAsync(Button button)
