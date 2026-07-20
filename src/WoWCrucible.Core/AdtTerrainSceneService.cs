@@ -33,7 +33,7 @@ public static class AdtTerrainSceneService
         var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity); foreach (var vertex in vertices) { minimum = Vector3.Min(minimum, vertex); maximum = Vector3.Max(maximum, vertex); }
         if (cells.Count != inspection.PresentCells) findings.Add($"Scene geometry loaded {cells.Count:N0} MCVT cells while map inspection reports {inspection.PresentCells:N0} present cells.");
         if (culled > 0) findings.Add($"Culled {culled:N0} terrain square(s) identified by MCNK hole masks.");
-        findings.Add("Terrain materials, alpha layers, water, and area lighting are not yet composed in this diagnostic geometry pass.");
+        findings.Add("Water and area lighting are not yet composed; MTEX/MCLY/MCAL terrain materials are supplied separately by the bounded terrain-material service.");
         return new(path, vertices, indices, cells.OrderBy(cell => cell.CellY).ThenBy(cell => cell.CellX).ToArray(), minimum, maximum, culled, findings);
 
         void LoadCell(long chunkOffset, long end, uint size)

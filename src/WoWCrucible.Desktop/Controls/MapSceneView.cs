@@ -22,28 +22,39 @@ public sealed class MapSceneView : UserControl
         _terrain.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true); _objects.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true); _wireframe.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true);
         Content = new Grid { RowDefinitions = new("Auto,*"), Children = { new WrapPanel { Margin = new Thickness(7), Children = { _terrain, _objects, _wireframe, reset } }, WithRow(_canvas, 1) } };
     }
-    public void SetScene(AdtTerrainSceneGeometry terrain, IReadOnlyList<MapSceneM2Instance> m2, IReadOnlyList<MapSceneWmoInstance> wmo, int unresolved, string provenance) => _canvas.SetScene(terrain, m2, wmo, unresolved, provenance);
+    public void SetScene(AdtTerrainSceneGeometry terrain, AdtTerrainMaterialSet? materials, IReadOnlyList<MapSceneM2Instance> m2, IReadOnlyList<MapSceneWmoInstance> wmo, int unresolved, string provenance) => _canvas.SetScene(terrain, materials, m2, wmo, unresolved, provenance);
     public void ClearScene() => _canvas.ClearScene();
     private static T WithRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
 }
 
 internal sealed class MapSceneCanvas : Control
 {
-    private sealed record Mesh(IReadOnlyList<Vector3> Vertices, IReadOnlyList<int> Indices, Matrix4x4 Transform, SKColor Color, string Kind);
-    private sealed record Scene(IReadOnlyList<Mesh> Meshes, Vector3 Minimum, Vector3 Maximum, int M2, int Wmo, int Unresolved, string Provenance, int SourceTriangles);
+    private sealed record Mesh(IReadOnlyList<Vector3> Vertices, IReadOnlyList<int> Indices, IReadOnlyList<SKColor>? VertexColors, Matrix4x4 Transform, SKColor Color, string Kind);
+    private sealed record Scene(IReadOnlyList<Mesh> Meshes, Vector3 Minimum, Vector3 Maximum, int M2, int Wmo, int Unresolved, string Provenance, int SourceTriangles, int MaterialCells, int CompleteMaterialCells);
     private Scene? _scene; private float _yaw = -0.72f; private float _pitch = 0.72f; private float _zoom = 1f; private Point? _dragStart; private bool _terrain = true; private bool _objects = true; private bool _wireframe;
     public MapSceneCanvas() => ClipToBounds = true;
-    public void SetScene(AdtTerrainSceneGeometry terrain, IReadOnlyList<MapSceneM2Instance> m2, IReadOnlyList<MapSceneWmoInstance> wmo, int unresolved, string provenance)
+    public void SetScene(AdtTerrainSceneGeometry terrain, AdtTerrainMaterialSet? materials, IReadOnlyList<MapSceneM2Instance> m2, IReadOnlyList<MapSceneWmoInstance> wmo, int unresolved, string provenance)
     {
-        var meshes = new List<Mesh> { new(terrain.Vertices, terrain.TriangleIndices, Matrix4x4.Identity, new SKColor(72, 121, 74), "terrain") };
-        meshes.AddRange(m2.Select(value => new Mesh(value.Geometry.Vertices, value.Geometry.TriangleIndices, M2PreviewSceneService.MapObjectTransform(value.Placement.Orientation, value.Placement.Scale, value.Placement.Position), new SKColor(91, 155, 213), "M2")));
-        meshes.AddRange(wmo.Select(value => new Mesh(value.Geometry.Vertices, value.Geometry.TriangleIndices, M2PreviewSceneService.MapObjectTransform(value.Placement.Orientation, value.Placement.Scale, value.Placement.Position), new SKColor(178, 142, 91), "WMO")));
+        var materialByCell = materials?.Cells.ToDictionary(value => (value.CellX, value.CellY)) ?? new Dictionary<(int, int), AdtTerrainMaterialCell>(); var meshes = new List<Mesh>();
+        foreach (var cell in terrain.Cells)
+        {
+            var vertices = terrain.Vertices.Skip(cell.VertexStart).Take(cell.VertexCount).ToArray(); var indices = terrain.TriangleIndices.Skip(cell.TriangleStart).Take(cell.TriangleIndexCount).Select(value => value - cell.VertexStart).ToArray(); IReadOnlyList<SKColor>? colors = null;
+            if (materialByCell.TryGetValue((cell.CellX, cell.CellY), out var material)) colors = Enumerable.Range(0, cell.VertexCount).Select(index => MaterialColor(material.Composite, index)).ToArray();
+            meshes.Add(new(vertices, indices, colors, Matrix4x4.Identity, new SKColor(72, 121, 74), "terrain"));
+        }
+        meshes.AddRange(m2.Select(value => new Mesh(value.Geometry.Vertices, value.Geometry.TriangleIndices, null, M2PreviewSceneService.MapObjectTransform(value.Placement.Orientation, value.Placement.Scale, value.Placement.Position), new SKColor(91, 155, 213), "M2")));
+        meshes.AddRange(wmo.Select(value => new Mesh(value.Geometry.Vertices, value.Geometry.TriangleIndices, null, M2PreviewSceneService.MapObjectTransform(value.Placement.Orientation, value.Placement.Scale, value.Placement.Position), new SKColor(178, 142, 91), "WMO")));
         var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity); var triangles = 0;
         foreach (var mesh in meshes)
         {
             triangles += mesh.Indices.Count / 3; foreach (var vertex in mesh.Vertices) { var world = Vector3.Transform(vertex, mesh.Transform); minimum = Vector3.Min(minimum, world); maximum = Vector3.Max(maximum, world); }
         }
-        _scene = new(meshes, minimum, maximum, m2.Count, wmo.Count, unresolved, provenance, triangles); ResetView();
+        _scene = new(meshes, minimum, maximum, m2.Count, wmo.Count, unresolved, provenance, triangles, materials?.Cells.Count ?? 0, materials?.CompleteCells ?? 0); ResetView();
+
+        static SKColor MaterialColor(RgbaTexture texture, int vertexIndex)
+        {
+            var local = AdtTerrainBrushService.VertexPosition(vertexIndex); var x = Math.Clamp((int)Math.Round(local.X * (texture.Width - 1)), 0, texture.Width - 1); var y = Math.Clamp((int)Math.Round(local.Y * (texture.Height - 1)), 0, texture.Height - 1); var offset = (y * texture.Width + x) * 4; return new(texture.Pixels[offset], texture.Pixels[offset + 1], texture.Pixels[offset + 2], texture.Pixels[offset + 3]);
+        }
     }
     public void ClearScene() { _scene = null; InvalidateVisual(); }
     public void ResetView() { _yaw = -0.72f; _pitch = 0.72f; _zoom = 1; InvalidateVisual(); }
@@ -60,7 +71,7 @@ internal sealed class MapSceneCanvas : Control
 
     private sealed class DrawOperation(Rect bounds, Scene scene, float yaw, float pitch, float zoom, bool terrain, bool objects, bool wireframe) : ICustomDrawOperation
     {
-        private readonly record struct Face(float Depth, float Ax, float Ay, float Bx, float By, float Cx, float Cy, SKColor Color);
+        private readonly record struct Face(float Depth, float Ax, float Ay, float Bx, float By, float Cx, float Cy, SKColor AColor, SKColor BColor, SKColor CColor);
         public Rect Bounds => bounds; public bool HitTest(Point point) => bounds.Contains(point); public bool Equals(ICustomDrawOperation? other) => false; public void Dispose() { }
         public void Render(ImmediateDrawingContext context)
         {
@@ -74,12 +85,16 @@ internal sealed class MapSceneCanvas : Control
                 {
                     var ia = mesh.Indices[index]; var ib = mesh.Indices[index + 1]; var ic = mesh.Indices[index + 2]; if ((uint)ia >= transformed.Length || (uint)ib >= transformed.Length || (uint)ic >= transformed.Length) continue; var a = transformed[ia]; var b = transformed[ib]; var c = transformed[ic];
                     var ax = width * .5f + a.X * scale; var ay = height * .5f - a.Z * scale; var bx = width * .5f + b.X * scale; var by = height * .5f - b.Z * scale; var cx = width * .5f + c.X * scale; var cy = height * .5f - c.Z * scale; if (Math.Abs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax)) < .015f) continue;
-                    var normal = Vector3.Cross(b - a, c - a); if (normal.LengthSquared() > .000001f) normal = Vector3.Normalize(normal); var shade = Math.Clamp(.28f + .72f * Math.Abs(Vector3.Dot(normal, light)), .22f, 1f); var color = new SKColor((byte)(mesh.Color.Red * shade), (byte)(mesh.Color.Green * shade), (byte)(mesh.Color.Blue * shade), 255); faces.Add(new((a.Y + b.Y + c.Y) / 3f, ax, ay, bx, by, cx, cy, color));
+                    var normal = Vector3.Cross(b - a, c - a); if (normal.LengthSquared() > .000001f) normal = Vector3.Normalize(normal); var shade = Math.Clamp(.28f + .72f * Math.Abs(Vector3.Dot(normal, light)), .22f, 1f); var baseA = mesh.VertexColors is null ? mesh.Color : mesh.VertexColors[ia]; var baseB = mesh.VertexColors is null ? mesh.Color : mesh.VertexColors[ib]; var baseC = mesh.VertexColors is null ? mesh.Color : mesh.VertexColors[ic]; faces.Add(new((a.Y + b.Y + c.Y) / 3f, ax, ay, bx, by, cx, cy, Shade(baseA, shade), Shade(baseB, shade), Shade(baseC, shade)));
                 }
             }
-            faces.Sort(static (left, right) => right.Depth.CompareTo(left.Depth)); using var fill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill }; using var edge = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = .65f, Color = new SKColor(7, 11, 17, 110) }; using var path = new SKPath();
-            foreach (var face in faces) { path.Rewind(); path.MoveTo(face.Ax, face.Ay); path.LineTo(face.Bx, face.By); path.LineTo(face.Cx, face.Cy); path.Close(); fill.Color = face.Color; canvas.DrawPath(path, fill); if (wireframe) canvas.DrawPath(path, edge); }
-            using var text = new SKPaint { IsAntialias = true, Color = new SKColor(223, 230, 240) }; using var font = new SKFont(SKTypeface.Default, 13); using var hint = new SKFont(SKTypeface.Default, 12); canvas.DrawText($"ADT terrain + {scene.M2:N0} M2 + {scene.Wmo:N0} WMO · {faces.Count:N0}/{scene.SourceTriangles:N0} rendered triangles · provenance {scene.Provenance}", 12, 22, SKTextAlign.Left, font, text); text.Color = scene.Unresolved == 0 ? new SKColor(155, 194, 163) : new SKColor(255, 186, 91); canvas.DrawText(scene.Unresolved == 0 ? "All selected placements resolved" : $"{scene.Unresolved:N0} placement(s) unresolved or outside the selected provenance", 12, 40, SKTextAlign.Left, hint, text); text.Color = new SKColor(160, 172, 190); canvas.DrawText("Diagnostic materials · drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hint, text);
+            faces.Sort(static (left, right) => right.Depth.CompareTo(left.Depth)); var positions = new SKPoint[faces.Count * 3]; var colors = new SKColor[positions.Length];
+            for (var index = 0; index < faces.Count; index++) { var face = faces[index]; var offset = index * 3; positions[offset] = new(face.Ax, face.Ay); positions[offset + 1] = new(face.Bx, face.By); positions[offset + 2] = new(face.Cx, face.Cy); colors[offset] = face.AColor; colors[offset + 1] = face.BColor; colors[offset + 2] = face.CColor; }
+            using (var fill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill }) using (var vertices = SKVertices.CreateCopy(SKVertexMode.Triangles, positions, null, colors)) canvas.DrawVertices(vertices, SKBlendMode.SrcOver, fill);
+            if (wireframe) { using var edge = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = .65f, Color = new SKColor(7, 11, 17, 110) }; using var path = new SKPath(); foreach (var face in faces) { path.Rewind(); path.MoveTo(face.Ax, face.Ay); path.LineTo(face.Bx, face.By); path.LineTo(face.Cx, face.Cy); path.Close(); canvas.DrawPath(path, edge); } }
+            using var text = new SKPaint { IsAntialias = true, Color = new SKColor(223, 230, 240) }; using var font = new SKFont(SKTypeface.Default, 13); using var hint = new SKFont(SKTypeface.Default, 12); canvas.DrawText($"ADT terrain + {scene.M2:N0} M2 + {scene.Wmo:N0} WMO · {faces.Count:N0}/{scene.SourceTriangles:N0} rendered triangles · provenance {scene.Provenance}", 12, 22, SKTextAlign.Left, font, text); text.Color = scene.Unresolved == 0 ? new SKColor(155, 194, 163) : new SKColor(255, 186, 91); canvas.DrawText(scene.Unresolved == 0 ? "All selected placements resolved" : $"{scene.Unresolved:N0} placement(s) unresolved or outside the selected provenance", 12, 40, SKTextAlign.Left, hint, text); text.Color = scene.MaterialCells == 0 || scene.CompleteMaterialCells < scene.MaterialCells ? new SKColor(255, 186, 91) : new SKColor(155, 194, 163); canvas.DrawText(scene.MaterialCells == 0 ? "Diagnostic terrain color · no material set loaded" : $"MCLY/MCAL terrain materials · {scene.CompleteMaterialCells:N0}/{scene.MaterialCells:N0} cells complete", 12, 57, SKTextAlign.Left, hint, text); text.Color = new SKColor(160, 172, 190); canvas.DrawText("Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hint, text);
+
+            static SKColor Shade(SKColor color, float amount) => new((byte)(color.Red * amount), (byte)(color.Green * amount), (byte)(color.Blue * amount), color.Alpha);
         }
     }
 }
