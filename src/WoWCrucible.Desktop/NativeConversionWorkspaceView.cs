@@ -130,7 +130,8 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var operation = BeginOperation($"Checking nearby listfiles against {models.Length:N0} modern M2 model(s)…"); var token = operation.Token;
         try
         {
-            var discovery = await Task.Run(() => FileDataIdListfileDiscoveryService.ResolveBest(StaticM2DownportService.RequiredExternalTextureIds(models, token), models, token), token);
+            var discoveryContexts = models.Concat(_inspections.Select(asset => asset.Path)).ToArray();
+            var discovery = await Task.Run(() => FileDataIdListfileDiscoveryService.ResolveBest(StaticM2DownportService.RequiredExternalTextureIds(models, token), discoveryContexts, token), token);
             if (discovery.Selected is null) throw new InvalidOperationException(string.Join(" ", discovery.Findings));
             RememberListfile(discovery.Selected.SourcePath);
             _details.Text = $"FILEDATAID LISTFILE AUTO-DETECTION\n\nSelected: {discovery.Selected.SourcePath}\nSHA-256: {discovery.Selected.SourceSha256}\nRequested IDs: {discovery.Selected.RequestedIds.Count:N0}\nResolved IDs: {discovery.Selected.Resolved.Count:N0}\nCandidates checked: {discovery.Candidates.Count:N0}\n\n{Lines(discovery.Findings)}";
@@ -241,7 +242,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
                 else
                 {
                     var required = StaticM2DownportService.RequiredExternalTextureIds([source], token);
-                    discovery = FileDataIdListfileDiscoveryService.ResolveBest(required, [source, workspace.RootPath], token);
+                    discovery = FileDataIdListfileDiscoveryService.ResolveBest(required, [source, asset.Path, workspace.RootPath], token);
                     if (required.Count > 0 && discovery.Selected is null) throw new InvalidOperationException(string.Join(" ", discovery.Findings));
                     snapshot = discovery.Selected;
                 }
@@ -279,7 +280,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
                 else
                 {
                     var required = StaticM2DownportService.RequiredExternalTextureIds(sources.Values, token);
-                    discovery = FileDataIdListfileDiscoveryService.ResolveBest(required, sources.Values.Append(workspace.RootPath), token);
+                    discovery = FileDataIdListfileDiscoveryService.ResolveBest(required, sources.Values.Concat(candidates.Select(asset => asset.Path)).Append(workspace.RootPath), token);
                     if (required.Count > 0 && discovery.Selected is null) throw new InvalidOperationException(string.Join(" ", discovery.Findings));
                     listfile = discovery.Selected;
                 }
