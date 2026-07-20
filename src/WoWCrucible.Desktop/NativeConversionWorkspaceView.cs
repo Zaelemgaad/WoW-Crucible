@@ -14,6 +14,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
 {
     private static readonly EnumerationOptions RecursiveFiles = new() { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
     private readonly ListBox _assets = new();
+    private readonly DesktopSettings _settings;
     private readonly TextBlock _summary = Status("Drop M2/WMO files or folders here, or add them with the buttons above.");
     private readonly TextBlock _previewStatus = Status("Select a compatible Wrath M2 or version-17 WMO for a live geometry preview.");
     private readonly TextBox _details = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
@@ -30,8 +31,10 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
 
     public event EventHandler? BackRequested;
 
-    public NativeConversionWorkspaceView()
+    public NativeConversionWorkspaceView(DesktopSettings settings)
     {
+        _settings = settings;
+        if (File.Exists(settings.ModernFileDataIdListfilePath)) _listfile.Text = settings.ModernFileDataIdListfilePath;
         _previewHost.Children.Add(_preview); _previewHost.Children.Add(_wmoPreview);
         _assets.ItemTemplate = new FuncDataTemplate<AssetInspection>((asset, _) =>
         {
@@ -60,7 +63,8 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var pathPayload = Accent("Build path-preserving payload"); pathPayload.Click += async (_, _) => await BuildPathPayloadAsync();
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
         var browseListfile = new Button { Content = "Choose listfile" }; browseListfile.Click += async (_, _) => await ChooseListfileAsync();
-        var clearListfile = new Button { Content = "Clear listfile" }; clearListfile.Click += (_, _) => _listfile.Text = string.Empty;
+        var autoListfile = new Button { Content = "Auto-detect" }; autoListfile.Click += async (_, _) => await AutoDetectListfileAsync();
+        var clearListfile = new Button { Content = "Clear listfile" }; clearListfile.Click += (_, _) => RememberListfile(null);
 
         var header = new Border
         {
@@ -85,11 +89,11 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
 
         var listfileStrip = new Grid
         {
-            ColumnDefinitions = new("Auto,*,Auto,Auto"), ColumnSpacing = 7, Margin = new Thickness(12, 7, 12, 0),
+            ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), ColumnSpacing = 7, Margin = new Thickness(12, 7, 12, 0),
             Children =
             {
                 new TextBlock { Text = "External texture IDs", VerticalAlignment = VerticalAlignment.Center, Foreground = Brush.Parse("#9AA5B7") },
-                WithColumn(_listfile, 1), WithColumn(browseListfile, 2), WithColumn(clearListfile, 3)
+                WithColumn(_listfile, 1), WithColumn(browseListfile, 2), WithColumn(autoListfile, 3), WithColumn(clearListfile, 4)
             }
         };
 
@@ -115,7 +119,26 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             Title = "Choose a FileDataID-to-client-path listfile", AllowMultiple = false,
             FileTypeFilter = [new FilePickerFileType("FileDataID listfiles") { Patterns = ["*.csv", "*.txt"] }]
         })).FirstOrDefault()?.TryGetLocalPath();
-        if (file is not null) _listfile.Text = file;
+        if (file is not null) RememberListfile(file);
+    }
+
+    private async Task AutoDetectListfileAsync()
+    {
+        var models = _inspections.Where(asset => asset.Format == AssetFormat.M2 && asset.Magic == "MD21")
+            .Select(asset => _workspace is null ? asset.Path : NativeAssetConversionService.ResolveSnapshotPath(_workspace, asset)).ToArray();
+        if (models.Length == 0) { _summary.Text = "Add or open modern M2 assets first; auto-detection verifies candidates against their exact FileDataIDs."; return; }
+        var operation = BeginOperation($"Checking nearby listfiles against {models.Length:N0} modern M2 model(s)…"); var token = operation.Token;
+        try
+        {
+            var discovery = await Task.Run(() => FileDataIdListfileDiscoveryService.ResolveBest(StaticM2DownportService.RequiredExternalTextureIds(models, token), models, token), token);
+            if (discovery.Selected is null) throw new InvalidOperationException(string.Join(" ", discovery.Findings));
+            RememberListfile(discovery.Selected.SourcePath);
+            _details.Text = $"FILEDATAID LISTFILE AUTO-DETECTION\n\nSelected: {discovery.Selected.SourcePath}\nSHA-256: {discovery.Selected.SourceSha256}\nRequested IDs: {discovery.Selected.RequestedIds.Count:N0}\nResolved IDs: {discovery.Selected.Resolved.Count:N0}\nCandidates checked: {discovery.Candidates.Count:N0}\n\n{Lines(discovery.Findings)}";
+            _summary.Text = $"Verified and remembered a complete FileDataID listfile · {discovery.Selected.SourcePath}";
+        }
+        catch (OperationCanceledException) { _summary.Text = "Listfile auto-detection cancelled."; }
+        catch (Exception exception) { _summary.Text = $"Listfile auto-detection needs review: {exception.Message}"; DesktopCrashLogger.Log("FileDataID listfile auto-detection failed", exception); }
+        finally { EndOperation(operation); }
     }
 
     private async Task AddFilesAsync()
@@ -211,12 +234,22 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var operation = BeginOperation("Planning and validating the selected immutable M2/SKIN snapshot…"); var token = operation.Token;
         try
         {
-            var result = await Task.Run(() =>
+            var completed = await Task.Run(() =>
             {
-                var plan = StaticM2DownportService.Plan(source, skin, listfile, token);
+                FileDataIdListfileDiscoveryResult? discovery = null; FileDataIdListfileSnapshot? snapshot = null;
+                if (listfile is not null) snapshot = StaticM2DownportService.PrepareListfile(listfile, [source], token);
+                else
+                {
+                    var required = StaticM2DownportService.RequiredExternalTextureIds([source], token);
+                    discovery = FileDataIdListfileDiscoveryService.ResolveBest(required, [source, workspace.RootPath], token);
+                    if (required.Count > 0 && discovery.Selected is null) throw new InvalidOperationException(string.Join(" ", discovery.Findings));
+                    snapshot = discovery.Selected;
+                }
+                var plan = snapshot is null ? StaticM2DownportService.Plan(source, skin, cancellationToken: token) : StaticM2DownportService.PlanWithListfileSnapshot(source, skin, snapshot, token);
                 if (!plan.Ready) throw new InvalidOperationException("Static profile blocked this model:\n- " + string.Join("\n- ", plan.Blockers));
-                return StaticM2DownportService.Convert(plan, output, token);
+                return (Result: StaticM2DownportService.Convert(plan, output, token), Discovery: discovery);
             }, token);
+            var result = completed.Result; if (completed.Discovery?.Selected is not null) RememberListfile(completed.Discovery.Selected.SourcePath);
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(result.OutputModelPath, result.OutputSkinPath, M2PreviewVisibilityMode.AllGeosets), token);
             _preview.IsVisible = true; _wmoPreview.IsVisible = false; _preview.SetGeometry(geometry);
             _previewStatus.Text = $"Converted and independently reloaded · {geometry.Vertices.Count:N0} vertices · {geometry.TotalTriangleIndices / 3:N0} triangles";
@@ -239,9 +272,17 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         {
             var batch = await Task.Run(() =>
             {
-                var converted = new List<string>(); var skipped = new List<string>(); var blocked = new List<string>(); var failed = new List<string>();
+                var converted = new List<string>(); var skipped = new List<string>(); var blocked = new List<string>(); var failed = new List<string>(); FileDataIdListfileDiscoveryResult? discovery = null;
                 var sources = candidates.ToDictionary(asset => asset, asset => NativeAssetConversionService.ResolveSnapshotPath(workspace, asset));
-                var listfile = listfilePath is null ? null : StaticM2DownportService.PrepareListfile(listfilePath, sources.Values, token);
+                FileDataIdListfileSnapshot? listfile;
+                if (listfilePath is not null) listfile = StaticM2DownportService.PrepareListfile(listfilePath, sources.Values, token);
+                else
+                {
+                    var required = StaticM2DownportService.RequiredExternalTextureIds(sources.Values, token);
+                    discovery = FileDataIdListfileDiscoveryService.ResolveBest(required, sources.Values.Append(workspace.RootPath), token);
+                    if (required.Count > 0 && discovery.Selected is null) throw new InvalidOperationException(string.Join(" ", discovery.Findings));
+                    listfile = discovery.Selected;
+                }
                 foreach (var asset in candidates)
                 {
                     token.ThrowIfCancellationRequested();
@@ -256,8 +297,9 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
                     catch (OperationCanceledException) { throw; }
                     catch (Exception exception) { failed.Add($"{asset.Path} :: {exception.Message}"); }
                 }
-                return (Converted: converted, Skipped: skipped, Blocked: blocked, Failed: failed);
+                return (Converted: converted, Skipped: skipped, Blocked: blocked, Failed: failed, Discovery: discovery);
             }, token);
+            if (batch.Discovery?.Selected is not null) RememberListfile(batch.Discovery.Selected.SourcePath);
             _details.Text = $"BATCH STATIC M2 CONVERSION\n\nCONVERTED ({batch.Converted.Count:N0})\n{Lines(batch.Converted)}\n\nALREADY PRESENT ({batch.Skipped.Count:N0})\n{Lines(batch.Skipped)}\n\nBLOCKED WITHOUT WRITING ({batch.Blocked.Count:N0})\n{Lines(batch.Blocked)}\n\nFAILED ({batch.Failed.Count:N0})\n{Lines(batch.Failed)}";
             _summary.Text = $"Batch complete · {batch.Converted.Count:N0} converted · {batch.Skipped.Count:N0} already present · {batch.Blocked.Count:N0} blocked · {batch.Failed.Count:N0} failed";
             DesktopCrashLogger.Debug("CONVERT", "static-m2-batch-complete", ("converted", batch.Converted.Count), ("skipped", batch.Skipped.Count), ("blocked", batch.Blocked.Count), ("failed", batch.Failed.Count));
@@ -277,13 +319,15 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var operation = BeginOperation("Planning the complete path-preserving source tree…"); var token = operation.Token;
         try
         {
-            var result = await Task.Run(() =>
+            var completed = await Task.Run(() =>
             {
-                var plan = StaticM2BatchDownportService.Plan(source, listfile, token);
+                var automatic = listfile is null ? StaticM2BatchDownportService.PlanAuto(source, cancellationToken: token) : null;
+                var plan = automatic?.Plan ?? StaticM2BatchDownportService.Plan(source, listfile, token);
                 if (!readyOnly && (plan.Blocked > 0 || plan.Failed > 0))
                     throw new InvalidOperationException($"The tree has {plan.Ready:N0} eligible, {plan.Blocked:N0} blocked, and {plan.Failed:N0} failed model(s). Enable the explicit eligible-only option to publish the verified subset while retaining every blocker in the receipt.");
-                return StaticM2BatchDownportService.Convert(plan, output, readyOnly, cancellationToken: token);
+                return (Result: StaticM2BatchDownportService.Convert(plan, output, readyOnly, cancellationToken: token), Discovery: automatic?.Discovery);
             }, token);
+            var result = completed.Result; if (completed.Discovery?.Selected is not null) RememberListfile(completed.Discovery.Selected.SourcePath);
             _details.Text = $"PATH-PRESERVING BATCH COMPLETE\n\nPayload: {result.PayloadDirectory}\nReceipt: {result.ReceiptPath}\nWorkers: {result.Workers:N0}\nConverted: {result.Outputs.Count:N0}\nBlocked retained in receipt: {result.Plan.Blocked:N0}\nFailed retained in receipt: {result.Plan.Failed:N0}\n\nOUTPUTS\n{Lines(result.Outputs.Select(value => $"{value.ModelRelativePath} · {value.Vertices:N0} vertices · {value.Triangles:N0} triangles"))}";
             _summary.Text = $"MPQ-ready relative tree published atomically · {result.Outputs.Count:N0} model(s) · {result.PayloadDirectory}";
             DesktopCrashLogger.Debug("CONVERT", "path-batch-complete", ("source", source), ("payload", result.PayloadDirectory), ("converted", result.Outputs.Count), ("blocked", result.Plan.Blocked));
@@ -388,6 +432,11 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         return dependency is null ? null : NativeAssetConversionService.ResolveDependencySnapshotPath(workspace, asset, dependency);
     }
     private string? SelectedListfile() => string.IsNullOrWhiteSpace(_listfile.Text) ? null : Path.GetFullPath(_listfile.Text.Trim());
+    private void RememberListfile(string? path)
+    {
+        var normalized = string.IsNullOrWhiteSpace(path) ? string.Empty : Path.GetFullPath(path);
+        _listfile.Text = normalized; _settings.ModernFileDataIdListfilePath = normalized; _settings.Save();
+    }
     private static string CompatibilityLabel(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "Wrath 3.3.5 ready", AssetCompatibility.RequiresNativeConversion => "native conversion required", AssetCompatibility.Unsupported => "unsupported layout", _ => "invalid asset" };
     private static string CompatibilityColor(AssetCompatibility value) => value switch { AssetCompatibility.AlreadyWotlk335 => "#79C793", AssetCompatibility.RequiresNativeConversion => "#E5B768", _ => "#E27B7B" };
     private static Button Accent(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }

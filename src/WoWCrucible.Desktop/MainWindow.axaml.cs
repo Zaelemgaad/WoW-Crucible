@@ -826,7 +826,7 @@ public partial class MainWindow : Window
     {
         if (_nativeConversionWorkspaceView is null)
         {
-            _nativeConversionWorkspaceView = new NativeConversionWorkspaceView();
+            _nativeConversionWorkspaceView = new NativeConversionWorkspaceView(_workspaceSession.Settings);
             _nativeConversionWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
         }
         OpenFeatureWorkspace(_nativeConversionWorkspaceView, "Modern Asset Conversion");

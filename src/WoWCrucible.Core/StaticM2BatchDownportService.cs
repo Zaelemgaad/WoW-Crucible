@@ -49,6 +49,8 @@ public sealed record StaticM2BatchResult(
     string ReceiptPath,
     IReadOnlyList<StaticM2BatchOutput> Outputs);
 
+public sealed record StaticM2BatchAutoPlan(StaticM2BatchPlan Plan, FileDataIdListfileDiscoveryResult Discovery);
+
 /// <summary>
 /// Publishes independently verified static M2 downports as one path-preserving,
 /// MPQ-ready payload. Every model is converted in isolated temporary storage and
@@ -64,6 +66,19 @@ public static class StaticM2BatchDownportService
 
     public static StaticM2BatchPlan Plan(string sourceRoot, string? listfilePath = null, CancellationToken cancellationToken = default) =>
         BuildPlan(sourceRoot, listfilePath, cancellationToken).Plan;
+
+    public static StaticM2BatchAutoPlan PlanAuto(string sourceRoot, IEnumerable<string>? additionalContexts = null, CancellationToken cancellationToken = default)
+    {
+        sourceRoot = Path.GetFullPath(sourceRoot);
+        var files = EnumerateModels(sourceRoot);
+        var requiredIds = StaticM2DownportService.RequiredExternalTextureIds(files, cancellationToken);
+        var contexts = (additionalContexts ?? []).Append(sourceRoot);
+        var discovery = FileDataIdListfileDiscoveryService.ResolveBest(requiredIds, contexts, cancellationToken);
+        if (requiredIds.Count > 0 && discovery.Selected is null)
+            throw new InvalidOperationException(string.Join(" ", discovery.Findings));
+        var built = BuildPlan(sourceRoot, discovery.Selected?.SourcePath, cancellationToken, discovery.Selected, files);
+        return new(built.Plan, discovery);
+    }
 
     public static StaticM2BatchResult Convert(StaticM2BatchPlan plan, string outputDirectory, bool readyOnly = false, int workers = 0, CancellationToken cancellationToken = default)
     {
@@ -132,14 +147,17 @@ public static class StaticM2BatchDownportService
         finally { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
     }
 
-    private static (StaticM2BatchPlan Plan, FileDataIdListfileSnapshot? Listfile) BuildPlan(string sourceRoot, string? listfilePath, CancellationToken cancellationToken)
+    private static (StaticM2BatchPlan Plan, FileDataIdListfileSnapshot? Listfile) BuildPlan(
+        string sourceRoot,
+        string? listfilePath,
+        CancellationToken cancellationToken,
+        FileDataIdListfileSnapshot? preparedListfile = null,
+        string[]? preparedFiles = null)
     {
         sourceRoot = Path.GetFullPath(sourceRoot);
-        if (!Directory.Exists(sourceRoot)) throw new DirectoryNotFoundException($"Static M2 batch source folder not found: {sourceRoot}");
-        var files = Directory.EnumerateFiles(sourceRoot, "*.m2", RecursiveFiles).Select(Path.GetFullPath).Order(StringComparer.OrdinalIgnoreCase).ToArray();
-        if (files.Length == 0) throw new InvalidOperationException("The selected source folder contains no M2 files.");
-        FileDataIdListfileSnapshot? listfile = null;
-        if (!string.IsNullOrWhiteSpace(listfilePath)) listfile = StaticM2DownportService.PrepareListfile(Path.GetFullPath(listfilePath), files, cancellationToken);
+        var files = preparedFiles ?? EnumerateModels(sourceRoot);
+        FileDataIdListfileSnapshot? listfile = preparedListfile;
+        if (listfile is null && !string.IsNullOrWhiteSpace(listfilePath)) listfile = StaticM2DownportService.PrepareListfile(Path.GetFullPath(listfilePath), files, cancellationToken);
         var entries = new List<StaticM2BatchEntry>(files.Length); var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
@@ -158,6 +176,15 @@ public static class StaticM2BatchDownportService
         var listfilePathValue = listfile?.SourcePath; var listfileHash = listfile?.SourceSha256;
         var fingerprint = Fingerprint(sourceRoot, listfileHash, entries);
         return (new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceRoot, listfilePathValue, listfileHash, fingerprint, entries), listfile);
+    }
+
+    private static string[] EnumerateModels(string sourceRoot)
+    {
+        sourceRoot = Path.GetFullPath(sourceRoot);
+        if (!Directory.Exists(sourceRoot)) throw new DirectoryNotFoundException($"Static M2 batch source folder not found: {sourceRoot}");
+        var files = Directory.EnumerateFiles(sourceRoot, "*.m2", RecursiveFiles).Select(Path.GetFullPath).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (files.Length == 0) throw new InvalidOperationException("The selected source folder contains no M2 files.");
+        return files;
     }
 
     private static string Fingerprint(string sourceRoot, string? listfileHash, IReadOnlyList<StaticM2BatchEntry> entries)

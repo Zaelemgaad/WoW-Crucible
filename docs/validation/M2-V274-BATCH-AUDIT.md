@@ -8,7 +8,7 @@ Target: WoW 3.3.5a M2 version 264 and SKIN version 2
 
 This audit validates Crucible's native clean-room batch path against real local assets. No source or converted game asset is committed to the repository.
 
-## Initial strict plan
+## Initial strict plan without a listfile
 
 - M2 files inspected: 112
 - Eligible for the currently verified static armor/head profile: 68
@@ -39,3 +39,20 @@ The packaged batch planner was then run against the published `Payload` tree as 
 - Failed: 0
 
 This proves the batch operation produced structurally recognized target files and did not merely rename or copy the modern inputs. Animated, camera, emitter, unsupported material, unresolved FileDataID, and WMO families remain explicit future profiles.
+
+## Expanded auto-listfile and LDV1 audit
+
+The native profile was then extended with two independently guarded behaviors:
+
+- Nearby listfile discovery requires complete resolution of the exact requested FileDataIDs. Two discovered local corpora produced the same requested mappings, so the newer candidate was selected and hash-bound automatically. Different complete mappings would have blocked selection.
+- All 13 encountered `LDV1` chunks were exactly 16 bytes and shared one validated single-SKIN structure. Crucible accepts only that structure, records omission of its finite modern distance threshold as a loss, and preserves the sole SKIN geometry. Changed signature/reserved bytes remain blockers.
+
+The expanded strict plan produced:
+
+- M2 files inspected: 112
+- Eligible: 88
+- Explicitly blocked: 24
+- Read/parse failures: 0
+- Converted M2/SKIN pairs: 88
+
+An independent plan over the expanded output classified 88/88 files as already valid Wrath MD20/version-264, with zero conversion-ready, blocked, or failed records. Before consolidating the earlier 68-model payload, all 136 overlapping M2/SKIN files were SHA-256 compared and proven byte-identical. Its prior receipt remains under `PreviousReceipts`; only the verified duplicate payload bytes were removed.

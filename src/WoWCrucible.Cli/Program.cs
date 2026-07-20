@@ -706,10 +706,17 @@ static int Asset(string[] args)
     }
     if (args is ["m2-downport-batch-plan", var batchSourceRoot, .. var batchPlanOptions])
     {
-        var json = batchPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var listfilePath = Option(batchPlanOptions, "--listfile=");
-        var unknown = batchPlanOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var json = batchPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var listfilePath = Option(batchPlanOptions, "--listfile="); var autoListfile = batchPlanOptions.Contains("--auto-listfile", StringComparer.OrdinalIgnoreCase);
+        var unknown = batchPlanOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.Equals("--auto-listfile", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown m2-downport-batch-plan option: {unknown[0]}");
-        var plan = StaticM2BatchDownportService.Plan(batchSourceRoot, listfilePath);
+        if (autoListfile && listfilePath is not null) return Fail("Use either --auto-listfile or --listfile=PATH, not both.");
+        StaticM2BatchPlan plan;
+        if (autoListfile)
+        {
+            var automatic = StaticM2BatchDownportService.PlanAuto(batchSourceRoot); plan = automatic.Plan;
+            foreach (var finding in automatic.Discovery.Findings) Console.Error.WriteLine($"AUTO_LISTFILE\t{finding}");
+        }
+        else plan = StaticM2BatchDownportService.Plan(batchSourceRoot, listfilePath);
         if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         else
         {
@@ -720,11 +727,18 @@ static int Asset(string[] args)
     }
     if (args is ["m2-downport-batch", var batchApplySourceRoot, var batchOutputRoot, .. var batchOptions])
     {
-        var listfilePath = Option(batchOptions, "--listfile="); var readyOnly = batchOptions.Contains("--ready-only", StringComparer.OrdinalIgnoreCase); var workersText = Option(batchOptions, "--workers=") ?? "0";
-        var unknown = batchOptions.Where(option => !option.Equals("--ready-only", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--workers=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var listfilePath = Option(batchOptions, "--listfile="); var autoListfile = batchOptions.Contains("--auto-listfile", StringComparer.OrdinalIgnoreCase); var readyOnly = batchOptions.Contains("--ready-only", StringComparer.OrdinalIgnoreCase); var workersText = Option(batchOptions, "--workers=") ?? "0";
+        var unknown = batchOptions.Where(option => !option.Equals("--ready-only", StringComparison.OrdinalIgnoreCase) && !option.Equals("--auto-listfile", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--workers=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown m2-downport-batch option: {unknown[0]}");
+        if (autoListfile && listfilePath is not null) return Fail("Use either --auto-listfile or --listfile=PATH, not both.");
         if (!int.TryParse(workersText, out var workers) || workers is < 0 or > StaticM2BatchDownportService.MaximumWorkers) return Fail($"--workers must be 1 through {StaticM2BatchDownportService.MaximumWorkers}, or 0 for automatic.");
-        var plan = StaticM2BatchDownportService.Plan(batchApplySourceRoot, listfilePath);
+        StaticM2BatchPlan plan;
+        if (autoListfile)
+        {
+            var automatic = StaticM2BatchDownportService.PlanAuto(batchApplySourceRoot); plan = automatic.Plan;
+            foreach (var finding in automatic.Discovery.Findings) Console.Error.WriteLine($"AUTO_LISTFILE\t{finding}");
+        }
+        else plan = StaticM2BatchDownportService.Plan(batchApplySourceRoot, listfilePath);
         var result = StaticM2BatchDownportService.Convert(plan, batchOutputRoot, readyOnly, workers);
         Console.WriteLine($"OUTPUT\t{result.OutputDirectory}\nPAYLOAD\t{result.PayloadDirectory}\nRECEIPT\t{result.ReceiptPath}\nCONVERTED\t{result.Outputs.Count:N0}\nBLOCKED_RECORDED\t{result.Plan.Blocked:N0}\nFAILED_RECORDED\t{result.Plan.Failed:N0}\nWORKERS\t{result.Workers:N0}");
         foreach (var output in result.Outputs) Console.WriteLine($"MODEL\t{output.ModelRelativePath}\t{output.ModelSha256}\nSKIN\t{output.SkinRelativePath}\t{output.SkinSha256}");
@@ -1118,8 +1132,8 @@ Usage:
   wowcrucible asset m2-downport-plan <modern.m2> [--skin=file.skin] [--listfile=id-path.csv] [--format=text|json]
   wowcrucible asset m2-downport-scan <file-or-folder>... [--listfile=id-path.csv] [--format=text|json]
   wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin] [--listfile=id-path.csv]
-  wowcrucible asset m2-downport-batch-plan <source-root> [--listfile=id-path.csv] [--format=text|json]
-  wowcrucible asset m2-downport-batch <source-root> <new-output-folder> [--listfile=id-path.csv] [--ready-only] [--workers=N]
+  wowcrucible asset m2-downport-batch-plan <source-root> [--listfile=id-path.csv|--auto-listfile] [--format=text|json]
+  wowcrucible asset m2-downport-batch <source-root> <new-output-folder> [--listfile=id-path.csv|--auto-listfile] [--ready-only] [--workers=N]
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
   wowcrucible asset gameobject-index-plan <client-index> <GameObjectDisplayInfo.dbc> <schema.xml> <new-workspace> <virtual-model-path>... [--display-start=N] [--template-start=N] [--occupied=ids.txt] [--archive-choice=client-path|Data\archive.MPQ]... [--format=text|json]
   wowcrucible asset indexed-snapshot-verify <indexed-assets.snapshot.json> [--archives] [--format=text|json]

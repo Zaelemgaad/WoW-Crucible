@@ -79,7 +79,7 @@ public sealed record StaticM2DownportScanResult(
 /// </summary>
 public static class StaticM2DownportService
 {
-    private const int PlanFormatVersion = 4;
+    private const int PlanFormatVersion = 5;
     private const int ReceiptFormatVersion = 1;
     private const uint ModernVersion = 274;
     private const uint WotlkVersion = 264;
@@ -94,9 +94,14 @@ public static class StaticM2DownportService
 
     public static FileDataIdListfileSnapshot PrepareListfile(string listfilePath, IEnumerable<string> modelPaths, CancellationToken cancellationToken = default)
     {
+        return FileDataIdListfileService.Resolve(listfilePath, RequiredExternalTextureIds(modelPaths, cancellationToken), cancellationToken);
+    }
+
+    public static IReadOnlyList<uint> RequiredExternalTextureIds(IEnumerable<string> modelPaths, CancellationToken cancellationToken = default)
+    {
         var ids = new HashSet<uint>();
         foreach (var modelPath in modelPaths) { cancellationToken.ThrowIfCancellationRequested(); foreach (var id in ExternalTextureIds(modelPath)) ids.Add(id); }
-        return FileDataIdListfileService.Resolve(listfilePath, ids, cancellationToken);
+        return ids.Order().ToArray();
     }
 
     public static StaticM2DownportPlan PlanWithListfileSnapshot(string sourceModelPath, string? sourceSkinPath, FileDataIdListfileSnapshot snapshot, CancellationToken cancellationToken = default)
@@ -110,7 +115,7 @@ public static class StaticM2DownportService
         var source = File.ReadAllBytes(sourceModelPath);
         var blockers = new List<string>(); var transformations = new List<string>(); var losses = new List<string>();
         var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0;
-        byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false; var constantColorTracks = 0;
+        byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false; var omittedSingleProfileLdv1 = false; var constantColorTracks = 0;
         var materialTranslation = MaterialTranslation.None;
         FileDataIdListfileSnapshot? listfile = null; var resolvedTextures = new List<M2ResolvedTexturePath>();
 
@@ -125,7 +130,22 @@ public static class StaticM2DownportService
                 if (txac[0].Size == 0 || source.AsSpan(checked((int)txac[0].DataOffset), checked((int)txac[0].Size)).IndexOfAnyExcept((byte)0) < 0) omittedEmptyTxac = true;
                 else blockers.Add("TXAC contains nonzero extended texture-animation data that has no verified Wrath translation yet.");
             }
-            var unexpected = chunks.Where(chunk => chunk.Id is not "MD21" and not "SFID" and not "TXID" and not "TXAC").Select(chunk => chunk.Id).Distinct().Order().ToArray();
+            var ldv1 = chunks.Where(chunk => chunk.Id == "LDV1").ToArray();
+            if (ldv1.Length > 1) blockers.Add($"Expected at most one LDV1 chunk; found {ldv1.Length:N0}.");
+            else if (ldv1.Length == 1)
+            {
+                var dataOffset = checked((int)ldv1[0].DataOffset);
+                if (ldv1[0].Size != 16)
+                    blockers.Add($"LDV1 has {ldv1[0].Size:N0} bytes; the verified single-profile structure is exactly 16 bytes.");
+                else
+                {
+                    var threshold = BitConverter.ToSingle(source, dataOffset + 4);
+                    if (U16(source, dataOffset) != 0 || U16(source, dataOffset + 2) != 1 || !float.IsFinite(threshold) || threshold <= 0 || U32(source, dataOffset + 8) != 0x02010000 || U32(source, dataOffset + 12) != 0)
+                        blockers.Add("LDV1 does not match the verified one-SKIN LOD-selection structure; it will not be discarded.");
+                    else omittedSingleProfileLdv1 = true;
+                }
+            }
+            var unexpected = chunks.Where(chunk => chunk.Id is not "MD21" and not "SFID" and not "TXID" and not "TXAC" and not "LDV1").Select(chunk => chunk.Id).Distinct().Order().ToArray();
             if (unexpected.Length > 0) blockers.Add($"Modern semantic chunk(s) are outside the static profile: {string.Join(", ", unexpected)}.");
             var md21 = chunks.Where(chunk => chunk.Id == "MD21").ToArray();
             if (md21.Length != 1) blockers.Add($"Expected exactly one MD21 payload chunk; found {md21.Length:N0}.");
@@ -251,6 +271,11 @@ public static class StaticM2DownportService
         if (resolvedTextures.Count > 0) transformations.Add($"Embed {resolvedTextures.Count:N0} listfile-resolved texture path(s) into the Wrath M2 payload and remove the external FileDataID dependency.");
         transformations.Add("Repack modern SKIN v3 common arrays into the Wrath SKIN v2 header without changing their contents.");
         if (omittedEmptyTxac) transformations.Add("Omit the proven zero-filled TXAC extension chunk; it contains no texture-animation values to translate.");
+        if (omittedSingleProfileLdv1)
+        {
+            transformations.Add("Omit the verified single-profile LDV1 selection chunk after proving the model exposes exactly one SKIN.");
+            losses.Add("Wrath's chunkless M2 container has no LDV1 distance-selection metadata; its finite modern threshold is omitted while the sole validated SKIN geometry remains unchanged.");
+        }
         var outputFlags = flags & ~SupportedModernFlagMask;
         if (materialTranslation.BlendOverrides.Count > 0) outputFlags |= 0x8;
         return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, listfile?.SourcePath, listfile?.SourceSha256, resolvedTextures, version, flags,
