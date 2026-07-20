@@ -39,7 +39,8 @@ public sealed record AdtPlacementLifecyclePlan(
     string? OccupancyPrefix,
     string? OccupancyFingerprint,
     int OccupancyFilesScanned,
-    IReadOnlyList<AdtPlacementCellReference> ReferencedCells);
+    IReadOnlyList<AdtPlacementCellReference> ReferencedCells,
+    bool CoordinatedMultiTile = false);
 
 public sealed record AdtPlacementLifecycleResult(
     string OutputPath,
@@ -84,6 +85,17 @@ public static partial class AdtPlacementLifecycleService
 
     public static AdtPlacementLifecyclePlan PlanAdd(string inputPath, AdtPlacementKind kind, string clientPath, string assetPath,
         Vector3 position, Vector3 orientation, ushort? scaleRaw = null, uint? uniqueId = null, ushort flags = 0, ushort doodadSet = 0, ushort nameSet = 0)
+        => PlanAddCore(inputPath, kind, clientPath, assetPath, position, orientation, scaleRaw, uniqueId, flags, doodadSet, nameSet, false, null);
+
+    internal static AdtPlacementLifecyclePlan PlanCoordinatedAdd(string inputPath, AdtPlacementKind kind, string clientPath, string assetPath,
+        Vector3 position, Vector3 orientation, ushort? scaleRaw, uint uniqueId, ushort flags, ushort doodadSet, ushort nameSet,
+        string occupancyDirectory, string occupancyPrefix, IReadOnlyList<string> occupancyFiles)
+        => PlanAddCore(inputPath, kind, clientPath, assetPath, position, orientation, scaleRaw, uniqueId, flags, doodadSet, nameSet, true,
+            new(Path.GetFullPath(occupancyDirectory), occupancyPrefix, occupancyFiles.Select(Path.GetFullPath).ToArray()));
+
+    private static AdtPlacementLifecyclePlan PlanAddCore(string inputPath, AdtPlacementKind kind, string clientPath, string assetPath,
+        Vector3 position, Vector3 orientation, ushort? scaleRaw, uint? uniqueId, ushort flags, ushort doodadSet, ushort nameSet,
+        bool coordinatedMultiTile, OccupancyScope? coordinatedScope)
     {
         inputPath = Path.GetFullPath(inputPath); clientPath = NormalizeClientPath(clientPath, kind); assetPath = Path.GetFullPath(assetPath);
         RequireFinite(position, "placement position"); RequireFinite(orientation, "placement orientation");
@@ -92,7 +104,7 @@ public static partial class AdtPlacementLifecycleService
         var index = kind == AdtPlacementKind.M2 ? inspection.M2Placements.Count : inspection.WmoPlacements.Count;
         var rawScale = scaleRaw ?? 1024; if (kind == AdtPlacementKind.M2 && rawScale == 0) throw new InvalidDataException("M2 placement scale cannot be zero.");
         if (kind == AdtPlacementKind.M2 && (doodadSet != 0 || nameSet != 0)) throw new InvalidOperationException("Doodad-set and name-set values apply only to WMO MODF records.");
-        var scope = DiscoverOccupancyScope(inputPath); var occupancy = ScanOccupancy(scope); var uid = uniqueId ?? NextUniqueId(occupancy.Maximum);
+        var scope = coordinatedScope ?? DiscoverOccupancyScope(inputPath); var occupancy = ScanOccupancy(scope); var uid = uniqueId ?? NextUniqueId(occupancy.Maximum);
         if (uid == 0) throw new InvalidDataException("Placement unique ID zero is reserved; choose a positive ID.");
         if (occupancy.Ids.Contains(uid)) throw new InvalidOperationException($"Placement unique ID {uid:N0} is already present in {scope.Prefix}_<x>_<y>.adt within {scope.Directory}.");
 
@@ -108,14 +120,20 @@ public static partial class AdtPlacementLifecycleService
             var evidence = WmoPlacementBoundsService.InspectRoot(assetPath); assetHash = evidence.Sha256; assetMinimum = evidence.DeclaredMinimum; assetMaximum = evidence.DeclaredMaximum; points = 8;
             var bounds = WmoPlacementBoundsService.Calculate(evidence, position, orientation, EffectiveScale(rawScale)); minimum = bounds.Minimum; maximum = bounds.Maximum;
         }
-        var cells = IntersectedCells(inspection, minimum, maximum);
+        var cells = IntersectedCells(inspection, minimum, maximum, coordinatedMultiTile);
         return new(FormatVersion, DateTimeOffset.UtcNow, inputPath, Sha256(inputPath), AdtPlacementLifecycleOperation.Add, kind, index, uid, nameId, clientPath,
             AdtPlacementVector.From(position), AdtPlacementVector.From(orientation), rawScale, flags, doodadSet, nameSet,
             AdtPlacementVector.From(minimum), AdtPlacementVector.From(maximum), assetPath, assetHash, AdtPlacementVector.From(assetMinimum), AdtPlacementVector.From(assetMaximum), points,
-            scope.Directory, scope.Prefix, occupancy.Fingerprint, scope.Files.Count, cells);
+            scope.Directory, scope.Prefix, occupancy.Fingerprint, scope.Files.Count, cells, coordinatedMultiTile);
     }
 
     public static AdtPlacementLifecyclePlan PlanDelete(string inputPath, AdtPlacementKind kind, int index)
+        => PlanDeleteCore(inputPath, kind, index, false);
+
+    internal static AdtPlacementLifecyclePlan PlanCoordinatedDelete(string inputPath, AdtPlacementKind kind, int index)
+        => PlanDeleteCore(inputPath, kind, index, true);
+
+    private static AdtPlacementLifecyclePlan PlanDeleteCore(string inputPath, AdtPlacementKind kind, int index, bool coordinatedMultiTile)
     {
         inputPath = Path.GetFullPath(inputPath); if (index < 0) throw new ArgumentOutOfRangeException(nameof(index)); var inspection = RequireEditableAdt(inputPath); var chunks = ParseTopChunks(File.ReadAllBytes(inputPath)); ValidateScaffold(chunks);
         var references = ReadAllCellReferences(chunks); var cells = references.Where(cell => (kind == AdtPlacementKind.M2 ? cell.M2 : cell.Wmo).Contains(checked((uint)index))).Select(cell => new AdtPlacementCellReference(cell.X, cell.Y)).OrderBy(cell => cell.Y).ThenBy(cell => cell.X).ToArray();
@@ -123,53 +141,66 @@ public static partial class AdtPlacementLifecycleService
         {
             var value = inspection.M2Placements.ElementAtOrDefault(index) ?? throw new ArgumentOutOfRangeException(nameof(index), $"M2 placement index {index:N0} does not exist.");
             return new(FormatVersion, DateTimeOffset.UtcNow, inputPath, Sha256(inputPath), AdtPlacementLifecycleOperation.Delete, kind, index, value.UniqueId, value.NameId, value.ClientPath,
-                AdtPlacementVector.From(value.Position), AdtPlacementVector.From(value.Orientation), value.ScaleRaw, value.Flags, 0, 0, null, null, null, null, null, null, 0, null, null, null, 0, cells);
+                AdtPlacementVector.From(value.Position), AdtPlacementVector.From(value.Orientation), value.ScaleRaw, value.Flags, 0, 0, null, null, null, null, null, null, 0, null, null, null, 0, cells, coordinatedMultiTile);
         }
         var wmo = inspection.WmoPlacements.ElementAtOrDefault(index) ?? throw new ArgumentOutOfRangeException(nameof(index), $"WMO placement index {index:N0} does not exist.");
         return new(FormatVersion, DateTimeOffset.UtcNow, inputPath, Sha256(inputPath), AdtPlacementLifecycleOperation.Delete, kind, index, wmo.UniqueId, wmo.NameId, wmo.ClientPath,
             AdtPlacementVector.From(wmo.Position), AdtPlacementVector.From(wmo.Orientation), wmo.ScaleRaw, wmo.Flags, wmo.DoodadSet, wmo.NameSet,
-            AdtPlacementVector.From(wmo.MinimumExtent), AdtPlacementVector.From(wmo.MaximumExtent), null, null, null, null, 0, null, null, null, 0, cells);
+            AdtPlacementVector.From(wmo.MinimumExtent), AdtPlacementVector.From(wmo.MaximumExtent), null, null, null, null, 0, null, null, null, 0, cells, coordinatedMultiTile);
     }
 
     public static void SavePlan(AdtPlacementLifecyclePlan plan, string path, bool overwrite = false)
     {
-        Validate(plan); path = Path.GetFullPath(path); if (File.Exists(path) && !overwrite) throw new IOException($"Placement lifecycle plan already exists: {path}"); AtomicWrite(path, JsonSerializer.SerializeToUtf8Bytes(plan, JsonOptions), overwrite);
+        Validate(plan, false, null); path = Path.GetFullPath(path); if (File.Exists(path) && !overwrite) throw new IOException($"Placement lifecycle plan already exists: {path}"); AtomicWrite(path, JsonSerializer.SerializeToUtf8Bytes(plan, JsonOptions), overwrite);
     }
 
     public static AdtPlacementLifecyclePlan LoadPlan(string path)
     {
         path = Path.GetFullPath(path); if (!File.Exists(path)) throw new FileNotFoundException("The ADT placement lifecycle plan does not exist.", path);
-        var plan = JsonSerializer.Deserialize<AdtPlacementLifecyclePlan>(File.ReadAllBytes(path), JsonOptions) ?? throw new InvalidDataException("The ADT placement lifecycle plan is empty."); Validate(plan); return plan;
+        var plan = JsonSerializer.Deserialize<AdtPlacementLifecyclePlan>(File.ReadAllBytes(path), JsonOptions) ?? throw new InvalidDataException("The ADT placement lifecycle plan is empty."); Validate(plan, false, null); return plan;
     }
 
     public static AdtPlacementLifecycleResult Apply(AdtPlacementLifecyclePlan plan, string outputPath, bool overwrite = false)
+        => ApplyCore(plan, outputPath, overwrite, false, null, writeReceipt: true);
+
+    internal static AdtPlacementLifecycleResult ApplyCoordinated(AdtPlacementLifecyclePlan plan, string outputPath,
+        string occupancyDirectory, string occupancyPrefix, IReadOnlyList<string> occupancyFiles)
+        => ApplyCore(plan, outputPath, false, true, new(Path.GetFullPath(occupancyDirectory), occupancyPrefix, occupancyFiles.Select(Path.GetFullPath).ToArray()), writeReceipt: false);
+
+    private static AdtPlacementLifecycleResult ApplyCore(AdtPlacementLifecyclePlan plan, string outputPath, bool overwrite,
+        bool allowCoordinated, OccupancyScope? coordinatedScope, bool writeReceipt)
     {
-        var before = Validate(plan); outputPath = Path.GetFullPath(outputPath);
+        var before = Validate(plan, allowCoordinated, coordinatedScope); outputPath = Path.GetFullPath(outputPath);
         if (outputPath.Equals(Path.GetFullPath(plan.InputPath), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Crucible does not overwrite the source ADT; choose a separate placement-lifecycle output path.");
         if (File.Exists(outputPath) && !overwrite) throw new IOException($"Output ADT already exists: {outputPath}");
         var chunks = ParseTopChunks(File.ReadAllBytes(plan.InputPath)); ValidateScaffold(chunks); var originalReferences = ReadAllCellReferences(chunks);
         if (plan.Operation == AdtPlacementLifecycleOperation.Add) AddPlacement(chunks, plan); else DeletePlacement(chunks, plan);
         RewriteTopLevelReferences(chunks); var bytes = Concatenate(chunks); AtomicWrite(outputPath, bytes, overwrite);
         var after = MapAssetInspectionService.Inspect(outputPath); VerifyPlacements(before, after, plan); VerifyReferences(originalReferences, ReadAllCellReferences(ParseTopChunks(bytes)), plan);
-        var hash = Sha256(outputPath); var receiptPath = outputPath + ".crucible-placement-lifecycle.json";
-        AtomicWrite(receiptPath, JsonSerializer.SerializeToUtf8Bytes(new { FormatVersion, AppliedUtc = DateTimeOffset.UtcNow, Plan = plan, OutputPath = outputPath, OutputSha256 = hash }, JsonOptions), true);
+        var hash = Sha256(outputPath); var receiptPath = writeReceipt ? outputPath + ".crucible-placement-lifecycle.json" : string.Empty;
+        if (writeReceipt) AtomicWrite(receiptPath, JsonSerializer.SerializeToUtf8Bytes(new { FormatVersion, AppliedUtc = DateTimeOffset.UtcNow, Plan = plan, OutputPath = outputPath, OutputSha256 = hash }, JsonOptions), true);
         return new(outputPath, hash, receiptPath, after, plan.Operation, plan.Kind, plan.Index, plan.UniqueId, plan.ReferencedCells.Count);
     }
 
-    private static MapAssetInspection Validate(AdtPlacementLifecyclePlan plan)
+    internal static void ValidateCoordinated(AdtPlacementLifecyclePlan plan, string occupancyDirectory, string occupancyPrefix, IReadOnlyList<string> occupancyFiles)
+        => _ = Validate(plan, true, new(Path.GetFullPath(occupancyDirectory), occupancyPrefix, occupancyFiles.Select(Path.GetFullPath).ToArray()));
+
+    private static MapAssetInspection Validate(AdtPlacementLifecyclePlan plan, bool allowCoordinated, OccupancyScope? coordinatedScope)
     {
         ArgumentNullException.ThrowIfNull(plan); if (plan.FormatVersion != FormatVersion || !Enum.IsDefined(plan.Operation) || !Enum.IsDefined(plan.Kind) || plan.Index < 0 || plan.UniqueId == 0) throw new InvalidDataException("Placement lifecycle plan has an unsupported format, operation, kind, index, or unique ID.");
+        if (plan.CoordinatedMultiTile && !allowCoordinated) throw new InvalidOperationException("This placement segment belongs to a coordinated multi-tile transaction and cannot be applied by itself.");
+        if (!plan.CoordinatedMultiTile && coordinatedScope is not null) throw new InvalidDataException("A single-tile placement plan cannot be smuggled into a coordinated transaction.");
         RequireFinite(plan.Position.ToVector3(), "planned position"); RequireFinite(plan.Orientation.ToVector3(), "planned orientation");
         var source = RequireEditableAdt(plan.InputPath); if (!Sha256(plan.InputPath).Equals(plan.InputSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Source ADT hash no longer matches the placement lifecycle plan.");
         if (plan.Operation == AdtPlacementLifecycleOperation.Add && plan.ReferencedCells.Count == 0 || plan.ReferencedCells.Any(cell => cell.X is < 0 or >= 16 || cell.Y is < 0 or >= 16) || plan.ReferencedCells.Distinct().Count() != plan.ReferencedCells.Count) throw new InvalidDataException("Placement lifecycle plan has an empty add-cell set, duplicate cells, or an out-of-range MCRF cell.");
         if (plan.Operation == AdtPlacementLifecycleOperation.Delete)
         {
             if (plan.AssetPath is not null || plan.AssetSha256 is not null || plan.AssetMinimum is not null || plan.AssetMaximum is not null || plan.AssetPointCount != 0 || plan.OccupancyDirectory is not null || plan.OccupancyPrefix is not null || plan.OccupancyFingerprint is not null || plan.OccupancyFilesScanned != 0) throw new InvalidDataException("Delete plans cannot contain add-only geometry or occupancy evidence.");
-            var rebuilt = PlanDelete(plan.InputPath, plan.Kind, plan.Index); RequireEquivalent(plan, rebuilt); return source;
+            var rebuilt = PlanDeleteCore(plan.InputPath, plan.Kind, plan.Index, plan.CoordinatedMultiTile); RequireEquivalent(plan, rebuilt); return source;
         }
         if (plan.ClientPath is null || plan.AssetPath is null || plan.AssetSha256 is null || plan.AssetMinimum is null || plan.AssetMaximum is null || plan.AssetPointCount == 0 || plan.OccupancyDirectory is null || plan.OccupancyPrefix is null || plan.OccupancyFingerprint is null || plan.OccupancyFilesScanned <= 0 || plan.MinimumExtent is null || plan.MaximumExtent is null) throw new InvalidDataException("Add plan geometry, bounds, path, or occupancy evidence is incomplete.");
         if (plan.Kind == AdtPlacementKind.M2 && plan.ScaleRaw == 0) throw new InvalidDataException("M2 add plan scale cannot be zero.");
-        var rebuiltAdd = PlanAdd(plan.InputPath, plan.Kind, plan.ClientPath, plan.AssetPath, plan.Position.ToVector3(), plan.Orientation.ToVector3(), plan.ScaleRaw, plan.UniqueId, plan.Flags, plan.DoodadSet, plan.NameSet); RequireEquivalent(plan, rebuiltAdd); return source;
+        var rebuiltAdd = PlanAddCore(plan.InputPath, plan.Kind, plan.ClientPath, plan.AssetPath, plan.Position.ToVector3(), plan.Orientation.ToVector3(), plan.ScaleRaw, plan.UniqueId, plan.Flags, plan.DoodadSet, plan.NameSet, plan.CoordinatedMultiTile, coordinatedScope); RequireEquivalent(plan, rebuiltAdd); return source;
     }
 
     private static void RequireEquivalent(AdtPlacementLifecyclePlan expected, AdtPlacementLifecyclePlan actual)
@@ -262,12 +293,12 @@ public static partial class AdtPlacementLifecycleService
         var m2 = new uint[m2Count]; var wmo = new uint[wmoCount]; for (var index = 0; index < total; index++) { var value = ReadU32(bytes, offset + 8 + index * 4); if (index < m2Count) m2[index] = value; else wmo[index - m2Count] = value; } return new(x, y, m2, wmo);
     }
 
-    private static IReadOnlyList<AdtPlacementCellReference> IntersectedCells(MapAssetInspection inspection, Vector3 minimum, Vector3 maximum)
+    private static IReadOnlyList<AdtPlacementCellReference> IntersectedCells(MapAssetInspection inspection, Vector3 minimum, Vector3 maximum, bool coordinatedMultiTile)
     {
         RequireFinite(minimum, "placement minimum extent"); RequireFinite(maximum, "placement maximum extent"); if (minimum.X > maximum.X || minimum.Y > maximum.Y || minimum.Z > maximum.Z) throw new InvalidDataException("Placement geometry produced reversed bounds.");
         if (inspection.TileX is not { } tileX || inspection.TileY is not { } tileY) throw new InvalidDataException("Placement creation requires an ADT named <map>_<tileX>_<tileY>.adt so cell ownership can be proven.");
         var tileMinimumX = tileX * TileSize; var tileMinimumZ = tileY * TileSize; var tileMaximumX = tileMinimumX + TileSize; var tileMaximumZ = tileMinimumZ + TileSize;
-        if (minimum.X < tileMinimumX - BoundaryTolerance || maximum.X > tileMaximumX + BoundaryTolerance || minimum.Z < tileMinimumZ - BoundaryTolerance || maximum.Z > tileMaximumZ + BoundaryTolerance) throw new InvalidOperationException($"Placement bounds {minimum.X:0.###},{minimum.Z:0.###}..{maximum.X:0.###},{maximum.Z:0.###} cross outside ADT tile {tileX},{tileY} ({tileMinimumX:0.###},{tileMinimumZ:0.###}..{tileMaximumX:0.###},{tileMaximumZ:0.###}). Multi-tile placement creation is not yet safe, so use a tile that fully contains this object.");
+        if (!coordinatedMultiTile && (minimum.X < tileMinimumX - BoundaryTolerance || maximum.X > tileMaximumX + BoundaryTolerance || minimum.Z < tileMinimumZ - BoundaryTolerance || maximum.Z > tileMaximumZ + BoundaryTolerance)) throw new InvalidOperationException($"Placement bounds {minimum.X:0.###},{minimum.Z:0.###}..{maximum.X:0.###},{maximum.Z:0.###} cross outside ADT tile {tileX},{tileY} ({tileMinimumX:0.###},{tileMinimumZ:0.###}..{tileMaximumX:0.###},{tileMaximumZ:0.###}). Use the coordinated multi-tile placement workflow for this object.");
         var present = inspection.Cells.Where(cell => cell.Present).Select(cell => (cell.X, cell.Y)).ToHashSet(); var result = new List<AdtPlacementCellReference>();
         for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++)
         {
