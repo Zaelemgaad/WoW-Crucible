@@ -5,12 +5,55 @@ using System.Text.RegularExpressions;
 
 namespace WoWCrucible.Core;
 
-public sealed record PatchEntry(string SourcePath, string ArchivePath);
+public sealed record PatchEntry(string SourcePath, string ArchivePath, uint Locale = 0);
 public sealed record MpqFileEntry(string ArchivePath, long Size, long CompressedSize, uint Flags, uint Locale, uint BlockIndex = uint.MaxValue)
 {
     public bool IsMetadata => MpqPathClassifier.IsMetadata(ArchivePath);
 }
 public sealed record PatchPathAssessment(bool HasWarning, string Message);
+
+public static class MpqLocale
+{
+    private const uint MaximumCompoundLocale = 0x00FFFFFF;
+    private static readonly IReadOnlyDictionary<string, uint> Named = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["neutral"] = 0, ["none"] = 0,
+        ["enUS"] = 0x0409, ["koKR"] = 0x0412, ["frFR"] = 0x040C, ["deDE"] = 0x0407,
+        ["zhCN"] = 0x0804, ["zhTW"] = 0x0404, ["esES"] = 0x0C0A, ["esMX"] = 0x080A,
+        ["ruRU"] = 0x0419, ["ptBR"] = 0x0416, ["itIT"] = 0x0410
+    };
+    private static readonly IReadOnlyDictionary<uint, string> Names = Named.Where(pair => pair.Value != 0).GroupBy(pair => pair.Value).ToDictionary(group => group.Key, group => group.First().Key);
+
+    public static uint Parse(string? value)
+    {
+        value = value?.Trim();
+        if (string.IsNullOrEmpty(value)) return 0;
+        if (Named.TryGetValue(value, out var named)) return named;
+        uint parsed;
+        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!uint.TryParse(value[2..], System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out parsed))
+                throw new FormatException($"Invalid MPQ locale '{value}'. Use neutral, a client locale such as enUS, decimal LCID, or hexadecimal 0x0409.");
+        }
+        else if (!uint.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out parsed))
+            throw new FormatException($"Invalid MPQ locale '{value}'. Use neutral, a client locale such as enUS, decimal LCID, or hexadecimal 0x0409.");
+        Validate(parsed); return parsed;
+    }
+
+    public static void Validate(uint locale)
+    {
+        if (locale > MaximumCompoundLocale) throw new ArgumentOutOfRangeException(nameof(locale), locale, "An MPQ locale/platform identity must fit StormLib's 24-bit compound LCID.");
+    }
+
+    public static string Format(uint locale)
+    {
+        Validate(locale);
+        return locale == 0 ? "neutral (0x0000)" : Names.TryGetValue(locale, out var name) ? $"{name} (0x{locale:X4})" : $"0x{locale:X8}";
+    }
+
+    public static string Token(uint locale) => locale == 0 ? "neutral" : Names.GetValueOrDefault(locale) ?? $"0x{locale:X8}";
+    public static string Identity(string archivePath, uint locale) => $"{PatchInputMapper.NormalizeArchivePath(archivePath).ToUpperInvariant()}\u001F{locale:X8}";
+}
 
 public static class MpqPathClassifier
 {
@@ -107,16 +150,14 @@ public sealed class PatchArchiveService
     private const uint FileReplaceExisting = 0x80000000;
     private const uint CompressionZlib = 0x02;
     private const uint OpenReadOnly = 0x00000100;
-    private static readonly object LegacyLocaleExtractionLock = new();
+    // StormLib's current locale is process-global. Every set+operation sequence must
+    // therefore be isolated and restore the caller's previous locale.
+    private static readonly object LocaleOperationLock = new();
     private sealed record ExtractionItem(MpqFileEntry Entry, string InternalPath, string OutputPath, string Destination, string LookupPath);
 
     public void Create(string outputPath, IEnumerable<PatchEntry> sourceEntries)
     {
-        var entries = sourceEntries.Select(entry => entry with { SourcePath = Path.GetFullPath(entry.SourcePath), ArchivePath = PatchInputMapper.NormalizeArchivePath(entry.ArchivePath) }).ToArray();
-        if (entries.Length == 0) throw new InvalidOperationException("Add at least one file to the patch.");
-        if (entries.Any(entry => !File.Exists(entry.SourcePath))) throw new FileNotFoundException("One or more patch source files no longer exist.");
-        var duplicate = entries.GroupBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
-        if (duplicate is not null) throw new InvalidOperationException($"Duplicate MPQ path: {duplicate.Key}");
+        var entries = ValidateEntries(sourceEntries);
 
         outputPath = Path.GetFullPath(outputPath);
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
@@ -129,7 +170,7 @@ public sealed class PatchArchiveService
                 ThrowNative("create the MPQ archive");
             foreach (var entry in entries)
             {
-                if (!Native.SFileAddFileEx(archive, entry.SourcePath, entry.ArchivePath, FileCompress | FileReplaceExisting, CompressionZlib, 0xFFFFFFFF))
+                if (!WithLocale(entry.Locale, () => Native.SFileAddFileEx(archive, entry.SourcePath, entry.ArchivePath, FileCompress | FileReplaceExisting, CompressionZlib, 0xFFFFFFFF)))
                     ThrowNative($"add '{entry.ArchivePath}'");
             }
             if (!Native.SFileCloseArchive(archive)) ThrowNative("finalize the MPQ archive");
@@ -144,10 +185,10 @@ public sealed class PatchArchiveService
         }
     }
 
-    public bool Contains(string archivePath, string internalPath)
+    public bool Contains(string archivePath, string internalPath, uint locale = 0)
     {
         var archive = OpenArchiveWithRetry(Path.GetFullPath(archivePath), "open the MPQ archive");
-        try { return Native.SFileHasFile(archive, PatchInputMapper.NormalizeArchivePath(internalPath)); }
+        try { var path = PatchInputMapper.NormalizeArchivePath(internalPath); return WithLocale(locale, () => Native.SFileHasFile(archive, path)); }
         finally { Native.SFileCloseArchive(archive); }
     }
 
@@ -167,7 +208,7 @@ public sealed class PatchArchiveService
                 {
                     embeddedListFile = Path.Combine(Path.GetTempPath(), $"wow-crucible-embedded-listfile-{Environment.ProcessId}-{Guid.NewGuid():N}.txt");
                     bool extracted;
-                    lock (LegacyLocaleExtractionLock) { Native.SFileSetLocale(0); extracted = Native.SFileExtractFile(archive, "(listfile)", embeddedListFile, 0); }
+                    extracted = WithLocale(0, () => Native.SFileExtractFile(archive, "(listfile)", embeddedListFile, 0));
                     if (extracted && File.Exists(embeddedListFile) && new FileInfo(embeddedListFile).Length > 0)
                     {
                         var recovered = EnumerateFiles(archive, mask, embeddedListFile);
@@ -223,7 +264,7 @@ public sealed class PatchArchiveService
     }
 
     public void Extract(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default,
-        bool overwriteExisting = true, bool preserveLocaleVariants = false, Action<MpqFileEntry, Exception>? extractionFailure = null, int workers = 0)
+        bool overwriteExisting = true, bool preserveLocaleVariants = true, Action<MpqFileEntry, Exception>? extractionFailure = null, int workers = 0)
     {
         if (workers is < 0 or > MaximumExtractionWorkers) throw new ArgumentOutOfRangeException(nameof(workers), $"Extraction workers must be auto (0) or from 1 to {MaximumExtractionWorkers}.");
         archivePath = Path.GetFullPath(archivePath);
@@ -273,8 +314,8 @@ public sealed class PatchArchiveService
         }
         if (pending.Count == 0) return;
 
-        // Entries sharing one output path intentionally remain ordered on one worker. This preserves
-        // the long-standing "last selected locale wins" behavior when variants are not preserved.
+        // Entries sharing one output path remain ordered on one worker when a caller explicitly opts
+        // out of variant preservation. Correctness-first callers preserve variants by default.
         var groups = pending.GroupBy(item => item.Destination, StringComparer.OrdinalIgnoreCase).Select(group => group.ToArray()).ToArray();
         var workerCount = Math.Min(groups.Length, workers == 0 ? RecommendedExtractionWorkers : workers);
         var archives = new IntPtr[workerCount];
@@ -324,11 +365,7 @@ public sealed class PatchArchiveService
     {
         if (!item.LookupPath.Equals(item.InternalPath, StringComparison.Ordinal))
             return Native.SFileExtractFile(archive, item.LookupPath, temporary, 0);
-        lock (LegacyLocaleExtractionLock)
-        {
-            Native.SFileSetLocale(item.Entry.Locale);
-            return Native.SFileExtractFile(archive, item.InternalPath, temporary, 0);
-        }
+        return WithLocale(item.Entry.Locale, () => Native.SFileExtractFile(archive, item.InternalPath, temporary, 0));
     }
 
     internal IReadOnlyList<(MpqFileEntry Entry, string FilePath)> ExtractFlat(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, CancellationToken cancellationToken = default)
@@ -339,8 +376,8 @@ public sealed class PatchArchiveService
         {
             for (var index = 0; index < entries.Length; index++)
             {
-                cancellationToken.ThrowIfCancellationRequested(); Native.SFileSetLocale(entries[index].Locale); var internalPath = PatchInputMapper.NormalizeArchivePath(entries[index].ArchivePath); var destination = Path.Combine(destinationRoot, $"{index:X8}.bin");
-                ExtractFileAtomically(destination, overwriteExisting: false, temporary => Native.SFileExtractFile(archive, internalPath, temporary, 0), () => ThrowNative($"extract '{internalPath}'")); result.Add((entries[index], destination));
+                cancellationToken.ThrowIfCancellationRequested(); var internalPath = PatchInputMapper.NormalizeArchivePath(entries[index].ArchivePath); var destination = Path.Combine(destinationRoot, $"{index:X8}.bin");
+                ExtractFileAtomically(destination, overwriteExisting: false, temporary => WithLocale(entries[index].Locale, () => Native.SFileExtractFile(archive, internalPath, temporary, 0)), () => ThrowNative($"extract '{internalPath}' locale {MpqLocale.Format(entries[index].Locale)}")); result.Add((entries[index], destination));
             }
         }
         finally { Native.SFileCloseArchive(archive); }
@@ -383,7 +420,7 @@ public sealed class PatchArchiveService
         {
             archive = OpenArchiveWithRetry(tempPath, "open the MPQ archive for updating", 0);
             foreach (var entry in entries)
-                if (!Native.SFileAddFileEx(archive, entry.SourcePath, entry.ArchivePath, FileCompress | FileReplaceExisting, CompressionZlib, 0xFFFFFFFF))
+                if (!WithLocale(entry.Locale, () => Native.SFileAddFileEx(archive, entry.SourcePath, entry.ArchivePath, FileCompress | FileReplaceExisting, CompressionZlib, 0xFFFFFFFF)))
                     ThrowNative($"add '{entry.ArchivePath}'");
             if (!Native.SFileCloseArchive(archive)) ThrowNative("finalize the updated MPQ archive");
             archive = IntPtr.Zero;
@@ -399,12 +436,23 @@ public sealed class PatchArchiveService
 
     private static PatchEntry[] ValidateEntries(IEnumerable<PatchEntry> sourceEntries)
     {
-        var entries = sourceEntries.Select(entry => entry with { SourcePath = Path.GetFullPath(entry.SourcePath), ArchivePath = PatchInputMapper.NormalizeArchivePath(entry.ArchivePath) }).ToArray();
+        var entries = sourceEntries.Select(entry => { MpqLocale.Validate(entry.Locale); return entry with { SourcePath = Path.GetFullPath(entry.SourcePath), ArchivePath = PatchInputMapper.NormalizeArchivePath(entry.ArchivePath) }; }).ToArray();
         if (entries.Length == 0) throw new InvalidOperationException("Add at least one file to the patch.");
         if (entries.Any(entry => !File.Exists(entry.SourcePath))) throw new FileNotFoundException("One or more patch source files no longer exist.");
-        var duplicate = entries.GroupBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
-        if (duplicate is not null) throw new InvalidOperationException($"Duplicate MPQ path: {duplicate.Key}");
+        var duplicate = entries.GroupBy(entry => MpqLocale.Identity(entry.ArchivePath, entry.Locale), StringComparer.Ordinal).FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null) { var entry = duplicate.First(); throw new InvalidOperationException($"Duplicate MPQ identity: {entry.ArchivePath} · {MpqLocale.Format(entry.Locale)}"); }
         return entries;
+    }
+
+    private static T WithLocale<T>(uint locale, Func<T> operation)
+    {
+        MpqLocale.Validate(locale);
+        lock (LocaleOperationLock)
+        {
+            var previous = Native.SFileGetLocale();
+            try { Native.SFileSetLocale(locale); return operation(); }
+            finally { Native.SFileSetLocale(previous); }
+        }
     }
 
     private static void ThrowNative(string operation) => throw new Win32Exception(Marshal.GetLastWin32Error(), $"StormLib could not {operation}");
@@ -476,5 +524,8 @@ public sealed class PatchArchiveService
 
         [DllImport("StormLib.dll", SetLastError = true)]
         internal static extern uint SFileSetLocale(uint locale);
+
+        [DllImport("StormLib.dll")]
+        internal static extern uint SFileGetLocale();
     }
 }

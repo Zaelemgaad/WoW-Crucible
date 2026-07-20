@@ -3371,6 +3371,41 @@ if (!patchService.Contains(Path.Combine(builtDirectory, "patch-X.mpq"), "DBFiles
     var blockedMergePath = Path.Combine(builtDirectory, "merge-blocked.mpq"); var blockedMerge = new MpqMergeService().Merge([mergeA, mergeConflict], blockedMergePath);
     if (blockedMerge.OutputFiles != 0 || blockedMerge.Conflicts.Count != 1 || File.Exists(blockedMergePath))
         throw new InvalidOperationException("MPQ merge did not block a different-byte internal-path conflict before creating output.");
+
+    const string localizedArchivePath = @"Interface\FrameXML\CrucibleLocale.lua";
+    const uint enUsLocale = 0x0409; const uint deDeLocale = 0x0407; const uint frFrLocale = 0x040C;
+    if (MpqLocale.Parse("enUS") != enUsLocale || MpqLocale.Parse("0x0407") != deDeLocale || MpqLocale.Parse("1036") != frFrLocale || !MpqLocale.Format(enUsLocale).Contains("enUS", StringComparison.Ordinal))
+        throw new InvalidOperationException("Named, hexadecimal, or decimal MPQ locale parsing regressed.");
+    var localeA = Path.Combine(builtDirectory, "locale-a.mpq"); var localeB = Path.Combine(builtDirectory, "locale-b.mpq"); var localeConflict = Path.Combine(builtDirectory, "locale-conflict.mpq");
+    patchService.Create(localeA, [new(castTimesSource, localizedArchivePath, enUsLocale), new(animationPath, localizedArchivePath, deDeLocale)]);
+    patchService.Create(localeB, [new(castTimesSource, localizedArchivePath, enUsLocale), new(castTimesSource, localizedArchivePath, frFrLocale)]);
+    patchService.Create(localeConflict, [new(animationPath, localizedArchivePath, enUsLocale)]);
+    var localeAEntries = patchService.ListFiles(localeA).Where(entry => !entry.IsMetadata && entry.ArchivePath.Equals(localizedArchivePath, StringComparison.OrdinalIgnoreCase)).OrderBy(entry => entry.Locale).ToArray();
+    if (localeAEntries.Length != 2 || !localeAEntries.Select(entry => entry.Locale).SequenceEqual(new[] { deDeLocale, enUsLocale }.Order()))
+        throw new InvalidOperationException("MPQ creation collapsed same-path locale variants.");
+    var localeMergedPath = Path.Combine(builtDirectory, "locale-merged.mpq"); var localeMerged = new MpqMergeService().Merge([localeA, localeB], localeMergedPath);
+    var localeMergedEntries = patchService.ListFiles(localeMergedPath).Where(entry => !entry.IsMetadata && entry.ArchivePath.Equals(localizedArchivePath, StringComparison.OrdinalIgnoreCase)).OrderBy(entry => entry.Locale).ToArray();
+    if (localeMerged.OutputFiles != 3 || localeMerged.LocaleVariantEntries != 3 || localeMerged.ExactDuplicates != 1 || localeMerged.Conflicts.Count != 0 || !localeMergedEntries.Select(entry => entry.Locale).SequenceEqual(new[] { deDeLocale, enUsLocale, frFrLocale }.Order()))
+        throw new InvalidOperationException("Locale-aware MPQ merge did not retain distinct path+locale identities or deduplicate only an exact same identity.");
+    var localeExtract = Path.Combine(builtDirectory, "locale-extract"); patchService.Extract(localeMergedPath, localeExtract, localeMergedEntries);
+    var localizedOutputs = Directory.GetFiles(localeExtract, "CrucibleLocale.locale-*.lua", SearchOption.AllDirectories);
+    if (localizedOutputs.Length != 3 || !localizedOutputs.Any(path => path.Contains("locale-0409", StringComparison.OrdinalIgnoreCase)) || !localizedOutputs.Any(path => path.Contains("locale-0407", StringComparison.OrdinalIgnoreCase)) || !localizedOutputs.Any(path => path.Contains("locale-040C", StringComparison.OrdinalIgnoreCase)))
+        throw new InvalidOperationException("Default MPQ extraction overwrote or failed to label same-path locale variants.");
+    var localizedManifestPath = Path.Combine(builtDirectory, "localized.crucible-patch.json"); PatchManifestService.Save(localizedManifestPath, "Localized fixture", "locale-a.mpq", [new(castTimesSource, localizedArchivePath, enUsLocale), new(animationPath, localizedArchivePath, deDeLocale)], policy: new(ExpectedEntryCount: 2));
+    var localizedManifest = PatchManifestService.Load(localizedManifestPath);
+    var duplicateLocalizedIdentity = PatchManifestService.ValidateEntries([new(castTimesSource, localizedArchivePath, enUsLocale), new(animationPath, localizedArchivePath, enUsLocale)]);
+    var invalidLocalizedIdentity = PatchManifestService.ValidateEntries([new(castTimesSource, localizedArchivePath, uint.MaxValue)]);
+    if (localizedManifest.FormatVersion != 5 || !PatchManifestService.Validate(localizedManifest, localeA).Passed || duplicateLocalizedIdentity.Passed || !duplicateLocalizedIdentity.Errors.Any(error => error.Code == "DuplicateArchivePath") || invalidLocalizedIdentity.Passed || !invalidLocalizedIdentity.Errors.Any(error => error.Code == "InvalidLocale"))
+        throw new InvalidOperationException("Format-v5 locale-aware patch manifests did not preserve or validate exact path+locale identities.");
+    var replacementGerman = Path.Combine(builtDirectory, "locale-german-replacement.txt"); File.WriteAllText(replacementGerman, "Crucible German locale replacement"); patchService.Update(localeMergedPath, [new(replacementGerman, localizedArchivePath, deDeLocale)]);
+    var updatedLocaleEntries = patchService.ListFiles(localeMergedPath).Where(entry => !entry.IsMetadata && entry.ArchivePath.Equals(localizedArchivePath, StringComparison.OrdinalIgnoreCase)).ToArray();
+    var updatedLocaleExtract = Path.Combine(builtDirectory, "locale-updated-extract"); patchService.Extract(localeMergedPath, updatedLocaleExtract, updatedLocaleEntries);
+    var germanOutput = Directory.GetFiles(updatedLocaleExtract, "*locale-0407*.lua", SearchOption.AllDirectories).Single();
+    if (updatedLocaleEntries.Length != 3 || File.ReadAllText(germanOutput) != "Crucible German locale replacement")
+        throw new InvalidOperationException("Transaction-safe MPQ update replaced the wrong locale or dropped sibling variants.");
+    var localeBlockedPath = Path.Combine(builtDirectory, "locale-blocked.mpq"); var localeBlocked = new MpqMergeService().Merge([localeA, localeConflict], localeBlockedPath);
+    if (localeBlocked.OutputFiles != 0 || localeBlocked.Conflicts.Count != 1 || localeBlocked.Conflicts[0].Locale != enUsLocale || File.Exists(localeBlockedPath))
+        throw new InvalidOperationException("MPQ merge did not scope a different-byte conflict to the exact same path+locale identity.");
     patchService.Update(builtPatch, PatchInputMapper.Map([animationPath]));
 File.AppendAllText(Path.Combine(overrideLayer, "SpellCastTimes.dbc"), "size mismatch");
 var mismatchedArchive = PatchManifestService.Validate(loadedManifest, builtPatch);

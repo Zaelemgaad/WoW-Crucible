@@ -24,8 +24,8 @@ public static class PatchManifestService
         var materialized = entries.ToArray();
         var validation = ValidateEntries(materialized, policy);
         var targetErrors = ValidateTarget(targetClient); if (!validation.Passed || targetErrors.Count > 0) throw new InvalidDataException(string.Join(Environment.NewLine, validation.Errors.Select(error => error.Message).Concat(targetErrors.Select(error => error.Message))));
-        var portable = materialized.Select(entry => new PatchEntry(Path.GetRelativePath(directory, Path.GetFullPath(entry.SourcePath)), PatchInputMapper.NormalizeArchivePath(entry.ArchivePath))).ToArray();
-        var manifest = new PatchManifest(targetClient is null ? 3 : 4, name, Path.GetFileName(outputFileName), portable, NormalizeSha256(requiredClientExecutableSha256), NormalizePolicy(policy), NormalizeTarget(targetClient));
+        var portable = materialized.Select(entry => new PatchEntry(Path.GetRelativePath(directory, Path.GetFullPath(entry.SourcePath)), PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), entry.Locale)).ToArray();
+        var manifest = new PatchManifest(portable.Any(entry => entry.Locale != 0) ? 5 : targetClient is null ? 3 : 4, name, Path.GetFileName(outputFileName), portable, NormalizeSha256(requiredClientExecutableSha256), NormalizePolicy(policy), NormalizeTarget(targetClient));
         File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
     }
 
@@ -33,9 +33,9 @@ public static class PatchManifestService
     {
         manifestPath = Path.GetFullPath(manifestPath);
         var manifest = JsonSerializer.Deserialize<PatchManifest>(File.ReadAllText(manifestPath)) ?? throw new InvalidDataException("The patch manifest is empty.");
-        if (manifest.FormatVersion is < 1 or > 4) throw new InvalidDataException($"Unsupported patch manifest version: {manifest.FormatVersion}");
+        if (manifest.FormatVersion is < 1 or > 5) throw new InvalidDataException($"Unsupported patch manifest version: {manifest.FormatVersion}");
         var directory = Path.GetDirectoryName(manifestPath)!;
-        var resolved = manifest.Entries.Select(entry => new PatchEntry(Path.GetFullPath(Path.Combine(directory, entry.SourcePath)), PatchInputMapper.NormalizeArchivePath(entry.ArchivePath))).ToArray();
+        var resolved = manifest.Entries.Select(entry => { MpqLocale.Validate(entry.Locale); return new PatchEntry(Path.GetFullPath(Path.Combine(directory, entry.SourcePath)), PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), entry.Locale); }).ToArray();
         return manifest with { Entries = resolved, RequiredClientExecutableSha256 = NormalizeSha256(manifest.RequiredClientExecutableSha256), Policy = NormalizePolicy(manifest.Policy), TargetClient = NormalizeTarget(manifest.TargetClient) };
     }
 
@@ -53,19 +53,20 @@ public static class PatchManifestService
         var errors = entryValidation.Errors.ToList(); var warnings = entryValidation.Warnings.ToList();
         errors.AddRange(ValidateTarget(manifest.TargetClient));
         if (manifest.TargetClient is not null && manifest.FormatVersion < 4) errors.Add(new("TargetRequirementVersion", "Target-client inheritance requires patch manifest format version 4."));
+        if (manifest.Entries.Any(entry => entry.Locale != 0) && manifest.FormatVersion < 5) errors.Add(new("LocaleRequirementVersion", "Locale-aware patch entries require patch manifest format version 5."));
         if (archivePath is not null)
         {
-            if (errors.Any(error => error.Code is "InvalidArchivePath" or "DuplicateArchivePath")) return new(errors, warnings);
-            var expected = manifest.Entries.GroupBy(entry => PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+            if (errors.Any(error => error.Code is "InvalidArchivePath" or "InvalidLocale" or "DuplicateArchivePath")) return new(errors, warnings);
+            var expected = manifest.Entries.GroupBy(entry => MpqLocale.Identity(entry.ArchivePath, entry.Locale), StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
             var actual = new PatchArchiveService().ListFiles(archivePath)
-                .Where(entry => !entry.IsMetadata).GroupBy(entry => PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
-            foreach (var path in expected.Keys.Except(actual.Keys, StringComparer.OrdinalIgnoreCase)) errors.Add(new("MissingArchiveEntry", $"Archive is missing manifest path '{path}'.", path));
-            foreach (var path in actual.Keys.Except(expected.Keys, StringComparer.OrdinalIgnoreCase)) errors.Add(new("UnexpectedArchiveEntry", $"Archive contains unexpected path '{path}'.", path));
-            foreach (var path in expected.Keys.Intersect(actual.Keys, StringComparer.OrdinalIgnoreCase))
+                .Where(entry => !entry.IsMetadata).GroupBy(entry => MpqLocale.Identity(entry.ArchivePath, entry.Locale), StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+            foreach (var identity in expected.Keys.Except(actual.Keys, StringComparer.Ordinal)) { var entry = expected[identity]; errors.Add(new("MissingArchiveEntry", $"Archive is missing manifest identity '{entry.ArchivePath}' · {MpqLocale.Format(entry.Locale)}.", entry.ArchivePath)); }
+            foreach (var identity in actual.Keys.Except(expected.Keys, StringComparer.Ordinal)) { var entry = actual[identity]; errors.Add(new("UnexpectedArchiveEntry", $"Archive contains unexpected identity '{entry.ArchivePath}' · {MpqLocale.Format(entry.Locale)}.", entry.ArchivePath)); }
+            foreach (var identity in expected.Keys.Intersect(actual.Keys, StringComparer.Ordinal))
             {
-                if (!File.Exists(expected[path].SourcePath)) continue;
-                var sourceSize = new FileInfo(expected[path].SourcePath).Length;
-                if (sourceSize != actual[path].Size) errors.Add(new("SizeMismatch", $"Archive path '{path}' is {actual[path].Size:N0} bytes; manifest source is {sourceSize:N0} bytes.", path));
+                if (!File.Exists(expected[identity].SourcePath)) continue;
+                var sourceSize = new FileInfo(expected[identity].SourcePath).Length;
+                if (sourceSize != actual[identity].Size) errors.Add(new("SizeMismatch", $"Archive identity '{expected[identity].ArchivePath}' · {MpqLocale.Format(expected[identity].Locale)} is {actual[identity].Size:N0} bytes; manifest source is {sourceSize:N0} bytes.", expected[identity].ArchivePath));
             }
         }
         return new(errors, warnings);
@@ -78,12 +79,18 @@ public static class PatchManifestService
         var normalized = new List<(PatchEntry Entry, string Path)>();
         foreach (var entry in entries)
         {
-            try { normalized.Add((entry, PatchInputMapper.NormalizeArchivePath(entry.ArchivePath))); }
+            string? path = null; var validLocale = true;
+            try { path = PatchInputMapper.NormalizeArchivePath(entry.ArchivePath); }
             catch (Exception ex) { errors.Add(new("InvalidArchivePath", ex.Message, entry.ArchivePath)); }
+            try { MpqLocale.Validate(entry.Locale); }
+            catch (Exception ex) { validLocale = false; errors.Add(new("InvalidLocale", ex.Message, entry.ArchivePath)); }
+            if (path is not null && validLocale) normalized.Add((entry, path));
             if (!File.Exists(entry.SourcePath)) errors.Add(new("MissingSource", $"Source file does not exist: {entry.SourcePath}", entry.ArchivePath));
         }
-        foreach (var duplicate in normalized.GroupBy(item => item.Path, StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1))
-            errors.Add(new("DuplicateArchivePath", $"Manifest contains duplicate archive path '{duplicate.Key}'.", duplicate.Key));
+        foreach (var duplicate in normalized.GroupBy(item => MpqLocale.Identity(item.Path, item.Entry.Locale), StringComparer.Ordinal).Where(group => group.Count() > 1))
+        {
+            var item = duplicate.First(); errors.Add(new("DuplicateArchivePath", $"Manifest contains duplicate archive identity '{item.Path}' · {MpqLocale.Format(item.Entry.Locale)}.", item.Path));
+        }
         var normalizedPolicy = NormalizePolicy(policy);
         if (normalizedPolicy?.ExpectedEntryCount is { } count && count != entries.Length) errors.Add(new("EntryCountMismatch", $"Manifest policy expects {count:N0} entries but contains {entries.Length:N0}."));
         foreach (var item in normalized)

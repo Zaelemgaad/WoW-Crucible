@@ -327,8 +327,9 @@ wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--
 wowcrucible mpq tree <archive.mpq> [internal-folder] [--format=text|json] [--listfile=paths.txt]
 wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]
 wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]
-wowcrucible mpq create <archive.mpq> <files/folders...>
-wowcrucible mpq update <small-patch.mpq> <files/folders...>
+wowcrucible mpq create <archive.mpq> <files/folders...> [--locale=neutral|enUS|0x0409]
+wowcrucible mpq update <small-patch.mpq> <files/folders...> [--locale=neutral|enUS|0x0409]
+wowcrucible mpq put <small-patch.mpq> <source-file> <archive-path> [--locale=neutral|enUS|0x0409] [--create]
 wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]
 ```
 
@@ -338,13 +339,13 @@ If StormLib's first enumeration exposes `File000...` placeholders while the arch
 
 `tree` lists only the direct files and subfolders at the requested internal folder while reporting recursive counts and bytes. `extract-folder` resolves that exact folder to its recursive files before extraction. The desktop provides the same lazy breadcrumb browser beside the global flat search and displays non-default locale variants explicitly.
 
-Extraction opens source archives explicitly read-only and uses a separate StormLib archive handle per worker. Every enumerated member retains its exact block index, so parallel extraction selects the intended locale variant without racing StormLib's process-global locale setting; legacy caller-constructed entries without an index use a serialized compatibility fallback. Writes remain per-file atomic, same-destination variants stay ordered, cancellation leaves no `.extracting` file behind, and a later run can resume around existing indexed outputs. Auto uses up to four workers; `--workers=1..16` and the desktop selector allow storage-specific tuning. On the workspace's USB SATA SSD, a byte-verified Patch-H sample of 10,000 files (781,411,574 output bytes) measured 49.82–49.88 seconds with one worker and 43.39–43.52 seconds with two/four workers, with zero SHA-256 mismatches.
+Extraction opens source archives explicitly read-only and uses a separate StormLib archive handle per worker. Every enumerated member retains its exact block index, so parallel extraction selects the intended locale variant without racing StormLib's process-global locale setting; legacy caller-constructed entries without an index use a serialized compatibility fallback. Path + compound locale is the physical identity. When multiple selected members share a path, extraction preserves every variant by default beneath that same folder using `.locale-XXXX.variant-NN` before the extension; it never silently lets the last locale overwrite its siblings. Writes remain per-file atomic, cancellation leaves no `.extracting` file behind, and a later run can resume around existing indexed outputs. Auto uses up to four workers; `--workers=1..16` and the desktop selector allow storage-specific tuning. On the workspace's USB SATA SSD, a byte-verified Patch-H sample of 10,000 files (781,411,574 output bytes) measured 49.82–49.88 seconds with one worker and 43.39–43.52 seconds with two/four workers, with zero SHA-256 mismatches.
 
 Standalone list/tree/extract commands and the desktop archive browser share compressed indexes under `Cache\MPQ` beside the executable when portable. A cache is reused only when the archive and optional external listfile path, size, and write timestamp still match. Writes are atomic, corrupt entries are rebuilt, and pruning retains at most roughly 64 recent indexes within a 512 MiB budget.
 
-`update` is transaction-safe but copies the archive first and refuses archives larger than 2 GiB. Treat large client/mod layers as immutable inputs and build a small manifest-driven patch instead.
+`create` and `update` accept one locale for their mapped batch. `put` writes one exact source→archive-path identity, making repeated calls a simple expert route for different locale variants of the same path. Locale tokens accept `neutral`, common WoW names such as `enUS`/`deDE`, decimal LCIDs, or hexadecimal values such as `0x0409`. The desktop patch builder exposes the same editable locale field on every row and locale-aware manifests use format v5. `update` is transaction-safe but copies the archive first and refuses archives larger than 2 GiB. Treat large client/mod layers as immutable inputs and build a small manifest-driven patch instead.
 
-`merge` treats every source MPQ as immutable. Repeated internal paths are SHA-256 checked and then compared byte-for-byte; exact copies are stored once. Different bytes at the same internal path block output by default. `--conflicts=earlier` or `--conflicts=later` is an explicit global precedence choice. Hash-only `File000...` names and duplicate locale variants are blocked unless their real paths can be resolved safely. Merge payloads use short flat temporary names while logical archive paths remain separate, so deeply nested project/output locations do not exceed StormLib's Windows destination-path limit.
+`merge` treats every source MPQ as immutable and uses normalized path + locale as identity. Same-path neutral/enUS/deDE/etc. members are intentionally retained as separate physical entries—even when their bytes happen to match. Repeated copies of the same path and same locale are SHA-256 checked and then compared byte-for-byte; exact copies are stored once. Different bytes at the same path and locale block output by default, with the locale printed beside each conflict. `--conflicts=earlier` or `--conflicts=later` is an explicit global precedence choice. Hash-only `File000...` names and physically indistinguishable duplicate identities remain blocked unless their real paths can be resolved safely. Merge payloads use short flat temporary names while logical archive paths remain separate, so deeply nested project/output locations do not exceed StormLib's Windows destination-path limit.
 
 ## Read-only CASC browsing and extraction
 
@@ -360,7 +361,7 @@ The desktop exposes the same provider beside MPQ in **MPQ & CASC archives**. CAS
 ## Manifest-first patches
 
 ```text
-wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]
+wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--locale=neutral|enUS|0x0409] [--allow=glob] [--deny=glob] [--count=N] [--client-exe=Wow.exe]
 wowcrucible manifest list <manifest.json>
 wowcrucible manifest validate <manifest.json> [existing-patch.mpq]
 wowcrucible manifest build <manifest.json> <output-folder>

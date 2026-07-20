@@ -12,12 +12,16 @@ namespace WoWCrucible.Desktop;
 
 internal sealed class MpqWorkspaceView : UserControl, IDisposable
 {
-    private sealed class PatchRow(string sourcePath, string archivePath)
+    private sealed class PatchRow(string sourcePath, string archivePath, uint locale = 0)
     {
         public string SourcePath { get; } = sourcePath;
         public string ArchivePath { get; set; } = archivePath;
-        public string Assessment => SafeAssessment(ArchivePath);
-        private static string SafeAssessment(string path) { try { return PatchInputMapper.AssessArchivePath(path).Message; } catch (Exception exception) { return exception.Message; } }
+        public string LocaleText { get; set; } = MpqLocale.Token(locale);
+        public uint Locale => MpqLocale.Parse(LocaleText);
+        public string Identity => MpqLocale.Identity(ArchivePath, Locale);
+        public string Assessment => SafeAssessment(ArchivePath, LocaleText);
+        public bool HasWarning { get { try { _ = MpqLocale.Parse(LocaleText); return PatchInputMapper.AssessArchivePath(ArchivePath).HasWarning; } catch { return true; } } }
+        private static string SafeAssessment(string path, string localeText) { try { return $"{PatchInputMapper.AssessArchivePath(path).Message} · {MpqLocale.Format(MpqLocale.Parse(localeText))}"; } catch (Exception exception) { return exception.Message; } }
     }
 
     private readonly DesktopWorkspaceSession _session;
@@ -83,12 +87,13 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         _builderItems.ItemTemplate = new FuncDataTemplate<PatchRow>((row, _) => row is null ? new Grid() : BuildPatchRow(row));
         _browserItems.ItemTemplate = new FuncDataTemplate<MpqFileEntry>((entry, _) => entry is null ? new Grid() : new Grid
         {
-            ColumnDefinitions = new("*,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(3,2), Children =
+            ColumnDefinitions = new("*,Auto,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(3,2), Children =
             {
                 new TextBlock { Text = entry.ArchivePath, TextTrimming = TextTrimming.CharacterEllipsis },
                 WithColumn(new TextBlock { Text = FormatBytes(entry.Size) }, 1),
                 WithColumn(new TextBlock { Text = FormatBytes(entry.CompressedSize) }, 2),
-                WithColumn(new TextBlock { Text = entry.IsMetadata ? "metadata" : entry.Size == 0 ? "—" : $"{100d * entry.CompressedSize / entry.Size:0.#}%" }, 3)
+                WithColumn(new TextBlock { Text = MpqLocale.Token(entry.Locale) }, 3),
+                WithColumn(new TextBlock { Text = entry.IsMetadata ? "metadata" : entry.Size == 0 ? "—" : $"{100d * entry.CompressedSize / entry.Size:0.#}%" }, 4)
             }
         });
         _browserSearch.TextChanged += (_, _) => FilterArchive();
@@ -156,7 +161,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         _tabs.SelectedIndex = 0; _targetClientRequirement = null;
         foreach (var entry in entries)
         {
-            var source = Path.GetFullPath(entry.SourcePath); var archive = PatchInputMapper.NormalizeArchivePath(entry.ArchivePath); var existing = _entries.FindIndex(row => row.ArchivePath.Equals(archive, StringComparison.OrdinalIgnoreCase)); var row = new PatchRow(source, archive);
+            var source = Path.GetFullPath(entry.SourcePath); var archive = PatchInputMapper.NormalizeArchivePath(entry.ArchivePath); var identity = MpqLocale.Identity(archive, entry.Locale); var existing = _entries.FindIndex(row => { try { return row.Identity.Equals(identity, StringComparison.Ordinal); } catch { return false; } }); var row = new PatchRow(source, archive, entry.Locale);
             if (existing >= 0) _entries[existing] = row; else _entries.Add(row);
         }
         _expectedCount.Value = _entries.Count;
@@ -172,6 +177,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     {
         var addFiles = new Button { Content = "Add files" }; addFiles.Click += async (_, _) => await AddFilesAsync();
         var addFolder = new Button { Content = "Add folder tree" }; addFolder.Click += async (_, _) => await AddFolderAsync();
+        var addLocaleVariant = new Button { Content = "Add selected path as locale variant…" }; addLocaleVariant.Click += async (_, _) => await AddLocaleVariantAsync();
         var openExisting = new Button { Content = "Update existing small MPQ" }; openExisting.Click += async (_, _) => await ChooseExistingPatchAsync();
         var remove = new Button { Content = "Remove selected" }; remove.Click += (_, _) => RemoveSelected();
         var clear = new Button { Content = "Clear" }; clear.Click += (_, _) => { _entries.Clear(); _existingPatch = null; _targetClientRequirement = null; RefreshBuilder(); };
@@ -179,7 +185,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         var saveManifest = new Button { Content = "Save manifest" }; saveManifest.Click += async (_, _) => await SaveManifestAsync();
         var bind = new Button { Content = "Bind client Wow.exe" }; bind.Click += async (_, _) => await BindClientAsync();
         var build = AccentButton("Build / update MPQ"); build.Click += async (_, _) => await BuildPatchAsync();
-        var toolbar = new WrapPanel { Children = { addFiles, addFolder, openExisting, remove, clear, loadManifest, saveManifest, bind, build } };
+        var toolbar = new WrapPanel { Children = { addFiles, addFolder, addLocaleVariant, openExisting, remove, clear, loadManifest, saveManifest, bind, build } };
         var policy = new Expander { Header = "Manifest content policy", Content = new Grid { ColumnDefinitions = new("*,*,*,Auto"), ColumnSpacing = 8, Children = { _allowed, WithColumn(_forbidden, 1), WithColumn(_required, 2), WithColumn(new StackPanel { Children = { new TextBlock { Text = "Expected count" }, _expectedCount } }, 3) } } };
         var dropTarget = new Border
         {
@@ -366,7 +372,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         var clear = new Button { Content = "Clear" }; clear.Click += (_, _) => { _mergePaths.Clear(); RefreshMergeInputs(); };
         var merge = AccentButton("Merge into new MPQ…"); merge.Click += async (_, _) => await MergePatchesAsync();
         var policy = new StackPanel { Children = { new TextBlock { Text = "Different-byte path conflict policy" }, _mergePolicy } };
-        var explanation = new TextBlock { Text = "Drop two or more deliberately small patch MPQs below, or add them with the picker. Exact duplicate internal paths are verified by SHA-256 and byte-for-byte comparison, then stored once. Different bytes at the same path block the merge by default. Choosing earlier/later archive is an explicit global conflict decision; source MPQs are always immutable.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
+        var explanation = new TextBlock { Text = "Drop two or more deliberately small patch MPQs below, or add them with the picker. MPQ identity is normalized path + locale: enUS, deDE, neutral, and other same-path variants remain separate output entries. Exact duplicates of the same path and locale are SHA-256 plus byte verified and stored once. Different bytes at the same path and locale block by default. Earlier/later is an explicit global conflict decision; sources remain immutable.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
         var dropTarget = new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _mergeInputs };
         DragDrop.SetAllowDrop(dropTarget, true);
         DragDrop.AddDragOverHandler(dropTarget, (_, args) =>
@@ -407,8 +413,8 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
             var inputs = _mergePaths.ToArray(); var policy = _mergePolicy.SelectedItem is MpqMergeConflictPolicy selected ? selected : MpqMergeConflictPolicy.BlockDifferentEntries; var progress = new Progress<(int Done, int Total, string Path)>(value => _mergeStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}");
             var result = await Task.Run(() => new MpqMergeService().Merge(inputs, output, policy, string.IsNullOrWhiteSpace(_externalListfile.Text) ? null : _externalListfile.Text, progress, _operation!.Token), _operation!.Token);
             _mergeStatus.Text = result.Conflicts.Count > 0 && result.OutputFiles == 0
-                ? $"Merge blocked: {result.Conflicts.Count:N0} different-byte internal path conflict(s). No output was created.\n" + string.Join("\n", result.Conflicts.Take(100).Select(conflict => conflict.ArchivePath))
-                : $"Created {result.OutputPath} with {result.OutputFiles:N0} files. Deduplicated {result.ExactDuplicates:N0} exact copies; resolved {result.Conflicts.Count:N0} explicit different-byte conflict(s) using {result.Policy}.";
+                ? $"Merge blocked: {result.Conflicts.Count:N0} different-byte path+locale conflict(s). No output was created.\n" + string.Join("\n", result.Conflicts.Take(100).Select(conflict => $"{conflict.ArchivePath} · {MpqLocale.Format(conflict.Locale)} · {string.Join(" | ", conflict.Sources.Select((source, index) => $"{Path.GetFileName(source)} {conflict.Sha256[index][..12]}") )}"))
+                : $"Created {result.OutputPath} with {result.OutputFiles:N0} physical entries, including {result.LocaleVariantEntries:N0} same-path locale entries. Deduplicated {result.ExactDuplicates:N0} exact same-identity copies; resolved {result.Conflicts.Count:N0} explicit different-byte conflict(s) using {result.Policy}.";
         }
         catch (OperationCanceledException) { _mergeStatus.Text = "Merge cancelled; source archives were untouched."; }
         catch (Exception exception) { _mergeStatus.Text = $"Merge failed safely: {exception.Message}"; DesktopCrashLogger.Log("MPQ merge failed", exception); }
@@ -440,27 +446,37 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private Grid BuildPatchRow(PatchRow row)
     {
         var archive = new TextBox { Text = row.ArchivePath };
+        var locale = new TextBox { Text = row.LocaleText, PlaceholderText = "neutral / enUS / 0x0409" };
         var assessment = new TextBlock { Text = row.Assessment, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8793A7") };
         archive.TextChanged += (_, _) => { row.ArchivePath = archive.Text ?? string.Empty; assessment.Text = row.Assessment; };
-        return new Grid { ColumnDefinitions = new("2*,2*,*"), ColumnSpacing = 8, Margin = new Thickness(3,2), Children = { new TextBlock { Text = row.SourcePath, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center }, WithColumn(archive, 1), WithColumn(assessment, 2) } };
+        locale.TextChanged += (_, _) => { row.LocaleText = locale.Text ?? string.Empty; assessment.Text = row.Assessment; };
+        return new Grid { ColumnDefinitions = new("2*,2*,*,2*"), ColumnSpacing = 8, Margin = new Thickness(3,2), Children = { new TextBlock { Text = row.SourcePath, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center }, WithColumn(archive, 1), WithColumn(locale, 2), WithColumn(assessment, 3) } };
     }
 
     private async Task AddFilesAsync() { var storage = Storage(); var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Add files to the MPQ patch", AllowMultiple = true }); AddPaths(files.Select(file => file.TryGetLocalPath()).Where(path => path is not null)!); }
     private async Task AddFolderAsync() { var path = await PickFolderAsync("Add a folder tree and preserve client-relative paths"); if (path is not null) AddPaths([path]); }
+    private async Task AddLocaleVariantAsync()
+    {
+        if (_builderItems.SelectedItem is not PatchRow selected) { _builderStatus.Text = "Select the existing archive-path row that this locale variant should accompany."; return; }
+        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = $"Select localized payload(s) for {selected.ArchivePath}", AllowMultiple = true });
+        var paths = files.Select(file => file.TryGetLocalPath()).OfType<string>().Where(File.Exists).ToArray(); if (paths.Length == 0) return;
+        foreach (var path in paths) _entries.Add(new PatchRow(Path.GetFullPath(path), selected.ArchivePath) { LocaleText = "enter locale" });
+        _targetClientRequirement = null; RefreshBuilder(); _builderStatus.Text = $"Added {paths.Length:N0} locale-variant row(s) for {selected.ArchivePath}. Enter an explicit locale such as enUS, deDE, or 0x0409 in each new row before building; invalid or duplicate path+locale identities are blocked.";
+    }
     private void AddPaths(IEnumerable<string> paths)
     {
         try
         {
             _targetClientRequirement = null;
-            foreach (var mapped in PatchInputMapper.Map(paths)) { var existing = _entries.FindIndex(row => row.ArchivePath.Equals(mapped.ArchivePath, StringComparison.OrdinalIgnoreCase)); var row = new PatchRow(mapped.SourcePath, mapped.ArchivePath); if (existing >= 0) _entries[existing] = row; else _entries.Add(row); }
+            foreach (var mapped in PatchInputMapper.Map(paths)) { var identity = MpqLocale.Identity(mapped.ArchivePath, mapped.Locale); var existing = _entries.FindIndex(row => { try { return row.Identity.Equals(identity, StringComparison.Ordinal); } catch { return false; } }); var row = new PatchRow(mapped.SourcePath, mapped.ArchivePath, mapped.Locale); if (existing >= 0) _entries[existing] = row; else _entries.Add(row); }
             RefreshBuilder();
         }
         catch (Exception exception) { _builderStatus.Text = exception.Message; DesktopCrashLogger.Log("Patch input mapping failed", exception); }
     }
 
     private void RemoveSelected() { var selected = _builderItems.SelectedItems?.OfType<PatchRow>().ToHashSet() ?? []; _entries.RemoveAll(selected.Contains); _targetClientRequirement = null; RefreshBuilder(); }
-    private void RefreshBuilder() { _builderItems.ItemsSource = _entries.OrderBy(row => row.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray(); var warnings = _entries.Count(row => PatchInputMapper.AssessArchivePath(row.ArchivePath).HasWarning); _builderStatus.Text = $"{_entries.Count:N0} file(s) · {warnings:N0} path warning(s) · {(_existingPatch is null ? "new tiny MPQ" : $"transaction-safe update of {Path.GetFileName(_existingPatch)}")}{(_targetClientRequirement is null ? string.Empty : $" · bound to {_targetClientRequirement.ClientName} with {_targetClientRequirement.InheritedAssets.Count:N0} inherited path(s)")}"; }
-    private PatchEntry[] CurrentEntries() => _entries.Select(row => new PatchEntry(row.SourcePath, row.ArchivePath)).ToArray();
+    private void RefreshBuilder() { _builderItems.ItemsSource = _entries.OrderBy(row => row.ArchivePath, StringComparer.OrdinalIgnoreCase).ThenBy(row => { try { return row.Locale; } catch { return uint.MaxValue; } }).ToArray(); var warnings = _entries.Count(row => row.HasWarning); var localized = _entries.Count(row => { try { return row.Locale != 0; } catch { return false; } }); _builderStatus.Text = $"{_entries.Count:N0} physical file(s) · {localized:N0} localized · {warnings:N0} path/locale warning(s) · {(_existingPatch is null ? "new tiny MPQ" : $"transaction-safe update of {Path.GetFileName(_existingPatch)}")}{(_targetClientRequirement is null ? string.Empty : $" · bound to {_targetClientRequirement.ClientName} with {_targetClientRequirement.InheritedAssets.Count:N0} inherited path(s)")}"; }
+    private PatchEntry[] CurrentEntries() => _entries.Select(row => new PatchEntry(row.SourcePath, row.ArchivePath, row.Locale)).ToArray();
     private PatchManifestPolicy? CurrentPolicy()
     {
         static string[] Lines(string? text) => (text ?? string.Empty).Split(['\r','\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -486,7 +502,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         try
         {
             var path = await PickFileAsync("Load Crucible patch manifest", ["*.crucible-patch.json", "*.json"]); if (path is null) return; var manifest = await Task.Run(() => PatchManifestService.Load(path));
-            _entries.Clear(); _entries.AddRange(manifest.Entries.Select(entry => new PatchRow(entry.SourcePath, entry.ArchivePath))); _existingPatch = null; _requiredClientExecutableSha256 = manifest.RequiredClientExecutableSha256; _targetClientRequirement = manifest.TargetClient; ApplyPolicy(manifest.Policy); _bindingStatus.Text = (_requiredClientExecutableSha256 is null ? "No client executable binding." : $"Required client SHA-256 {_requiredClientExecutableSha256}") + (_targetClientRequirement is null ? string.Empty : $" · target {_targetClientRequirement.ClientName} fingerprint {_targetClientRequirement.IndexFingerprint}"); RefreshBuilder();
+            _entries.Clear(); _entries.AddRange(manifest.Entries.Select(entry => new PatchRow(entry.SourcePath, entry.ArchivePath, entry.Locale))); _existingPatch = null; _requiredClientExecutableSha256 = manifest.RequiredClientExecutableSha256; _targetClientRequirement = manifest.TargetClient; ApplyPolicy(manifest.Policy); _bindingStatus.Text = (_requiredClientExecutableSha256 is null ? "No client executable binding." : $"Required client SHA-256 {_requiredClientExecutableSha256}") + (_targetClientRequirement is null ? string.Empty : $" · target {_targetClientRequirement.ClientName} fingerprint {_targetClientRequirement.IndexFingerprint}"); RefreshBuilder();
         }
         catch (Exception exception) { _builderStatus.Text = $"Manifest load failed: {exception.Message}"; DesktopCrashLogger.Log("Manifest load failed", exception); }
     }
@@ -532,7 +548,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private async Task ExtractAsync(IReadOnlyList<MpqFileEntry> entries)
     {
         if (entries.Count == 0) { _browserStatus.Text = "Select at least one archive entry."; return; } var destination = await PickFolderAsync("Select extraction destination"); if (destination is null) return; BeginOperation();
-        try { var archivePath = _archivePath.Text ?? string.Empty; var workers = _extractionWorkers.SelectedIndex switch { 1 => 1, 2 => 2, 3 => 4, 4 => 8, 5 => 16, _ => 0 }; var workerLabel = workers == 0 ? $"auto (up to {PatchArchiveService.RecommendedExtractionWorkers})" : workers.ToString(); var progress = new Progress<(int Done, int Total, string Path)>(value => _browserStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}"); await Task.Run(() => new PatchArchiveService().Extract(archivePath, destination, entries, progress, _operation!.Token, workers: workers)); _browserStatus.Text = $"Extracted {entries.Count:N0} entries to {destination} using {workerLabel} worker(s)."; }
+        try { var archivePath = _archivePath.Text ?? string.Empty; var workers = _extractionWorkers.SelectedIndex switch { 1 => 1, 2 => 2, 3 => 4, 4 => 8, 5 => 16, _ => 0 }; var workerLabel = workers == 0 ? $"auto (up to {PatchArchiveService.RecommendedExtractionWorkers})" : workers.ToString(); var progress = new Progress<(int Done, int Total, string Path)>(value => _browserStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}"); await Task.Run(() => new PatchArchiveService().Extract(archivePath, destination, entries, progress, _operation!.Token, preserveLocaleVariants: true, workers: workers)); _browserStatus.Text = $"Extracted {entries.Count:N0} entries to {destination} using {workerLabel} worker(s). Same-path locale variants received explicit locale suffixes instead of overwriting one another."; }
         catch (OperationCanceledException) { _browserStatus.Text = "Extraction cancelled."; }
         catch (Exception exception) { _browserStatus.Text = $"Extraction failed: {exception.Message}"; DesktopCrashLogger.Log("MPQ extraction failed", exception); }
     }
