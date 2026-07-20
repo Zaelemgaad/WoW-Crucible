@@ -218,16 +218,18 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var openLeft = new Button { Content = "Reveal left" }; openLeft.Click += (_, _) => RevealSlot(0); var openRight = new Button { Content = "Reveal right" }; openRight.Click += (_, _) => RevealSlot(1);
         _imageComparisonTools = new StackPanel { Spacing = 5, Children = { new TextBlock { Text = "SYNCHRONIZED ZOOM & PAN", VerticalAlignment = VerticalAlignment.Center, FontSize = 10, FontWeight = FontWeight.Bold, Margin = new Thickness(4, 0) }, zoom, new WrapPanel { Children = { openLeft, openRight } } } };
         var toolbar = new StackPanel { Spacing = 6, Margin = new Thickness(12, 8), Children = { _previewMode, _imageComparisonTools } };
-        var grid = new Grid { ColumnDefinitions = new("*,*"), RowDefinitions = new("Auto,*") };
+        var slots = new Control[2];
         for (var index = 0; index < 2; index++)
         {
-            var header = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(2), ColumnSpacing = 8, Children = { _slotButtons[index], WithColumn(_comparisonTitles[index], 1) } }; Grid.SetColumn(header, index); grid.Children.Add(header);
+            var header = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(2), ColumnSpacing = 8, Children = { _slotButtons[index], WithColumn(_comparisonTitles[index], 1) } };
             _comparisonScrolls[index].Content = _comparisonImages[index]; _comparisonScrolls[index].HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto; _comparisonScrolls[index].VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto;
             var scrollIndex = index; _comparisonScrolls[index].ScrollChanged += (_, _) => SyncScroll(scrollIndex);
             var imageBorder = new Border { Background = Brush.Parse("#090B0F"), BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Margin = new Thickness(3), ClipToBounds = true, Child = _comparisonScrolls[index] };
-            Grid.SetRow(imageBorder, 1); Grid.SetColumn(imageBorder, index); grid.Children.Add(imageBorder);
+            var slot = new Grid { RowDefinitions = new("Auto,*"), Children = { header } };
+            Grid.SetRow(imageBorder, 1); slot.Children.Add(imageBorder); slots[index] = slot;
         }
-        _imageComparisonPane = grid;
+        var comparisonSlots = new ResponsiveSplitGrid(slots[0], slots[1], wideAspect: 1);
+        _imageComparisonPane = comparisonSlots;
         var previousModel = new Button { Content = "← Model" }; previousModel.Click += (_, _) => MoveModel(-1); var nextModel = new Button { Content = "Model →" }; nextModel.Click += (_, _) => MoveModel(1);
         _modelPicker.HorizontalAlignment = HorizontalAlignment.Stretch;
         _modelSkinPicker.HorizontalAlignment = HorizontalAlignment.Stretch;
@@ -273,7 +275,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var modelPane = new Grid { RowDefinitions = new("2*,Auto,3*"), IsVisible = false, Children = { modelHeaderScroll } };
         var modelSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }; Grid.SetRow(modelSplitter, 1); modelPane.Children.Add(modelSplitter);
         var modelBorder = new Border { Background = Brush.Parse("#090D14"), BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Child = _modelView }; Grid.SetRow(modelBorder, 2); modelPane.Children.Add(modelBorder); _modelPreviewPane = modelPane;
-        var previewHost = new Grid { Children = { grid, modelPane } };
+        var previewHost = new Grid { Children = { comparisonSlots, modelPane } };
         var root = new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(6) }; root.Children.Add(toolbar); Grid.SetRow(previewHost, 1); root.Children.Add(previewHost); return root;
     }
 

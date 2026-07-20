@@ -3,6 +3,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
+using WoWCrucible.Core;
 
 namespace WoWCrucible.Desktop;
 
@@ -41,7 +42,7 @@ internal sealed class ResponsiveSplitGrid : Grid
 
     private void Apply(Size size)
     {
-        var wide = size.Width > 0 && size.Height > 0 && size.Width / size.Height >= _wideAspect;
+        var wide = ResponsiveLayoutService.UseSideBySide(size.Width, size.Height, _wideAspect);
         if (_wide == wide) return;
         _wide = wide;
         var first = _firstWeight.ToString("0.###", CultureInfo.InvariantCulture);

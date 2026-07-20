@@ -799,6 +799,9 @@ if (!Path.GetFullPath(relativeSkinGeometry.SkinPath).Equals(Path.GetFullPath(Pat
 var environmentModelPath = Path.Combine(assetFixture, "geometry-environment.m2"); var environmentBytes = geometryBytes.ToArray(); BitConverter.GetBytes((short)-1).CopyTo(environmentBytes, textureCoordinateLookupOffset + 2); File.WriteAllBytes(environmentModelPath, environmentBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-environment00.skin"));
 var environmentGeometry = M2PreviewGeometryService.Load(environmentModelPath);
 var allGeosetGeometry = M2PreviewGeometryService.Load(geometryModelPath, visibilityMode: M2PreviewVisibilityMode.AllGeosets);
+if (!ResponsiveLayoutService.UseSideBySide(1000, 500, 1) || !ResponsiveLayoutService.UseSideBySide(500, 500, 1) || ResponsiveLayoutService.UseSideBySide(499, 500, 1) || ResponsiveLayoutService.UseSideBySide(0, 500, 1) || ResponsiveLayoutService.UseSideBySide(double.NaN, 500, 1))
+    throw new InvalidOperationException("Aspect-driven responsive layout policy regressed at wide, boundary, compact, empty, or non-finite dimensions.");
+try { _ = ResponsiveLayoutService.UseSideBySide(500, 500, 0); throw new InvalidOperationException("Responsive layout accepted a non-positive aspect threshold."); } catch (ArgumentOutOfRangeException) { }
 var selectedHairGeometry = M2PreviewGeometryService.Load(geometryModelPath, geosetSelection: new M2GeosetSelection(new Dictionary<int, int> { [0] = 2 }, "test selection"));
 var nakedGeometry = M2PreviewGeometryService.Load(geometryModelPath, geosetSelection: new M2GeosetSelection(M2GeosetCatalog.NakedCharacterSelection, "naked test"));
 var describedGeosets = M2GeosetCatalog.Describe(allGeosetGeometry.Submeshes); var describedHair = describedGeosets.Single(group => group.Group == 0);
