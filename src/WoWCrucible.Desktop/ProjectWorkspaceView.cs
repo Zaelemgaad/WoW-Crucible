@@ -27,8 +27,17 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _status = Status("No occupancy scan has been run.");
     private readonly ListBox _sources = new();
     private readonly ListBox _reservations = new();
+    private readonly TextBox _classSource = new() { Text = "1", PlaceholderText = "Existing source class ID" };
+    private readonly TextBox _classTarget = new() { PlaceholderText = "Reserved target class ID" };
+    private readonly TextBox _className = new() { PlaceholderText = "New playable class name" };
+    private readonly TextBox _classToken = new() { PlaceholderText = "Uppercase client file token" };
+    private readonly TextBox _classPower = new() { PlaceholderText = "Leave blank to clone source power" };
+    private readonly TextBox _classOutput = new() { PlaceholderText = "New/empty bundle output folder…" };
+    private readonly TextBlock _classStatus = Status("Choose a reserved Class ID, then create a read-only dependency plan.");
+    private readonly ListBox _classDetails = new();
     private IReadOnlyList<TargetProfile> _profiles = [];
     private ContentIdOccupancyReport? _report;
+    private PlayableClassClonePlan? _classPlan;
     private CancellationTokenSource? _operation;
 
     public event EventHandler? BackRequested;
@@ -41,7 +50,9 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         _domain.ItemsSource = ContentIdDomainCatalog.All; _domain.SelectedItem = ContentIdDomainCatalog.Get(ContentIdDomain.Item);
         _dbc.Text = session.Settings.CoreDbcPath; _schema.Text = session.Settings.SchemaDefinitionPath; _root.Text = session.Settings.ActiveProjectPath;
         _domain.SelectionChanged += (_, _) => { InvalidateReport(); ShowPolicy(); };
-        _dbc.TextChanged += (_, _) => InvalidateReport(); _schema.TextChanged += (_, _) => InvalidateReport(); _manualIds.TextChanged += (_, _) => InvalidateReport();
+        _root.TextChanged += (_, _) => InvalidateClassPlan();
+        _dbc.TextChanged += (_, _) => { InvalidateReport(); InvalidateClassPlan(); }; _schema.TextChanged += (_, _) => { InvalidateReport(); InvalidateClassPlan(); }; _manualIds.TextChanged += (_, _) => InvalidateReport();
+        foreach (var field in new[] { _classSource, _classTarget, _className, _classToken, _classPower }) field.TextChanged += (_, _) => InvalidateClassPlan();
 
         _sources.ItemTemplate = new FuncDataTemplate<ContentIdOccupancySource>((source, _) => source is null ? new TextBlock() : new Grid
         {
@@ -73,6 +84,12 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         var reserve = Accent("Reserve collision-checked IDs"); reserve.Click += async (_, _) => await ReserveAsync();
         var connect = new Button { Content = "Connect Server & SQL" }; connect.Click += (_, _) => ServerSqlRequested?.Invoke(this, EventArgs.Empty);
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
+        var connectClass = new Button { Content = "Connect Server & SQL" }; connectClass.Click += (_, _) => ServerSqlRequested?.Invoke(this, EventArgs.Empty);
+        var cancelClass = new Button { Content = "Cancel" }; cancelClass.Click += (_, _) => _operation?.Cancel();
+        var latestClass = new Button { Content = "Use latest reserved Class ID" }; latestClass.Click += (_, _) => UseLatestClassReservation();
+        var browseClassOutput = new Button { Content = "Browse…" }; browseClassOutput.Click += async (_, _) => await PickFolderAsync(_classOutput, "Choose a new or empty playable-class bundle folder");
+        var classPlan = Accent("Create dependency plan"); classPlan.Click += async (_, _) => await PlanClassAsync();
+        var classBuild = Accent("Build reviewed bundle"); classBuild.Click += async (_, _) => await BuildClassAsync();
 
         var heading = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "PROJECTS & SHARED IDS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, create, open } } };
         var projectForm = Form(("Project folder", Row(_root, browseRoot)), ("Project name", _name), ("Target profile", _target), ("Asset library", Row(_assetLibrary, browseAssets)));
@@ -81,7 +98,30 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         var configuration = new ScrollViewer { Content = new StackPanel { Spacing = 10, Margin = new Thickness(12), Children = { new TextBlock { Text = "Portable project", FontSize = 17, FontWeight = FontWeight.SemiBold }, projectForm, _projectSummary, new TextBlock { Text = "Authoritative occupancy", FontSize = 17, FontWeight = FontWeight.SemiBold }, sourceForm, new TextBlock { Text = "Reservation", FontSize = 17, FontWeight = FontWeight.SemiBold }, allocationForm, _policy, new WrapPanel { Children = { connect, scan, reserve, cancel } }, _status } } };
         var evidence = new Grid { RowDefinitions = new("Auto,*,Auto,Auto,*"), RowSpacing = 7, Margin = new Thickness(12), Children = { new TextBlock { Text = "Occupancy sources", FontSize = 17, FontWeight = FontWeight.SemiBold }, WithRow(_sources, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(new TextBlock { Text = "Project reservations", FontSize = 17, FontWeight = FontWeight.SemiBold }, 3), WithRow(_reservations, 4) } };
         var body = new ResponsiveSplitGrid(configuration, evidence);
-        Content = new Grid { RowDefinitions = new("Auto,*"), Children = { heading, WithRow(body, 1) } };
+        var classForm = Form(
+            ("Source class ID", _classSource),
+            ("Reserved target ID", Row(_classTarget, latestClass)),
+            ("Class name", _className),
+            ("Client file token", _classToken),
+            ("Primary display power", _classPower),
+            ("Bundle output", Row(_classOutput, browseClassOutput)));
+        var classConfiguration = new ScrollViewer { Content = new StackPanel { Spacing = 10, Margin = new Thickness(12), Children =
+        {
+            new TextBlock { Text = "PLAYABLE CLASS BUNDLE", FontSize = 17, FontWeight = FontWeight.SemiBold },
+            Status("Creates a reviewable, additive WotLK 3.3.5a bundle from a complete existing class row plus its playable races, outfits, access masks, and recognized SQL starting/stat data. It never edits the live server, database, or client."),
+            classForm,
+            new WrapPanel { Children = { connectClass, classPlan, classBuild, cancelClass } },
+            _classStatus,
+            Status("DisplayPower selects one primary stock client bar. Multi-resource classes still require explicit core, spell, form, and UI work; Crucible reports that boundary instead of hiding it.")
+        } } };
+        var classEvidence = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Margin = new Thickness(12), Children = { new TextBlock { Text = "Dependency evidence", FontSize = 17, FontWeight = FontWeight.SemiBold }, WithRow(_classDetails, 1) } };
+        var classBody = new ResponsiveSplitGrid(classConfiguration, classEvidence);
+        var tabs = new TabControl { ItemsSource = new[]
+        {
+            new TabItem { Header = "ID reservations", Content = body },
+            new TabItem { Header = "Playable class bundle", Content = classBody }
+        } };
+        Content = new Grid { RowDefinitions = new("Auto,*"), Children = { heading, WithRow(tabs, 1) } };
         ShowPolicy(); TryLoadConfiguredProject();
     }
 
@@ -144,6 +184,79 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         catch (Exception exception) { Fail("ID reservation failed", exception); }
     }
 
+    private async Task PlanClassAsync()
+    {
+        _operation?.Cancel(); _operation?.Dispose(); _operation = new();
+        try
+        {
+            var (root, source, target, name, token, power) = ClassInputs();
+            var profile = _session.DatabaseProfile ?? throw new InvalidOperationException("Connect Server & SQL first so Crucible can inspect authoritative class and player-create tables.");
+            var capabilities = _session.DatabaseCapabilities ?? throw new InvalidOperationException("Connect Server & SQL first so Crucible can inspect authoritative class and player-create tables.");
+            _classStatus.Text = $"Inspecting every dependency for class {source:N0} -> {target:N0}…";
+            _classPlan = await new PlayableClassCloneService().CreatePlanAsync(root, RequiredPath(_dbc.Text, "Choose the authoritative DBC folder."), RequiredPath(_schema.Text, "Choose the matching WDBX schema XML."), source, target, name, token, power, profile, capabilities, _operation.Token);
+            ShowClassPlan(_classPlan);
+            _session.Settings.CoreDbcPath = _dbc.Text ?? string.Empty; _session.Settings.SchemaDefinitionPath = _schema.Text ?? string.Empty; _session.Settings.Save();
+            DesktopCrashLogger.Debug("PROJECT", "class-plan", ("sourceClass", source), ("targetClass", target), ("ready", _classPlan.Ready), ("dbcRows", _classPlan.DbcTables.Sum(table => table.AffectedRows)), ("sqlRows", _classPlan.SqlRows));
+        }
+        catch (OperationCanceledException) { _classStatus.Text = "Playable-class planning cancelled."; }
+        catch (Exception exception) { FailClass("Playable-class planning failed", exception); }
+    }
+
+    private async Task BuildClassAsync()
+    {
+        _operation?.Cancel(); _operation?.Dispose(); _operation = new();
+        try
+        {
+            if (_classPlan is null) { await PlanClassAsync(); if (_classPlan is null) return; }
+            if (!_classPlan.Ready) throw new InvalidOperationException($"Resolve the {_classPlan.Blockers.Count:N0} dependency blocker(s) before building.");
+            var profile = _session.DatabaseProfile ?? throw new InvalidOperationException("Reconnect Server & SQL before building.");
+            var output = RequiredPath(_classOutput.Text, "Choose a new or empty bundle output folder.");
+            _classStatus.Text = "Revalidating bound DBC/SQL inputs and building a new reviewable bundle…";
+            var result = await new PlayableClassCloneService().BuildAsync(_classPlan, profile, output, _operation.Token);
+            _classStatus.Text = $"Built class {_classPlan.TargetClassId:N0} bundle. Patch: {result.PatchPath} · SQL: {result.SqlPath} · receipt: {result.ReceiptPath}";
+            DesktopCrashLogger.Debug("PROJECT", "class-bundle-built", ("class", _classPlan.TargetClassId), ("output", result.OutputRoot), ("patch", result.PatchPath));
+        }
+        catch (OperationCanceledException) { _classStatus.Text = "Playable-class build cancelled."; }
+        catch (Exception exception) { FailClass("Playable-class build failed", exception); }
+    }
+
+    private (string Root, uint Source, uint Target, string Name, string Token, uint? Power) ClassInputs()
+    {
+        var root = RequiredPath(_root.Text, "Open or create a Crucible project first."); _ = CrucibleContentProjectService.Load(root);
+        if (!uint.TryParse(_classSource.Text, out var source) || source is 0 or > 31) throw new FormatException("Source class ID must be from 1 through 31.");
+        if (!uint.TryParse(_classTarget.Text, out var target) || target is 0 or > 31) throw new FormatException("Target class ID must be from 1 through 31.");
+        var name = (_className.Text ?? string.Empty).Trim(); if (name.Length == 0) throw new FormatException("Enter the new class name.");
+        var token = (_classToken.Text ?? string.Empty).Trim(); if (token.Length == 0) throw new FormatException("Enter the client file token, such as ADVENTURER.");
+        uint? power = null; if (!string.IsNullOrWhiteSpace(_classPower.Text)) { if (!uint.TryParse(_classPower.Text, out var parsed)) throw new FormatException("Primary display power must be an unsigned integer."); power = parsed; }
+        return (root, source, target, name, token, power);
+    }
+
+    private void ShowClassPlan(PlayableClassClonePlan plan)
+    {
+        var details = new List<string>
+        {
+            $"SOURCE  {plan.SourceClassId:N0} · {plan.SourceClassName}",
+            $"TARGET  {plan.TargetClassId:N0} · {plan.TargetClassName} · {plan.TargetFileToken}",
+            $"POWER   {plan.DisplayPower:N0}",
+            $"BINDING {plan.ContentSha256}"
+        };
+        details.AddRange(plan.DbcTables.Select(table => $"DBC     {table.Table} · {table.AffectedRows:N0} row(s) · {table.Action}"));
+        details.AddRange(plan.SqlTables.Select(table => $"SQL     {table.Table} · source {table.SourceRows:N0} · plan {table.Rows.Count:N0} · covered {table.AlreadyCovered:N0} · conflicts {table.Conflicts:N0}"));
+        details.AddRange(plan.Blockers.Select(value => $"BLOCKER {value}")); details.AddRange(plan.Warnings.Select(value => $"WARNING {value}")); _classDetails.ItemsSource = details;
+        _classStatus.Text = plan.Ready ? $"Ready · {plan.DbcTables.Sum(table => table.AffectedRows):N0} DBC row operation(s) · {plan.SqlRows:N0} additive SQL row(s). Review the evidence, then build." : $"Blocked · {plan.Blockers.Count:N0} issue(s). Nothing can be built until they are resolved.";
+        if (string.IsNullOrWhiteSpace(_classOutput.Text)) _classOutput.Text = Path.Combine(plan.ProjectRoot, "Staging", $"Class-{plan.TargetClassId}-{plan.TargetFileToken}");
+    }
+
+    private void UseLatestClassReservation()
+    {
+        try
+        {
+            var root = RequiredPath(_root.Text, "Open or create a Crucible project first."); var reservation = CrucibleContentProjectService.LoadRegistry(root).Reservations.Where(value => value.Domain == ContentIdDomain.Class).OrderByDescending(value => value.CreatedUtc).FirstOrDefault() ?? throw new InvalidOperationException("This project has no reserved Class ID yet.");
+            _classTarget.Text = reservation.Values.Last().ToString();
+        }
+        catch (Exception exception) { FailClass("Could not load a reserved Class ID", exception); }
+    }
+
     private void TryLoadConfiguredProject()
     {
         if (string.IsNullOrWhiteSpace(_root.Text)) return;
@@ -168,8 +281,10 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
     private IReadOnlyList<uint>? ReadManual() => string.IsNullOrWhiteSpace(_manualIds.Text) ? null : CrucibleContentProjectService.ReadOccupiedIds(_manualIds.Text);
     private void SetActive(string root) { root = Path.GetFullPath(root); _root.Text = root; _session.Settings.ActiveProjectPath = root; _session.Settings.Save(); }
     private void InvalidateReport() { _report = null; _sources.ItemsSource = Array.Empty<ContentIdOccupancySource>(); _status.Text = "Occupancy inputs changed · scan again before reserving."; }
-    private void SessionChanged(object? sender, EventArgs e) => InvalidateReport();
+    private void InvalidateClassPlan() { _classPlan = null; _classDetails.ItemsSource = Array.Empty<string>(); _classStatus.Text = "Class inputs changed · create a fresh dependency plan before building."; }
+    private void SessionChanged(object? sender, EventArgs e) { InvalidateReport(); InvalidateClassPlan(); }
     private void Fail(string operation, Exception exception) { _status.Text = $"{operation}: {exception.Message}"; DesktopCrashLogger.Log(operation, exception); }
+    private void FailClass(string operation, Exception exception) { _classStatus.Text = $"{operation}: {exception.Message}"; DesktopCrashLogger.Log(operation, exception); }
     private static string RequiredPath(string? value, string message) { if (string.IsNullOrWhiteSpace(value)) throw new InvalidOperationException(message); return Path.GetFullPath(value.Trim()); }
     private static string? EmptyNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static string Range(IReadOnlyList<uint> values) => values.Count == 0 ? "none" : values.Count == 1 ? values[0].ToString("N0") : $"{values.Min():N0}–{values.Max():N0}";

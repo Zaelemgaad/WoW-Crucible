@@ -1409,6 +1409,47 @@ static async Task<int> Project(string[] args, CancellationToken cancellationToke
         var result = CrucibleContentProjectService.ReserveIds(reserveRoot, domain, count, start, occupied, purpose); Console.WriteLine(string.Join(Environment.NewLine, result.Reservation.Values));
         Console.Error.WriteLine($"Reserved {result.Reservation.Values.Count:N0} {domain} ID(s), {result.Reservation.Values.First():N0}–{result.Reservation.Values.Last():N0}, for {result.Reservation.Purpose}.{(occupiedPath is null ? " WARNING: no live DBC/SQL occupied-ID list was supplied." : $" Checked occupied IDs from {Path.GetFullPath(occupiedPath)}.")}"); return occupiedPath is null ? 3 : 0;
     }
+    if (args is ["class-plan", var classProject, var classDbc, var classSchema, var sourceText, var targetText, var targetName, var fileToken, var classHost, var classPortText, var classUser, var classDatabase, .. var classOptions])
+    {
+        if (!uint.TryParse(sourceText, out var sourceClass) || sourceClass is 0 or > 31) return Fail("Source class ID must be from 1 through 31.");
+        if (!uint.TryParse(targetText, out var targetClass) || targetClass is 0 or > 31) return Fail("Target class ID must be from 1 through 31.");
+        if (!uint.TryParse(classPortText, out var classPort) || classPort is 0 or > 65535) return Fail("Database port must be from 1 to 65535.");
+        uint? power = null; var powerText = Option(classOptions, "--power=");
+        if (powerText is not null) { if (!uint.TryParse(powerText, out var parsedPower)) return Fail("--power must be an unsigned integer."); power = parsedPower; }
+        var output = Option(classOptions, "--output="); var overwrite = classOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var json = classOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var passwordEnvironment = Option(classOptions, "--password-env=") ?? "WOW_CRUCIBLE_DB_PASSWORD"; var sslText = Option(classOptions, "--ssl=") ?? "Preferred";
+        var allowed = new[] { "--power=", "--output=", "--password-env=", "--ssl=" };
+        var unknown = classOptions.Where(option => !allowed.Any(prefix => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown class-plan option: {unknown[0]}");
+        var password = Environment.GetEnvironmentVariable(passwordEnvironment); if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
+        if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
+        var profile = new DatabaseConnectionProfile(classHost, classPort, classUser, password, classDatabase, ssl); var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, cancellationToken);
+        var service = new PlayableClassCloneService(); var plan = await service.CreatePlanAsync(classProject, classDbc, classSchema, sourceClass, targetClass, targetName, fileToken, power, profile, capabilities, cancellationToken);
+        if (output is not null) service.SavePlan(output, plan, overwrite);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"Project\t{plan.ProjectName}\nSourceClass\t{plan.SourceClassId} · {plan.SourceClassName}\nTargetClass\t{plan.TargetClassId} · {plan.TargetClassName}\nDisplayPower\t{plan.DisplayPower}\nDBCChanges\t{plan.DbcTables.Sum(table => table.AffectedRows)}\nSQLRows\t{plan.SqlRows}\nReady\t{plan.Ready}\nContentSHA256\t{plan.ContentSha256}");
+            foreach (var table in plan.DbcTables) Console.WriteLine($"DBC\t{table.Table}\t{table.AffectedRows}\t{table.Action}");
+            foreach (var table in plan.SqlTables) Console.WriteLine($"SQL\t{table.Table}\tSOURCE={table.SourceRows}\tPLAN={table.Rows.Count}\tCOVERED={table.AlreadyCovered}\tCONFLICTS={table.Conflicts}");
+            foreach (var blocker in plan.Blockers) Console.Error.WriteLine($"BLOCKER\t{blocker}"); foreach (var warning in plan.Warnings) Console.Error.WriteLine($"WARNING\t{warning}");
+            if (output is not null) Console.Error.WriteLine($"Saved reviewable plan: {Path.GetFullPath(output)}");
+        }
+        return plan.Ready ? 0 : 3;
+    }
+    if (args is ["class-build", var classPlanPath, var classOutput, var buildHost, var buildPortText, var buildUser, var buildDatabase, .. var buildOptions])
+    {
+        if (!uint.TryParse(buildPortText, out var buildPort) || buildPort is 0 or > 65535) return Fail("Database port must be from 1 to 65535.");
+        var apply = buildOptions.Contains("--build", StringComparer.OrdinalIgnoreCase); var passwordEnvironment = Option(buildOptions, "--password-env=") ?? "WOW_CRUCIBLE_DB_PASSWORD"; var sslText = Option(buildOptions, "--ssl=") ?? "Preferred";
+        var unknown = buildOptions.Where(option => !option.StartsWith("--password-env=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--ssl=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--build", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown class-build option: {unknown[0]}");
+        var service = new PlayableClassCloneService(); var plan = service.LoadPlan(classPlanPath);
+        Console.WriteLine($"Plan\t{Path.GetFullPath(classPlanPath)}\nClass\t{plan.SourceClassId} · {plan.SourceClassName} -> {plan.TargetClassId} · {plan.TargetClassName}\nDBCChanges\t{plan.DbcTables.Sum(table => table.AffectedRows)}\nSQLRows\t{plan.SqlRows}\nReady\t{plan.Ready}\nContentSHA256\t{plan.ContentSha256}");
+        if (!apply) { Console.Error.WriteLine("Dry run only. Re-run with --build to revalidate live inputs and create the new bundle."); return plan.Ready ? 0 : 3; }
+        var password = Environment.GetEnvironmentVariable(passwordEnvironment); if (password is null) return Fail($"Set the {passwordEnvironment} environment variable for this process. Passwords are not accepted on the command line.");
+        if (!Enum.TryParse<MySqlConnector.MySqlSslMode>(sslText, true, out var ssl)) return Fail($"Unknown SSL mode: {sslText}");
+        var result = await service.BuildAsync(plan, new DatabaseConnectionProfile(buildHost, buildPort, buildUser, password, buildDatabase, ssl), classOutput, cancellationToken);
+        Console.Error.WriteLine($"Built playable-class bundle: {result.OutputRoot}\nPatch: {result.PatchPath}\nSQL: {result.SqlPath}\nManifest: {result.ManifestPath}\nReceipt: {result.ReceiptPath}"); return 0;
+    }
     var liveOperation = args.FirstOrDefault()?.ToLowerInvariant();
     var reserveLive = liveOperation == "reserve-live";
     var connectionOffset = reserveLive ? 4 : 2;
@@ -1446,7 +1487,7 @@ static async Task<int> Project(string[] args, CancellationToken cancellationToke
     return ProjectHelp(2);
 }
 
-static int ProjectHelp(int code = 0) => GroupHelp($"Usage:\n  wowcrucible project create <folder> <name> [--target={TargetProfileCatalog.DefaultProfileId}] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n  wowcrucible project occupancy <domain> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--format=text|json]\n  wowcrucible project reserve-live <project-folder> <domain> <count> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--start=N] [--purpose=text]\n\nLive commands read passwords from WOW_CRUCIBLE_DB_PASSWORD by default and refuse reservation unless every mapped SQL/DBC identity source is available. Mount and Spell deliberately share the same registry namespace.\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, GameObjectDisplayInfo, Race, Class, Faction, Mount, Quest, Custom", code);
+static int ProjectHelp(int code = 0) => GroupHelp($"Usage:\n  wowcrucible project create <folder> <name> [--target={TargetProfileCatalog.DefaultProfileId}] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n  wowcrucible project occupancy <domain> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--format=text|json]\n  wowcrucible project reserve-live <project-folder> <domain> <count> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--start=N] [--purpose=text]\n  wowcrucible project class-plan <project> <dbc-folder> <schema.xml> <source-class> <target-class> <target-name> <file-token> <host> <port> <user> <database> [--power=N] [--output=plan.json] [--overwrite] [--format=text|json]\n  wowcrucible project class-build <plan.json> <new-output-folder> <host> <port> <user> <database> [--build]\n\nLive commands read passwords from WOW_CRUCIBLE_DB_PASSWORD by default. Class planning is read-only; class-build is also a dry run unless --build is explicit. It revalidates every bound DBC, project reservation, SQL schema, and selected SQL row before producing a new DBC/SQL/manifest/MPQ bundle. Neither command mutates the live database, server, or client. Mount and Spell deliberately share the same registry namespace.\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, GameObjectDisplayInfo, Race, Class, Faction, Mount, Quest, Custom", code);
 
 static int Client(string[] args)
 {
