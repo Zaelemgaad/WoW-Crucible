@@ -5,17 +5,20 @@ namespace WoWCrucible.Core;
 internal sealed record M2ParticleAnimation(
     M2TrackHeader Speed, M2TrackHeader Variation, M2TrackHeader VerticalRange, M2TrackHeader HorizontalRange,
     M2TrackHeader Gravity, M2TrackHeader Lifespan, M2TrackHeader EmissionRate,
-    M2TrackHeader AreaLength, M2TrackHeader AreaWidth, M2TrackHeader ZSource);
+    M2TrackHeader AreaLength, M2TrackHeader AreaWidth, M2TrackHeader ZSource, M2TrackHeader Enabled, bool CompressedGravity);
 
 internal sealed record M2ParticleClip(
     M2ScalarTrack Speed, M2ScalarTrack Variation, M2ScalarTrack VerticalRange, M2ScalarTrack HorizontalRange,
-    M2ScalarTrack Gravity, M2ScalarTrack Lifespan, M2ScalarTrack EmissionRate,
-    M2ScalarTrack AreaLength, M2ScalarTrack AreaWidth, M2ScalarTrack ZSource);
+    M2VectorTrack Gravity, M2ScalarTrack Lifespan, M2ScalarTrack EmissionRate,
+    M2ScalarTrack AreaLength, M2ScalarTrack AreaWidth, M2ScalarTrack ZSource, M2ScalarTrack Enabled);
 
-internal sealed class M2ParticleRig(IReadOnlyList<M2PreviewParticleEmitter> emitters, M2ParticleAnimation[] animations, M2AnimationRig animationRig)
+internal sealed record M2ParticleLifeRamp(float[] ColorTimes, Vector3[] Colors, float[] OpacityTimes, float[] Opacities, float[] SizeTimes, Vector2[] Sizes);
+
+internal sealed class M2ParticleRig(IReadOnlyList<M2PreviewParticleEmitter> emitters, M2ParticleAnimation[] animations, M2ParticleLifeRamp[] lifeRamps, M2AnimationRig animationRig)
 {
     public IReadOnlyList<M2PreviewParticleEmitter> Emitters { get; } = emitters;
     public M2ParticleAnimation[] Animations { get; } = animations;
+    public M2ParticleLifeRamp[] LifeRamps { get; } = lifeRamps;
     public M2AnimationRig AnimationRig { get; } = animationRig;
     public Dictionary<int, M2ParticleClip[]> ClipCache { get; } = [];
 }
@@ -24,6 +27,8 @@ public sealed record M2PreviewParticleSprite(Vector3 Position, Vector4 Color, fl
     int TextureDefinitionIndex, byte BlendMode, int TileIndex, ushort Rows, ushort Columns, int EmitterIndex)
 {
     public IReadOnlyList<int> TextureDefinitionIndices { get; init; } = [TextureDefinitionIndex];
+    public float Width { get; init; } = Size;
+    public float Height { get; init; } = Size;
 }
 
 public static class M2ParticlePreviewService
@@ -32,6 +37,7 @@ public static class M2ParticlePreviewService
     private const int MaximumEmitters = 65_536;
     private const int MaximumLifeKeys = 4_096;
     private const uint MultiTextureFlag = 0x1000_0000;
+    private const uint CompressedGravityFlag = 0x0080_0000;
     private const uint WorldSpaceFlag = 0x8;
 
     internal static M2ParticleRig Parse(byte[] model, M2AnimationRig animationRig, int boneCount, int textureCount)
@@ -41,6 +47,7 @@ public static class M2ParticlePreviewService
         Require(model, offset, count, ParticleStride, "M2 particle emitters");
         var emitters = new M2PreviewParticleEmitter[count];
         var animations = new M2ParticleAnimation[count];
+        var lifeRamps = new M2ParticleLifeRamp[count];
         for (var index = 0; index < count; index++)
         {
             var item = offset + index * ParticleStride;
@@ -65,22 +72,22 @@ public static class M2ParticlePreviewService
 
             var colors = ReadLifeColors(model, item + 260, index);
             var opacity = ReadLifeOpacity(model, item + 276, index);
-            var scales = new[] { ReadSingle(model, item + 360), ReadSingle(model, item + 364), ReadSingle(model, item + 368) };
-            if (scales.Any(value => !float.IsFinite(value))) throw new InvalidDataException($"M2 particle emitter {index:N0} contains a non-finite life-size scale.");
-            var sizes = ReadLifeSizes(model, item + 292, scales, index);
+            var sizes = ReadLifeSizes(model, item + 292, index);
             var lifeColors = new Vector4[3];
-            for (var key = 0; key < 3; key++) lifeColors[key] = new(colors[key], opacity[key]);
+            var legacyColors = Three(colors.Values, Vector3.One); var legacyOpacity = Three(opacity.Values, 1f); var legacySizes = Three(sizes.Values, new Vector2(0.1f));
+            for (var key = 0; key < 3; key++) lifeColors[key] = new(legacyColors[key], legacyOpacity[key]);
             var rotation = ReadSingle(model, item + 384);
             if (!float.IsFinite(rotation)) throw new InvalidDataException($"M2 particle emitter {index:N0} contains a non-finite sprite rotation.");
-            emitters[index] = new(index, flags, position, bone, texture, blend, type, rows, columns, lifeColors, sizes, rotation) { TextureDefinitionIndices = textures };
+            emitters[index] = new(index, flags, position, bone, texture, blend, type, rows, columns, lifeColors, legacySizes.Select(value => Math.Max(Math.Abs(value.X), Math.Abs(value.Y))).ToArray(), rotation) { TextureDefinitionIndices = textures };
+            lifeRamps[index] = new(colors.Times, colors.Values, opacity.Times, opacity.Values, sizes.Times, sizes.Values);
             animations[index] = new(
                 Track(item + 52, "speed"), Track(item + 72, "variation"), Track(item + 92, "vertical range"), Track(item + 112, "horizontal range"),
                 Track(item + 132, "gravity"), Track(item + 152, "lifespan"), Track(item + 176, "emission rate"),
-                Track(item + 200, "area length"), Track(item + 220, "area width"), Track(item + 240, "Z source"));
+                Track(item + 200, "area length"), Track(item + 220, "area width"), Track(item + 240, "Z source"), Track(item + 456, "enabled"), (flags & CompressedGravityFlag) != 0);
 
             M2TrackHeader Track(int trackOffset, string name) => M2AnimationService.ReadTrack(model, trackOffset, animationRig.GlobalSequenceDurations.Length, $"particle {index:N0} {name}");
         }
-        return new(emitters, animations, animationRig);
+        return new(emitters, animations, lifeRamps, animationRig);
     }
 
     public static IReadOnlyList<M2PreviewParticleSprite> BuildSprites(M2PreviewGeometry geometry, M2AnimationPose? pose, int maximumSprites = 2_000)
@@ -101,11 +108,12 @@ public static class M2ParticlePreviewService
             var emitter = particles.Emitters[emitterIndex];
             if (emitter.EmitterType is not (1 or 2)) continue;
             var clip = clips?[emitterIndex];
+            if (Value(clip?.Enabled, 1) <= 0) continue;
             var speed = Value(clip?.Speed, 0);
             var variation = Math.Clamp(Value(clip?.Variation, 0), 0, 4);
             var vertical = Value(clip?.VerticalRange, 0);
             var horizontal = Value(clip?.HorizontalRange, MathF.PI * 2);
-            var gravity = Value(clip?.Gravity, 0);
+            var gravity = clip is null ? Vector3.Zero : M2AnimationService.Sample(clip.Gravity, sequenceTime, elapsedTime, Vector3.Zero);
             var lifespan = Math.Clamp(Value(clip?.Lifespan, 0), 0, 120);
             var rate = Math.Clamp(Value(clip?.EmissionRate, 0), 0, 20_000);
             var areaLength = Math.Abs(Value(clip?.AreaLength, 0));
@@ -149,17 +157,20 @@ public static class M2ParticlePreviewService
                     origin = Vector3.Transform(origin, transform);
                     if ((emitter.Flags & WorldSpaceFlag) == 0) velocity = Vector3.TransformNormal(velocity, transform);
                 }
-                var position = origin + velocity * age + new Vector3(0, 0, -0.5f * gravity * age * age);
+                var position = origin + velocity * age + 0.5f * gravity * age * age;
                 if (!Finite(position)) continue;
                 var life = Math.Clamp(age / lifespan, 0, 1);
-                var color = Life(emitter.LifeColors, life);
-                var size = Math.Abs(Life(emitter.LifeSizes, life));
-                if (!Finite(color) || !float.IsFinite(size) || size <= 0.000001f || color.W <= 0.00001f) continue;
+                var ramp = particles.LifeRamps[emitterIndex];
+                var rgb = Life(ramp.ColorTimes, ramp.Colors, life, Vector3.One); var alpha = Life(ramp.OpacityTimes, ramp.Opacities, life, 1f); var sizeVector = Life(ramp.SizeTimes, ramp.Sizes, life, new Vector2(0.1f));
+                var color = new Vector4(rgb, alpha); var width = Math.Abs(sizeVector.X); var height = Math.Abs(sizeVector.Y); var size = Math.Max(width, height);
+                if (!Finite(color) || !float.IsFinite(width) || !float.IsFinite(height) || size <= 0.000001f || color.W <= 0.00001f) continue;
                 var tileCount = emitter.Rows * emitter.Columns;
                 var tile = tileCount <= 1 ? 0 : (int)(seed % tileCount);
                 result.Add(new(position, Vector4.Clamp(color, Vector4.Zero, Vector4.One), size, emitter.Rotation, emitter.TextureDefinitionIndex, emitter.BlendMode, tile, emitter.Rows, emitter.Columns, emitterIndex)
                 {
-                    TextureDefinitionIndices = emitter.TextureDefinitionIndices
+                    TextureDefinitionIndices = emitter.TextureDefinitionIndices,
+                    Width = width,
+                    Height = height
                 });
             }
         }
@@ -179,8 +190,8 @@ public static class M2ParticlePreviewService
             var value = particles.Animations[index];
             result[index] = new(
                 Scalar(value.Speed, "speed"), Scalar(value.Variation, "variation"), Scalar(value.VerticalRange, "vertical range"), Scalar(value.HorizontalRange, "horizontal range"),
-                Scalar(value.Gravity, "gravity"), Scalar(value.Lifespan, "lifespan"), Scalar(value.EmissionRate, "emission rate"),
-                Scalar(value.AreaLength, "area length"), Scalar(value.AreaWidth, "area width"), Scalar(value.ZSource, "Z source"));
+                M2AnimationService.ParseParticleGravityTrack(particles.AnimationRig, value.Gravity, sequenceIndex, data, value.CompressedGravity, $"particle {index:N0} gravity"), Scalar(value.Lifespan, "lifespan"), Scalar(value.EmissionRate, "emission rate"),
+                Scalar(value.AreaLength, "area length"), Scalar(value.AreaWidth, "area width"), Scalar(value.ZSource, "Z source"), M2AnimationService.ParseByteScalarTrack(particles.AnimationRig, value.Enabled, sequenceIndex, data, $"particle {index:N0} enabled"));
             M2ScalarTrack Scalar(M2TrackHeader header, string name) => M2AnimationService.ParseScalarTrack(particles.AnimationRig, header, sequenceIndex, data, $"particle {index:N0} {name}");
         }
         if (particles.ClipCache.Count >= 8) particles.ClipCache.Remove(particles.ClipCache.Keys.First());
@@ -188,65 +199,82 @@ public static class M2ParticlePreviewService
         return result;
     }
 
-    private static Vector3[] ReadLifeColors(byte[] data, int block, int emitter)
+    internal static void ValidateAllSequences(M2PreviewGeometry geometry)
     {
-        var values = ReadFakeBlock(data, block, 12, emitter, "colors");
-        var result = new[] { Vector3.One, Vector3.One, Vector3.One };
-        for (var index = 0; index < Math.Min(3, values.Count); index++)
+        var rig = geometry.ParticleRig;
+        if (rig is null || rig.Emitters.Count == 0) return;
+        if (geometry.Sequences.Count == 0) { _ = BuildSprites(geometry, null, 1); return; }
+        foreach (var sequence in geometry.Sequences)
         {
-            var offset = values.Offset + index * 12;
+            var resolved = M2AnimationService.ResolveAlias(geometry.Sequences, sequence.Index);
+            _ = GetClips(geometry.ModelPath, rig, resolved);
+        }
+    }
+
+    private static (float[] Times, Vector3[] Values) ReadLifeColors(byte[] data, int block, int emitter)
+    {
+        var values = ReadFakeBlock(data, block, 12, emitter, "colors"); var result = new Vector3[values.Count];
+        for (var index = 0; index < values.Count; index++)
+        {
+            var offset = values.ValueOffset + index * 12;
             var value = ReadVector(data, offset) / 255f;
             if (!Finite(value)) throw new InvalidDataException($"M2 particle emitter {emitter:N0} contains a non-finite life color.");
             result[index] = Vector3.Clamp(value, Vector3.Zero, Vector3.One);
         }
-        Fill(result, values.Count); return result;
+        return (values.Times, result);
     }
 
-    private static float[] ReadLifeOpacity(byte[] data, int block, int emitter)
+    private static (float[] Times, float[] Values) ReadLifeOpacity(byte[] data, int block, int emitter)
     {
-        var values = ReadFakeBlock(data, block, 2, emitter, "opacity");
-        var result = new[] { 1f, 1f, 0f };
-        for (var index = 0; index < Math.Min(3, values.Count); index++) result[index] = Math.Clamp(ReadShort(data, values.Offset + index * 2) / 32767f, 0, 1);
-        Fill(result, values.Count); return result;
+        var values = ReadFakeBlock(data, block, 2, emitter, "opacity"); var result = new float[values.Count];
+        for (var index = 0; index < values.Count; index++) result[index] = Math.Clamp(ReadShort(data, values.ValueOffset + index * 2) / 32767f, 0, 1);
+        return (values.Times, result);
     }
 
-    private static float[] ReadLifeSizes(byte[] data, int block, IReadOnlyList<float> scales, int emitter)
+    private static (float[] Times, Vector2[] Values) ReadLifeSizes(byte[] data, int block, int emitter)
     {
-        var values = ReadFakeBlock(data, block, 8, emitter, "sizes");
-        var result = new[] { 0.1f, 0.1f, 0.1f };
-        for (var index = 0; index < Math.Min(3, values.Count); index++)
+        var values = ReadFakeBlock(data, block, 8, emitter, "sizes"); var result = new Vector2[values.Count];
+        for (var index = 0; index < values.Count; index++)
         {
-            var value = ReadSingle(data, values.Offset + index * 8) * scales[index];
-            if (!float.IsFinite(value)) throw new InvalidDataException($"M2 particle emitter {emitter:N0} contains a non-finite life size.");
+            var value = new Vector2(ReadSingle(data, values.ValueOffset + index * 8), ReadSingle(data, values.ValueOffset + index * 8 + 4));
+            if (!float.IsFinite(value.X) || !float.IsFinite(value.Y)) throw new InvalidDataException($"M2 particle emitter {emitter:N0} contains a non-finite life size.");
             result[index] = value;
         }
-        Fill(result, values.Count); return result;
+        return (values.Times, result);
     }
 
-    private static (int Count, int Offset) ReadFakeBlock(byte[] data, int block, int stride, int emitter, string label)
+    private static (int Count, float[] Times, int ValueOffset) ReadFakeBlock(byte[] data, int block, int stride, int emitter, string label)
     {
         Require(data, block, 1, 16, $"M2 particle {emitter:N0} {label} block");
-        var count = CheckedCount(ReadUInt(data, block + 8), MaximumLifeKeys, $"M2 particle {emitter:N0} {label}");
-        var offset = CheckedOffset(ReadUInt(data, block + 12), $"M2 particle {emitter:N0} {label}");
-        Require(data, offset, count, stride, $"M2 particle {emitter:N0} {label} values");
-        return (count, offset);
-    }
-
-    private static T Life<T>(IReadOnlyList<T> values, float life) where T : struct
-    {
-        if (typeof(T) == typeof(float))
+        var timeCount = CheckedCount(ReadUInt(data, block), MaximumLifeKeys, $"M2 particle {emitter:N0} {label} timestamps"); var timeOffset = CheckedOffset(ReadUInt(data, block + 4), $"M2 particle {emitter:N0} {label} timestamps");
+        var valueCount = CheckedCount(ReadUInt(data, block + 8), MaximumLifeKeys, $"M2 particle {emitter:N0} {label} values"); var valueOffset = CheckedOffset(ReadUInt(data, block + 12), $"M2 particle {emitter:N0} {label} values");
+        if (timeCount != valueCount) throw new InvalidDataException($"M2 particle emitter {emitter:N0} {label} has {timeCount:N0} timestamps but {valueCount:N0} values.");
+        Require(data, timeOffset, timeCount, 2, $"M2 particle {emitter:N0} {label} timestamps"); Require(data, valueOffset, valueCount, stride, $"M2 particle {emitter:N0} {label} values");
+        var times = new float[timeCount];
+        for (var index = 0; index < times.Length; index++)
         {
-            var a = (float)(object)values[life <= 0.5f ? 0 : 1]; var b = (float)(object)values[life <= 0.5f ? 1 : 2];
-            return (T)(object)(a + (b - a) * (life <= 0.5f ? life * 2 : (life - 0.5f) * 2));
+            times[index] = Math.Clamp(ReadUShort(data, timeOffset + index * 2) / 32767f, 0, 1);
+            if (index > 0 && times[index] < times[index - 1]) throw new InvalidDataException($"M2 particle emitter {emitter:N0} {label} timestamps are not sorted.");
         }
-        var va = (Vector4)(object)values[life <= 0.5f ? 0 : 1]; var vb = (Vector4)(object)values[life <= 0.5f ? 1 : 2];
-        return (T)(object)Vector4.Lerp(va, vb, life <= 0.5f ? life * 2 : (life - 0.5f) * 2);
+        return (valueCount, times, valueOffset);
     }
 
-    private static void Fill<T>(T[] values, int populated)
+    private static T Life<T>(float[] times, IReadOnlyList<T> values, float life, T fallback) where T : struct
     {
-        if (populated <= 0) return;
-        for (var index = Math.Min(populated, values.Length); index < values.Length; index++) values[index] = values[index - 1];
+        if (values.Count == 0 || times.Length == 0) return fallback;
+        var count = Math.Min(times.Length, values.Count); if (count == 1 || life <= times[0]) return values[0]; if (life >= times[count - 1]) return values[count - 1];
+        var right = Array.BinarySearch(times, 0, count, life); if (right >= 0) return values[right]; right = ~right; var left = right - 1;
+        var amount = times[right] == times[left] ? 0 : Math.Clamp((life - times[left]) / (times[right] - times[left]), 0, 1);
+        if (typeof(T) == typeof(float)) { var a = (float)(object)values[left]; var b = (float)(object)values[right]; return (T)(object)(a + (b - a) * amount); }
+        if (typeof(T) == typeof(Vector2)) return (T)(object)Vector2.Lerp((Vector2)(object)values[left], (Vector2)(object)values[right], amount);
+        if (typeof(T) == typeof(Vector3)) return (T)(object)Vector3.Lerp((Vector3)(object)values[left], (Vector3)(object)values[right], amount);
+        throw new NotSupportedException($"Unsupported particle life-ramp value {typeof(T).Name}.");
+    }
+
+    private static T[] Three<T>(IReadOnlyList<T> values, T fallback)
+    {
+        if (values.Count == 0) return [fallback, fallback, fallback];
+        return [values[0], values[Math.Min(1, values.Count - 1)], values[Math.Min(2, values.Count - 1)]];
     }
 
     private static float PositiveModulo(float value, float divisor) { var result = value % divisor; return result < 0 ? result + divisor : result; }

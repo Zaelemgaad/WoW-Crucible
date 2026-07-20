@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Numerics;
 
 namespace WoWCrucible.Core;
@@ -397,6 +398,37 @@ public static class M2AnimationService
         var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 2);
         Require(data, valueOffset, valueCount, 2, label + " values"); var values = new float[valueCount];
         for (var index = 0; index < values.Length; index++) values[index] = UShort(data, valueOffset + index * 2);
+        MatchCounts(times, values.Length, label); return new(header.Interpolation, times, values, globalDuration);
+    }
+
+    internal static M2ScalarTrack ParseByteScalarTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, string label)
+    {
+        var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 1);
+        Require(data, valueOffset, valueCount, 1, label + " values"); var values = new float[valueCount];
+        for (var index = 0; index < values.Length; index++) values[index] = data[valueOffset + index];
+        MatchCounts(times, values.Length, label); return new(header.Interpolation, times, values, globalDuration);
+    }
+
+    internal static M2VectorTrack ParseParticleGravityTrack(M2AnimationRig rig, M2TrackHeader header, int sequenceIndex, byte[] sequenceData, bool compressed, string label)
+    {
+        var (times, valueCount, valueOffset, globalDuration, data) = ReadSeries(rig, header, sequenceIndex, sequenceData, label); data = ValueData(rig, data, valueOffset, valueCount, 4);
+        Require(data, valueOffset, valueCount, 4, label + " values"); var values = new Vector3[valueCount];
+        for (var index = 0; index < values.Length; index++)
+        {
+            var offset = valueOffset + index * 4;
+            if (!compressed)
+            {
+                var gravity = Single(data, offset); if (!float.IsFinite(gravity)) throw new InvalidDataException($"M2 {label} key {index:N0} is non-finite.");
+                values[index] = new(0, 0, -gravity);
+            }
+            else
+            {
+                var x = (sbyte)data[offset] / 128f; var y = (sbyte)data[offset + 1] / 128f; var signedMagnitude = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(offset + 2, 2)) * 0.04238648f;
+                var zDirection = MathF.Sqrt(Math.Max(0, 1 - Math.Min(1, x * x + y * y)));
+                var magnitude = Math.Abs(signedMagnitude); values[index] = new(x * magnitude, y * magnitude, MathF.CopySign(zDirection * magnitude, signedMagnitude));
+                if (!Finite(values[index])) throw new InvalidDataException($"M2 {label} compressed key {index:N0} is non-finite.");
+            }
+        }
         MatchCounts(times, values.Length, label); return new(header.Interpolation, times, values, globalDuration);
     }
 

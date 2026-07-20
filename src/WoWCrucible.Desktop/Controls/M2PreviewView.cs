@@ -601,9 +601,9 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                     var mountedPosition = Vector3.Transform(particle.Position, effectSource.Transform); Vector3 point;
                     if (useNativeCamera) { var view = cameraProjection!.ToViewPoint(Vector3.Transform(mountedPosition, sceneTransform)); if (!cameraProjection.ContainsDepth(view.Y)) continue; point = cameraProjection.Project(view); }
                     else point = Vector3.Transform(mountedPosition - center, orbitRotation);
-                    var x = width * 0.5f + point.X * scale; var y = height * 0.5f - point.Z * scale; var radius = Math.Clamp(particle.Size * scale, 0.5f, 256f);
-                    if (x + radius < 0 || x - radius > width || y + radius < 0 || y - radius > height) continue;
-                    projectedParticles.Add(new(point.Y, x, y, radius, effectSourceIndex, particle));
+                    var x = width * 0.5f + point.X * scale; var y = height * 0.5f - point.Z * scale; var radiusX = Math.Clamp(particle.Width * scale, 0.5f, 256f); var radiusY = Math.Clamp(particle.Height * scale, 0.5f, 256f);
+                    if (x + radiusX < 0 || x - radiusX > width || y + radiusY < 0 || y - radiusY > height) continue;
+                    projectedParticles.Add(new(point.Y, x, y, radiusX, radiusY, effectSourceIndex, particle));
                 }
             }
             projectedParticles.Sort(static (left, right) => right.Depth.CompareTo(left.Depth));
@@ -626,8 +626,8 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                     for (var runIndex = 0; runIndex < count; runIndex++)
                     {
                         var projected = projectedParticles[start + runIndex]; var particle = projected.Sprite; var offset = runIndex * 6;
-                        var cosine = MathF.Cos(particle.Rotation); var sine = MathF.Sin(particle.Rotation); var radius = projected.Radius;
-                        var a = Rotate(-radius, -radius); var b = Rotate(radius, -radius); var c = Rotate(radius, radius); var d = Rotate(-radius, radius);
+                        var cosine = MathF.Cos(particle.Rotation); var sine = MathF.Sin(particle.Rotation); var radiusX = projected.RadiusX; var radiusY = projected.RadiusY;
+                        var a = Rotate(-radiusX, -radiusY); var b = Rotate(radiusX, -radiusY); var c = Rotate(radiusX, radiusY); var d = Rotate(-radiusX, radiusY);
                         positions[offset] = a; positions[offset + 1] = b; positions[offset + 2] = c; positions[offset + 3] = a; positions[offset + 4] = c; positions[offset + 5] = d;
                         var columns = Math.Max(1, (int)particle.Columns); var rows = Math.Max(1, (int)particle.Rows); var tileWidth = particleTexture.Width / (float)columns; var tileHeight = particleTexture.Height / (float)rows;
                         var column = particle.TileIndex % columns; var row = particle.TileIndex / columns; var left = column * tileWidth; var top = row * tileHeight; var right = left + tileWidth; var bottom = top + tileHeight;
@@ -639,7 +639,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                     using var mesh = SKVertices.CreateCopy(SKVertexMode.Triangles, positions, coordinates, colors); using var shader = SKShader.CreateBitmap(particleTexture, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp);
                     particlePaint.Shader = shader; canvas.DrawVertices(mesh, SKBlendMode.Modulate, particlePaint);
                 }
-                else for (var index = start; index < end; index++) { var projected = projectedParticles[index]; var particle = projected.Sprite; particlePaint.Color = new(Channel(particle.Color.X * 255), Channel(particle.Color.Y * 255), Channel(particle.Color.Z * 255), Channel(particle.Color.W * 255)); canvas.DrawCircle(projected.X, projected.Y, projected.Radius, particlePaint); }
+                else for (var index = start; index < end; index++) { var projected = projectedParticles[index]; var particle = projected.Sprite; particlePaint.Color = new(Channel(particle.Color.X * 255), Channel(particle.Color.Y * 255), Channel(particle.Color.Z * 255), Channel(particle.Color.W * 255)); canvas.DrawOval(new SKRect(projected.X - projected.RadiusX, projected.Y - projected.RadiusY, projected.X + projected.RadiusX, projected.Y + projected.RadiusY), particlePaint); }
                 start = end;
             }
 
@@ -765,7 +765,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
 
         private sealed record ResolvedTextureStage(SKBitmap Texture, M2PreviewTextureCoordinateSource CoordinateSource, M2PreviewTextureStageBlend Blend);
         private sealed record SceneLight(short Type, M2PreviewLightPose Pose);
-        private readonly record struct ProjectedParticle(float Depth, float X, float Y, float Radius, int SourceIndex, M2PreviewParticleSprite Sprite);
+        private readonly record struct ProjectedParticle(float Depth, float X, float Y, float RadiusX, float RadiusY, int SourceIndex, M2PreviewParticleSprite Sprite);
         private readonly record struct TextureGroup(int PassOrder, int SourceIndex, int MaterialKey, ushort BlendMode);
         private readonly record struct Face(float Depth, int PassOrder, int SourceIndex, int MaterialKey, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy,
             Vector2 EnvironmentA, Vector2 EnvironmentB, Vector2 EnvironmentC, float EdgeFadeA, float EdgeFadeB, float EdgeFadeC, Vector3 Lighting, IReadOnlyList<ResolvedTextureStage> TextureStages, M2PreviewTextureCombinerKind CombinerKind, ushort BlendMode);

@@ -37,6 +37,7 @@ public sealed record StaticM2DownportPlan(
     public IReadOnlyList<ushort> OutputTransparencyLookup { get; init; } = [];
     public IReadOnlyList<ushort> OutputTextureAnimationLookup { get; init; } = [];
     public IReadOnlyList<string> OutputMaterialCombiners { get; init; } = [];
+    public int ParticleEmitterCount { get; init; }
     public bool UsesBlendOverrides => OutputBlendOverrides.Count > 0;
     public bool TranslatesMaterials => OutputMaterialCombiners.Count > 0;
 }
@@ -81,7 +82,7 @@ public sealed record StaticM2DownportScanResult(
 /// </summary>
 public static class StaticM2DownportService
 {
-    private const int PlanFormatVersion = 6;
+    private const int PlanFormatVersion = 7;
     private const int ReceiptFormatVersion = 1;
     private const uint ModernVersion = 274;
     private const uint WotlkVersion = 264;
@@ -91,6 +92,9 @@ public static class StaticM2DownportService
     private const uint ClearedModernFlagMask = RequiredModernFlags | NewExporterLayoutFlag;
     private const uint SupportedSourceFlagMask = ClearedModernFlagMask | WotlkPassthroughFlagMask;
     private const int MaximumArrayCount = 20_000_000;
+    private const int ModernParticleStride = 492;
+    private const int WotlkParticleStride = 476;
+    private const uint ParticleMultiTextureFlag = 0x1000_0000;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     public static StaticM2DownportPlan Plan(string sourceModelPath, string? sourceSkinPath = null, string? listfilePath = null, CancellationToken cancellationToken = default)
@@ -118,8 +122,8 @@ public static class StaticM2DownportService
         if (!File.Exists(sourceModelPath)) throw new FileNotFoundException("The modern M2 source does not exist.", sourceModelPath);
         var source = File.ReadAllBytes(sourceModelPath);
         var blockers = new List<string>(); var transformations = new List<string>(); var losses = new List<string>();
-        var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0, globalSequenceCount = 0, animationSequenceCount = 0;
-        byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false; var omittedSingleProfileLdv1 = false; var constantColorTracks = 0;
+        var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0, globalSequenceCount = 0, animationSequenceCount = 0, particleEmitterCount = 0;
+        byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false; var omittedSingleProfileLdv1 = false; var omittedNeutralExp2 = false; var constantColorTracks = 0;
         var materialTranslation = MaterialTranslation.None;
         FileDataIdListfileSnapshot? listfile = null; var resolvedTextures = new List<M2ResolvedTexturePath>();
 
@@ -149,7 +153,9 @@ public static class StaticM2DownportService
                     else omittedSingleProfileLdv1 = true;
                 }
             }
-            var unexpected = chunks.Where(chunk => chunk.Id is not "MD21" and not "SFID" and not "TXID" and not "TXAC" and not "LDV1").Select(chunk => chunk.Id).Distinct().Order().ToArray();
+            var exp2 = chunks.Where(chunk => chunk.Id == "EXP2").ToArray();
+            if (exp2.Length > 1) blockers.Add($"Expected at most one EXP2 chunk; found {exp2.Length:N0}.");
+            var unexpected = chunks.Where(chunk => chunk.Id is not "MD21" and not "SFID" and not "TXID" and not "TXAC" and not "LDV1" and not "EXP2").Select(chunk => chunk.Id).Distinct().Order().ToArray();
             if (unexpected.Length > 0) blockers.Add($"Modern semantic chunk(s) are outside the static profile: {string.Join(", ", unexpected)}.");
             var md21 = chunks.Where(chunk => chunk.Id == "MD21").ToArray();
             if (md21.Length != 1) blockers.Add($"Expected exactly one MD21 payload chunk; found {md21.Length:N0}.");
@@ -176,6 +182,7 @@ public static class StaticM2DownportService
                     ValidateArray(payload, 0x24, 0x28, 2, "animation lookup", blockers);
                     ValidateAnimationLookup(payload, animationSequenceCount, blockers);
                     ValidateEmbeddedAnimationOwnership(sourceModelPath, payload, animationSequenceCount, blockers);
+                    var boneCount = Count(payload, 0x2C, "bone", blockers);
                     ValidateArray(payload, 0x2C, 0x30, 88, "bones", blockers);
                     var colorCount = Count(payload, 0x48, "color track", blockers);
                     if (colorCount > 0 && ValidateConstantColorTracks(payload, colorCount, blockers)) constantColorTracks = colorCount;
@@ -185,11 +192,13 @@ public static class StaticM2DownportService
                     RequireZero(payload, 0x108, "lights", blockers);
                     RequireZero(payload, 0x110, "cameras", blockers);
                     RequireZero(payload, 0x120, "ribbon emitters", blockers);
-                    RequireZero(payload, 0x128, "particle emitters", blockers);
+                    particleEmitterCount = Count(payload, 0x128, "particle emitter", blockers);
                     if (Count(payload, 0x88, "texture-coordinate lookup", blockers) != 0) blockers.Add("Modern texture-coordinate lookup is not empty; the static profile only synthesizes the verified primary-UV lookup.");
 
                     var textureCount = Count(payload, 0x50, "texture", blockers);
                     ValidateArray(payload, 0x50, 0x54, 16, "textures", blockers);
+                    ValidateModernParticles(payload, particleEmitterCount, boneCount, textureCount, globalSequenceCount, blockers);
+                    if (exp2.Length == 1 && ValidateNeutralExp2(source, exp2[0], particleEmitterCount, blockers)) omittedNeutralExp2 = true;
                     ValidateArray(payload, 0x58, 0x5C, 20, "transparency tracks", blockers);
                     var textureOffset = Offset(payload, 0x54, "textures", blockers);
                     ValidateArray(payload, 0x70, 0x74, 4, "render flags", blockers);
@@ -273,6 +282,7 @@ public static class StaticM2DownportService
             transformations.Add("Pad material transparency/texture-animation lookup spans with explicit none values; dangling references to absent definitions are canonicalized to none.");
         }
         if (constantColorTracks > 0) transformations.Add($"Preserve {constantColorTracks:N0} single-key constant color track(s) after validating both nested RGB and opacity series.");
+        if (particleEmitterCount > 0) transformations.Add($"Repack {particleEmitterCount:N0} validated modern particle emitter record(s) from 492 to Wrath's 476-byte stride while preserving every legacy field and referenced animation/lifetime payload byte-for-byte.");
         if (resolvedTextures.Count > 0) transformations.Add($"Embed {resolvedTextures.Count:N0} listfile-resolved texture path(s) into the Wrath M2 payload and remove the external FileDataID dependency.");
         transformations.Add("Repack modern SKIN v3 common arrays into the Wrath SKIN v2 header without changing their contents.");
         if (omittedEmptyTxac) transformations.Add("Omit the proven zero-filled TXAC extension chunk; it contains no texture-animation values to translate.");
@@ -280,6 +290,11 @@ public static class StaticM2DownportService
         {
             transformations.Add("Omit the verified single-profile LDV1 selection chunk after proving the model exposes exactly one SKIN.");
             losses.Add("Wrath's chunkless M2 container has no LDV1 distance-selection metadata; its finite modern threshold is omitted while the sole validated SKIN geometry remains unchanged.");
+        }
+        if (omittedNeutralExp2)
+        {
+            transformations.Add("Omit the verified neutral EXP2 particle extension after proving every Z-source offset is zero, both multipliers are one, and every alpha-cutoff curve is empty.");
+            losses.Add("Wrath has no EXP2 particle-extension chunk; only identity-valued EXP2 metadata with no visual effect is omitted.");
         }
         var outputFlags = flags & ~ClearedModernFlagMask;
         if (materialTranslation.BlendOverrides.Count > 0) outputFlags |= 0x8;
@@ -291,7 +306,8 @@ public static class StaticM2DownportService
             OutputMaterialShaderIds = materialTranslation.MaterialShaderIds,
             OutputTransparencyLookup = materialTranslation.TransparencyLookup,
             OutputTextureAnimationLookup = materialTranslation.TextureAnimationLookup,
-            OutputMaterialCombiners = materialTranslation.MaterialCombiners
+            OutputMaterialCombiners = materialTranslation.MaterialCombiners,
+            ParticleEmitterCount = particleEmitterCount
         };
     }
 
@@ -380,6 +396,7 @@ public static class StaticM2DownportService
                 var bytes = Encoding.UTF8.GetBytes(resolved.ClientPath + "\0"); var pathOffset = payload.Length; Array.Resize(ref payload, checked(payload.Length + bytes.Length)); bytes.CopyTo(payload, pathOffset);
                 var item = checked(textureOffset + resolved.TextureIndex * 16); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(item + 8, 4), checked((uint)bytes.Length)); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(item + 12, 4), checked((uint)pathOffset));
             }
+            AppendLegacyParticles(ref payload, originalPayload, current.ParticleEmitterCount);
             var outputColorBlockers = new List<string>(); var outputColorCount = Count(payload, 0x48, "output color track", outputColorBlockers);
             if (outputColorCount != current.ConstantColorTrackCount || (outputColorCount > 0 && !ValidateConstantColorTracks(payload, outputColorCount, outputColorBlockers)))
                 throw new InvalidDataException("Converted M2 color tracks failed independent constant-track validation: " + string.Join("; ", outputColorBlockers));
@@ -401,6 +418,9 @@ public static class StaticM2DownportService
             if (geometry.Sequences.Count != current.AnimationSequenceCount || geometry.AnimationRig?.GlobalSequenceDurations.Length != current.GlobalSequenceCount)
                 throw new InvalidDataException($"Converted animation metadata differs from the immutable plan. Expected {current.AnimationSequenceCount:N0} sequence(s) and {current.GlobalSequenceCount:N0} global clock(s); found {geometry.Sequences.Count:N0} and {geometry.AnimationRig?.GlobalSequenceDurations.Length ?? 0:N0}.");
             M2AnimationService.ValidateAllSequences(geometry);
+            M2ParticlePreviewService.ValidateAllSequences(geometry);
+            if (geometry.ParticleEmitters.Count != current.ParticleEmitterCount)
+                throw new InvalidDataException($"Converted particle-emitter count differs from the immutable plan. Expected {current.ParticleEmitterCount:N0}; found {geometry.ParticleEmitters.Count:N0}.");
             if (current.OutputMaterialCombiners.Count > 0 && !geometry.MaterialUnits.Select(material => material.Combiner.Name).SequenceEqual(current.OutputMaterialCombiners))
                 throw new InvalidDataException($"Converted material combiners differ from the immutable plan. Expected {string.Join(", ", current.OutputMaterialCombiners)}; found {string.Join(", ", geometry.MaterialUnits.Select(material => material.Combiner.Name))}.");
             var slots = M2PreviewGeometryService.InspectTextureSlots(stagedModel);
@@ -653,6 +673,127 @@ public static class StaticM2DownportService
         Span<byte> header = stackalloc byte[8]; using var stream = File.OpenRead(path); if (stream.Length < header.Length) return false; stream.ReadExactly(header);
         return header[..4].SequenceEqual("MD20"u8) && BinaryPrimitives.ReadUInt32LittleEndian(header[4..]) == WotlkVersion;
     }
+
+    private static void ValidateModernParticles(byte[] data, int count, int boneCount, int textureCount, int globalSequenceCount, List<string> blockers)
+    {
+        var offset = Offset(data, 0x12C, "particle emitters", blockers);
+        if (!HasRange(data, offset, count, ModernParticleStride))
+        {
+            if (count > 0) blockers.Add($"Modern particle-emitter range ({count:N0} × {ModernParticleStride:N0} bytes at {offset:N0}) exceeds the containing model.");
+            return;
+        }
+        var trackOffsets = new[] { 52, 72, 92, 112, 132, 152, 176, 200, 220, 240 };
+        for (var index = 0; index < count; index++)
+        {
+            var item = offset + index * ModernParticleStride;
+            var flags = U32(data, item + 4); var bone = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(item + 20, 2)); var packedTexture = U16(data, item + 22);
+            foreach (var floatOffset in new[] { 8,12,16,172,196,308,312,348,352,356,360,364,368,372,376,380,384,388,392,396,400,404,408,412,416,420,424,428,432,436,440,444 })
+                if (!float.IsFinite(BitConverter.ToSingle(data, item + floatOffset))) blockers.Add($"Particle emitter {index:N0} contains a non-finite scalar at +0x{floatOffset:X}.");
+            if (bone < -1 || bone >= boneCount) blockers.Add($"Particle emitter {index:N0} references bone {bone:N0}, but only {boneCount:N0} bones exist.");
+            if ((flags & ParticleMultiTextureFlag) != 0)
+                blockers.Add($"Particle emitter {index:N0} uses modern multi-texturing; its post-Cataclysm texture parameters do not yet have a verified Wrath equivalent.");
+            else if (packedTexture >= textureCount) blockers.Add($"Particle emitter {index:N0} references texture definition {packedTexture:N0}, but only {textureCount:N0} textures exist.");
+            if (data[item + 40] > 7) blockers.Add($"Particle emitter {index:N0} uses invalid blend mode {data[item + 40]:N0}.");
+            if (data[item + 41] is not (1 or 2)) blockers.Add($"Particle emitter {index:N0} uses emitter type {data[item + 41]:N0}; the verified Wrath downport profile currently covers plane and sphere emitters.");
+            var rows = U16(data, item + 48); var columns = U16(data, item + 50);
+            if ((long)Math.Max(1, (int)rows) * Math.Max(1, (int)columns) > 65_536) blockers.Add($"Particle emitter {index:N0} declares an excessive {rows:N0} × {columns:N0} sprite sheet.");
+            ValidateParticleArray(data, item + 24, 1, $"particle emitter {index:N0} geometry filename", blockers);
+            ValidateParticleArray(data, item + 32, 1, $"particle emitter {index:N0} recursion filename", blockers);
+            foreach (var trackOffset in trackOffsets) ValidateParticleTrack(data, item + trackOffset, 4, globalSequenceCount, $"particle emitter {index:N0} track at +0x{trackOffset:X}", blockers, trackOffset == 132 && (flags & 0x0080_0000) != 0);
+            ValidateParticleTrack(data, item + 456, 1, globalSequenceCount, $"particle emitter {index:N0} enabled track", blockers);
+            ValidateParticleLifeBlock(data, item + 260, 12, $"particle emitter {index:N0} color curve", blockers, 3);
+            ValidateParticleLifeBlock(data, item + 276, 2, $"particle emitter {index:N0} opacity curve", blockers);
+            ValidateParticleLifeBlock(data, item + 292, 8, $"particle emitter {index:N0} size curve", blockers, 2);
+            ValidateParticleLifeBlock(data, item + 316, 2, $"particle emitter {index:N0} head-cell curve", blockers);
+            ValidateParticleLifeBlock(data, item + 332, 2, $"particle emitter {index:N0} tail-cell curve", blockers);
+            ValidateParticleArray(data, item + 448, 12, $"particle emitter {index:N0} spline", blockers);
+            if (data.AsSpan(item + WotlkParticleStride, ModernParticleStride - WotlkParticleStride).IndexOfAnyExcept((byte)0) >= 0)
+                blockers.Add($"Particle emitter {index:N0} has nonzero post-Cataclysm multi-texture parameters; they will not be silently discarded.");
+        }
+    }
+
+    private static void ValidateParticleTrack(byte[] data, int offset, int valueStride, int globalSequenceCount, string label, List<string> blockers, bool packedValues = false)
+    {
+        if (!HasRange(data, offset, 1, 20)) { blockers.Add($"{label} header is truncated."); return; }
+        var interpolation = U16(data, offset); var globalSequence = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(offset + 2, 2));
+        if (interpolation > 1) blockers.Add($"{label} uses interpolation {interpolation}; the verified profile supports none and linear tracks.");
+        if (globalSequence < -1 || globalSequence >= globalSequenceCount) blockers.Add($"{label} references global sequence {globalSequence:N0}, but only {globalSequenceCount:N0} exist.");
+        var timeCount = checked((int)Math.Min(U32(data, offset + 4), int.MaxValue)); var timeOffset = U32(data, offset + 8);
+        var valueCount = checked((int)Math.Min(U32(data, offset + 12), int.MaxValue)); var valueOffset = U32(data, offset + 16);
+        if (timeCount != valueCount) { blockers.Add($"{label} has {timeCount:N0} timestamp series but {valueCount:N0} value series."); return; }
+        if (!HasRange(data, UIntOffset(timeOffset), timeCount, 8) || !HasRange(data, UIntOffset(valueOffset), valueCount, 8)) { blockers.Add($"{label} outer series range is invalid."); return; }
+        for (var series = 0; series < timeCount; series++)
+        {
+            var timeEntry = UIntOffset(timeOffset) + series * 8; var valueEntry = UIntOffset(valueOffset) + series * 8;
+            var keys = U32(data, timeEntry); var values = U32(data, valueEntry);
+            if (keys != values) { blockers.Add($"{label} series {series:N0} has {keys:N0} timestamps but {values:N0} values."); continue; }
+            var nestedTimeOffset = UIntOffset(U32(data, timeEntry + 4)); var nestedValueOffset = UIntOffset(U32(data, valueEntry + 4));
+            if (keys > MaximumArrayCount || !HasRange(data, nestedTimeOffset, (int)keys, 4) || !HasRange(data, nestedValueOffset, (int)values, valueStride)) { blockers.Add($"{label} series {series:N0} has an invalid nested key range."); continue; }
+            for (var key = 1; key < keys; key++) if (U32(data, nestedTimeOffset + (key - 1) * 4) > U32(data, nestedTimeOffset + key * 4)) { blockers.Add($"{label} series {series:N0} timestamps are not sorted."); break; }
+            if (!packedValues && valueStride == 4)
+                for (var key = 0; key < values; key++) if (!float.IsFinite(BitConverter.ToSingle(data, nestedValueOffset + key * 4))) { blockers.Add($"{label} series {series:N0} key {key:N0} is non-finite."); break; }
+        }
+    }
+
+    private static void ValidateParticleLifeBlock(byte[] data, int offset, int valueStride, string label, List<string> blockers, int floatComponents = 0)
+    {
+        if (!HasRange(data, offset, 1, 16)) { blockers.Add($"{label} header is truncated."); return; }
+        var times = U32(data, offset); var values = U32(data, offset + 8);
+        if (times != values) { blockers.Add($"{label} has {times:N0} timestamps but {values:N0} values."); return; }
+        var timeOffset = UIntOffset(U32(data, offset + 4)); var valueOffset = UIntOffset(U32(data, offset + 12));
+        if (times > MaximumArrayCount || !HasRange(data, timeOffset, (int)times, 2) || !HasRange(data, valueOffset, (int)values, valueStride)) { blockers.Add($"{label} range is invalid."); return; }
+        for (var key = 0; key < times; key++)
+        {
+            var time = U16(data, timeOffset + key * 2); if (time > 32767) { blockers.Add($"{label} timestamp {key:N0} exceeds normalized fixed-16 range."); break; }
+            if (key > 0 && U16(data, timeOffset + (key - 1) * 2) > time) { blockers.Add($"{label} timestamps are not sorted."); break; }
+        }
+        for (var key = 0; key < values && floatComponents > 0; key++)
+            for (var component = 0; component < floatComponents; component++) if (!float.IsFinite(BitConverter.ToSingle(data, valueOffset + key * valueStride + component * 4))) { blockers.Add($"{label} key {key:N0} component {component:N0} is non-finite."); return; }
+    }
+
+    private static void ValidateParticleArray(byte[] data, int offset, int stride, string label, List<string> blockers)
+    {
+        if (!HasRange(data, offset, 1, 8)) { blockers.Add($"{label} header is truncated."); return; }
+        var count = U32(data, offset); if (count > MaximumArrayCount || !HasRange(data, UIntOffset(U32(data, offset + 4)), (int)count, stride)) blockers.Add($"{label} range is invalid.");
+    }
+
+    private static bool ValidateNeutralExp2(byte[] source, Chunk chunk, int particleCount, List<string> blockers)
+    {
+        if (chunk.Size > int.MaxValue) { blockers.Add("EXP2 is too large to validate safely."); return false; }
+        var start = checked((int)chunk.DataOffset); var size = checked((int)chunk.Size);
+        if (size < 16) { blockers.Add("EXP2 is shorter than its verified 16-byte header."); return false; }
+        var count = U32(source, start); var relativeOffset = U32(source, start + 4);
+        if (count != particleCount || relativeOffset != 16) { blockers.Add($"EXP2 does not match the verified particle mapping: {count:N0} record(s) at relative offset {relativeOffset:N0} for {particleCount:N0} emitter(s)."); return false; }
+        if (source.AsSpan(start + 8, 8).IndexOfAnyExcept((byte)0) >= 0 || (long)relativeOffset + (long)count * 28 > size) { blockers.Add("EXP2 has an unsupported header or record range."); return false; }
+        var neutral = true; var records = start + (int)relativeOffset;
+        for (var index = 0; index < count; index++)
+        {
+            var item = records + index * 28; var z = BitConverter.ToSingle(source, item); var color = BitConverter.ToSingle(source, item + 4); var alpha = BitConverter.ToSingle(source, item + 8);
+            var timeCount = U32(source, item + 12); var timeOffset = U32(source, item + 16); var valueCount = U32(source, item + 20); var valueOffset = U32(source, item + 24);
+            if (!float.IsFinite(z) || !float.IsFinite(color) || !float.IsFinite(alpha) || z != 0 || color != 1 || alpha != 1 || timeCount != 0 || timeOffset != 0 || valueCount != 0 || valueOffset != 0)
+            {
+                blockers.Add($"EXP2 record {index:N0} carries non-neutral Z-source, color/alpha multiplier, or alpha-cutoff data that Wrath cannot represent."); neutral = false;
+            }
+        }
+        var logicalEnd = checked((int)relativeOffset + (int)count * 28);
+        if (source.AsSpan(start + logicalEnd, size - logicalEnd).IndexOfAnyExcept((byte)0) >= 0) { blockers.Add("EXP2 contains nonzero trailing extension bytes outside the verified records."); neutral = false; }
+        return neutral;
+    }
+
+    private static void AppendLegacyParticles(ref byte[] payload, byte[] source, int count)
+    {
+        if (count == 0) return;
+        var sourceOffset = checked((int)U32(source, 0x12C));
+        if (!HasRange(source, sourceOffset, count, ModernParticleStride)) throw new InvalidDataException("Planned modern particle-emitter range is no longer valid.");
+        var outputOffset = Align(payload.Length, 16); Array.Resize(ref payload, checked(outputOffset + count * WotlkParticleStride));
+        for (var index = 0; index < count; index++) source.AsSpan(sourceOffset + index * ModernParticleStride, WotlkParticleStride).CopyTo(payload.AsSpan(outputOffset + index * WotlkParticleStride, WotlkParticleStride));
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x128, 4), checked((uint)count)); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x12C, 4), checked((uint)outputOffset));
+        for (var index = 0; index < count; index++)
+            if (!source.AsSpan(sourceOffset + index * ModernParticleStride, WotlkParticleStride).SequenceEqual(payload.AsSpan(outputOffset + index * WotlkParticleStride, WotlkParticleStride)))
+                throw new InvalidDataException($"Particle emitter {index:N0} was not preserved byte-for-byte while changing record stride.");
+    }
+
+    private static int UIntOffset(uint value) => value > int.MaxValue ? -1 : (int)value;
 
     private static void RequireZero(byte[] data, int countOffset, string label, List<string> blockers) { var count = Count(data, countOffset, label, blockers); if (count != 0) blockers.Add($"Static profile requires zero {label}; found {count:N0}."); }
     private static void ValidateAnimationSequences(byte[] data, int count, List<string> blockers)
