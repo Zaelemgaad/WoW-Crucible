@@ -17,18 +17,19 @@ public sealed record MapSceneWmoInstance(WmoPreviewGeometry Geometry, MapWmoPlac
 
 public sealed class MapSceneView : UserControl
 {
-    private readonly MapSceneCanvas _canvas = new(); private readonly CheckBox _terrain = new() { Content = "Terrain", IsChecked = true }; private readonly CheckBox _objects = new() { Content = "Placed objects", IsChecked = true }; private readonly CheckBox _wireframe = new() { Content = "Wireframe overlay" }; private readonly CheckBox _pick = new() { Content = "Pick placement position" }; private readonly TextBlock _pickStatus = new() { Text = "Enable placement picking, then click the rendered terrain to fill the exact X / Y / Z authoring fields.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), Margin = new Thickness(9, 2, 9, 5) };
+    private readonly MapSceneCanvas _canvas = new(); private readonly CheckBox _terrain = new() { Content = "Terrain", IsChecked = true }; private readonly CheckBox _objects = new() { Content = "Placed objects", IsChecked = true }; private readonly CheckBox _wireframe = new() { Content = "Wireframe overlay" }; private readonly CheckBox _pick = new() { Content = "Pick placement position" };
     public event EventHandler<MapSceneTerrainPick>? TerrainPicked;
+    public event EventHandler<string>? StatusChanged;
     public MapSceneView()
     {
         AutomationProperties.SetName(_canvas, "Interactive terrain placement canvas"); AutomationProperties.SetHelpText(_canvas, "Enable Pick placement position, then click a visible terrain triangle to choose exact ADT coordinates.");
         var reset = new Button { Content = "Reset view" }; reset.Click += (_, _) => _canvas.ResetView();
-        var clearPick = new Button { Content = "Clear marker" }; clearPick.Click += (_, _) => { _canvas.ClearPick(); _pickStatus.Text = "Placement marker cleared. Enable placement picking and click terrain to choose another exact point."; };
+        var clearPick = new Button { Content = "Clear marker" }; clearPick.Click += (_, _) => { _canvas.ClearPick(); StatusChanged?.Invoke(this, "Placement marker cleared. Enable placement picking and click terrain to choose another exact point."); };
         _terrain.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true); _objects.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true); _wireframe.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true);
-        _pick.IsCheckedChanged += (_, _) => { _canvas.SetPickMode(_pick.IsChecked == true); _pickStatus.Text = _pick.IsChecked == true ? "PICK MODE · terrain is framed for exact selection. Click one visible triangle; drag rotation is paused until pick mode is disabled." : "View mode · drag to rotate and use the wheel to zoom. The current marker remains visible."; };
-        _canvas.TerrainPicked += (_, value) => { _pickStatus.Text = $"PICKED MCNK {value.CellX},{value.CellY} · X {value.WorldPosition.X:0.###} · Y {value.WorldPosition.Y:0.###} · Z {value.WorldPosition.Z:0.###}"; TerrainPicked?.Invoke(this, value); };
-        _canvas.TerrainPickMissed += (_, _) => _pickStatus.Text = "No visible terrain triangle exists under that pixel. Rotate or zoom the scene and try again.";
-        Content = new Grid { RowDefinitions = new("Auto,Auto,*"), Children = { new WrapPanel { Margin = new Thickness(7), Children = { _terrain, _objects, _wireframe, _pick, clearPick, reset } }, WithRow(_pickStatus, 1), WithRow(_canvas, 2) } };
+        _pick.IsCheckedChanged += (_, _) => { _canvas.SetPickMode(_pick.IsChecked == true); StatusChanged?.Invoke(this, _pick.IsChecked == true ? "PICK MODE · terrain is framed for exact selection. Click one visible triangle; drag rotation is paused until pick mode is disabled." : "View mode · drag to rotate and use the wheel to zoom. The current marker remains visible."); };
+        _canvas.TerrainPicked += (_, value) => { StatusChanged?.Invoke(this, $"PICKED MCNK {value.CellX},{value.CellY} · X {value.WorldPosition.X:0.###} · Y {value.WorldPosition.Y:0.###} · Z {value.WorldPosition.Z:0.###}"); TerrainPicked?.Invoke(this, value); };
+        _canvas.TerrainPickMissed += (_, _) => StatusChanged?.Invoke(this, "No visible terrain triangle exists under that pixel. Rotate or zoom the scene and try again.");
+        Content = new Grid { RowDefinitions = new("Auto,*"), Children = { new WrapPanel { Margin = new Thickness(7), Children = { _terrain, _objects, _wireframe, _pick, clearPick, reset } }, WithRow(_canvas, 1) } };
     }
     public void SetScene(AdtTerrainSceneGeometry terrain, AdtTerrainMaterialSet? materials, IReadOnlyList<MapSceneM2Instance> m2, IReadOnlyList<MapSceneWmoInstance> wmo, int unresolved, string provenance) => _canvas.SetScene(terrain, materials, m2, wmo, unresolved, provenance);
     public void ClearScene() => _canvas.ClearScene();

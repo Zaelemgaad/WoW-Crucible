@@ -107,6 +107,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     {
         _session = session; _lightingView = new WorldLightingView(session); _lightingView.OpenDbcRecordRequested += (_, request) => OpenDbcRecordRequested?.Invoke(this, request); _wmoLibrary.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
         AutomationProperties.SetName(_placementX, "Placement X"); AutomationProperties.SetName(_placementY, "Placement Y"); AutomationProperties.SetName(_placementZ, "Placement Z"); AutomationProperties.SetName(_sceneStatus, "Map scene status");
+        _sceneStatus.TextWrapping = TextWrapping.NoWrap;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
         var inspect = new Button { Content = "Inspect / reload" }; inspect.Click += async (_, _) => await OpenAsync(_path.Text);
@@ -139,6 +140,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var previewAlpha = new Button { Content = "Preview alpha paint" }; previewAlpha.Click += async (_, _) => await PreviewAlphaAsync();
         var saveAlpha = new Button { Content = "Write alpha-painted ADT…" }; saveAlpha.Click += async (_, _) => await SaveAlphaAsync();
         _grid.TerrainPointSelected += (_, point) => { _brushCenterX.Text = point.X.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _brushCenterY.Text = point.Y.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _alphaPlan = null; UpdateBrushOverlay(); };
+        _mapScene.StatusChanged += (_, status) => _sceneStatus.Text = status;
         _mapScene.TerrainPicked += (_, pick) => UseScenePlacementPick(pick);
         _brushCenterX.TextChanged += (_, _) => BrushInputChanged(); _brushCenterY.TextChanged += (_, _) => BrushInputChanged(); _brushRadius.TextChanged += (_, _) => BrushInputChanged(); _brushStrength.TextChanged += (_, _) => _brushPlan = null; _brushMode.SelectionChanged += (_, _) => _brushPlan = null; _brushFalloff.SelectionChanged += (_, _) => _brushPlan = null; _brushTarget.TextChanged += (_, _) => _brushPlan = null; _brushSeed.TextChanged += (_, _) => _brushPlan = null;
         _heightDelta.TextChanged += (_, _) => _heightPlan = null;
@@ -173,7 +175,8 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var objectPreviewHost = new Grid { Children = { _wmoPreview, _m2Preview } }; Grid.SetRow(objectPreviewHost, 1);
         var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, objectPreviewHost, wmoFooter } };
         var sceneControls = new WrapPanel { Margin = new Thickness(7), Children = { buildScene, openPlacementControls, _sceneProvenance, _scenePlacementLimit } };
-        var scenePage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { sceneControls, WithRow(_mapScene, 1), WithRow(new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _sceneStatus }, 2) } };
+        var sceneStatusScroller = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = _sceneStatus };
+        var scenePage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { sceneControls, WithRow(_mapScene, 1), WithRow(new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = sceneStatusScroller }, 2) } };
         _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Terrain + placement scene", Content = scenePage }); _visualTabs.Items.Add(new TabItem { Header = "Selected object preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
         var body = new ResponsiveSplitGrid(_visualTabs, details, 3, 2, compactFirstWeight: 4, compactSecondWeight: 1);
         var terrainPage = new Grid { RowDefinitions = new("Auto,*"), Children = { controls, body } }; Grid.SetRow(body, 1);
