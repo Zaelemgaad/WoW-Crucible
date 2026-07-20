@@ -501,6 +501,28 @@ static int Asset(string[] args)
         Console.Error.WriteLine($"Decoded native BLP mip {mip} to PNG: {Path.GetFullPath(decodeOutput)}");
         return 0;
     }
+    if (args is ["texture-proof", var proofSource, .. var proofOptions])
+    {
+        var mipText = Option(proofOptions, "--mip=") ?? "0"; if (!int.TryParse(mipText, out var mip) || mip < 0) return Fail("--mip must be a non-negative integer.");
+        var codecText = (Option(proofOptions, "--codec=") ?? "auto").Replace("-", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
+        var codec = codecText switch { "auto" => BlpOutputFormat.Auto, "dxt1" => BlpOutputFormat.Dxt1, "dxt1a" or "dxt1alpha" => BlpOutputFormat.Dxt1Alpha, "dxt3" => BlpOutputFormat.Dxt3, "dxt5" => BlpOutputFormat.Dxt5, _ => (BlpOutputFormat)(-1) }; if ((int)codec < 0) return Fail("--codec must be auto, dxt1, dxt1a, dxt3, or dxt5.");
+        var qualityText = (Option(proofOptions, "--quality=") ?? "best").ToLowerInvariant(); var quality = qualityText switch { "fast" => BlpOutputQuality.Fast, "balanced" => BlpOutputQuality.Balanced, "best" => BlpOutputQuality.Best, _ => (BlpOutputQuality)(-1) }; if ((int)quality < 0) return Fail("--quality must be fast, balanced, or best.");
+        var amplificationText = Option(proofOptions, "--amplify=") ?? "4"; if (!double.TryParse(amplificationText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var amplification) || !double.IsFinite(amplification) || amplification <= 0 || amplification > 255) return Fail("--amplify must be a finite number from 0 exclusive through 255.");
+        var reportFormat = (Option(proofOptions, "--report=") ?? "text").ToLowerInvariant(); if (reportFormat is not "text" and not "json") return Fail("--report must be text or json.");
+        var maximumRgbMae = OptionalFinite(proofOptions, "--max-rgb-mae="); var maximumAlphaMae = OptionalFinite(proofOptions, "--max-alpha-mae=");
+        var maximumAlphaCrossingsText = Option(proofOptions, "--max-alpha-crossings="); long? maximumAlphaCrossings = maximumAlphaCrossingsText is null ? null : long.TryParse(maximumAlphaCrossingsText, out var crossings) && crossings >= 0 ? crossings : throw new ArgumentException("--max-alpha-crossings must be a non-negative integer.");
+        var differenceOutput = Option(proofOptions, "--difference="); var previewOutput = Option(proofOptions, "--preview="); var overwrite = proofOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var generateMipmaps = !proofOptions.Contains("--no-mips", StringComparer.OrdinalIgnoreCase);
+        var unknown = proofOptions.Where(option => !option.StartsWith("--mip=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--codec=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--quality=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--amplify=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--report=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--difference=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--preview=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--max-rgb-mae=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--max-alpha-mae=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--max-alpha-crossings=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--no-mips", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown asset texture-proof option: {unknown[0]}");
+        proofSource = Path.GetFullPath(proofSource); differenceOutput = NormalizeProofPng(differenceOutput, "--difference"); previewOutput = NormalizeProofPng(previewOutput, "--preview");
+        if (differenceOutput is not null && differenceOutput.Equals(proofSource, StringComparison.OrdinalIgnoreCase) || previewOutput is not null && previewOutput.Equals(proofSource, StringComparison.OrdinalIgnoreCase)) return Fail("Texture proof images require separate output paths; the source remains immutable.");
+        if (differenceOutput is not null && previewOutput is not null && differenceOutput.Equals(previewOutput, StringComparison.OrdinalIgnoreCase)) return Fail("--difference and --preview must use separate PNG output paths.");
+        var source = Path.GetExtension(proofSource).Equals(".blp", StringComparison.OrdinalIgnoreCase) ? BlpTextureService.Decode(proofSource, mip) : BlpTextureService.DecodeImage(proofSource);
+        var proof = TextureComparisonService.AnalyzeEncoding(source, new(codec, generateMipmaps, quality), amplification);
+        if (differenceOutput is not null) BlpTextureService.WritePng(differenceOutput, proof.DifferenceMap, overwrite); if (previewOutput is not null) BlpTextureService.WritePng(previewOutput, proof.DecodedPreview, overwrite);
+        if (reportFormat == "json") Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(proof, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } })); else WriteTextureProof(proof, proofSource, amplification, differenceOutput, previewOutput);
+        var exceeds = maximumRgbMae is { } rgbLimit && proof.Comparison.RgbCombined.MeanAbsoluteError > rgbLimit || maximumAlphaMae is { } alphaLimit && proof.Comparison.Alpha.MeanAbsoluteError > alphaLimit || maximumAlphaCrossings is { } crossingLimit && proof.Comparison.AlphaThresholdCrossings > crossingLimit;
+        if (exceeds) Console.Error.WriteLine("Texture proof exceeded at least one explicit loss threshold."); return exceeds ? 3 : 0;
+    }
     if (args is ["texture-brush", var editSource, var editOutput, .. var editOptions])
     {
         var mipText = Option(editOptions, "--mip=") ?? "0"; if (!int.TryParse(mipText, out var mip) || mip < 0) return Fail("--mip must be a non-negative integer.");
@@ -1173,6 +1195,7 @@ static int AssetHelp(int code = 0) => GroupHelp("""
 Usage:
   wowcrucible asset texture-info <file.blp>
   wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]
+  wowcrucible asset texture-proof <input.blp|image> [--mip=N] [--codec=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--amplify=N] [--difference=output.png] [--preview=output.png] [--max-rgb-mae=N] [--max-alpha-mae=N] [--max-alpha-crossings=N] [--report=text|json] [--overwrite]
   wowcrucible asset texture-brush <input.blp|image> <output.png|blp> (--point=x:y [...]|--fill|--invert-alpha) [--mip=N] [--radius=N] [--opacity=0..1] [--color=R:G:B:A] [--tool=color-alpha|rgb|alpha|erase-alpha] [--falloff=smooth|linear|hard] [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
   wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
   wowcrucible asset texture-validate <file-or-folder> [--recursive]
@@ -2881,6 +2904,27 @@ static void WriteTextAtomic(string path, string content)
 }
 
 static string? Option(IEnumerable<string> options, string prefix) => options.FirstOrDefault(option => option.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))?[prefix.Length..];
+static double? OptionalFinite(IEnumerable<string> options, string prefix)
+{
+    var text = Option(options, prefix); if (text is null) return null;
+    if (!double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value) || !double.IsFinite(value) || value < 0) throw new ArgumentException($"{prefix.TrimEnd('=')} must be a finite non-negative number.");
+    return value;
+}
+static string? NormalizeProofPng(string? path, string option)
+{
+    if (path is null) return null; path = Path.GetFullPath(path);
+    if (!Path.GetExtension(path).Equals(".png", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException($"{option} output must end in .png.");
+    return path;
+}
+static void WriteTextureProof(TextureEncodingProof proof, string source, double amplification, string? differenceOutput, string? previewOutput)
+{
+    var report = proof.Comparison; var changedPercent = report.PixelCount == 0 ? 0 : report.ChangedPixels * 100d / report.PixelCount;
+    Console.WriteLine($"Source\t{source}\nDimensions\t{report.Width}x{report.Height}\nRequestedCodec\t{proof.RequestedFormat}\nActualEncoding\t{proof.ActualEncoding}\nQuality\t{proof.Quality}\nMipmaps\t{proof.MipLevels} (generated={proof.GeneratedMipmaps})\nEncodedBytes\t{proof.EncodedBytes:N0}\nChangedPixels\t{report.ChangedPixels:N0}/{report.PixelCount:N0} ({changedPercent:0.####}%)\nExactPixels\t{report.ExactPixels:N0}");
+    WriteChannel("RGB", report.RgbCombined); WriteChannel("R", report.Red); WriteChannel("G", report.Green); WriteChannel("B", report.Blue); WriteChannel("A", report.Alpha); WriteChannel("RGBA", report.RgbaCombined);
+    Console.WriteLine($"AlphaTransparentBoundaryChanges\t{report.TransparentBoundaryChanges:N0}\nAlphaOpaqueBoundaryChanges\t{report.OpaqueBoundaryChanges:N0}\nAlphaThresholdCrossings128\t{report.AlphaThresholdCrossings:N0}\nBinaryAlphaBecameTranslucent\t{report.BinaryAlphaBecameTranslucent:N0}\nDifferenceAmplification\t{amplification:0.###}x");
+    if (differenceOutput is not null) Console.WriteLine($"DifferenceMap\t{Path.GetFullPath(differenceOutput)}"); if (previewOutput is not null) Console.WriteLine($"DecodedPreview\t{Path.GetFullPath(previewOutput)}");
+    static void WriteChannel(string name, TextureChannelError value) => Console.WriteLine($"{name}\tchanged={value.ChangedSamples:N0}\tMAE={value.MeanAbsoluteError:0.######}\tRMSE={value.RootMeanSquareError:0.######}\tmax={value.MaximumAbsoluteError}\tPSNR={(value.PeakSignalToNoiseDb is { } psnr ? $"{psnr:0.###} dB" : "exact")}");
+}
 static (int Time, string Value) ParseLightingKey(string text)
 {
     var separator = text.IndexOf(':'); if (separator <= 0 || !int.TryParse(text[..separator], out var time)) throw new ArgumentException($"Invalid lighting key '{text}'. Expected --key=time:value.");

@@ -40,11 +40,18 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
     private readonly CheckBox _alphaGrayscale = new() { Content = "Alpha as grayscale" };
     private readonly TextBlock _pixelStatus = Text("Hover the image to inspect an exact RGBA pixel.");
     private readonly TextBlock _channelStatistics = Text("Channel statistics appear after a mip is decoded.");
+    private readonly Image _proofPreview = new() { Stretch = Stretch.Uniform };
+    private readonly Image _proofDifference = new() { Stretch = Stretch.Uniform };
+    private readonly TextBlock _proofSummary = Text("Analyze the current decoded or edited mip to prove exactly what the selected BLP encoding changes.");
+    private readonly TextBox _proofAmplification = new() { Text = "4", PlaceholderText = "Difference amplification (0..255)" };
     private readonly List<byte[]> _undo = [];
     private CancellationTokenSource? _operation;
     private CancellationTokenSource? _statisticsOperation;
     private WriteableBitmap? _bitmap;
+    private WriteableBitmap? _proofPreviewBitmap;
+    private WriteableBitmap? _proofDifferenceBitmap;
     private BlpTextureInfo? _info;
+    private TextureEncodingProof? _proof;
     private RgbaTexture? _editTexture;
     private RgbaTexture? _editBaseline;
     private int _editMip = -1;
@@ -74,6 +81,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         _editorCanvas.HoverChanged += (_, pixel) => _pixelStatus.Text = pixel is null ? "Pointer is outside the texture." : $"Pixel {pixel.X:N0},{pixel.Y:N0} · R {pixel.R} · G {pixel.G} · B {pixel.B} · A {pixel.A}";
         foreach (var channel in new[] { _showRed, _showGreen, _showBlue, _showAlpha, _alphaGrayscale }) channel.IsCheckedChanged += (_, _) => RefreshChannelView();
         _brushRadius.TextChanged += (_, _) => { if (double.TryParse(_brushRadius.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var radius) && radius > 0) _editorCanvas.BrushRadius = radius; };
+        _format.SelectionChanged += (_, _) => InvalidateProof(); _quality.SelectionChanged += (_, _) => InvalidateProof(); _mipmaps.IsCheckedChanged += (_, _) => InvalidateProof(); _proofAmplification.TextChanged += (_, _) => InvalidateProof();
 
         var heading = new Grid
         {
@@ -115,7 +123,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
                 Row(new Border { Background = Brush.Parse("#080B10"), Child = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Content = _preview } }, 1)
             }
         };
-        var visualPages = new TabControl { Items = { new TabItem { Header = "Inspect decoded mip", Content = previewCard }, new TabItem { Header = "Edit RGBA pixels", Content = BuildEditorPage() } } };
+        var visualPages = new TabControl { Items = { new TabItem { Header = "Inspect decoded mip", Content = previewCard }, new TabItem { Header = "Edit RGBA pixels", Content = BuildEditorPage() }, new TabItem { Header = "Compression proof", Content = BuildProofPage() } } };
         var body = new ResponsiveSplitGrid(inspector, visualPages, 2, 3);
         Content = new Grid
         {
@@ -174,6 +182,77 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
             }
         };
         return new Grid { RowDefinitions = new("Auto,*"), Children = { new ScrollViewer { VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = controls }, Row(_editorCanvas, 1) } };
+    }
+
+    private Control BuildProofPage()
+    {
+        var analyze = AccentButton("Analyze current draft with selected encoding"); analyze.Click += async (_, _) => await AnalyzeProofAsync();
+        var savePreview = new Button { Content = "Save decoded compression preview…" }; savePreview.Click += async (_, _) => await SaveProofImageAsync(difference: false);
+        var saveDifference = new Button { Content = "Save amplified difference map…" }; saveDifference.Click += async (_, _) => await SaveProofImageAsync(difference: true);
+        var controls = new StackPanel
+        {
+            Margin = new Thickness(10), Spacing = 7,
+            Children =
+            {
+                new WrapPanel { Children = { analyze, Label("DIFFERENCE AMPLIFICATION"), _proofAmplification, savePreview, saveDifference } },
+                new TextBlock { Text = "This encodes the current in-memory pixels with the Format, Quality, and mip settings on the left, decodes that exact temporary BLP, then compares every byte. The temporary archive is always deleted; neither the loaded source nor the edited draft is changed.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8E99AD"), FontSize = 11 },
+                _proofSummary
+            }
+        };
+        var preview = ProofImageCard("ACTUAL DECODED BLP OUTPUT", _proofPreview);
+        var difference = ProofImageCard("AMPLIFIED RGBA DIFFERENCE · alpha appears magenta", _proofDifference);
+        return new Grid { RowDefinitions = new("Auto,*"), Children = { new ScrollViewer { VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = controls }, Row(new ResponsiveSplitGrid(preview, difference, 1, 1, 1.7), 1) } };
+    }
+
+    private static Control ProofImageCard(string title, Image image)
+        => new Grid { RowDefinitions = new("Auto,*"), Children = { new Border { Padding = new Thickness(9, 6), BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = new TextBlock { Text = title, Foreground = Brush.Parse("#8E99AD"), FontSize = 10 } }, Row(new Border { Background = Brush.Parse("#080B10"), Child = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Content = image } }, 1) } };
+
+    private async Task AnalyzeProofAsync()
+    {
+        if (_editTexture is null || _editBusy) { _status.Text = "Decode a BLP mip before analyzing compression loss."; return; }
+        double amplification;
+        try { amplification = ParseFinite(_proofAmplification.Text, "Difference amplification"); if (amplification <= 0 || amplification > 255) throw new FormatException("Difference amplification must be from 0 exclusive through 255."); }
+        catch (Exception exception) { _status.Text = exception.Message; return; }
+        var source = CloneEditTexture(); var options = new BlpEncodeOptions(SelectedFormat(), _mipmaps.IsChecked == true, SelectedQuality());
+        Begin("Encoding, decoding, and measuring the current texture draft…"); _editBusy = true; _editorCanvas.IsHitTestVisible = false;
+        try
+        {
+            var proof = await Task.Run(() => TextureComparisonService.AnalyzeEncoding(source, options, amplification, _operation!.Token), _operation!.Token); _operation.Token.ThrowIfCancellationRequested();
+            var preview = CreateBitmap(proof.DecodedPreview); var difference = CreateBitmap(proof.DifferenceMap); var previousPreview = _proofPreviewBitmap; var previousDifference = _proofDifferenceBitmap;
+            _proof = proof; _proofPreviewBitmap = preview; _proofDifferenceBitmap = difference; _proofPreview.Source = preview; _proofDifference.Source = difference; previousPreview?.Dispose(); previousDifference?.Dispose();
+            _proofSummary.Text = FormatProof(proof, amplification); var changed = proof.Comparison.ChangedPixels * 100d / proof.Comparison.PixelCount;
+            _status.Text = $"Compression proof complete · {proof.ActualEncoding} · {proof.Comparison.ChangedPixels:N0}/{proof.Comparison.PixelCount:N0} pixel(s) changed ({changed:0.####}%) · source and draft unchanged.";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { Fail("Texture compression proof failed", exception); }
+        finally { _editBusy = false; _editorCanvas.IsHitTestVisible = true; }
+    }
+
+    private async Task SaveProofImageAsync(bool difference)
+    {
+        if (_proof is null) { _status.Text = "Analyze the current texture encoding before saving proof images."; return; }
+        var output = await PickSaveFileAsync(difference ? "Save amplified texture difference" : "Save decoded BLP compression preview", difference ? "texture-compression-difference.png" : "texture-compression-preview.png", "png"); if (output is null) return;
+        Begin("Writing texture proof PNG atomically…");
+        try { var texture = difference ? _proof.DifferenceMap : _proof.DecodedPreview; await Task.Run(() => BlpTextureService.WritePng(output, texture, overwrite: true), _operation!.Token); _status.Text = $"Texture proof PNG saved: {output}"; }
+        catch (OperationCanceledException) { } catch (Exception exception) { Fail("Texture proof export failed", exception); }
+    }
+
+    private static string FormatProof(TextureEncodingProof proof, double amplification)
+    {
+        var report = proof.Comparison; var changed = report.ChangedPixels * 100d / report.PixelCount;
+        return $"{proof.ActualEncoding} · {proof.Quality} · {proof.EncodedBytes:N0} bytes · {proof.MipLevels:N0} mip(s)\n" +
+               $"Changed pixels: {report.ChangedPixels:N0}/{report.PixelCount:N0} ({changed:0.####}%) · exact: {report.ExactPixels:N0}\n" +
+               $"RGB  MAE {report.RgbCombined.MeanAbsoluteError:0.######} · RMSE {report.RgbCombined.RootMeanSquareError:0.######} · max {report.RgbCombined.MaximumAbsoluteError} · PSNR {Psnr(report.RgbCombined)}\n" +
+               $"Alpha MAE {report.Alpha.MeanAbsoluteError:0.######} · RMSE {report.Alpha.RootMeanSquareError:0.######} · max {report.Alpha.MaximumAbsoluteError} · PSNR {Psnr(report.Alpha)}\n" +
+               $"Alpha boundary changes: {report.TransparentBoundaryChanges:N0} transparent · {report.OpaqueBoundaryChanges:N0} opaque · {report.AlphaThresholdCrossings:N0} threshold-128 crossing(s) · {report.BinaryAlphaBecameTranslucent:N0} binary→translucent\n" +
+               $"Difference map: {amplification:0.###}× amplification; exact pixels are black and alpha damage is added to red + blue.";
+        static string Psnr(TextureChannelError value) => value.PeakSignalToNoiseDb is { } psnr ? $"{psnr:0.###} dB" : "exact";
+    }
+
+    private void InvalidateProof()
+    {
+        _proof = null; var preview = _proofPreviewBitmap; var difference = _proofDifferenceBitmap; _proofPreviewBitmap = null; _proofDifferenceBitmap = null; _proofPreview.Source = null; _proofDifference.Source = null; preview?.Dispose(); difference?.Dispose();
+        _proofSummary.Text = "Analyze the current decoded or edited mip to prove exactly what the selected BLP encoding changes.";
     }
 
     private async Task ApplyStrokeAsync(IReadOnlyList<TexturePoint> points)
@@ -259,7 +338,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
 
     private void RefreshChannelView() { _editorCanvas.SetChannelView(CurrentChannelView()); }
     private TextureChannelView CurrentChannelView() => new(_showRed.IsChecked == true, _showGreen.IsChecked == true, _showBlue.IsChecked == true, _showAlpha.IsChecked == true, _alphaGrayscale.IsChecked == true);
-    private void RefreshEditedPixels() { if (_editTexture is null) return; _editorCanvas.SetTexture(_editTexture, CurrentChannelView()); _ = UpdateStatisticsAsync(_editTexture); }
+    private void RefreshEditedPixels() { if (_editTexture is null) return; InvalidateProof(); _editorCanvas.SetTexture(_editTexture, CurrentChannelView()); _ = UpdateStatisticsAsync(_editTexture); }
     private async Task UpdateStatisticsAsync(RgbaTexture texture)
     {
         _statisticsOperation?.Cancel(); _statisticsOperation?.Dispose(); var operation = _statisticsOperation = new();
@@ -418,6 +497,6 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
 
     public void Dispose()
     {
-        _operation?.Cancel(); _operation?.Dispose(); _statisticsOperation?.Cancel(); _statisticsOperation?.Dispose(); _bitmap?.Dispose(); _editorCanvas.Dispose();
+        _operation?.Cancel(); _operation?.Dispose(); _statisticsOperation?.Cancel(); _statisticsOperation?.Dispose(); _bitmap?.Dispose(); _proofPreviewBitmap?.Dispose(); _proofDifferenceBitmap?.Dispose(); _editorCanvas.Dispose();
     }
 }
