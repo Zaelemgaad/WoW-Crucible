@@ -69,6 +69,12 @@ public sealed class ItemCatalogService
         IReadOnlyDictionary<uint, IReadOnlyList<LootRow>> ReferencePools,
         IReadOnlyDictionary<string, IReadOnlySet<uint>> FixedOwners,
         IReadOnlyDictionary<uint, uint> ItemDisenchantPools);
+    internal sealed record CppGrantRuntimeData(
+        IReadOnlyList<CppItemGrant> Grants,
+        IReadOnlyDictionary<string, IReadOnlyList<uint>> ItemBindings,
+        IReadOnlyDictionary<string, IReadOnlyList<uint>> SpellBindings,
+        bool SourceIdentityVerified,
+        string IdentityDetail);
     private static readonly AcquisitionSpec[] DirectAcquisitionSpecs =
     [
         new("npc_vendor", "item"),
@@ -178,6 +184,7 @@ public sealed class ItemCatalogService
         var scriptedSpellGrants = await CollectScriptCreatedItemsAsync(connection, schema, acquired, rejected, checkedSources, missingSources, cancellationToken);
         CollectCharStartOutfitItems(dbcFolder, acquired, checkedSources, missingSources);
         var loot = await ReadLootReachabilityAsync(connection, schema, itemTable, dbcFolder, checkedSources, missingSources, cancellationToken);
+        var cppGrants = await ReadCppGrantRuntimeDataAsync(connection, schema, itemTable, coreSourceFolder, checkedSources, missingSources, cancellationToken);
         // Item loot and item-use/create-spell effects form a real graph: a reachable
         // container can award an item that teaches a spell, which can create another
         // millable/container item. Iterate to a fixed point instead of assuming the
@@ -188,13 +195,14 @@ public sealed class ItemCatalogService
             var spellCount = reachableSpells.Count;
             await CollectReachableSpellCreatedItemsAsync(connection, schema, itemTable, dbcFolder, reachableSpells, acquired, checkedSources, missingSources, cancellationToken);
             ApplyReachableScriptSpellItems(scriptedSpellGrants, reachableSpells, acquired);
+            ApplyReachableCppGrants(cppGrants, acquired);
             ApplyReachableLoot(loot, acquired, reachableSpells, rejected, cancellationToken);
             if (itemCount == acquired.Count && spellCount == reachableSpells.Count) break;
         }
         foreach (var grant in scriptedSpellGrants.Where(grant => !reachableSpells.Contains(grant.SpellId)))
             AddRejected(rejected, grant.ItemId, $"Ignored · {grant.Table} SCRIPT_COMMAND_CREATE_ITEM grants this item from spell {grant.SpellId}, but that spell is not reachable through the checked trainer, quest, item-use, or trigger graph.");
 
-        await CollectCppGrantCandidatesAsync(coreSourceFolder, rejected, checkedSources, missingSources, cancellationToken);
+        AddCppGrantReviewEvidence(cppGrants, acquired, reachableSpells, rejected);
 
         var itemColumns = schema[itemTable];
         var entryColumn = RequireColumn(itemColumns, "entry"); var nameColumn = RequireColumn(itemColumns, "name");
@@ -222,28 +230,130 @@ public sealed class ItemCatalogService
 
     private const string NoEvidenceMessage = "No accepted acquisition row was found in the checked SQL, SmartAI/script-command, DBC, and configured source coverage. Direct source call sites remain review candidates until their runtime registration and trigger are proven.";
 
-    private static async Task CollectCppGrantCandidatesAsync(string? coreSourceFolder, Dictionary<uint, HashSet<string>> rejected,
+    private static async Task<CppGrantRuntimeData> ReadCppGrantRuntimeDataAsync(MySqlConnection connection,
+        Dictionary<string, List<string>> schema, string itemTable, string? coreSourceFolder,
         ICollection<string> checkedSources, ICollection<string> missingSources, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(coreSourceFolder)) { missingSources.Add("C++/module direct item grants (configure core source)"); return; }
+        var empty = new CppGrantRuntimeData([], new Dictionary<string, IReadOnlyList<uint>>(StringComparer.OrdinalIgnoreCase),
+            new Dictionary<string, IReadOnlyList<uint>>(StringComparer.OrdinalIgnoreCase), false, "Core source was not configured.");
+        if (string.IsNullOrWhiteSpace(coreSourceFolder)) { missingSources.Add("C++/module direct item grants (configure core source)"); return empty; }
         var root = Path.GetFullPath(coreSourceFolder);
-        if (!Directory.Exists(root)) { missingSources.Add($"C++/module direct item grants ({root} was not found)"); return; }
+        if (!Directory.Exists(root)) { missingSources.Add($"C++/module direct item grants ({root} was not found)"); return empty with { IdentityDetail = $"Core source folder was not found: {root}" }; }
         try
         {
             var report = await new CppItemGrantAuditService().ScanAsync(root, cancellationToken);
-            foreach (var grant in report.Grants)
-                AddRejected(rejected, grant.ItemId,
-                    $"Potential source grant · {grant.SourcePath}:{grant.Line} calls Player::{grant.Api} with {grant.ItemToken}={grant.ItemId}" +
-                    (grant.Count is { } count ? $" × {count}" : string.Empty) +
-                    ". The exact call site is proven, but runtime registration and an in-game trigger are not; it is not counted as obtainable.");
-            checkedSources.Add($"C++/module direct Player item-grant sites ({report.Grants.Count:N0} exact call(s), {report.UnresolvedCalls:N0} runtime/ambiguous call(s) not inferred, review-only)");
+            var runtimeRevision = await ReadRuntimeCoreRevisionAsync(connection, schema, cancellationToken);
+            var identityVerified = SourceMatchesRuntime(report.SourceRevision, report.WorktreeClean, runtimeRevision);
+            var identityDetail = identityVerified
+                ? $"clean source {ShortRevision(report.SourceRevision)} matches running core revision {runtimeRevision}"
+                : report.SourceRevision is null ? "source Git revision is unavailable"
+                : report.WorktreeClean != true ? $"source {ShortRevision(report.SourceRevision)} has modifications/untracked files or unknown cleanliness"
+                : string.IsNullOrWhiteSpace(runtimeRevision) ? $"running core revision is unavailable; source is {ShortRevision(report.SourceRevision)}"
+                : $"source {ShortRevision(report.SourceRevision)} does not match running core revision {runtimeRevision}";
+
+            var itemNames = report.Grants.Where(grant => grant.ScriptKind == CppItemGrantScriptKind.ItemScript && !string.IsNullOrWhiteSpace(grant.ScriptName)).Select(grant => grant.ScriptName!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var itemEntry = ResolveColumn(schema[itemTable], "entry", "ID"); var itemScript = ResolveColumn(schema[itemTable], "ScriptName", "scriptname");
+            var itemBindings = itemEntry is null || itemScript is null ? new Dictionary<string, IReadOnlyList<uint>>(StringComparer.OrdinalIgnoreCase)
+                : await ReadScriptBindingsAsync(connection, itemTable, itemEntry, itemScript, itemNames, cancellationToken);
+            if (itemNames.Length > 0 && (itemEntry is null || itemScript is null)) missingSources.Add($"{itemTable}.ScriptName (C++ ItemScript binding)");
+
+            var spellNames = report.Grants.Where(grant => grant.ScriptKind is CppItemGrantScriptKind.SpellScript or CppItemGrantScriptKind.AuraScript && !string.IsNullOrWhiteSpace(grant.ScriptName)).Select(grant => grant.ScriptName!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var spellTable = ResolveTable(schema, "spell_script_names");
+            Dictionary<string, IReadOnlyList<uint>> spellBindings;
+            if (spellTable is null) { spellBindings = new(StringComparer.OrdinalIgnoreCase); if (spellNames.Length > 0) missingSources.Add("spell_script_names (C++ SpellScript binding)"); }
+            else
+            {
+                var spellId = ResolveColumn(schema[spellTable], "spell_id", "id"); var spellScript = ResolveColumn(schema[spellTable], "ScriptName", "scriptname");
+                spellBindings = spellId is null || spellScript is null ? new(StringComparer.OrdinalIgnoreCase)
+                    : await ReadScriptBindingsAsync(connection, spellTable, spellId, spellScript, spellNames, cancellationToken, absoluteIds: true);
+                if (spellNames.Length > 0 && (spellId is null || spellScript is null)) missingSources.Add($"{spellTable} C++ SpellScript binding columns");
+            }
+            checkedSources.Add($"C++/module direct Player item-grant sites ({report.Grants.Count:N0} exact, {report.UnresolvedCalls:N0} runtime/ambiguous not inferred; {identityDetail})");
+            return new(report.Grants, itemBindings, spellBindings, identityVerified, identityDetail);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception exception)
         {
             missingSources.Add($"C++/module direct item grants ({exception.Message})");
+            return empty with { IdentityDetail = exception.Message };
         }
     }
+
+    private static async Task<Dictionary<string, IReadOnlyList<uint>>> ReadScriptBindingsAsync(MySqlConnection connection,
+        string table, string idColumn, string scriptColumn, IReadOnlyList<string> names, CancellationToken cancellationToken, bool absoluteIds = false)
+    {
+        var result = new Dictionary<string, List<uint>>(StringComparer.OrdinalIgnoreCase);
+        if (names.Count == 0) return new(StringComparer.OrdinalIgnoreCase);
+        foreach (var batch in names.Chunk(500))
+        {
+            var parameters = batch.Select((_, index) => $"@script{index}").ToArray();
+            await using var command = new MySqlCommand($"SELECT {Quote(idColumn)},{Quote(scriptColumn)} FROM {Quote(table)} WHERE {Quote(scriptColumn)} IN ({string.Join(',', parameters)})", connection) { CommandTimeout = 120 };
+            for (var index = 0; index < batch.Length; index++) command.Parameters.AddWithValue(parameters[index], batch[index]);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var raw = Convert.ToInt64(reader.GetValue(0)); if (absoluteIds) raw = Math.Abs(raw);
+                if (raw is <= 0 or > uint.MaxValue) continue;
+                var script = Convert.ToString(reader.GetValue(1)) ?? string.Empty;
+                if (!result.TryGetValue(script, out var ids)) result[script] = ids = [];
+                if (!ids.Contains((uint)raw)) ids.Add((uint)raw);
+            }
+        }
+        return result.ToDictionary(pair => pair.Key, pair => (IReadOnlyList<uint>)pair.Value.Order().ToArray(), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static async Task<string?> ReadRuntimeCoreRevisionAsync(MySqlConnection connection, Dictionary<string, List<string>> schema, CancellationToken cancellationToken)
+    {
+        var table = ResolveTable(schema, "version"); if (table is null) return null;
+        var revision = ResolveColumn(schema[table], "core_revision", "CoreRevision"); if (revision is null) return null;
+        await using var command = new MySqlCommand($"SELECT {Quote(revision)} FROM {Quote(table)} WHERE {Quote(revision)} IS NOT NULL AND {Quote(revision)}<>'' LIMIT 1", connection);
+        var value = Convert.ToString(await command.ExecuteScalarAsync(cancellationToken))?.Trim();
+        return value is { Length: >= 7 and <= 40 } && value.All(Uri.IsHexDigit) ? value.ToLowerInvariant() : null;
+    }
+
+    internal static bool SourceMatchesRuntime(string? sourceRevision, bool? worktreeClean, string? runtimeRevision)
+        => worktreeClean == true && !string.IsNullOrWhiteSpace(sourceRevision) && !string.IsNullOrWhiteSpace(runtimeRevision) &&
+           (sourceRevision.StartsWith(runtimeRevision, StringComparison.OrdinalIgnoreCase) || runtimeRevision.StartsWith(sourceRevision, StringComparison.OrdinalIgnoreCase));
+
+    internal static void ApplyReachableCppGrants(CppGrantRuntimeData data, Dictionary<uint, HashSet<string>> acquired)
+    {
+        if (!data.SourceIdentityVerified) return;
+        foreach (var grant in data.Grants)
+        {
+            if (!grant.RegisteredInSource || !grant.LoaderInvoked || string.IsNullOrWhiteSpace(grant.ScriptName)) continue;
+            if (grant.ScriptKind == CppItemGrantScriptKind.ItemScript && grant.Callback == "OnExpire" && data.ItemBindings.TryGetValue(grant.ScriptName, out var items))
+            {
+                var trigger = items.FirstOrDefault(acquired.ContainsKey); if (trigger == 0) continue;
+                AddAcquired(acquired, grant.ItemId, $"registered C++ ItemScript.OnExpire {grant.ScriptName} on reachable item {trigger} ({grant.SourcePath}:{grant.Line} Player::{grant.Api})");
+            }
+        }
+    }
+
+    private static void AddCppGrantReviewEvidence(CppGrantRuntimeData data, IReadOnlyDictionary<uint, HashSet<string>> acquired,
+        IReadOnlySet<uint> reachableSpells, Dictionary<uint, HashSet<string>> rejected)
+    {
+        foreach (var grant in data.Grants)
+        {
+            if (acquired.TryGetValue(grant.ItemId, out var accepted) && accepted.Any(value => value.Contains($"{grant.SourcePath}:{grant.Line}", StringComparison.OrdinalIgnoreCase))) continue;
+            var call = $"{grant.SourcePath}:{grant.Line} Player::{grant.Api}({grant.ItemToken}={grant.ItemId}{(grant.Count is { } count ? $" × {count}" : string.Empty)})";
+            string reason;
+            if (!data.SourceIdentityVerified) reason = $"runtime source identity is not proven ({data.IdentityDetail})";
+            else if (grant.ScriptKind == CppItemGrantScriptKind.Unknown || string.IsNullOrWhiteSpace(grant.ScriptName)) reason = "the enclosing runtime script type/name is not conservatively recognized";
+            else if (!grant.RegisteredInSource) reason = $"{grant.ScriptClass} is not instantiated by a recognized source registration";
+            else if (!grant.LoaderInvoked) reason = $"loader {grant.LoaderFunction ?? "(unknown)"} is not invoked by the scanned source tree";
+            else if (grant.ScriptKind == CppItemGrantScriptKind.ItemScript)
+                reason = grant.Callback != "OnExpire" ? $"ItemScript callback {grant.Callback ?? "(unknown)"} is not yet admitted by the conservative runtime rule" :
+                    !data.ItemBindings.TryGetValue(grant.ScriptName, out var items) || items.Count == 0 ? $"no live item_template row binds ScriptName {grant.ScriptName}" : $"bound source item(s) {string.Join(", ", items)} have no proven acquisition path";
+            else if (grant.ScriptKind is CppItemGrantScriptKind.SpellScript or CppItemGrantScriptKind.AuraScript)
+                reason = !data.SpellBindings.TryGetValue(grant.ScriptName, out var spells) || spells.Count == 0 ? $"no live spell_script_names row binds {grant.ScriptName}" :
+                    !spells.Any(reachableSpells.Contains) ? $"bound spell(s) {string.Join(", ", spells)} are not reachable through the checked spell graph" :
+                    $"registered and reachable {grant.ScriptKind} callback {grant.Callback ?? "(unknown)"} still has target/event conditions that are not independently proven";
+            else reason = $"{grant.ScriptKind} trigger reachability is not yet proven";
+            AddRejected(rejected, grant.ItemId, $"Potential source grant · {call}; {reason}. It is not counted as obtainable.");
+        }
+    }
+
+    private static string ShortRevision(string? value) => string.IsNullOrWhiteSpace(value) ? "unknown" : value[..Math.Min(12, value.Length)];
 
     private static async Task<IReadOnlyList<ScriptedSpellGrant>> CollectScriptCreatedItemsAsync(MySqlConnection connection,
         Dictionary<string, List<string>> schema, Dictionary<uint, HashSet<string>> acquired, Dictionary<uint, HashSet<string>> rejected,

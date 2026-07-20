@@ -1740,17 +1740,52 @@ try
             // player->AddItem(77777, 1);
             const char* ignored = "player->AddItem(88888, 1)";
         }
+        class item_fixture_grant : public ItemScript
+        {
+        public:
+            item_fixture_grant() : ItemScript("item_fixture_grant") { }
+            bool OnExpire(Player* player) override { player->AddItem(70001, 1); return true; }
+        };
+        void AddSC_fixture_grants() { new item_fixture_grant(); }
+        class item_dead_grant : public ItemScript
+        {
+        public:
+            item_dead_grant() : ItemScript("item_dead_grant") { }
+            bool OnExpire(Player* player) override { player->AddItem(70002, 1); return true; }
+        };
+        void AddSC_dead_grants() { new item_dead_grant(); }
         """);
+    File.WriteAllText(Path.Combine(cppScripts, "loader.cpp"), "void AddSC_fixture_grants(); void AddFixtureScripts() { AddSC_fixture_grants(); }\n");
     File.WriteAllText(Path.Combine(cppScripts, "ambiguous-a.h"), "enum { ITEM_AMBIGUOUS = 60001 };\n");
     File.WriteAllText(Path.Combine(cppScripts, "ambiguous-b.h"), "enum { ITEM_AMBIGUOUS = 60002 };\n");
     File.WriteAllText(Path.Combine(cppScripts, "ambiguous.cpp"), "void Grant(Player* player) { player->AddItem(ITEM_AMBIGUOUS, 1); }\n");
     var cppGrants = new CppItemGrantAuditService().Scan(cppGrantRoot);
     var grantIds = cppGrants.Grants.Select(grant => grant.ItemId).Order().ToArray();
-    if (!grantIds.SequenceEqual(new uint[] { 12_345, 24_538, 32_906, 54_321 }) ||
+    var registeredFixtureGrant = cppGrants.Grants.Single(grant => grant.ItemId == 70_001);
+    var deadFixtureGrant = cppGrants.Grants.Single(grant => grant.ItemId == 70_002);
+    if (!grantIds.SequenceEqual(new uint[] { 12_345, 24_538, 32_906, 54_321, 70_001, 70_002 }) ||
         cppGrants.Grants.Single(grant => grant.ItemId == 12_345).Confidence != CppItemGrantConfidence.SameFileConstant ||
         cppGrants.Grants.Single(grant => grant.ItemId == 24_538).Confidence != CppItemGrantConfidence.UniqueSourceConstant ||
+        registeredFixtureGrant.ScriptKind != CppItemGrantScriptKind.ItemScript || registeredFixtureGrant.ScriptClass != "item_fixture_grant" ||
+        registeredFixtureGrant.ScriptName != "item_fixture_grant" || registeredFixtureGrant.Callback != "OnExpire" || !registeredFixtureGrant.RegisteredInSource || !registeredFixtureGrant.LoaderInvoked ||
+        registeredFixtureGrant.LoaderFunction != "AddSC_fixture_grants" ||
+        deadFixtureGrant.ScriptName != "item_dead_grant" || !deadFixtureGrant.RegisteredInSource || deadFixtureGrant.LoaderInvoked || deadFixtureGrant.LoaderFunction != "AddSC_dead_grants" ||
         cppGrants.Grants.Any(grant => grant.ItemId is 99_999 or 77_777 or 88_888 or 60_001 or 60_002) || cppGrants.UnresolvedCalls != 2)
         throw new InvalidOperationException("Conservative C++ item-grant inspection inferred a non-player/runtime/ambiguous call or lost exact literal/constant evidence.");
+    if (!ItemCatalogService.SourceMatchesRuntime("abcdef1234567890abcdef1234567890abcdef12", true, "abcdef123456") ||
+        ItemCatalogService.SourceMatchesRuntime("abcdef1234567890abcdef1234567890abcdef12", false, "abcdef123456") ||
+        ItemCatalogService.SourceMatchesRuntime("abcdef1234567890abcdef1234567890abcdef12", true, "123456abcdef"))
+        throw new InvalidOperationException("Core source/runtime revision identity accepted a dirty or mismatched checkout.");
+    var cppRuntime = new ItemCatalogService.CppGrantRuntimeData([registeredFixtureGrant],
+        new Dictionary<string, IReadOnlyList<uint>>(StringComparer.OrdinalIgnoreCase) { ["item_fixture_grant"] = [123u] },
+        new Dictionary<string, IReadOnlyList<uint>>(StringComparer.OrdinalIgnoreCase), true, "fixture identity");
+    var cppRuntimeAcquired = new Dictionary<uint, HashSet<string>> { [123] = new(StringComparer.OrdinalIgnoreCase) { "fixture source" } };
+    ItemCatalogService.ApplyReachableCppGrants(cppRuntime, cppRuntimeAcquired);
+    if (!cppRuntimeAcquired.TryGetValue(70_001, out var cppEvidence) || !cppEvidence.Single().Contains("item_fixture_grant", StringComparison.Ordinal))
+        throw new InvalidOperationException("A clean revision-matched, registered, live-bound C++ ItemScript grant was not admitted to the acquisition graph.");
+    var rejectedRuntimeAcquired = new Dictionary<uint, HashSet<string>> { [123] = new(StringComparer.OrdinalIgnoreCase) { "fixture source" } };
+    ItemCatalogService.ApplyReachableCppGrants(cppRuntime with { SourceIdentityVerified = false }, rejectedRuntimeAcquired);
+    if (rejectedRuntimeAcquired.ContainsKey(70_001)) throw new InvalidOperationException("A source-identity-mismatched C++ grant was accepted.");
 }
 finally { if (Directory.Exists(cppGrantRoot)) Directory.Delete(cppGrantRoot, true); }
 var lootGraph = new ItemCatalogService.LootReachabilityData(

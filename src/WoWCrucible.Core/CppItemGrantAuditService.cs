@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -11,6 +12,15 @@ public enum CppItemGrantConfidence
     UniqueSourceConstant
 }
 
+public enum CppItemGrantScriptKind
+{
+    Unknown,
+    ItemScript,
+    CreatureScript,
+    SpellScript,
+    AuraScript
+}
+
 public sealed record CppItemGrant(
     uint ItemId,
     uint? Count,
@@ -18,7 +28,14 @@ public sealed record CppItemGrant(
     string SourcePath,
     int Line,
     string ItemToken,
-    CppItemGrantConfidence Confidence);
+    CppItemGrantConfidence Confidence,
+    string? ScriptClass,
+    string? ScriptName,
+    CppItemGrantScriptKind ScriptKind,
+    string? Callback,
+    bool RegisteredInSource,
+    string? LoaderFunction,
+    bool LoaderInvoked);
 
 public sealed record CppItemGrantAuditReport(
     string Root,
@@ -26,6 +43,8 @@ public sealed record CppItemGrantAuditReport(
     int ScannedFiles,
     int SkippedFiles,
     int UnresolvedCalls,
+    string? SourceRevision,
+    bool? WorktreeClean,
     IReadOnlyList<CppItemGrant> Grants,
     IReadOnlyList<string> Findings);
 
@@ -42,8 +61,10 @@ public sealed partial class CppItemGrantAuditService
     private static readonly string[] Extensions = [".cpp", ".cc", ".cxx", ".h", ".hpp"];
     private static readonly string[] SkippedDirectoryNames = [".git", ".vs", "bin", "obj", "build", "deps", "doc", "docs", "test", "tests", "var"];
 
-    private sealed record SourceFile(string FullPath, string RelativePath, string Sanitized,
+    private sealed record SourceFile(string FullPath, string RelativePath, string Original, string Sanitized,
         IReadOnlyDictionary<string, IReadOnlySet<uint>> Constants);
+    private sealed record ScriptContext(string Class, string Name, CppItemGrantScriptKind Kind, string? Callback,
+        bool Registered, string? LoaderFunction, bool LoaderInvoked);
 
     public Task<CppItemGrantAuditReport> ScanAsync(string coreSourceRoot, CancellationToken cancellationToken = default)
         => Task.Run(() => Scan(coreSourceRoot, cancellationToken), cancellationToken);
@@ -81,8 +102,8 @@ public sealed partial class CppItemGrantAuditService
             cancellationToken.ThrowIfCancellationRequested();
             var info = new FileInfo(path);
             if (info.Length > MaximumSourceBytes) { skipped++; continue; }
-            var sanitized = Sanitize(File.ReadAllText(path));
-            files.Add(new(path, Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/'), sanitized, ReadConstants(sanitized)));
+            var original = File.ReadAllText(path); var sanitized = Sanitize(original);
+            files.Add(new(path, Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/'), original, sanitized, ReadConstants(sanitized)));
         }
 
         var globalConstants = new Dictionary<string, HashSet<uint>>(StringComparer.Ordinal);
@@ -92,6 +113,7 @@ public sealed partial class CppItemGrantAuditService
                 if (!globalConstants.TryGetValue(pair.Key, out var values)) globalConstants[pair.Key] = values = [];
                 values.UnionWith(pair.Value);
             }
+        var loaderCalls = CountLoaderInvocations(files);
 
         var grants = new List<CppItemGrant>();
         var unresolved = 0;
@@ -120,7 +142,10 @@ public sealed partial class CppItemGrantAuditService
                     }
                     count = parsedCount;
                 }
-                grants.Add(new(item, count, api, file.RelativePath, LineNumber(file.Sanitized, match.Index), token, confidence));
+                var script = FindScriptContext(file, match.Index, loaderCalls);
+                grants.Add(new(item, count, api, file.RelativePath, LineNumber(file.Sanitized, match.Index), token, confidence,
+                    script?.Class, script?.Name, script?.Kind ?? CppItemGrantScriptKind.Unknown, script?.Callback, script?.Registered == true,
+                    script?.LoaderFunction, script?.LoaderInvoked == true));
             }
         }
 
@@ -128,13 +153,51 @@ public sealed partial class CppItemGrantAuditService
             .DistinctBy(grant => (grant.ItemId, grant.Count, grant.Api, grant.SourcePath.ToUpperInvariant(), grant.Line))
             .OrderBy(grant => grant.ItemId).ThenBy(grant => grant.SourcePath, StringComparer.OrdinalIgnoreCase).ThenBy(grant => grant.Line)
             .ToArray();
+        var git = ReadGitIdentity(root);
         var findings = new List<string>
         {
             $"Read-only source scan covered {files.Count:N0} C/C++ file(s) beneath {string.Join(", ", scanRoots.Select(path => Path.GetRelativePath(root, path)))}.",
             $"Resolved {unique.Length:N0} exact player item-grant call(s); {unresolved:N0} player-like call(s) used runtime/ambiguous values and were not inferred."
         };
+        if (git.Revision is not null) findings.Add($"Source Git revision {git.Revision}; worktree {(git.Clean == true ? "clean" : git.Clean == false ? "modified/untracked" : "cleanliness unavailable")}.");
+        else findings.Add("Source Git revision was unavailable; runtime source identity cannot be proven.");
         if (skipped > 0) findings.Add($"Skipped {skipped:N0} non-source, excluded-directory, inaccessible, or oversized file(s).");
-        return new(root, discovered.Count, files.Count, skipped, unresolved, unique, findings);
+        return new(root, discovered.Count, files.Count, skipped, unresolved, git.Revision, git.Clean, unique, findings);
+    }
+
+    private static (string? Revision, bool? Clean) ReadGitIdentity(string root)
+    {
+        try
+        {
+            var revision = RunGit(root, "rev-parse", "HEAD");
+            if (revision.ExitCode != 0 || !Regex.IsMatch(revision.Output.Trim(), "^[0-9a-fA-F]{40}$", RegexOptions.CultureInvariant)) return (null, null);
+            var status = RunGit(root, "status", "--porcelain", "--untracked-files=normal");
+            return (revision.Output.Trim().ToLowerInvariant(), status.ExitCode == 0 ? string.IsNullOrWhiteSpace(status.Output) : null);
+        }
+        catch { return (null, null); }
+    }
+
+    private static (int ExitCode, string Output) RunGit(string root, params string[] arguments)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "git",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WorkingDirectory = root
+            }
+        };
+        process.StartInfo.ArgumentList.Add("-C"); process.StartInfo.ArgumentList.Add(root);
+        foreach (var argument in arguments) process.StartInfo.ArgumentList.Add(argument);
+        if (!process.Start()) return (-1, string.Empty);
+        var outputTask = process.StandardOutput.ReadToEndAsync(); var errorTask = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(10_000)) { process.Kill(true); process.WaitForExit(); throw new TimeoutException("Git source identity check exceeded 10 seconds."); }
+        Task.WaitAll(outputTask, errorTask);
+        return (process.ExitCode, outputTask.Result);
     }
 
     private static IReadOnlyList<string> ResolveScanRoots(string root)
@@ -248,6 +311,89 @@ public sealed partial class CppItemGrantAuditService
                value.Contains("ToPlayer", StringComparison.Ordinal);
     }
 
+    private static ScriptContext? FindScriptContext(SourceFile file, int callOffset, IReadOnlyDictionary<string, int> loaderCalls)
+    {
+        Match? selected = null; var selectedClose = -1;
+        foreach (Match match in ScriptClassRegex().Matches(file.Sanitized))
+        {
+            if (match.Index >= callOffset) break;
+            var opening = file.Sanitized.IndexOf('{', match.Index + match.Length);
+            if (opening < 0) continue;
+            var closing = FindClosingBrace(file.Sanitized, opening);
+            if (closing < callOffset || callOffset <= opening) continue;
+            if (selected is null || match.Index > selected.Index) { selected = match; selectedClose = closing; }
+        }
+        if (selected is null) return null;
+
+        var className = selected.Groups["class"].Value;
+        var kind = Enum.TryParse<CppItemGrantScriptKind>(selected.Groups["base"].Value, out var parsed) ? parsed : CppItemGrantScriptKind.Unknown;
+        var callback = FindContainingMethod(file.Sanitized, callOffset, selected.Index, selectedClose);
+        var scriptName = className;
+        if (kind is CppItemGrantScriptKind.ItemScript or CppItemGrantScriptKind.CreatureScript)
+        {
+            var opening = file.Original.IndexOf('{', selected.Index + selected.Length);
+            var body = opening >= 0 && selectedClose > opening ? file.Original[opening..(selectedClose + 1)] : string.Empty;
+            var constructor = NamedScriptConstructorRegex().Match(body);
+            if (constructor.Success) scriptName = constructor.Groups["name"].Value;
+        }
+
+        var registration = Regex.Match(file.Sanitized,
+            $@"(?:\bnew\s+{Regex.Escape(className)}\s*\(|\bRegister[A-Za-z0-9_]*\s*\([^;\r\n]*\b{Regex.Escape(className)}\b)",
+            RegexOptions.CultureInvariant);
+        if (!registration.Success) return new(className, scriptName, kind, callback, false, null, false);
+
+        string? loader = null;
+        foreach (Match candidate in LoaderFunctionRegex().Matches(file.Sanitized))
+        {
+            var opening = file.Sanitized.IndexOf('{', candidate.Index + candidate.Length);
+            if (opening < 0) continue;
+            var closing = FindClosingBrace(file.Sanitized, opening);
+            if (registration.Index > opening && registration.Index < closing) { loader = candidate.Groups["loader"].Value; break; }
+        }
+        var invoked = loader is not null && loaderCalls.TryGetValue(loader, out var calls) && calls > 0;
+        return new(className, scriptName, kind, callback, true, loader, invoked);
+    }
+
+    private static IReadOnlyDictionary<string, int> CountLoaderInvocations(IReadOnlyList<SourceFile> files)
+    {
+        var result = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var file in files)
+            foreach (Match match in LoaderCallRegex().Matches(file.Sanitized))
+            {
+                var lineStart = file.Sanitized.LastIndexOf('\n', Math.Max(0, match.Index - 1));
+                var prefix = file.Sanitized[(lineStart + 1)..match.Index].TrimEnd();
+                if (Regex.IsMatch(prefix, @"\bvoid\s*$", RegexOptions.CultureInvariant)) continue;
+                var loader = match.Groups["loader"].Value;
+                result[loader] = result.GetValueOrDefault(loader) + 1;
+            }
+        return result;
+    }
+
+    private static string? FindContainingMethod(string source, int callOffset, int classStart, int classEnd)
+    {
+        Match? selected = null;
+        foreach (Match match in MethodRegex().Matches(source, classStart))
+        {
+            if (match.Index >= callOffset || match.Index > classEnd) break;
+            var opening = source.IndexOf('{', match.Index + match.Length - 1);
+            if (opening < 0 || opening > callOffset) continue;
+            var closing = FindClosingBrace(source, opening);
+            if (closing >= callOffset && (selected is null || match.Index > selected.Index)) selected = match;
+        }
+        return selected?.Groups["method"].Value;
+    }
+
+    private static int FindClosingBrace(string source, int opening)
+    {
+        var depth = 0;
+        for (var index = opening; index < source.Length; index++)
+        {
+            if (source[index] == '{') depth++;
+            else if (source[index] == '}' && --depth == 0) return index;
+        }
+        return -1;
+    }
+
     private static int LineNumber(string source, int offset)
     {
         var line = 1;
@@ -299,4 +445,14 @@ public sealed partial class CppItemGrantAuditService
     private static partial Regex IdentifierRegex();
     [GeneratedRegex(@"(?<receiver>(?:[A-Za-z_][A-Za-z0-9_]*(?:\s*\(\s*\))?)(?:\s*->\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\))*)\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex ReceiverRegex();
+    [GeneratedRegex(@"\b(?:class|struct)\s+(?<class>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*public\s+(?<base>ItemScript|CreatureScript|SpellScript|AuraScript)\b", RegexOptions.CultureInvariant)]
+    private static partial Regex ScriptClassRegex();
+    [GeneratedRegex(@"\b(?:ItemScript|CreatureScript)\s*\(\s*""(?<name>[^""]+)""\s*\)", RegexOptions.CultureInvariant)]
+    private static partial Regex NamedScriptConstructorRegex();
+    [GeneratedRegex(@"\bvoid\s+(?<loader>(?:AddSC_|Addmod_)[A-Za-z0-9_]+)\s*\(\s*\)", RegexOptions.CultureInvariant)]
+    private static partial Regex LoaderFunctionRegex();
+    [GeneratedRegex(@"\b(?<loader>(?:AddSC_|Addmod_)[A-Za-z0-9_]+)\s*\(", RegexOptions.CultureInvariant)]
+    private static partial Regex LoaderCallRegex();
+    [GeneratedRegex(@"\b(?:bool|void|Item\s*|SpellCastResult|int(?:8|16|32|64)?|uint(?:8|16|32|64)?|[A-Za-z_][A-Za-z0-9_:<>]*\s*[&*]?)\s+(?<method>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:override\s*)?\{", RegexOptions.CultureInvariant)]
+    private static partial Regex MethodRegex();
 }
