@@ -38,6 +38,18 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private ClientFusionDbcResult? _fusionDbcResult;
     private ClientFusionDbcRemapPlan? _fusionDbcRemapPlan;
     private ClientFusionDbcRemapResult? _fusionDbcRemapResult;
+    private readonly TextBox _releaseSourceRoot = new() { PlaceholderText = "Folder containing the exact player-facing files" };
+    private readonly TextBox _releaseBundleRoot = new() { PlaceholderText = "New portable release-bundle folder" };
+    private readonly TextBox _releaseName = new() { Text = "Crucible Player Release", PlaceholderText = "Release name" };
+    private readonly TextBox _releaseChannel = new() { Text = "public", PlaceholderText = "Channel identity" };
+    private readonly TextBox _releaseChangelog = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, PlaceholderText = "Player-visible changes and compatibility notes" };
+    private readonly TextBox _releaseOptionalRules = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, PlaceholderText = "Optional group mappings, one per line: HD Textures|Data\\patch-HD.MPQ" };
+    private readonly TextBox _releaseTargetRoot = new() { PlaceholderText = "Target WoW client root containing Data" };
+    private readonly TextBox _releaseSelectedGroups = new() { PlaceholderText = "Optional groups to install, comma separated" };
+    private readonly ListBox _releaseActions = new();
+    private readonly TextBlock _releaseSummary = Status("Create or select a release bundle, choose optional groups, then review an exact install plan.");
+    private readonly Border _releaseConfirmation = new() { IsVisible = false, Padding = new Thickness(10), BorderBrush = Brush.Parse("#755A2B"), BorderThickness = new Thickness(1) };
+    private ClientReleasePlan? _releasePlan;
     private CancellationTokenSource? _operation;
     private readonly List<Button> _operationButtons = [];
 
@@ -69,7 +81,8 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
             {
                 new TabItem { Header = "Inspect / index / extract", Content = InspectorPage() },
                 new TabItem { Header = "Client → server DBC plan", Content = ServerPlanPage() },
-                new TabItem { Header = "Additive client fusion", Content = FusionPage() }
+                new TabItem { Header = "Additive client fusion", Content = FusionPage() },
+                new TabItem { Header = "Player release & rollback", Content = ReleasePage() }
             }
         };
         Content = new Grid
@@ -131,6 +144,16 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
                 WithColumn(new TextBlock { Text = $"{entry.Candidates.Count:N0} source(s)" }, 2), WithColumn(new TextBlock { Text = entry.Guidance, TextTrimming = TextTrimming.CharacterEllipsis }, 3)
             }
         });
+        _releaseActions.ItemTemplate = new FuncDataTemplate<ClientReleaseAction>((action, _) => action is null ? new Grid() : new Grid
+        {
+            ColumnDefinitions = new("Auto,2*,Auto,3*"), ColumnSpacing = 10, Margin = new Thickness(3, 2), Children =
+            {
+                new TextBlock { Text = action.Kind.ToString(), Foreground = ReleaseBrush(action.Kind) },
+                WithColumn(new TextBlock { Text = action.RelativePath, TextWrapping = TextWrapping.Wrap }, 1),
+                WithColumn(new TextBlock { Text = action.OptionalGroup ?? "required" }, 2),
+                WithColumn(new TextBlock { Text = action.Detail, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, 3)
+            }
+        });
         _archives.SelectionChanged += async (_, _) => await ExplainArchiveAsync();
         _looseFiles.SelectionChanged += (_, _) => ExplainLooseFile();
     }
@@ -184,6 +207,100 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
         AddPath(paths, 0, "Effective base", _fusionBase, chooseBase, null); AddPath(paths, 1, "Override sources", _fusionSources, addSource, null);
         return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, analyzeDbcs, writeDbcs, planRemap, writeRemap, stage } }, 1), WithRow(_fusionItems, 2), WithRow(Card(_fusionSummary), 3) } };
+    }
+
+    private Control ReleasePage()
+    {
+        var source = Button("Source…", async () => { var path = await PickFolderAsync("Choose the exact player release source"); if (path is not null) _releaseSourceRoot.Text = path; });
+        var bundle = Button("Bundle parent…", async () => { var path = await PickFolderAsync("Choose a parent for a new portable release bundle"); if (path is not null) { var stem = string.Concat((_releaseName.Text ?? "release").Where(char.IsLetterOrDigit)); if (stem.Length == 0) stem = "Release"; _releaseBundleRoot.Text = Path.Combine(path, $"Crucible-{stem}-{DateTime.Now:yyyyMMdd-HHmmss}"); } });
+        var target = Button("Client…", async () => { var path = await PickFolderAsync("Choose the target WoW client root containing Data"); if (path is not null) _releaseTargetRoot.Text = path; });
+        var create = AccentButton("Build immutable release bundle"); create.Click += async (_, _) => await CreateReleaseBundleAsync(); Register(create);
+        var plan = AccentButton("Review client install plan"); plan.Click += async (_, _) => await PlanReleaseAsync(); Register(plan);
+        var export = new Button { Content = "Export reviewed plan…" }; export.Click += async (_, _) => await ExportReleasePlanAsync();
+        var install = AccentButton("Install reviewed release…"); install.Click += async (_, _) => await PrepareReleaseInstallAsync(); Register(install);
+        var rollback = new Button { Content = "Validate rollback receipt…" }; rollback.Click += async (_, _) => await PrepareReleaseRollbackAsync(); Register(rollback);
+        var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
+        AddPath(paths, 0, "Release source", _releaseSourceRoot, source, null); AddPath(paths, 1, "Bundle / manifest", _releaseBundleRoot, bundle, null); AddPath(paths, 2, "Target client", _releaseTargetRoot, target, null);
+        var identity = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { new StackPanel { Children = { new TextBlock { Text = "Release name" }, _releaseName } }, WithColumn(new StackPanel { Children = { new TextBlock { Text = "Channel (stable ownership identity)" }, _releaseChannel } }, 1) } };
+        var configuration = new StackPanel { Spacing = 7, Children = { paths, identity, new TextBlock { Text = "Changelog" }, _releaseChangelog, new TextBlock { Text = "Optional groups · group|client-relative prefix · a group may own multiple prefixes" }, _releaseOptionalRules, new TextBlock { Text = "Optional groups selected for this target" }, _releaseSelectedGroups, new WrapPanel { Children = { create, plan, export, install, rollback } }, _releaseConfirmation, Card(_releaseSummary), new TextBlock { Text = "Safety contract: bundles and plans bind every payload by SHA-256. Updates back up every replaced or removed file. Only unchanged files proven owned by the previous Crucible release can be pruned. Installation closes Wow.exe only when it belongs to the selected client and always clears that client's Cache. This is an offline/local distribution foundation; network downloads and cryptographic channel signing are not claimed here.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") } } };
+        return new Grid { RowDefinitions = new("*,*"), RowSpacing = 8, Margin = new Thickness(8), Children = { new ScrollViewer { Content = configuration }, WithRow(_releaseActions, 1) } };
+    }
+
+    private async Task CreateReleaseBundleAsync()
+    {
+        Begin("Hashing and copying the exact release payload into a new immutable bundle…"); _releaseConfirmation.IsVisible = false;
+        try
+        {
+            var source = _releaseSourceRoot.Text ?? string.Empty; var output = _releaseBundleRoot.Text ?? string.Empty; var name = _releaseName.Text ?? string.Empty; var channel = _releaseChannel.Text ?? string.Empty; var changelog = _releaseChangelog.Text;
+            var rules = ParseReleaseRules(_releaseOptionalRules.Text); var progress = new Progress<ClientReleaseProgress>(value => _operationStatus.Text = $"{value.Completed:N0}/{value.Total:N0} · {value.Stage} · {value.RelativePath}");
+            var result = await Task.Run(() => ClientReleaseService.CreateBundle(source, output, name, channel, changelog, rules, progress), _operation!.Token);
+            _releaseBundleRoot.Text = result.BundleRoot; _releasePlan = null; _releaseActions.ItemsSource = null;
+            var groups = result.Manifest.Files.Where(file => file.OptionalGroup is not null).GroupBy(file => file.OptionalGroup, StringComparer.OrdinalIgnoreCase).Select(group => $"{group.Key}: {group.Count():N0}");
+            _releaseSummary.Text = $"Bundle ready · {result.Manifest.Files.Count:N0} file(s) · {FormatBytes(result.PayloadBytes)} · content {result.Manifest.ContentId}\nOptional groups: {(groups.Any() ? string.Join(" · ", groups) : "none")}\n{result.ManifestPath}";
+            _operationStatus.Text = "Release bundle built without changing any client.";
+        }
+        catch (OperationCanceledException) { _operationStatus.Text = "Release bundle creation cancelled before publication."; }
+        catch (Exception exception) { Fail("Release bundle creation failed", exception); }
+        finally { End(); }
+    }
+
+    private async Task PlanReleaseAsync()
+    {
+        Begin("Verifying every release payload and comparing the exact target client preimages…"); _releaseConfirmation.IsVisible = false;
+        try
+        {
+            var progress = new Progress<ClientReleaseProgress>(value => _operationStatus.Text = $"{value.Completed:N0}/{value.Total:N0} · {value.Stage} · {value.RelativePath}");
+            var plan = await Task.Run(() => ClientReleaseService.CreatePlan(_releaseBundleRoot.Text ?? string.Empty, _releaseTargetRoot.Text ?? string.Empty, ParseGroups(_releaseSelectedGroups.Text), progress), _operation!.Token);
+            _releasePlan = plan; _releaseActions.ItemsSource = plan.Actions;
+            _releaseSummary.Text = $"{(plan.Ready ? "READY" : "BLOCKED")} · add {plan.Adds:N0} · replace {plan.Replacements:N0} · remove owned {plan.Removals:N0} · unchanged {plan.Unchanged:N0}\nSelected optional groups: {(plan.SelectedOptionalGroups.Count == 0 ? "none" : string.Join(", ", plan.SelectedOptionalGroups))}\n{string.Join(Environment.NewLine, plan.Blockers.Select(blocker => "• " + blocker))}";
+            _operationStatus.Text = plan.Ready ? "Exact release plan is ready for export or confirmed installation." : $"Release plan has {plan.Blockers.Count:N0} blocker(s); no installation is available.";
+        }
+        catch (OperationCanceledException) { _operationStatus.Text = "Release planning cancelled."; }
+        catch (Exception exception) { _releasePlan = null; _releaseActions.ItemsSource = null; Fail("Release planning failed", exception); }
+        finally { End(); }
+    }
+
+    private async Task ExportReleasePlanAsync()
+    {
+        if (_releasePlan is null) { _operationStatus.Text = "Review a release plan first."; return; }
+        var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Export hash-bound client release plan", SuggestedFileName = "client-release-plan.crucible.json", FileTypeChoices = [new FilePickerFileType("Crucible JSON") { Patterns = ["*.json"] }] }); var path = file?.TryGetLocalPath(); if (path is null) return;
+        try { ClientReleaseService.SavePlan(path, _releasePlan); _operationStatus.Text = $"Release plan exported: {path}"; } catch (Exception exception) { Fail("Release plan export failed", exception); }
+    }
+
+    private async Task PrepareReleaseInstallAsync()
+    {
+        if (_releasePlan is not { Ready: true } plan) { _operationStatus.Text = "Create a blocker-free release plan first."; return; }
+        var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Save exact client release receipt", SuggestedFileName = $"client-release-{DateTime.Now:yyyyMMdd-HHmmss}.receipt.json", FileTypeChoices = [new FilePickerFileType("Crucible receipt") { Patterns = ["*.json"] }] }); var receipt = file?.TryGetLocalPath(); if (receipt is null) return;
+        var cancel = new Button { Content = "Cancel" }; var confirm = AccentButton("Confirm client update"); cancel.Click += (_, _) => _releaseConfirmation.IsVisible = false; confirm.Click += async (_, _) => await ApplyReleaseAsync(confirm, plan, receipt);
+        _releaseConfirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Install this exact reviewed release into {plan.TargetClientRoot}?\n{plan.Adds:N0} add · {plan.Replacements:N0} replace · {plan.Removals:N0} owned removal. Wow processes from this client will be force-closed, every preimage will be backed up, ownership recorded, and Cache deleted.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _releaseConfirmation.IsVisible = true;
+    }
+
+    private async Task ApplyReleaseAsync(Button button, ClientReleasePlan plan, string receipt)
+    {
+        Begin("Rechecking the plan, closing the selected client, and preparing exact backups…"); button.IsEnabled = false;
+        try { var result = await Task.Run(() => ClientReleaseService.Apply(plan, receipt), _operation!.Token); _releaseConfirmation.IsVisible = false; _releaseSummary.Text = $"INSTALLED · {result.ChangedFiles:N0} changed · {result.RemovedFiles:N0} removed · {result.Cache.DeletedFiles:N0} cache file(s) cleared\nReceipt: {result.ReceiptPath}\nOwnership: {result.InstalledStatePath}"; _operationStatus.Text = "Player release installed and rollback evidence retained."; await PlanReleaseAsync(); }
+        catch (Exception exception) { Fail("Player release installation failed safely", exception); }
+        finally { button.IsEnabled = true; End(); }
+    }
+
+    private async Task PrepareReleaseRollbackAsync()
+    {
+        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose a committed client release receipt", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("Crucible receipt") { Patterns = ["*.json"] }] }); var receiptPath = files.FirstOrDefault()?.TryGetLocalPath(); if (receiptPath is null) return;
+        try
+        {
+            var receipt = await Task.Run(() => ClientReleaseService.ValidateRollback(receiptPath)); _releaseActions.ItemsSource = receipt.Actions;
+            var cancel = new Button { Content = "Cancel" }; var confirm = new Button { Content = "Confirm exact rollback" }; cancel.Click += (_, _) => _releaseConfirmation.IsVisible = false; confirm.Click += async (_, _) => await ApplyReleaseRollbackAsync(confirm, receiptPath);
+            _releaseConfirmation.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = $"Rollback the committed release at {receipt.TargetClientRoot}? Every current postimage and backup passed validation. The previous files and ownership state will be restored, and Cache will be cleared again.", TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } }; _releaseConfirmation.IsVisible = true; _releaseSummary.Text = $"Rollback validated · {receipt.Actions.Count:N0} reviewed action(s) · backup {receipt.BackupRoot}";
+        }
+        catch (Exception exception) { Fail("Release rollback validation failed", exception); }
+    }
+
+    private async Task ApplyReleaseRollbackAsync(Button button, string receiptPath)
+    {
+        Begin("Rechecking postimages and restoring the exact release preimages…"); button.IsEnabled = false;
+        try { var result = await Task.Run(() => ClientReleaseService.Rollback(receiptPath), _operation!.Token); _releaseConfirmation.IsVisible = false; _releaseSummary.Text = $"ROLLED BACK · {result.RestoredFiles:N0} restored · {result.RemovedFiles:N0} release-only files removed · {result.Cache.DeletedFiles:N0} cache file(s) cleared\n{result.ReceiptPath}"; _operationStatus.Text = "Exact client rollback completed."; _releasePlan = null; }
+        catch (Exception exception) { Fail("Client release rollback failed", exception); }
+        finally { button.IsEnabled = true; End(); }
     }
 
     private async Task BuildIndexAsync()
@@ -411,6 +528,7 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         _clientRoot.Text = Directory.Exists(data) && Path.GetFileName(Path.TrimEndingDirectorySeparator(data)).Equals("Data", StringComparison.OrdinalIgnoreCase) ? Directory.GetParent(data)?.FullName : string.Empty;
         _indexRoot.Text = _session.Settings.ClientIndexPath;
         _coreSourceRoot.Text = _session.Settings.CoreSourcePath;
+        _releaseTargetRoot.Text = _clientRoot.Text;
     }
 
     private void Begin(string text) { _operation?.Cancel(); _operation?.Dispose(); _operation = new(); foreach (var button in _operationButtons) button.IsEnabled = false; _operationStatus.Text = text; }
@@ -427,11 +545,19 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private static Border Card(Control child) => new() { Padding = new Thickness(10), BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = child };
     private static TextBlock Status(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8") };
     private static string[] Lines(string? text) => (text ?? string.Empty).Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    private static string[] ParseGroups(string? text) => (text ?? string.Empty).Split([',', ';', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    private static IReadOnlyList<ClientReleaseGroupRule> ParseReleaseRules(string? text)
+    {
+        var result = new List<ClientReleaseGroupRule>();
+        foreach (var line in Lines(text)) { var separator = line.IndexOf('|'); if (separator < 1 || separator == line.Length - 1) throw new FormatException($"Optional release rule must use group|relative-prefix: {line}"); result.Add(new(line[..separator], line[(separator + 1)..])); }
+        return result;
+    }
     private static string FormatBytes(long bytes) => bytes < 1024 ? $"{bytes:N0} B" : bytes < 1024 * 1024 ? $"{bytes / 1024d:0.#} KiB" : bytes < 1024L * 1024 * 1024 ? $"{bytes / (1024d * 1024):0.#} MiB" : $"{bytes / (1024d * 1024 * 1024):0.##} GiB";
     private static string ScopeGuidance(ClientArchiveScope scope) => scope switch { ClientArchiveScope.RootData => "Root Data layer; usually effective, but filename precedence still matters.", ClientArchiveScope.ActiveLocale => "Active locale layer; reuse only for the matching locale unless content is proven language-neutral.", ClientArchiveScope.InactiveLocale => "Inactive locale layer; excluded from the effective view by default.", ClientArchiveScope.Cache => "Cache layer; treat as generated or launcher-managed until proven otherwise.", ClientArchiveScope.CustomSubdirectory => "Custom loader subdirectory; preserve separately and expect executable/launcher coupling.", ClientArchiveScope.Backup => "Backup archive; excluded from effective content and patch inputs by default.", _ => "Unknown archive scope." };
     private static IBrush ScopeBrush(ClientArchiveScope scope) => scope is ClientArchiveScope.Backup or ClientArchiveScope.InactiveLocale ? Brush.Parse("#78859A") : scope == ClientArchiveScope.CustomSubdirectory ? Brush.Parse("#F0A34A") : Brush.Parse("#B8C4D8");
     private static IBrush PlanBrush(ClientServerPlanStatus status) => status is ClientServerPlanStatus.Identical ? Brush.Parse("#67C587") : status is ClientServerPlanStatus.ConflictingClientLayers or ClientServerPlanStatus.InvalidDbc or ClientServerPlanStatus.UnknownConsumer ? Brush.Parse("#E36B6B") : Brush.Parse("#E5B75A");
     private static IBrush FusionBrush(ClientFusionStatus status) => status is ClientFusionStatus.IdenticalToBase ? Brush.Parse("#78859A") : status is ClientFusionStatus.Conflict ? Brush.Parse("#E36B6B") : Brush.Parse("#67C587");
+    private static IBrush ReleaseBrush(ClientReleaseActionKind kind) => kind switch { ClientReleaseActionKind.Add => Brush.Parse("#67C587"), ClientReleaseActionKind.Replace => Brush.Parse("#E5B75A"), ClientReleaseActionKind.RemoveManaged => Brush.Parse("#E36B6B"), _ => Brush.Parse("#78859A") };
     private static void AddPath(Grid grid, int row, string label, Control field, Control firstButton, Control? secondButton) { var text = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center }; Grid.SetRow(text, row); grid.Children.Add(text); Grid.SetRow(field, row); Grid.SetColumn(field, 1); grid.Children.Add(field); Grid.SetRow(firstButton, row); Grid.SetColumn(firstButton, 2); grid.Children.Add(firstButton); if (secondButton is not null) { Grid.SetRow(secondButton, row); Grid.SetColumn(secondButton, 3); grid.Children.Add(secondButton); } }
     private static T WithColumn<T>(T control, int column) where T : Control { Grid.SetColumn(control, column); return control; }
     private static T WithRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }

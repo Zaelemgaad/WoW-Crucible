@@ -327,6 +327,10 @@ Manifests preserve source-to-archive mappings and can enforce allow/deny globs, 
 ```text
 wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]
 wowcrucible client clear-cache <client-root>
+wowcrucible client release-create <source-folder> <new-bundle-folder> --name=NAME [--channel=public] [--changelog=notes.txt] [--optional=group|relative-prefix]...
+wowcrucible client release-plan <bundle-or-manifest> <client-root> <plan.json> [--group=name]... [--overwrite]
+wowcrucible client release-apply <plan.json> <receipt.json> [--apply] [--overwrite]
+wowcrucible client release-rollback <receipt.json> [--apply]
 wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]
 wowcrucible client corpus <output-listfile> <index-directory>...
 wowcrucible client show <index-directory>
@@ -340,6 +344,12 @@ wowcrucible client fusion-stage <fusion-plan.json> <stage-folder> [--dbc-receipt
 ```
 
 Client indexes are resumable and distinguish active, backup, inactive-locale, and custom-subdirectory archives. Anonymous hash-only MPQ entries remain quarantined unless explicitly requested. `install-patch` atomically installs the patch and deletes that exact client’s `Cache` folder only after success.
+
+`release-create` builds a new portable offline bundle with a strict manifest and copied `Payload` tree; every path, length, SHA-256, channel, changelog, and optional-group assignment contributes to its content identity. Repeat `--optional=group|relative-prefix` when one optional package owns multiple client-relative folders. `release-plan` verifies the complete bundle and exact target client, includes required files plus each selected `--group`, binds any prior channel ownership file, and blocks removal of a managed file whose bytes changed outside Crucible. A pre-existing unowned collision can be replaced only as an explicit reviewed action and is backed up completely.
+
+`release-apply` is dry-run unless `--apply` is present. Confirmed apply recreates the plan, closes only Wow processes whose executable is inside the selected client, verifies every backup and staged payload before client mutation, retains a pending recovery receipt, publishes files atomically per path, records exact channel ownership under the client's `.crucible` folder, and deletes the complete client `Cache`. `release-rollback` likewise validates without mutation unless `--apply` is supplied; it refuses later-edited postimages, missing/changed backups, or a changed ownership state, then restores the exact previous files/state and clears Cache again. These commands deliberately provide no unsigned HTTP/FTP updater. Cryptographically authenticated channel transport, resumable download, and launcher self-update require a later trust/publishing layer.
+
+Launch the same-window desktop directly in this workspace with `WoWCrucible.Desktop-latest.exe --client`.
 
 `fusion` performs the fast whole-file comparison and saves every source candidate needed by the record stages. `fusion-dbc-plan` is the quick path: it requires an exact named physical-ID schema, compares strings by value rather than string-table offset, unions absent IDs, reuses equal rows, and reports genuinely different occupied IDs as field-level blockers. `fusion-dbc-remap-plan` is the dependency-safe path for those collisions. It also loads build-12340 WoWDBDefs, allocates unused IDs, rewrites DBD-declared references within the same source layer, and reaches a fixed point so an otherwise base-identical referencing row is cloned when its target moves. Byte-identical content from later sources maps to the already planned target instead of being duplicated. Apply rehashes and recomputes every schema/base/source/definition-bound operation before atomically publishing changed DBCs and a receipt. `fusion-stage` accepts exactly one receipt type, verifies it, substitutes its outputs—including propagated tables that were originally byte-identical—and produces the normal tiny manifest. SQL, script, executable, and undeclared binary references remain explicit follow-up work. The same paths live under **Client Workshop → Additive client fusion** without opening another window.
 

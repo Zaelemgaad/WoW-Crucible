@@ -15,6 +15,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("mpq merge").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
     CrucibleCommandCatalog.Search("casc later client extract").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
     CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.items" ||
+    CrucibleCommandCatalog.Search("amaroth launcher optional release rollback").FirstOrDefault()?.Command.Id != "workspace.client" ||
     CrucibleCommandCatalog.Search("project collision ids").FirstOrDefault()?.Command.Id != "workspace.projects" ||
     CrucibleCommandCatalog.Search("sqlite spell staging").FirstOrDefault()?.Command.Id != "action.dbc-staging" ||
     CrucibleCommandCatalog.Search("pet companion level stats").FirstOrDefault()?.Command.Id != "workspace.pets" ||
@@ -427,6 +428,42 @@ Directory.CreateDirectory(Path.Combine(deploymentFixture, "Cache"));
 if (!ClientPatchDeploymentService.InvalidateCache(deploymentFixture).Existed || Directory.Exists(Path.Combine(deploymentFixture, "Cache")))
     throw new InvalidOperationException("Explicit client cache invalidation failed.");
 Directory.Delete(deploymentFixture, true); File.Delete(patchDeploymentSource);
+
+var releaseFixture = Path.Combine(Path.GetTempPath(), $"crucible-client-release-{Guid.NewGuid():N}");
+try
+{
+    var sourceOne = Path.Combine(releaseFixture, "source-one"); var sourceTwo = Path.Combine(releaseFixture, "source-two"); var client = Path.Combine(releaseFixture, "client");
+    foreach (var root in new[] { sourceOne, sourceTwo }) { Directory.CreateDirectory(Path.Combine(root, "Data")); Directory.CreateDirectory(Path.Combine(root, "Interface", "AddOns", "HD")); }
+    Directory.CreateDirectory(Path.Combine(client, "Data")); Directory.CreateDirectory(Path.Combine(client, "Cache", "WDB"));
+    File.WriteAllText(Path.Combine(sourceOne, "Data", "patch-Z.MPQ"), "release one"); File.WriteAllText(Path.Combine(sourceOne, "Interface", "AddOns", "HD", "HD.toc"), "optional one");
+    File.WriteAllText(Path.Combine(sourceTwo, "Data", "patch-Z.MPQ"), "release two"); File.WriteAllText(Path.Combine(sourceTwo, "Interface", "AddOns", "HD", "HD.toc"), "optional two");
+    var targetPatch = Path.Combine(client, "Data", "patch-Z.MPQ"); var targetOptional = Path.Combine(client, "Interface", "AddOns", "HD", "HD.toc"); File.WriteAllText(targetPatch, "stock bytes"); File.WriteAllText(Path.Combine(client, "Cache", "WDB", "cache.bin"), "stale");
+    var rules = new[] { new ClientReleaseGroupRule("HD", @"Interface\AddOns\HD") };
+    var bundleOne = ClientReleaseService.CreateBundle(sourceOne, Path.Combine(releaseFixture, "bundle-one"), "One", "public", "first", rules);
+    File.WriteAllText(Path.Combine(bundleOne.BundleRoot, "Payload", "unexpected.bin"), "unexpected"); var unexpectedRejected = false;
+    try { ClientReleaseService.VerifyBundle(bundleOne.BundleRoot, bundleOne.Manifest); } catch (InvalidDataException) { unexpectedRejected = true; }
+    File.Delete(Path.Combine(bundleOne.BundleRoot, "Payload", "unexpected.bin")); if (!unexpectedRejected) throw new InvalidOperationException("Client release verification accepted an unmanifested payload file.");
+    var planOne = ClientReleaseService.CreatePlan(bundleOne.BundleRoot, client, ["HD"]); var planOnePath = Path.Combine(releaseFixture, "plan-one.json"); ClientReleaseService.SavePlan(planOnePath, planOne);
+    if (!planOne.Ready || planOne.Adds != 1 || planOne.Replacements != 1 || ClientReleaseService.LoadPlan(planOnePath).Fingerprint != planOne.Fingerprint) throw new InvalidOperationException("Client release did not plan required/optional payloads and an unowned replacement exactly.");
+    File.WriteAllText(targetPatch, "changed after review"); var staleRejected = false;
+    try { ClientReleaseService.Apply(planOne, Path.Combine(releaseFixture, "stale-receipt.json")); } catch (InvalidOperationException) { staleRejected = true; }
+    if (!staleRejected || File.Exists(Path.Combine(releaseFixture, "stale-receipt.json"))) throw new InvalidOperationException("Client release apply accepted a stale target preimage or published a false receipt.");
+    File.WriteAllText(targetPatch, "stock bytes"); planOne = ClientReleaseService.CreatePlan(bundleOne.BundleRoot, client, ["HD"]);
+    var receiptOne = Path.Combine(releaseFixture, "receipt-one.json"); var appliedOne = ClientReleaseService.Apply(planOne, receiptOne);
+    if (Directory.Exists(Path.Combine(client, "Cache")) || File.ReadAllText(targetPatch) != "release one" || File.ReadAllText(targetOptional) != "optional one" || appliedOne.ChangedFiles != 2) throw new InvalidOperationException("Client release did not install required/optional payloads, record ownership, and clear Cache.");
+    var bundleTwo = ClientReleaseService.CreateBundle(sourceTwo, Path.Combine(releaseFixture, "bundle-two"), "Two", "public", "second", rules);
+    File.WriteAllText(targetOptional, "player modified"); var protectedPlan = ClientReleaseService.CreatePlan(bundleTwo.BundleRoot, client);
+    if (protectedPlan.Ready || !protectedPlan.Blockers.Any(blocker => blocker.Contains("changed outside Crucible", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("Client release planned deletion of an externally modified managed optional file.");
+    File.WriteAllText(targetOptional, "optional one"); Directory.CreateDirectory(Path.Combine(client, "Cache")); File.WriteAllText(Path.Combine(client, "Cache", "again.bin"), "stale");
+    var planTwo = ClientReleaseService.CreatePlan(bundleTwo.BundleRoot, client); if (!planTwo.Ready || planTwo.Replacements != 1 || planTwo.Removals != 1) throw new InvalidOperationException("Client release did not plan safe optional-group deselection against exact prior ownership.");
+    var receiptTwo = Path.Combine(releaseFixture, "receipt-two.json"); ClientReleaseService.Apply(planTwo, receiptTwo);
+    if (File.Exists(targetOptional) || File.ReadAllText(targetPatch) != "release two" || Directory.Exists(Path.Combine(client, "Cache"))) throw new InvalidOperationException("Second client release did not replace required bytes, prune only its owned optional file, or clear Cache.");
+    ClientReleaseService.ValidateRollback(receiptTwo); ClientReleaseService.Rollback(receiptTwo);
+    if (File.ReadAllText(targetPatch) != "release one" || File.ReadAllText(targetOptional) != "optional one") throw new InvalidOperationException("Client release rollback did not restore the prior release and optional ownership preimages.");
+    ClientReleaseService.ValidateRollback(receiptOne); ClientReleaseService.Rollback(receiptOne);
+    if (File.ReadAllText(targetPatch) != "stock bytes" || File.Exists(targetOptional)) throw new InvalidOperationException("Initial client release rollback did not restore the unowned stock preimage and remove release-only files.");
+}
+finally { if (Directory.Exists(releaseFixture)) Directory.Delete(releaseFixture, true); }
 
 var toolInventoryFixture = Path.Combine(Path.GetTempPath(), $"crucible-tool-inventory-{Guid.NewGuid():N}");
 Directory.CreateDirectory(Path.Combine(toolInventoryFixture, "Keira3")); Directory.CreateDirectory(Path.Combine(toolInventoryFixture, "WDBXEditor")); Directory.CreateDirectory(Path.Combine(toolInventoryFixture, "MysteryTool"));
@@ -1421,6 +1458,8 @@ if (Directory.Exists(desktopSourceRoot))
         throw new InvalidOperationException($"Single-window/responsive desktop contract regressed. Feature windows: {string.Join(", ", featureWindows)}; C# rigid constraints: {string.Join(", ", rigidConstraints)}; markup constraints: {string.Join(", ", markupConstraints)}; permanent horizontal splitters: {string.Join(", ", permanentHorizontalSplitters)}; responsive splitter uses: {responsiveSplitters}.");
     var itemWorkbenchSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ItemWorkbenchWindow.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var sqlWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("SqlWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var clientWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ClientWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var appSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("App.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 17802", StringComparison.Ordinal) ||
@@ -1433,6 +1472,10 @@ if (Directory.Exists(desktopSourceRoot))
         !sqlWorkspaceSource.Contains("ActivateFavorites", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related DBC / DB2 path", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related MPQ path", StringComparison.Ordinal) ||
+        !clientWorkspaceSource.Contains("Player release & rollback", StringComparison.Ordinal) ||
+        !clientWorkspaceSource.Contains("ClientReleaseService.Apply", StringComparison.Ordinal) ||
+        !clientWorkspaceSource.Contains("ClientReleaseService.ValidateRollback", StringComparison.Ordinal) ||
+        !appSource.Contains("--client", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenSqlFavorites", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenMpqMergeWorkspace", StringComparison.Ordinal))
         throw new InvalidOperationException("Cut-item classification, exact-ID bypass, independent item-tab path controls, arbitrary SQL-row favorites, or the direct same-window Favorites route regressed.");

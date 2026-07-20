@@ -876,7 +876,8 @@ public partial class MainWindow : Window
         OpenMpqWorkspace();
         _mpqWorkspaceView!.ActivateMerge();
     }
-    private void OpenClientWorkspaceClick(object? sender, RoutedEventArgs e)
+    private void OpenClientWorkspaceClick(object? sender, RoutedEventArgs e) => OpenClientWorkspace();
+    public void OpenClientWorkspace()
     {
         if (_clientWorkspaceView is null)
         {

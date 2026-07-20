@@ -1215,6 +1215,35 @@ static int Client(string[] args)
             : $"Client cache is already absent: {result.CachePath}");
         return 0;
     }
+    if (args is ["release-create", var releaseSource, var releaseBundle, .. var releaseOptions])
+    {
+        var name = Option(releaseOptions, "--name="); var channel = Option(releaseOptions, "--channel=") ?? "public"; var changelogFile = Option(releaseOptions, "--changelog=");
+        var unknown = releaseOptions.Where(option => !option.StartsWith("--name=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--channel=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--changelog=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--optional=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown release-create option: {unknown[0]}"); if (string.IsNullOrWhiteSpace(name)) return Fail("release-create requires --name=Release Name.");
+        var changelog = changelogFile is null ? string.Empty : File.ReadAllText(changelogFile); var rules = ParseReleaseGroupRules(releaseOptions);
+        var result = ClientReleaseService.CreateBundle(releaseSource, releaseBundle, name, channel, changelog, rules);
+        Console.WriteLine($"BUNDLE\t{result.BundleRoot}\nMANIFEST\t{result.ManifestPath}\nCONTENT_ID\t{result.Manifest.ContentId}\nFILES\t{result.Manifest.Files.Count:N0}\nBYTES\t{result.PayloadBytes:N0}");
+        foreach (var group in result.Manifest.Files.Where(file => file.OptionalGroup is not null).GroupBy(file => file.OptionalGroup, StringComparer.OrdinalIgnoreCase)) Console.WriteLine($"OPTIONAL\t{group.Key}\t{group.Count():N0}");
+        return 0;
+    }
+    if (args is ["release-plan", var releaseManifest, var releaseClientRoot, var releasePlanPath, .. var releasePlanOptions])
+    {
+        var groups = releasePlanOptions.Where(option => option.StartsWith("--group=", StringComparison.OrdinalIgnoreCase)).Select(option => option[8..]).ToArray(); var overwrite = releasePlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
+        var unknown = releasePlanOptions.Where(option => !option.StartsWith("--group=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown release-plan option: {unknown[0]}");
+        var plan = ClientReleaseService.CreatePlan(releaseManifest, releaseClientRoot, groups); ClientReleaseService.SavePlan(releasePlanPath, plan, overwrite); PrintReleasePlan(plan); Console.WriteLine($"PLAN\t{Path.GetFullPath(releasePlanPath)}"); return plan.Ready ? 0 : 3;
+    }
+    if (args is ["release-apply", var releaseApplyPlanPath, var releaseReceiptPath, .. var releaseApplyOptions])
+    {
+        var apply = releaseApplyOptions.Contains("--apply", StringComparer.OrdinalIgnoreCase); var overwrite = releaseApplyOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var unknown = releaseApplyOptions.Where(option => !option.Equals("--apply", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown release-apply option: {unknown[0]}");
+        var plan = ClientReleaseService.LoadPlan(releaseApplyPlanPath); PrintReleasePlan(plan); if (!apply) { Console.Error.WriteLine("Dry-run only. Re-run with --apply after reviewing every action."); return plan.Ready ? 0 : 3; }
+        var result = ClientReleaseService.Apply(plan, releaseReceiptPath, overwrite); Console.WriteLine($"RECEIPT\t{result.ReceiptPath}\nSTATE\t{result.InstalledStatePath}\nCHANGED\t{result.ChangedFiles:N0}\nREMOVED\t{result.RemovedFiles:N0}\nCLOSED_WOW\t{string.Join(',', result.ClosedWowProcessIds)}\nCACHE_FILES\t{result.Cache.DeletedFiles:N0}"); return 0;
+    }
+    if (args is ["release-rollback", var releaseRollbackReceipt, .. var releaseRollbackOptions])
+    {
+        var apply = releaseRollbackOptions.Contains("--apply", StringComparer.OrdinalIgnoreCase); var unknown = releaseRollbackOptions.Where(option => !option.Equals("--apply", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown release-rollback option: {unknown[0]}");
+        var receipt = ClientReleaseService.ValidateRollback(releaseRollbackReceipt); Console.WriteLine($"TARGET\t{receipt.TargetClientRoot}\nACTIONS\t{receipt.Actions.Count:N0}\nBACKUP\t{receipt.BackupRoot}\nSTATUS\t{receipt.Status}"); if (!apply) { Console.Error.WriteLine("Rollback validation passed; dry-run only. Re-run with --apply to restore exact preimages."); return 0; }
+        var result = ClientReleaseService.Rollback(releaseRollbackReceipt); Console.WriteLine($"RECEIPT\t{result.ReceiptPath}\nRESTORED\t{result.RestoredFiles:N0}\nREMOVED\t{result.RemovedFiles:N0}\nCACHE_FILES\t{result.Cache.DeletedFiles:N0}"); return 0;
+    }
     if (args is ["fusion", var baseRoot, .. var fusionInputs])
     {
         var stage = Option(fusionInputs, "--stage="); var output = Option(fusionInputs, "--output="); var showAll = fusionInputs.Contains("--all", StringComparer.OrdinalIgnoreCase);
@@ -1326,7 +1355,24 @@ static int Client(string[] args)
     return ClientHelp(2);
 }
 
-static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  wowcrucible client clear-cache <client-root>\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]\n  wowcrucible client fusion-dbc-plan <fusion-plan.json> <schema.xml> [--output=dbc-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-apply <dbc-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-dbc-remap-plan <fusion-plan.json> <schema.xml> <WoWDBDefs-definitions> [--output=remap-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-remap-apply <remap-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-stage <fusion-plan.json> <stage-folder> [--dbc-receipt=client-fusion-dbc.crucible.json|--dbc-remap-receipt=client-fusion-dbc-remap.crucible.json]", code);
+static IReadOnlyList<ClientReleaseGroupRule> ParseReleaseGroupRules(IEnumerable<string> options)
+{
+    var rules = new List<ClientReleaseGroupRule>();
+    foreach (var option in options.Where(option => option.StartsWith("--optional=", StringComparison.OrdinalIgnoreCase)))
+    {
+        var value = option[11..]; var separator = value.IndexOf('|'); if (separator < 1 || separator == value.Length - 1) throw new ArgumentException($"Optional group must use --optional=group|relative-prefix: {value}");
+        rules.Add(new(value[..separator], value[(separator + 1)..]));
+    }
+    return rules;
+}
+
+static void PrintReleasePlan(ClientReleasePlan plan)
+{
+    Console.WriteLine($"READY\t{plan.Ready}\nTARGET\t{plan.TargetClientRoot}\nADD\t{plan.Adds:N0}\nREPLACE\t{plan.Replacements:N0}\nREMOVE_MANAGED\t{plan.Removals:N0}\nUNCHANGED\t{plan.Unchanged:N0}\nGROUPS\t{string.Join(',', plan.SelectedOptionalGroups)}");
+    foreach (var action in plan.Actions) Console.WriteLine($"ACTION\t{action.Kind}\t{action.RelativePath}\t{action.OptionalGroup ?? "required"}\t{action.Detail}"); foreach (var blocker in plan.Blockers) Console.WriteLine($"BLOCKER\t{blocker}");
+}
+
+static int ClientHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible client install-patch <patch.mpq> <client-root> [--name=patch-X.MPQ]\n  wowcrucible client clear-cache <client-root>\n  wowcrucible client release-create <source-folder> <new-bundle-folder> --name=NAME [--channel=public] [--changelog=notes.txt] [--optional=group|relative-prefix]...\n  wowcrucible client release-plan <bundle-or-manifest> <client-root> <plan.json> [--group=name]... [--overwrite]\n  wowcrucible client release-apply <plan.json> <receipt.json> [--apply] [--overwrite]\n  wowcrucible client release-rollback <receipt.json> [--apply]\n  wowcrucible client index <client-root> <index-directory> [--no-hash] [--listfile=paths.txt] [--client-exe=Wow.exe]\n  wowcrucible client corpus <output-listfile> <index-directory>...\n  wowcrucible client extract <index-directory> <archive-relative-path> <folder> [path-glob-or-text] [--resolved-only|--anonymous-only] [--overwrite] [--quiet] [--workers=N]\n  wowcrucible client show <index-directory>\n  wowcrucible client fusion <base-root> <override-root>... [--output=plan.json] [--stage=review-folder] [--all]\n  wowcrucible client fusion-dbc-plan <fusion-plan.json> <schema.xml> [--output=dbc-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-apply <dbc-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-dbc-remap-plan <fusion-plan.json> <schema.xml> <WoWDBDefs-definitions> [--output=remap-plan.json] [--format=text|json] [--overwrite]\n  wowcrucible client fusion-dbc-remap-apply <remap-plan.json> <new-or-empty-output-folder>\n  wowcrucible client fusion-stage <fusion-plan.json> <stage-folder> [--dbc-receipt=client-fusion-dbc.crucible.json|--dbc-remap-receipt=client-fusion-dbc-remap.crucible.json]\n\nRelease bundles are local/offline publication artifacts. Payloads and plans are SHA-256 bound; only files proven owned by a previous Crucible release can be pruned. Apply force-closes Wow processes from the selected client, backs up every replaced/removed preimage, records ownership, and clears that client's Cache. Apply and rollback are dry-run unless --apply is explicit. Network transport and cryptographic channel signing are separate future layers, not implied by this command.", code);
 
 static async Task<int> Server(string[] args)
 {
