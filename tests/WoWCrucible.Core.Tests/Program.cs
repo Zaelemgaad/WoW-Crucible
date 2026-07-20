@@ -1829,12 +1829,20 @@ if (Directory.Exists(desktopSourceRoot))
         !serverSqlWorkspaceSource.Contains("Zero or multiple matching rows block planning", StringComparison.Ordinal))
         throw new InvalidOperationException("Same-window exact schema-lookup or bounded value-transform authoring regressed.");
     if (!sqlWorkspaceSource.Contains("Exact view/routine/trigger/event", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("Guided trigger/routine/event", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("Generate exact trigger & review", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("Generate exact routine & review", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("Generate exact event & review", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("SqlDatabaseObjectComposer.BuildTrigger", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("SqlDatabaseObjectComposer.BuildFunction", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("SqlDatabaseObjectComposer.BuildRecurringEvent", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("LoadComposedDatabaseObjectAsync", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Review exact CREATE / replacement", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("service.PrepareChangeAsync", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("SqlDatabaseObjectService().ApplyChangeAsync", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("RollbackChangeAsync", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("new ResponsiveSplitGrid(_databaseObjects, details", StringComparison.Ordinal))
-        throw new InvalidOperationException("Responsive same-window exact database-object authoring, recovery receipts, or stale-safe rollback wiring regressed.");
+        throw new InvalidOperationException("Responsive same-window guided/exact database-object authoring, recovery receipts, or stale-safe rollback wiring regressed.");
 }
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
@@ -2396,6 +2404,26 @@ catch (InvalidDataException exception) when (exception.Message.Contains("one CRE
 var nestedCompound = "CREATE PROCEDURE `acore_world`.`crucible_nested_procedure`() BEGIN IF 1 = 1 THEN BEGIN SELECT CASE WHEN 1 = 1 THEN 'END;DROP' ELSE 'BEGIN' END; END; END IF; END";
 if (!SqlDatabaseObjectService.ValidateCreateDefinition(SqlDatabaseObjectType.Procedure, "acore_world", "crucible_nested_procedure", nestedCompound).EndsWith(';'))
     throw new InvalidOperationException("Exact compound-object validation rejected a nested BEGIN/IF/CASE body.");
+var guidedProcedureParameters = SqlDatabaseObjectComposer.ParseParameters(SqlDatabaseObjectType.Procedure, "IN item_id INT UNSIGNED\nOUT item_name VARCHAR(255)");
+var guidedProcedure = SqlDatabaseObjectComposer.BuildProcedure("acore_world", "crucible_guided_procedure", guidedProcedureParameters, SqlRoutineDataAccess.ReadsSqlData, SqlSecurityMode.Invoker, "BEGIN SELECT name INTO item_name FROM item_template WHERE entry=item_id; END");
+if (!guidedProcedure.Contains("IN `item_id` INT UNSIGNED", StringComparison.Ordinal) || !guidedProcedure.Contains("OUT `item_name` VARCHAR(255)", StringComparison.Ordinal) || !guidedProcedure.Contains("READS SQL DATA", StringComparison.Ordinal) || !guidedProcedure.Contains("SQL SECURITY INVOKER", StringComparison.Ordinal))
+    throw new InvalidOperationException("Guided procedure composition lost structured parameters, data-access intent, or security mode.");
+var guidedFunctionParameters = SqlDatabaseObjectComposer.ParseParameters(SqlDatabaseObjectType.Function, "item_id BIGINT");
+var guidedFunction = SqlDatabaseObjectComposer.BuildFunction("acore_world", "crucible_guided_function", guidedFunctionParameters, "DECIMAL(10, 2)", true, SqlRoutineDataAccess.NoSql, SqlSecurityMode.Definer, "RETURN item_id * 1.5");
+if (!guidedFunction.Contains("RETURNS DECIMAL(10, 2)", StringComparison.Ordinal) || !guidedFunction.Contains("DETERMINISTIC", StringComparison.Ordinal) || !guidedFunction.Contains("NO SQL", StringComparison.Ordinal))
+    throw new InvalidOperationException("Guided function composition lost its return type or routine traits.");
+var guidedTrigger = SqlDatabaseObjectComposer.BuildTrigger("acore_world", "crucible_guided_trigger", "item_template", SqlTriggerTiming.Before, SqlTriggerEvent.Update, "BEGIN SET NEW.name=TRIM(NEW.name); END");
+if (!guidedTrigger.Contains("BEFORE UPDATE ON `acore_world`.`item_template` FOR EACH ROW", StringComparison.Ordinal)) throw new InvalidOperationException("Guided trigger composition lost its exact table/timing/event binding.");
+var guidedRecurringEvent = SqlDatabaseObjectComposer.BuildRecurringEvent("acore_world", "crucible_guided_event", 15, SqlEventIntervalUnit.Minute, "2026-07-20 12:00:00", "2026-07-21 12:00:00", true, false, "CALL crucible_guided_procedure(1, @name)");
+var guidedOneTimeEvent = SqlDatabaseObjectComposer.BuildOneTimeEvent("acore_world", "crucible_guided_once", "2026-07-20 12:00:00", false, true, "SELECT 1");
+if (!guidedRecurringEvent.Contains("EVERY 15 MINUTE", StringComparison.Ordinal) || !guidedRecurringEvent.Contains("ON COMPLETION PRESERVE", StringComparison.Ordinal) || !guidedRecurringEvent.Contains("DISABLE", StringComparison.Ordinal) || !guidedOneTimeEvent.Contains("AT '2026-07-20 12:00:00'", StringComparison.Ordinal))
+    throw new InvalidOperationException("Guided event composition lost recurring/one-time schedule or state intent.");
+try { _ = SqlDatabaseObjectComposer.BuildTrigger("acore_world", "crucible_bad_trigger", "item_template", SqlTriggerTiming.After, SqlTriggerEvent.Insert, "SET @value=1; DROP TABLE item_template"); throw new InvalidOperationException("Guided trigger composition accepted an appended statement."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("one CREATE statement", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = SqlDatabaseObjectComposer.BuildFunction("acore_world", "crucible_bad_function", [], "INT; DROP TABLE item_template", true, SqlRoutineDataAccess.NoSql, SqlSecurityMode.Invoker, "RETURN 1"); throw new InvalidOperationException("Guided function composition accepted an injected return type."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("Unsupported guided SQL data type", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = SqlDatabaseObjectComposer.ParseParameters(SqlDatabaseObjectType.Function, "OUT value INT"); throw new InvalidOperationException("Guided function composition accepted an OUT parameter."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("cannot use OUT", StringComparison.OrdinalIgnoreCase)) { }
 var syncKey = new[] { new LegacyDatabaseAuditKeyPart("entry", new(LegacyDatabaseAuditValueState.Scalar, "17")) };
 var syncFields = new[] { new DatabaseSyncField("name", new(LegacyDatabaseAuditValueState.Scalar, "Before"), new(LegacyDatabaseAuditValueState.Scalar, "After")) };
 var syncOperation = new DatabaseSyncOperation("item_template", LegacyDatabaseContentDomain.ItemsAndSets, LegacyDatabaseRowChangeKind.Modified, syncKey, syncFields, DatabaseSyncOperationStatus.Ready, "fixture");

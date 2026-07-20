@@ -83,6 +83,30 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _databaseObjectAuthorDefinition = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), PlaceholderText = "CREATE VIEW / TRIGGER / PROCEDURE / FUNCTION / EVENT ..." };
     private readonly TextBox _databaseObjectAuthorPlan = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
     private readonly TextBox _databaseObjectRollbackReceipt = new() { PlaceholderText = "Committed .crucible-sql-object.json receipt" };
+    private readonly TabControl _databaseObjectEditorTabs = new();
+    private readonly TextBox _guidedTriggerName = new() { PlaceholderText = "Trigger name" };
+    private readonly TextBox _guidedTriggerTable = new() { PlaceholderText = "Target table, for example item_template" };
+    private readonly ComboBox _guidedTriggerTiming = new() { ItemsSource = new[] { "BEFORE", "AFTER" }, SelectedIndex = 0 };
+    private readonly ComboBox _guidedTriggerEvent = new() { ItemsSource = new[] { "INSERT", "UPDATE", "DELETE" }, SelectedIndex = 1 };
+    private readonly TextBox _guidedTriggerBody = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "BEGIN\n    SET NEW.name = TRIM(NEW.name);\nEND" };
+    private readonly ComboBox _guidedRoutineType = new() { ItemsSource = new[] { "PROCEDURE", "FUNCTION" }, SelectedIndex = 0 };
+    private readonly TextBox _guidedRoutineName = new() { PlaceholderText = "Routine name" };
+    private readonly TextBox _guidedRoutineParameters = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), PlaceholderText = "One per line: [IN|OUT|INOUT] name TYPE" };
+    private readonly TextBox _guidedRoutineReturnType = new() { Text = "INT", PlaceholderText = "Function return type", IsVisible = false };
+    private readonly ComboBox _guidedRoutineAccess = new() { ItemsSource = new[] { "CONTAINS SQL", "NO SQL", "READS SQL DATA", "MODIFIES SQL DATA" }, SelectedIndex = 0 };
+    private readonly ComboBox _guidedRoutineSecurity = new() { ItemsSource = new[] { "INVOKER", "DEFINER" }, SelectedIndex = 0 };
+    private readonly CheckBox _guidedRoutineDeterministic = new() { Content = "Deterministic function", IsChecked = true, IsVisible = false };
+    private readonly TextBox _guidedRoutineBody = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "BEGIN\n    SELECT 1;\nEND" };
+    private readonly TextBox _guidedEventName = new() { PlaceholderText = "Event name" };
+    private readonly ComboBox _guidedEventSchedule = new() { ItemsSource = new[] { "RECURRING", "ONE TIME" }, SelectedIndex = 0 };
+    private readonly NumericUpDown _guidedEventEvery = new() { Value = 1, Minimum = 1, Increment = 1, FormatString = "0", PlaceholderText = "Every" };
+    private readonly ComboBox _guidedEventUnit = new() { ItemsSource = new[] { "SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH", "QUARTER", "YEAR" }, SelectedIndex = 3 };
+    private readonly TextBox _guidedEventAt = new() { PlaceholderText = "One-time execution: yyyy-MM-dd HH:mm:ss", IsVisible = false };
+    private readonly TextBox _guidedEventStarts = new() { PlaceholderText = "Optional recurring start: yyyy-MM-dd HH:mm:ss" };
+    private readonly TextBox _guidedEventEnds = new() { PlaceholderText = "Optional recurring end: yyyy-MM-dd HH:mm:ss" };
+    private readonly CheckBox _guidedEventPreserve = new() { Content = "Preserve after completion" };
+    private readonly CheckBox _guidedEventEnabled = new() { Content = "Enabled", IsChecked = true };
+    private readonly TextBox _guidedEventBody = new() { AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas"), Text = "BEGIN\n    SELECT 1;\nEND" };
     private readonly TextBox _accountUser = new() { PlaceholderText = "Database account user" };
     private readonly TextBox _accountHost = new() { Text = "localhost", PlaceholderText = "Account host" };
     private readonly TextBox _accountPassword = new() { PasswordChar = '●', PlaceholderText = "New password (memory only)" };
@@ -174,6 +198,8 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         _databaseObjectAuthorType.SelectionChanged += (_, _) => InvalidateDatabaseObjectPlan();
         _databaseObjectAuthorName.TextChanged += (_, _) => InvalidateDatabaseObjectPlan();
         _databaseObjectAuthorDefinition.TextChanged += (_, _) => InvalidateDatabaseObjectPlan();
+        _guidedRoutineType.SelectionChanged += (_, _) => { var function = _guidedRoutineType.SelectedIndex == 1; _guidedRoutineReturnType.IsVisible = function; _guidedRoutineDeterministic.IsVisible = function; };
+        _guidedEventSchedule.SelectionChanged += (_, _) => { var oneTime = _guidedEventSchedule.SelectedIndex == 1; _guidedEventAt.IsVisible = oneTime; _guidedEventEvery.IsVisible = _guidedEventUnit.IsVisible = _guidedEventStarts.IsVisible = _guidedEventEnds.IsVisible = !oneTime; };
         _structureColumns.SelectionChanged += (_, _) => SelectStructureColumn();
         _foreignKeys.SelectionChanged += (_, _) => SelectForeignKey();
         _checkConstraints.SelectionChanged += (_, _) => SelectCheckConstraint();
@@ -452,10 +478,63 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
                 WithRow(_databaseObjectAuthorPlan, 4), WithRow(receiptRow, 5), WithRow(new WrapPanel { Children = { reviewRollback, new TextBlock { Text = $"Committed receipts live under {CruciblePaths.SqlSchemaBackupDirectory}. Rollback refuses a changed live postimage.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9"), VerticalAlignment = VerticalAlignment.Center } } }, 6)
             }
         };
-        var editors = new TabControl { Items = { new TabItem { Header = "Exact view/routine/trigger/event", Content = exactEditor }, new TabItem { Header = "Guided SELECT view", Content = viewEditor } } };
-        var details = new Grid { RowDefinitions = new("2*,Auto,2*"), RowSpacing = 5, Children = { selected, WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 1), WithRow(editors, 2) } };
+        _databaseObjectEditorTabs.Items.Add(new TabItem { Header = "Exact view/routine/trigger/event", Content = exactEditor });
+        _databaseObjectEditorTabs.Items.Add(new TabItem { Header = "Guided trigger/routine/event", Content = GuidedDatabaseObjectComposerPage() });
+        _databaseObjectEditorTabs.Items.Add(new TabItem { Header = "Guided SELECT view", Content = viewEditor });
+        var details = new Grid { RowDefinitions = new("2*,Auto,2*"), RowSpacing = 5, Children = { selected, WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 1), WithRow(_databaseObjectEditorTabs, 2) } };
         var body = new ResponsiveSplitGrid(_databaseObjects, details, 1, 2);
         return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Children = { controls, WithRow(body, 1) } };
+    }
+
+    private Control GuidedDatabaseObjectComposerPage()
+    {
+        var trigger = AccentButton("Generate exact trigger & review"); trigger.Click += async (_, _) => await ComposeGuidedTriggerAsync();
+        var routine = AccentButton("Generate exact routine & review"); routine.Click += async (_, _) => await ComposeGuidedRoutineAsync();
+        var scheduledEvent = AccentButton("Generate exact event & review"); scheduledEvent.Click += async (_, _) => await ComposeGuidedEventAsync();
+        var triggerFields = new StackPanel
+        {
+            Spacing = 6,
+            Children =
+            {
+                new TextBlock { Text = "Trigger identity and exact table binding", FontWeight = FontWeight.SemiBold }, _guidedTriggerName, _guidedTriggerTable,
+                new WrapPanel { Children = { _guidedTriggerTiming, _guidedTriggerEvent } },
+                new TextBlock { Text = "Body · one statement or BEGIN … END; NEW and OLD remain available according to the selected event.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") },
+                _guidedTriggerBody, trigger
+            }
+        };
+        var parameterEditor = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 5, Children = { new TextBlock { Text = "Parameters · one per line: procedures use [IN|OUT|INOUT] name TYPE; functions use name TYPE", TextWrapping = TextWrapping.Wrap }, WithRow(_guidedRoutineParameters, 1) } };
+        var routineBody = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 5, Children = { new TextBlock { Text = "Routine body · one statement or BEGIN … END", TextWrapping = TextWrapping.Wrap }, WithRow(_guidedRoutineBody, 1) } };
+        var routineFields = new Grid
+        {
+            RowDefinitions = new("Auto,Auto,*,Auto,Auto"), RowSpacing = 6,
+            Children =
+            {
+                new WrapPanel { Children = { _guidedRoutineType, _guidedRoutineName, _guidedRoutineReturnType } },
+                WithRow(new WrapPanel { Children = { _guidedRoutineAccess, _guidedRoutineSecurity, _guidedRoutineDeterministic } }, 1),
+                WithRow(new ResponsiveSplitGrid(parameterEditor, routineBody, 1, 1), 2),
+                WithRow(new TextBlock { Text = "The guided type list intentionally covers safe scalar MySQL types. Specialized types and clauses remain available in the exact editor.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") }, 3),
+                WithRow(routine, 4)
+            }
+        };
+        var eventFields = new Grid
+        {
+            RowDefinitions = new("Auto,Auto,Auto,Auto,*,Auto"), RowSpacing = 6,
+            Children =
+            {
+                new WrapPanel { Children = { _guidedEventName, _guidedEventSchedule, _guidedEventEvery, _guidedEventUnit } },
+                WithRow(_guidedEventAt, 1), WithRow(new WrapPanel { Children = { _guidedEventStarts, _guidedEventEnds } }, 2),
+                WithRow(new WrapPanel { Children = { _guidedEventPreserve, _guidedEventEnabled } }, 3), WithRow(_guidedEventBody, 4), WithRow(scheduledEvent, 5)
+            }
+        };
+        return new TabControl
+        {
+            Items =
+            {
+                new TabItem { Header = "Trigger", Content = new ScrollViewer { Content = triggerFields } },
+                new TabItem { Header = "Procedure / function", Content = routineFields },
+                new TabItem { Header = "Scheduled event", Content = eventFields }
+            }
+        };
     }
 
     private Control ProcessAdministrationPage()
@@ -1021,6 +1100,61 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private void InvalidateDatabaseObjectPlan()
     {
         _databaseObjectChangePlan = null; _databaseObjectAuthorPlan.Text = "Draft changed · review again before applying.";
+    }
+
+    private async Task ComposeGuidedTriggerAsync()
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        try
+        {
+            var definition = SqlDatabaseObjectComposer.BuildTrigger(_profile.Database, _guidedTriggerName.Text ?? string.Empty, _guidedTriggerTable.Text ?? string.Empty,
+                _guidedTriggerTiming.SelectedIndex == 1 ? SqlTriggerTiming.After : SqlTriggerTiming.Before,
+                _guidedTriggerEvent.SelectedIndex switch { 0 => SqlTriggerEvent.Insert, 2 => SqlTriggerEvent.Delete, _ => SqlTriggerEvent.Update }, _guidedTriggerBody.Text ?? string.Empty);
+            await LoadComposedDatabaseObjectAsync(SqlDatabaseObjectType.Trigger, _guidedTriggerName.Text ?? string.Empty, definition);
+        }
+        catch (Exception exception) { Fail("Guided trigger composition failed", exception); _administrationStatus.Text = exception.Message; }
+    }
+
+    private async Task ComposeGuidedRoutineAsync()
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        try
+        {
+            var type = _guidedRoutineType.SelectedIndex == 1 ? SqlDatabaseObjectType.Function : SqlDatabaseObjectType.Procedure;
+            var parameters = SqlDatabaseObjectComposer.ParseParameters(type, _guidedRoutineParameters.Text); var access = _guidedRoutineAccess.SelectedIndex switch { 1 => SqlRoutineDataAccess.NoSql, 2 => SqlRoutineDataAccess.ReadsSqlData, 3 => SqlRoutineDataAccess.ModifiesSqlData, _ => SqlRoutineDataAccess.ContainsSql };
+            var security = _guidedRoutineSecurity.SelectedIndex == 1 ? SqlSecurityMode.Definer : SqlSecurityMode.Invoker; var name = _guidedRoutineName.Text ?? string.Empty;
+            var definition = type == SqlDatabaseObjectType.Function
+                ? SqlDatabaseObjectComposer.BuildFunction(_profile.Database, name, parameters, _guidedRoutineReturnType.Text ?? string.Empty, _guidedRoutineDeterministic.IsChecked == true, access, security, _guidedRoutineBody.Text ?? string.Empty)
+                : SqlDatabaseObjectComposer.BuildProcedure(_profile.Database, name, parameters, access, security, _guidedRoutineBody.Text ?? string.Empty);
+            await LoadComposedDatabaseObjectAsync(type, name, definition);
+        }
+        catch (Exception exception) { Fail("Guided routine composition failed", exception); _administrationStatus.Text = exception.Message; }
+    }
+
+    private async Task ComposeGuidedEventAsync()
+    {
+        if (_profile is null) { _administrationStatus.Text = "Connect Server & SQL first."; return; }
+        try
+        {
+            var name = _guidedEventName.Text ?? string.Empty; var preserve = _guidedEventPreserve.IsChecked == true; var enabled = _guidedEventEnabled.IsChecked == true;
+            var definition = _guidedEventSchedule.SelectedIndex == 1
+                ? SqlDatabaseObjectComposer.BuildOneTimeEvent(_profile.Database, name, _guidedEventAt.Text ?? string.Empty, preserve, enabled, _guidedEventBody.Text ?? string.Empty)
+                : SqlDatabaseObjectComposer.BuildRecurringEvent(_profile.Database, name, checked((int)(_guidedEventEvery.Value ?? 1)), _guidedEventUnit.SelectedIndex switch
+                {
+                    0 => SqlEventIntervalUnit.Second, 1 => SqlEventIntervalUnit.Minute, 2 => SqlEventIntervalUnit.Hour, 4 => SqlEventIntervalUnit.Week,
+                    5 => SqlEventIntervalUnit.Month, 6 => SqlEventIntervalUnit.Quarter, 7 => SqlEventIntervalUnit.Year, _ => SqlEventIntervalUnit.Day
+                }, _guidedEventStarts.Text, _guidedEventEnds.Text, preserve, enabled, _guidedEventBody.Text ?? string.Empty);
+            await LoadComposedDatabaseObjectAsync(SqlDatabaseObjectType.Event, name, definition);
+        }
+        catch (Exception exception) { Fail("Guided event composition failed", exception); _administrationStatus.Text = exception.Message; }
+    }
+
+    private async Task LoadComposedDatabaseObjectAsync(SqlDatabaseObjectType type, string name, string definition)
+    {
+        _databaseObjectAuthorType.SelectedIndex = type switch { SqlDatabaseObjectType.Trigger => 1, SqlDatabaseObjectType.Procedure => 2, SqlDatabaseObjectType.Function => 3, SqlDatabaseObjectType.Event => 4, _ => 0 };
+        _databaseObjectAuthorName.Text = name; _databaseObjectAuthorDefinition.Text = definition; _databaseObjectEditorTabs.SelectedIndex = 0;
+        _administrationStatus.Text = $"Generated an exact {type} definition from the guided fields. Binding it to the live database for review…";
+        await PrepareDatabaseObjectChangeAsync();
     }
 
     private SqlDatabaseObjectType SelectedDatabaseObjectAuthorType() => _databaseObjectAuthorType.SelectedIndex switch

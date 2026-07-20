@@ -453,6 +453,7 @@ wowcrucible db item-audit <host> <port> <user> <database> [--id=N]... [--ids=N,N
 wowcrucible db item-inspect <host> <port> <user> <database> <item-id> [--password-env=ENV_NAME] [--dbc=server-dbc-folder]
 wowcrucible db item-clone <host> <port> <user> <database> <source-id> <new-id> [--suffix=" Variant"] [--itemset=ID]
 wowcrucible db spell-inspect <host> <port> <user> <database> <spell-id> [--password-env=ENV_NAME] [--dbc=Spell.dbc|folder] [--format=text|json]
+wowcrucible db object-compose <database> <trigger|procedure|function|event> <name> <body.sql> [guided options] [--output=definition.sql] [--overwrite]
 wowcrucible db objects <host> <port> <user> <database> [--type=view|trigger|procedure|function|event] [--format=text|json]
 wowcrucible db object-show <host> <port> <user> <database> <type> <name> [--format=text|json]
 wowcrucible db object-export <host> <port> <user> <database> <output.sql> [--overwrite]
@@ -461,6 +462,14 @@ wowcrucible db object-set <host> <port> <user> <database> <type> <name> <create-
 wowcrucible db object-rollback <host> <port> <user> <database> <receipt.json> [--apply] [--format=text|json]
 wowcrucible db view-set <host> <port> <user> <database> <name> <select.sql> [--apply]
 wowcrucible db event-state <host> <port> <user> <database> <name> <enable|disable> [--apply]
+```
+
+`db object-compose` is an offline beginner/expert bridge: it generates one exact validated definition without a password, and that output can be reviewed or passed to `object-set`. Triggers use `--table`, `--timing=before|after`, and `--event=insert|update|delete`. Procedure/function parameters come from a UTF-8 `--parameters` file with one `[IN|OUT|INOUT] name TYPE` per line; functions also require `--returns`, while `--deterministic`/`--not-deterministic`, `--data-access=contains-sql|no-sql|reads-sql-data|modifies-sql-data`, and `--security=invoker|definer` retain routine traits. Recurring events use `--every`, `--unit`, and optional `--starts`/`--ends`; one-time events use `--at`; `--preserve` and `--disabled` retain completion/state intent. Timestamps use `yyyy-MM-dd HH:mm:ss` in server-local time. The scalar type allowlist and final quote/comment-aware one-statement validator reject injected clauses; specialized types remain available in the exact editor.
+
+```powershell
+wowcrucible db object-compose acore_world trigger trim_item_name trigger-body.sql --table=item_template --timing=before --event=update --output=trim-item-name.sql
+wowcrucible db object-compose acore_world function item_score function-body.sql --parameters=function-parameters.txt --returns="DECIMAL(10,2)" --deterministic --data-access=reads-sql-data --security=invoker --output=item-score.sql
+wowcrucible db object-compose acore_world event daily_cleanup event-body.sql --every=1 --unit=day --starts="2026-07-21 04:00:00" --disabled --output=daily-cleanup.sql
 ```
 
 Server detection reads the live `worldserver.conf`; it does not accept `.dist` templates. Database passwords should be passed through an environment variable so they do not enter command history. DBC audits report the effective runtime value when the core applies an SQL overlay and can export an idempotent migration without applying it.
