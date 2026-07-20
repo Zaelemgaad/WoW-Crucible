@@ -113,6 +113,8 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         Content = new Grid { RowDefinitions = new("Auto,Auto,Auto,*"), Children = { header, WithRow(listfileStrip, 1), WithRow(dropTarget, 2), WithRow(body, 3) } };
     }
 
+    public Task OpenAsync(string path) => AnalyzeAsync([path]);
+
     private async Task AuditMaterialsAsync()
     {
         var root = Directory.Exists(_settings.ProcessedAssetLibraryPath) ? Path.GetFullPath(_settings.ProcessedAssetLibraryPath) : null;

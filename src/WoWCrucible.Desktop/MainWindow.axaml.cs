@@ -941,8 +941,9 @@ public partial class MainWindow : Window
     {
         if (_textureWorkspaceView is null)
         {
-            _textureWorkspaceView = new TextureWorkspaceView();
+            _textureWorkspaceView = new TextureWorkspaceView(_workspaceSession);
             _textureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _textureWorkspaceView.ConsumerOpenRequested += async (_, consumerPath) => await OpenTextureConsumerAsync(consumerPath);
         }
         OpenFeatureWorkspace(_textureWorkspaceView, "Texture Lab");
         if (!string.IsNullOrWhiteSpace(path)) _ = _textureWorkspaceView.OpenAsync(path);
@@ -952,6 +953,15 @@ public partial class MainWindow : Window
     {
         OpenTextureWorkspace();
         await _textureWorkspaceView!.OpenAsync(path);
+    }
+
+    private async Task OpenTextureConsumerAsync(string path)
+    {
+        var extension = Path.GetExtension(path).ToLowerInvariant();
+        if (extension == ".m2") { CloseAllFeatureWorkspaces(); await LoadM2Async(path); return; }
+        if (extension is ".adt" or ".wdt") { await OpenMapWorkspaceAsync(path); return; }
+        if (extension == ".wmo") { OpenNativeConversionWorkspace(); await _nativeConversionWorkspaceView!.OpenAsync(path); return; }
+        await ShowErrorAsync("Unsupported texture consumer", $"Crucible indexed '{extension}', but no same-window viewer route exists for it.");
     }
 
     private async Task OpenIndexedArchiveAsync(string path)

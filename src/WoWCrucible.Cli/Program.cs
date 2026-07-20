@@ -21,7 +21,7 @@ try
         "db" => Database(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "server" => Server(commandArguments[1..]).GetAwaiter().GetResult(),
         "client" => Client(commandArguments[1..]),
-        "asset" => Asset(commandArguments[1..]),
+        "asset" => Asset(commandArguments[1..], cancellation.Token),
         "project" => Project(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "tools" => Tooling(commandArguments[1..]),
         "knowledge" => Knowledge(commandArguments[1..]),
@@ -283,9 +283,50 @@ static int Knowledge(string[] args)
     return Fail($"Unknown knowledge operation: {operation}");
 }
 
-static int Asset(string[] args)
+static int Asset(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["texture-consumers-build", var consumerLibrary, .. var consumerBuildOptions])
+    {
+        var json = consumerBuildOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = consumerBuildOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset texture-consumers-build option: {unknown[0]}");
+        var progress = new WoWCrucible.Cli.SynchronousProgress<TextureConsumerIndexProgress>(value =>
+        {
+            if (value.CurrentPath == "Complete" || value.CurrentPath.StartsWith("Batch", StringComparison.Ordinal) || value.EligibleAssets % 1000 == 0)
+                Console.Error.WriteLine($"Texture consumers\t{value.EligibleAssets:N0} eligible\t{value.UpdatedAssets:N0} updated\t{value.CatalogRows:N0} catalog rows\t{value.CurrentPath}");
+        });
+        var result = new TextureConsumerIndexService().Build(consumerLibrary, progress, cancellationToken);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else PrintTextureConsumerBuild(result);
+        return result.Summary.CoverageComplete ? 0 : 3;
+    }
+    if (args is ["texture-consumers", var queryLibrary, var textureQueryInput, .. var consumerQueryOptions])
+    {
+        var json = consumerQueryOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var refresh = consumerQueryOptions.Contains("--refresh", StringComparer.OrdinalIgnoreCase);
+        var unknown = consumerQueryOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.Equals("--refresh", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset texture-consumers option: {unknown[0]}");
+        var service = new TextureConsumerIndexService(); TextureConsumerIndexBuildResult? build = null;
+        if (refresh || !File.Exists(TextureConsumerIndexService.GetIndexPath(queryLibrary)))
+        {
+            var progress = new WoWCrucible.Cli.SynchronousProgress<TextureConsumerIndexProgress>(value =>
+            {
+                if (value.CurrentPath == "Complete" || value.CurrentPath.StartsWith("Batch", StringComparison.Ordinal) || value.EligibleAssets % 1000 == 0)
+                    Console.Error.WriteLine($"Texture consumers\t{value.EligibleAssets:N0} eligible\t{value.UpdatedAssets:N0} updated\t{value.CatalogRows:N0} catalog rows\t{value.CurrentPath}");
+            });
+            build = service.Build(queryLibrary, progress, cancellationToken);
+        }
+        var query = service.Query(queryLibrary, textureQueryInput, cancellationToken);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Build = build, Query = query }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            if (build is not null) PrintTextureConsumerBuild(build);
+            Console.WriteLine($"TEXTURE\t{query.TextureClientPath}\nTEXTURE_SOURCE\t{query.TextureSourcePath ?? "client path only"}\nTEXTURE_PROVENANCE\t{query.TextureProvenance ?? "not selected"}\nCONSUMERS\t{query.Consumers.Count:N0}\nCOVERAGE_COMPLETE\t{query.Summary.CoverageComplete}");
+            foreach (var consumer in query.Consumers) Console.WriteLine($"CONSUMER\t{(consumer.SameProvenance ? "SAME_PROVENANCE" : "OTHER_OR_UNSELECTED_PROVENANCE")}\t{consumer.ReferenceKind}\t{consumer.ConsumerProvenance}\t{consumer.ConsumerClientPath}\t{consumer.ConsumerSourcePath}");
+            if (!query.Summary.CoverageComplete) Console.Error.WriteLine($"INCOMPLETE COVERAGE: {query.Summary.UnsupportedAssets:N0} unsupported-format, {query.Summary.InvalidAssets:N0} invalid consumer file(s), {query.Summary.MissingAssets:N0} missing catalog file(s), {query.Summary.CatalogIssues:N0} catalog issue(s). Zero matches cannot be treated as proof of no use.");
+        }
+        return query.Consumers.Count > 0 && query.Summary.CoverageComplete ? 0 : 3;
+    }
     if (args is ["m2-material-audit", var materialRoot, .. var materialOptions])
     {
         var json = materialOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
@@ -1238,10 +1279,18 @@ static int Asset(string[] args)
         return workspace.BlockedAssets == 0 ? 0 : 3;
     }
     return AssetHelp(2);
+
+    static void PrintTextureConsumerBuild(TextureConsumerIndexBuildResult result)
+    {
+        var summary = result.Summary;
+        Console.WriteLine($"INDEX\t{summary.IndexPath}\nCATALOG\t{summary.CatalogPath}\nCATALOG_ROWS\t{summary.CatalogRows:N0}\nELIGIBLE_ASSETS\t{summary.EligibleAssets:N0}\nINDEXED_ASSETS\t{summary.IndexedAssets:N0}\nUPDATED_ASSETS\t{result.UpdatedAssets:N0}\nUNCHANGED_ASSETS\t{result.UnchangedAssets:N0}\nREMOVED_ASSETS\t{result.RemovedAssets:N0}\nUNSUPPORTED_ASSETS\t{summary.UnsupportedAssets:N0}\nINVALID_ASSETS\t{summary.InvalidAssets:N0}\nMISSING_ASSETS\t{summary.MissingAssets:N0}\nCATALOG_ISSUES\t{summary.CatalogIssues:N0}\nTEXTURE_REFERENCES\t{summary.TextureReferences:N0}\nCOVERAGE_COMPLETE\t{summary.CoverageComplete}\nDURATION_MS\t{result.DurationMilliseconds:0.###}");
+    }
 }
 
 static int AssetHelp(int code = 0) => GroupHelp("""
 Usage:
+  wowcrucible asset texture-consumers-build <processed-library> [--format=text|json]
+  wowcrucible asset texture-consumers <processed-library> <texture.blp|client-path> [--refresh] [--format=text|json]
   wowcrucible asset texture-info <file.blp>
   wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]
   wowcrucible asset texture-proof <input.blp|image> [--mip=N] [--codec=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--amplify=N] [--difference=output.png] [--preview=output.png] [--max-rgb-mae=N] [--max-alpha-mae=N] [--max-alpha-crossings=N] [--report=text|json] [--overwrite]

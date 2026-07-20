@@ -205,7 +205,7 @@ internal static class AssetComparisonAggregateCache
         return true;
     }
 
-    private static AssetCatalogIdentity CaptureIdentity(string catalogPath, CancellationToken cancellationToken)
+    internal static AssetCatalogIdentity CaptureIdentity(string catalogPath, CancellationToken cancellationToken)
     {
         var before = new FileInfo(catalogPath);
         before.Refresh();
@@ -245,7 +245,7 @@ internal static class AssetComparisonAggregateCache
         return Convert.ToHexString(hash.GetHashAndReset());
     }
 
-    private static IReadOnlyList<string> ParseCsv(string line)
+    internal static IReadOnlyList<string> ParseCsv(string line)
     {
         var fields = new List<string>();
         var value = new StringBuilder();

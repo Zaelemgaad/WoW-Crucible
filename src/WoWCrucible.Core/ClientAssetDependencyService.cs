@@ -5,6 +5,7 @@ namespace WoWCrucible.Core;
 public enum ClientAssetDependencyState { Root, Resolved, TargetOverride, TargetInherited, Missing, CrossSourceConflict, TargetAmbiguous, ExternalBinding, Invalid }
 public sealed record ClientAssetLocation(string ClientPath, string Provenance, string SourcePath);
 public sealed record ClientAssetReference(string Kind, string ClientPath, bool External = false, string? Message = null, bool Missing = false);
+public sealed class UnsupportedClientAssetFormatException(string message) : NotSupportedException(message);
 public sealed record ClientAssetDependencyNode(int Depth, string? ParentClientPath, string Kind, string ClientPath,
     ClientAssetDependencyState State, string Provenance, string? SourcePath, IReadOnlyList<string> Candidates, string Message,
     string? TargetArchive = null, string? TargetSha256 = null);
@@ -33,6 +34,12 @@ public static class ClientAssetDependencyService
     public static ClientAssetLocation InferLocation(AssetComparisonIndex index, string sourcePath)
     {
         sourcePath = Path.GetFullPath(sourcePath); if (!File.Exists(sourcePath)) throw new FileNotFoundException("The dependency root does not exist.", sourcePath);
+        return InferExistingLocation(index, sourcePath);
+    }
+
+    internal static ClientAssetLocation InferExistingLocation(AssetComparisonIndex index, string sourcePath)
+    {
+        sourcePath = Path.GetFullPath(sourcePath);
         if (index.LooseContentRoot is { } loose && IsInside(loose, sourcePath)) return new(PatchInputMapper.NormalizeArchivePath(Path.GetRelativePath(loose, sourcePath)), "Loose", sourcePath);
         if (!IsInside(index.ContentRoot, sourcePath)) throw new InvalidOperationException("The selected root is outside this processed asset library. Choose a file below Archives\\Content (or the legacy Loose\\Content root).");
         var relative = Path.GetRelativePath(index.ContentRoot, sourcePath); var parts = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -229,6 +236,101 @@ public static class ClientAssetDependencyService
             ".skin" or ".anim" or ".blp" or ".png" => [],
             _ => []
         };
+    }
+
+    /// <summary>
+    /// Reads only direct BLP references. Unlike the complete deployment closure,
+    /// this intentionally does not enumerate sibling animations/SKINs or return
+    /// nested model/WMO dependencies, so reverse texture indexing remains O(files)
+    /// even when a legacy extraction placed thousands of assets in one directory.
+    /// </summary>
+    public static IReadOnlyList<ClientAssetReference> InspectTextureReferences(string sourcePath, string clientPath)
+    {
+        var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
+        return extension switch
+        {
+            ".m2" => InspectM2TextureReferences(sourcePath),
+            ".wmo" => InspectWmoTextureReferences(sourcePath),
+            ".adt" or ".wdt" => InspectMapTextureReferences(sourcePath),
+            _ => []
+        };
+    }
+
+    private static IReadOnlyList<ClientAssetReference> InspectM2TextureReferences(string path)
+    {
+        const int HeaderSize = 0x58; const int TextureStride = 16; const uint MaximumTextures = 4096; const uint MaximumTexturePathBytes = 1024 * 1024;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 16 * 1024, FileOptions.RandomAccess);
+        Span<byte> header = stackalloc byte[HeaderSize]; if (stream.Length < header.Length) throw new InvalidDataException("M2 header is truncated."); stream.ReadExactly(header);
+        var magic = Encoding.ASCII.GetString(header[..4]); var version = BitConverter.ToUInt32(header[4..8]);
+        if ((magic is "MD20" or "MD21") && version != 264) throw new UnsupportedClientAssetFormatException($"Texture-slot inspection does not yet support {magic} version {version:N0}; the native reverse reader currently targets unwrapped Wrath MD20 version 264.");
+        if (magic != "MD20") throw new InvalidDataException("M2 texture-slot header magic is not recognized.");
+        var count = BitConverter.ToUInt32(header[0x50..0x54]); var offset = BitConverter.ToUInt32(header[0x54..0x58]);
+        if (count > MaximumTextures) throw new InvalidDataException($"M2 declares an unreasonable {count:N0} texture slots.");
+        var tableBytes = checked((long)count * TextureStride); if ((long)offset + tableBytes > stream.Length) throw new InvalidDataException("M2 texture table extends beyond the file.");
+        var table = new byte[checked((int)tableBytes)]; stream.Position = offset; stream.ReadExactly(table);
+        var result = new List<ClientAssetReference>();
+        for (var index = 0; index < count; index++)
+        {
+            var item = checked((int)index * TextureStride); var type = BitConverter.ToUInt32(table, item); if (type != 0) continue;
+            var nameLength = BitConverter.ToUInt32(table, item + 8); var nameOffset = BitConverter.ToUInt32(table, item + 12); string? embeddedPath = null;
+            if (nameLength > MaximumTexturePathBytes) throw new InvalidDataException($"M2 texture slot {index:N0} declares an unreasonable {nameLength:N0}-byte path.");
+            if (nameLength > 0)
+            {
+                if ((long)nameOffset + nameLength > stream.Length) throw new InvalidDataException($"M2 texture slot {index:N0} path extends beyond the file.");
+                var pathBytes = new byte[checked((int)nameLength)]; stream.Position = nameOffset; stream.ReadExactly(pathBytes); embeddedPath = Encoding.UTF8.GetString(pathBytes).TrimEnd('\0');
+            }
+            result.Add(string.IsNullOrWhiteSpace(embeddedPath)
+                ? new("embedded-texture", $"slot:{index}", false, $"Embedded texture slot {index} has no client path.", true)
+                : new("embedded-texture", embeddedPath));
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<ClientAssetReference> InspectWmoTextureReferences(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024, FileOptions.SequentialScan);
+        var sawVersion = false; var sawRoot = false; byte[]? textures = null; Span<byte> header = stackalloc byte[8];
+        while (stream.Position < stream.Length)
+        {
+            var offset = stream.Position; if (stream.Read(header) != header.Length) throw new InvalidDataException($"Chunk header is truncated at byte {offset:N0}.");
+            var id = new string(Encoding.ASCII.GetString(header[..4]).Reverse().ToArray()); var size = BitConverter.ToUInt32(header[4..]);
+            if (id == "MOGP" && !sawRoot) return sawVersion ? [] : throw new InvalidDataException("WMO has no MVER chunk.");
+            if (size > int.MaxValue || stream.Position + size > stream.Length) throw new InvalidDataException($"Chunk {id} at byte {offset:N0} extends beyond the file.");
+            if (id == "MVER") sawVersion = true;
+            else if (id == "MOHD") sawRoot = true;
+            if (id == "MOTX") { textures = new byte[checked((int)size)]; stream.ReadExactly(textures); }
+            else stream.Position += size;
+            if (sawVersion && sawRoot && textures is not null) break;
+        }
+        if (!sawVersion) throw new InvalidDataException("WMO has no MVER chunk.");
+        if (!sawRoot || textures is null) return [];
+        return Strings([new Chunk("MOTX", textures)], "MOTX")
+            .Where(value => Path.GetExtension(value).Equals(".blp", StringComparison.OrdinalIgnoreCase))
+            .Select(value => new ClientAssetReference("wmo-texture", value)).DistinctBy(reference => NormalizeReference(reference.ClientPath)).ToArray();
+    }
+
+    private static IReadOnlyList<ClientAssetReference> InspectMapTextureReferences(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024, FileOptions.SequentialScan);
+        var sawVersion = false; Span<byte> header = stackalloc byte[8];
+        while (stream.Position < stream.Length)
+        {
+            var offset = stream.Position; if (stream.Read(header) != header.Length) throw new InvalidDataException($"Chunk header is truncated at byte {offset:N0}.");
+            var id = new string(Encoding.ASCII.GetString(header[..4]).Reverse().ToArray()); var size = BitConverter.ToUInt32(header[4..]);
+            if (size > int.MaxValue || stream.Position + size > stream.Length) throw new InvalidDataException($"Chunk {id} at byte {offset:N0} extends beyond the file.");
+            if (id == "MVER") sawVersion = true;
+            if (id == "MTEX")
+            {
+                if (!sawVersion) throw new InvalidDataException("Map texture table precedes the required MVER chunk.");
+                var data = new byte[checked((int)size)]; stream.ReadExactly(data);
+                return Strings([new Chunk("MTEX", data)], "MTEX")
+                    .Where(value => Path.GetExtension(value).Equals(".blp", StringComparison.OrdinalIgnoreCase))
+                    .Select(value => new ClientAssetReference("terrain-texture", value)).DistinctBy(reference => NormalizeReference(reference.ClientPath)).ToArray();
+            }
+            stream.Position += size;
+        }
+        if (!sawVersion) throw new InvalidDataException("Map file has no MVER chunk.");
+        return [];
     }
 
     private static IReadOnlyList<ClientAssetReference> InspectM2(string path, string clientPath)
