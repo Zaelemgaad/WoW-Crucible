@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -44,14 +45,32 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
     private readonly Image _proofDifference = new() { Stretch = Stretch.Uniform };
     private readonly TextBlock _proofSummary = Text("Analyze the current decoded or edited mip to prove exactly what the selected BLP encoding changes.");
     private readonly TextBox _proofAmplification = new() { Text = "4", PlaceholderText = "Difference amplification (0..255)" };
+    private readonly TabControl _visualPages = new();
+    private readonly ListBox _compositionLayers = new();
+    private readonly List<CompositionLayerDraft> _compositionLayerDrafts = [];
+    private readonly Image _compositionPreview = new() { Stretch = Stretch.Uniform };
+    private readonly TextBlock _compositionSummary = Text("Add one or more BLP/image layers, then render the ordered material stack.");
+    private readonly TextBox _compositionWidth = new() { PlaceholderText = "Canvas width" };
+    private readonly TextBox _compositionHeight = new() { PlaceholderText = "Canvas height" };
+    private readonly TextBox _compositionOpacity = new() { Text = "1", PlaceholderText = "Layer opacity 0..1" };
+    private readonly TextBox _compositionOffsetX = new() { Text = "0", PlaceholderText = "Layer X offset" };
+    private readonly TextBox _compositionOffsetY = new() { Text = "0", PlaceholderText = "Layer Y offset" };
+    private readonly ComboBox _compositionBlend = new() { ItemsSource = Enum.GetValues<TextureBlendMode>().Select(TextureLayerCompositionService.BlendModeName).ToArray(), SelectedIndex = 0 };
+    private readonly CheckBox _compositionVisible = new() { Content = "Selected layer visible", IsChecked = true };
+    private readonly TextBox _compositionBackgroundR = new() { Text = "0", PlaceholderText = "Background R" };
+    private readonly TextBox _compositionBackgroundG = new() { Text = "0", PlaceholderText = "Background G" };
+    private readonly TextBox _compositionBackgroundB = new() { Text = "0", PlaceholderText = "Background B" };
+    private readonly TextBox _compositionBackgroundA = new() { Text = "0", PlaceholderText = "Background A" };
     private readonly List<byte[]> _undo = [];
     private CancellationTokenSource? _operation;
     private CancellationTokenSource? _statisticsOperation;
     private WriteableBitmap? _bitmap;
     private WriteableBitmap? _proofPreviewBitmap;
     private WriteableBitmap? _proofDifferenceBitmap;
+    private WriteableBitmap? _compositionBitmap;
     private BlpTextureInfo? _info;
     private TextureEncodingProof? _proof;
+    private TextureCompositionResult? _composition;
     private RgbaTexture? _editTexture;
     private RgbaTexture? _editBaseline;
     private int _editMip = -1;
@@ -59,6 +78,20 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
     private bool _editDirty;
     private bool _editBusy;
     private bool _changingMip;
+    private bool _changingCompositionSelection;
+
+    private sealed class CompositionLayerDraft
+    {
+        public required string Name { get; init; }
+        public string? SourcePath { get; init; }
+        public required RgbaTexture Texture { get; init; }
+        public bool Visible { get; set; } = true;
+        public double Opacity { get; set; } = 1;
+        public int OffsetX { get; set; }
+        public int OffsetY { get; set; }
+        public TextureBlendMode BlendMode { get; set; }
+        public string Detail => $"{Texture.Width:N0}×{Texture.Height:N0} · {TextureLayerCompositionService.BlendModeName(BlendMode)} · opacity {Opacity:0.###} · offset {OffsetX},{OffsetY} · {(Visible ? "visible" : "hidden")}";
+    }
 
     public event EventHandler? BackRequested;
 
@@ -82,6 +115,13 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         foreach (var channel in new[] { _showRed, _showGreen, _showBlue, _showAlpha, _alphaGrayscale }) channel.IsCheckedChanged += (_, _) => RefreshChannelView();
         _brushRadius.TextChanged += (_, _) => { if (double.TryParse(_brushRadius.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var radius) && radius > 0) _editorCanvas.BrushRadius = radius; };
         _format.SelectionChanged += (_, _) => InvalidateProof(); _quality.SelectionChanged += (_, _) => InvalidateProof(); _mipmaps.IsCheckedChanged += (_, _) => InvalidateProof(); _proofAmplification.TextChanged += (_, _) => InvalidateProof();
+        _compositionLayers.ItemTemplate = new FuncDataTemplate<CompositionLayerDraft>((layer, _) => layer is null ? new Border() : new Border
+        {
+            BorderBrush = Brush.Parse("#293247"), BorderThickness = new Thickness(1), Padding = new Thickness(8), Margin = new Thickness(0, 0, 0, 5),
+            Child = new StackPanel { Spacing = 3, Children = { new TextBlock { Text = layer.Name, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap }, new TextBlock { Text = layer.Detail, Foreground = Brush.Parse("#8E99AD"), FontSize = 10, TextWrapping = TextWrapping.Wrap } } }
+        });
+        _compositionLayers.SelectionChanged += (_, _) => LoadSelectedCompositionLayer();
+        foreach (var field in new[] { _compositionWidth, _compositionHeight, _compositionBackgroundR, _compositionBackgroundG, _compositionBackgroundB, _compositionBackgroundA }) field.TextChanged += (_, _) => InvalidateComposition();
 
         var heading = new Grid
         {
@@ -123,8 +163,11 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
                 Row(new Border { Background = Brush.Parse("#080B10"), Child = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Content = _preview } }, 1)
             }
         };
-        var visualPages = new TabControl { Items = { new TabItem { Header = "Inspect decoded mip", Content = previewCard }, new TabItem { Header = "Edit RGBA pixels", Content = BuildEditorPage() }, new TabItem { Header = "Compression proof", Content = BuildProofPage() } } };
-        var body = new ResponsiveSplitGrid(inspector, visualPages, 2, 3);
+        _visualPages.Items.Add(new TabItem { Header = "Inspect decoded mip", Content = previewCard });
+        _visualPages.Items.Add(new TabItem { Header = "Edit RGBA pixels", Content = BuildEditorPage() });
+        _visualPages.Items.Add(new TabItem { Header = "Compression proof", Content = BuildProofPage() });
+        _visualPages.Items.Add(new TabItem { Header = "Compose layers", Content = BuildCompositionPage() });
+        var body = new ResponsiveSplitGrid(inspector, _visualPages, 2, 3);
         Content = new Grid
         {
             RowDefinitions = new("Auto,*,Auto"),
@@ -206,6 +249,156 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
 
     private static Control ProofImageCard(string title, Image image)
         => new Grid { RowDefinitions = new("Auto,*"), Children = { new Border { Padding = new Thickness(9, 6), BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = new TextBlock { Text = title, Foreground = Brush.Parse("#8E99AD"), FontSize = 10 } }, Row(new Border { Background = Brush.Parse("#080B10"), Child = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Content = image } }, 1) } };
+
+    private Control BuildCompositionPage()
+    {
+        var add = AccentButton("Add BLP / image layers…"); add.Click += async (_, _) => await AddCompositionLayersAsync();
+        var addDraft = new Button { Content = "Add current RGBA draft" }; addDraft.Click += (_, _) => AddCurrentDraftLayer();
+        var remove = new Button { Content = "Remove" }; remove.Click += (_, _) => RemoveCompositionLayer();
+        var moveUp = new Button { Content = "Move toward top" }; moveUp.Click += (_, _) => MoveCompositionLayer(-1);
+        var moveDown = new Button { Content = "Move toward bottom" }; moveDown.Click += (_, _) => MoveCompositionLayer(1);
+        var apply = AccentButton("Apply selected layer settings"); apply.Click += (_, _) => ApplySelectedCompositionLayer();
+        var render = AccentButton("Render material stack"); render.Click += async (_, _) => await RenderCompositionAsync();
+        var use = new Button { Content = "Use result in RGBA editor" }; use.Click += (_, _) => UseCompositionAsDraft();
+        var proof = new Button { Content = "Run compression proof on result" }; proof.Click += async (_, _) => await ProofCompositionAsync();
+        var savePng = new Button { Content = "Save composition PNG…" }; savePng.Click += async (_, _) => await SaveCompositionAsync(blp: false);
+        var saveBlp = new Button { Content = "Save composition BLP2…" }; saveBlp.Click += async (_, _) => await SaveCompositionAsync(blp: true);
+        var layerSettings = new StackPanel
+        {
+            Spacing = 6,
+            Children =
+            {
+                Label("SELECTED LAYER"),
+                new WrapPanel { Children = { _compositionVisible, _compositionBlend, _compositionOpacity, _compositionOffsetX, _compositionOffsetY, apply } },
+                Label("CANVAS"),
+                new WrapPanel { Children = { _compositionWidth, _compositionHeight, Label("BACKGROUND RGBA"), _compositionBackgroundR, _compositionBackgroundG, _compositionBackgroundB, _compositionBackgroundA, render } },
+                new WrapPanel { Children = { use, proof, savePng, saveBlp } },
+                new TextBlock { Text = "The list is top-layer first. Every render uses exact bottom-to-top source-over alpha; offsets clip rather than resize inputs. Layers and sources remain immutable, and the result can continue through painting or actual-codec compression proof.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8E99AD"), FontSize = 11 },
+                _compositionSummary
+            }
+        };
+        var stack = new Grid
+        {
+            RowDefinitions = new("Auto,*,Auto"),
+            Children =
+            {
+                new StackPanel { Margin = new Thickness(8), Spacing = 6, Children = { Label("TOP LAYER FIRST"), new WrapPanel { Children = { add, addDraft, remove, moveUp, moveDown } } } },
+                Row(_compositionLayers, 1),
+                Row(new ScrollViewer { VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = new Border { Padding = new Thickness(8), Child = layerSettings } }, 2)
+            }
+        };
+        var preview = new Grid { RowDefinitions = new("Auto,*"), Children = { new Border { Padding = new Thickness(9, 6), BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = new TextBlock { Text = "RENDERED MATERIAL STACK", Foreground = Brush.Parse("#8E99AD"), FontSize = 10 } }, Row(new Border { Background = Brush.Parse("#080B10"), Child = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Content = _compositionPreview } }, 1) } };
+        return new ResponsiveSplitGrid(stack, preview, 2, 3, 1.65);
+    }
+
+    private async Task AddCompositionLayersAsync()
+    {
+        var paths = await PickFilesAsync("Add BLP or image layers", ["*.blp", "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga"]); if (paths.Count == 0) return;
+        Begin($"Decoding {paths.Count:N0} composition layer(s)…");
+        try
+        {
+            var token = _operation!.Token; var loaded = await Task.Run(() => paths.Select(path =>
+            {
+                token.ThrowIfCancellationRequested(); var full = Path.GetFullPath(path); var texture = Path.GetExtension(full).Equals(".blp", StringComparison.OrdinalIgnoreCase) ? BlpTextureService.Decode(full) : BlpTextureService.DecodeImage(full); return new CompositionLayerDraft { Name = Path.GetFileName(full), SourcePath = full, Texture = texture };
+            }).ToArray(), token);
+            foreach (var layer in loaded.Reverse()) _compositionLayerDrafts.Insert(0, layer);
+            if (string.IsNullOrWhiteSpace(_compositionWidth.Text) || string.IsNullOrWhiteSpace(_compositionHeight.Text)) { _compositionWidth.Text = loaded[0].Texture.Width.ToString(); _compositionHeight.Text = loaded[0].Texture.Height.ToString(); }
+            RefreshCompositionLayers(loaded[0]); _status.Text = $"Added {loaded.Length:N0} immutable composition layer(s). Render when ordering and settings are ready.";
+        }
+        catch (OperationCanceledException) { } catch (Exception exception) { Fail("Composition layer load failed", exception); }
+    }
+
+    private void AddCurrentDraftLayer()
+    {
+        if (_editTexture is null) { _status.Text = "Decode or create an RGBA draft before adding it as a composition layer."; return; }
+        var layer = new CompositionLayerDraft { Name = $"Current RGBA draft · {DateTime.Now:HH:mm:ss}", Texture = CloneEditTexture() }; _compositionLayerDrafts.Insert(0, layer);
+        if (string.IsNullOrWhiteSpace(_compositionWidth.Text) || string.IsNullOrWhiteSpace(_compositionHeight.Text)) { _compositionWidth.Text = layer.Texture.Width.ToString(); _compositionHeight.Text = layer.Texture.Height.ToString(); }
+        RefreshCompositionLayers(layer); _status.Text = "Added an immutable snapshot of the current RGBA draft as the top layer.";
+    }
+
+    private void LoadSelectedCompositionLayer()
+    {
+        if (_compositionLayers.SelectedItem is not CompositionLayerDraft layer) return; _changingCompositionSelection = true;
+        _compositionVisible.IsChecked = layer.Visible; _compositionBlend.SelectedIndex = (int)layer.BlendMode; _compositionOpacity.Text = layer.Opacity.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _compositionOffsetX.Text = layer.OffsetX.ToString(System.Globalization.CultureInfo.InvariantCulture); _compositionOffsetY.Text = layer.OffsetY.ToString(System.Globalization.CultureInfo.InvariantCulture); _changingCompositionSelection = false;
+    }
+
+    private void ApplySelectedCompositionLayer()
+    {
+        if (_changingCompositionSelection || _compositionLayers.SelectedItem is not CompositionLayerDraft layer) { _status.Text = "Select a composition layer first."; return; }
+        try
+        {
+            var opacity = ParseFinite(_compositionOpacity.Text, "Layer opacity"); if (opacity < 0 || opacity > 1) throw new FormatException("Layer opacity must be from 0 through 1.");
+            if (!int.TryParse(_compositionOffsetX.Text, out var x) || !int.TryParse(_compositionOffsetY.Text, out var y)) throw new FormatException("Layer offsets must be whole pixel values.");
+            layer.Visible = _compositionVisible.IsChecked == true; layer.BlendMode = _compositionBlend.SelectedIndex >= 0 ? (TextureBlendMode)_compositionBlend.SelectedIndex : TextureBlendMode.Normal; layer.Opacity = opacity; layer.OffsetX = x; layer.OffsetY = y;
+            InvalidateComposition(); RefreshCompositionLayers(layer); _status.Text = $"Updated {layer.Name}; render the material stack to apply it.";
+        }
+        catch (Exception exception) { _status.Text = exception.Message; }
+    }
+
+    private void RemoveCompositionLayer()
+    {
+        if (_compositionLayers.SelectedItem is not CompositionLayerDraft layer) return; var index = _compositionLayerDrafts.IndexOf(layer); _compositionLayerDrafts.Remove(layer); InvalidateComposition();
+        var nextSelection = _compositionLayerDrafts.Count == 0 ? null : _compositionLayerDrafts[Math.Min(index, _compositionLayerDrafts.Count - 1)];
+        RefreshCompositionLayers(nextSelection); _status.Text = $"Removed layer {layer.Name}; its source file was untouched.";
+    }
+
+    private void MoveCompositionLayer(int direction)
+    {
+        if (_compositionLayers.SelectedItem is not CompositionLayerDraft layer) return; var index = _compositionLayerDrafts.IndexOf(layer); var target = index + direction; if (target < 0 || target >= _compositionLayerDrafts.Count) return;
+        (_compositionLayerDrafts[index], _compositionLayerDrafts[target]) = (_compositionLayerDrafts[target], _compositionLayerDrafts[index]); InvalidateComposition(); RefreshCompositionLayers(layer);
+    }
+
+    private void RefreshCompositionLayers(CompositionLayerDraft? selected = null)
+    {
+        selected ??= _compositionLayers.SelectedItem as CompositionLayerDraft; _compositionLayers.ItemsSource = _compositionLayerDrafts.ToArray(); _compositionLayers.SelectedItem = selected is not null && _compositionLayerDrafts.Contains(selected) ? selected : _compositionLayerDrafts.FirstOrDefault();
+    }
+
+    private async Task RenderCompositionAsync()
+    {
+        if (_compositionLayerDrafts.Count == 0) { _status.Text = "Add at least one BLP, image, or current draft layer before rendering."; return; }
+        try
+        {
+            var width = ParsePositiveInt(_compositionWidth.Text, "Canvas width"); var height = ParsePositiveInt(_compositionHeight.Text, "Canvas height"); var background = new[] { ParseByte(_compositionBackgroundR.Text, "Background red"), ParseByte(_compositionBackgroundG.Text, "Background green"), ParseByte(_compositionBackgroundB.Text, "Background blue"), ParseByte(_compositionBackgroundA.Text, "Background alpha") };
+            var layers = _compositionLayerDrafts.AsEnumerable().Reverse().Select(layer => new TextureCompositionLayer(layer.Name, layer.Texture, layer.Visible, layer.Opacity, layer.OffsetX, layer.OffsetY, layer.BlendMode)).ToArray();
+            Begin($"Compositing {layers.Length:N0} ordered material layer(s)…"); var result = await Task.Run(() => TextureLayerCompositionService.Compose(width, height, layers, background[0], background[1], background[2], background[3], _operation!.Token), _operation!.Token);
+            var bitmap = CreateBitmap(result.Texture); var previous = _compositionBitmap; _composition = result; _compositionBitmap = bitmap; _compositionPreview.Source = bitmap; previous?.Dispose();
+            _compositionSummary.Text = $"Rendered {width:N0}×{height:N0} · {result.Layers.Count(layer => layer.Visible):N0}/{result.Layers.Count:N0} visible layer(s)\n" + string.Join("\n", result.Layers.Select(layer => $"• {layer.Name} · {(layer.Visible ? $"{layer.ChangedPixels:N0} changed · {layer.ContributingPixels:N0} contributing · {layer.ClippedPixels:N0} clipped" : "hidden")}"));
+            _status.Text = $"Material composition rendered · {result.Texture.Pixels.Length:N0} RGBA bytes · sources unchanged.";
+        }
+        catch (OperationCanceledException) { } catch (Exception exception) { Fail("Material composition failed", exception); }
+    }
+
+    private void UseCompositionAsDraft()
+    {
+        if (_composition is null) { _status.Text = "Render the material stack before handing it to the editor."; return; }
+        CaptureUndo(); _editTexture = new(_composition.Texture.Width, _composition.Texture.Height, _composition.Texture.Pixels.ToArray()); _editDirty = true; if (_editMip < 0) _editMip = 0; RefreshEditedPixels(); _visualPages.SelectedIndex = 1;
+        _status.Text = "Composition copied into the RGBA editor as a mutable draft. The rendered composition and every layer source remain unchanged.";
+    }
+
+    private async Task ProofCompositionAsync()
+    {
+        if (_composition is null) { _status.Text = "Render the material stack before running compression proof."; return; }
+        UseCompositionAsDraft(); _visualPages.SelectedIndex = 2; await AnalyzeProofAsync();
+    }
+
+    private async Task SaveCompositionAsync(bool blp)
+    {
+        if (_composition is null) { _status.Text = "Render the material stack before saving it."; return; }
+        var output = await PickSaveFileAsync(blp ? "Save material composition as Wrath-compatible BLP2" : "Save material composition as PNG", blp ? "texture-composition.blp" : "texture-composition.png", blp ? "blp" : "png"); if (output is null) return;
+        output = Path.GetFullPath(output); if (_compositionLayerDrafts.Any(layer => layer.SourcePath?.Equals(output, StringComparison.OrdinalIgnoreCase) == true)) { _status.Text = "Composition output must not overwrite a layer source."; return; }
+        Begin(blp ? "Encoding material composition BLP2 atomically…" : "Writing material composition PNG atomically…");
+        try
+        {
+            var texture = _composition.Texture; if (blp) await Task.Run(() => BlpTextureService.EncodeBlp2(texture, output, new(SelectedFormat(), _mipmaps.IsChecked == true, SelectedQuality()), overwrite: true), _operation!.Token); else await Task.Run(() => BlpTextureService.WritePng(output, texture, overwrite: true), _operation!.Token);
+            _status.Text = $"Material composition saved: {output}";
+        }
+        catch (OperationCanceledException) { } catch (Exception exception) { Fail("Material composition save failed", exception); }
+    }
+
+    private void InvalidateComposition()
+    {
+        _composition = null; var bitmap = _compositionBitmap; _compositionBitmap = null; _compositionPreview.Source = null; bitmap?.Dispose(); _compositionSummary.Text = _compositionLayerDrafts.Count == 0 ? "Add one or more BLP/image layers, then render the ordered material stack." : "Layer stack or canvas changed · render again before saving or handing off.";
+    }
 
     private async Task AnalyzeProofAsync()
     {
@@ -363,6 +556,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
     private void ClearUndo() { _undo.Clear(); _undoBytes = 0; }
     private RgbaTexture CloneEditTexture() => _editTexture is null ? throw new InvalidOperationException("No edited texture is loaded.") : new(_editTexture.Width, _editTexture.Height, _editTexture.Pixels.ToArray());
     private static double ParseFinite(string? text, string name) { if (!double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value) || !double.IsFinite(value)) throw new FormatException($"{name} must be a finite number."); return value; }
+    private static int ParsePositiveInt(string? text, string name) { if (!int.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var value) || value <= 0) throw new FormatException($"{name} must be a positive whole number."); return value; }
     private static byte ParseByte(string? text, string name) { if (!byte.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var value)) throw new FormatException($"{name} must be a whole byte value from 0 through 255."); return value; }
 
     private Control EncodePanel()
@@ -473,6 +667,13 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         return files.FirstOrDefault()?.TryGetLocalPath();
     }
 
+    private async Task<IReadOnlyList<string>> PickFilesAsync(string title, IReadOnlyList<string> patterns)
+    {
+        var storage = TopLevel.GetTopLevel(this)?.StorageProvider; if (storage is null) return [];
+        var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions { Title = title, AllowMultiple = true, FileTypeFilter = [new FilePickerFileType("Supported files") { Patterns = patterns }] });
+        return files.Select(file => file.TryGetLocalPath()).Where(path => path is not null).Cast<string>().ToArray();
+    }
+
     private async Task<string?> PickFolderAsync(string title)
     {
         var storage = TopLevel.GetTopLevel(this)?.StorageProvider; if (storage is null) return null;
@@ -497,6 +698,6 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
 
     public void Dispose()
     {
-        _operation?.Cancel(); _operation?.Dispose(); _statisticsOperation?.Cancel(); _statisticsOperation?.Dispose(); _bitmap?.Dispose(); _proofPreviewBitmap?.Dispose(); _proofDifferenceBitmap?.Dispose(); _editorCanvas.Dispose();
+        _operation?.Cancel(); _operation?.Dispose(); _statisticsOperation?.Cancel(); _statisticsOperation?.Dispose(); _bitmap?.Dispose(); _proofPreviewBitmap?.Dispose(); _proofDifferenceBitmap?.Dispose(); _compositionBitmap?.Dispose(); _editorCanvas.Dispose();
     }
 }

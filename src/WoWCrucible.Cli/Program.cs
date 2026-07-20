@@ -523,6 +523,34 @@ static int Asset(string[] args)
         var exceeds = maximumRgbMae is { } rgbLimit && proof.Comparison.RgbCombined.MeanAbsoluteError > rgbLimit || maximumAlphaMae is { } alphaLimit && proof.Comparison.Alpha.MeanAbsoluteError > alphaLimit || maximumAlphaCrossings is { } crossingLimit && proof.Comparison.AlphaThresholdCrossings > crossingLimit;
         if (exceeds) Console.Error.WriteLine("Texture proof exceeded at least one explicit loss threshold."); return exceeds ? 3 : 0;
     }
+    if (args is ["texture-compose", var composeOutput, .. var textureComposeOptions])
+    {
+        var positional = textureComposeOptions.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).Select(path => new TextureLayerArgument(path, TextureBlendMode.Normal, 1, 0, 0, true));
+        var described = textureComposeOptions.Where(option => option.StartsWith("--layer=", StringComparison.OrdinalIgnoreCase)).Select(option => ParseTextureLayerArgument(option[8..])); var requestedLayers = positional.Concat(described).ToArray();
+        if (requestedLayers.Length == 0) return Fail("texture-compose requires at least one positional source or --layer=path|blend|opacity|x|y|visible layer. Layers are ordered bottom-to-top.");
+        var widthText = Option(textureComposeOptions, "--width="); var heightText = Option(textureComposeOptions, "--height=");
+        if ((widthText is not null && (!int.TryParse(widthText, out var requestedWidth) || requestedWidth <= 0)) ||
+            (heightText is not null && (!int.TryParse(heightText, out var requestedHeight) || requestedHeight <= 0)))
+            return Fail("--width and --height must be positive whole pixels.");
+        var backgroundParts = (Option(textureComposeOptions, "--background=") ?? "0:0:0:0").Split(':'); if (backgroundParts.Length != 4 || backgroundParts.Any(value => !byte.TryParse(value, out _))) return Fail("--background must be R:G:B:A with four byte values."); var background = backgroundParts.Select(byte.Parse).ToArray();
+        var codecText = (Option(textureComposeOptions, "--codec=") ?? "auto").Replace("-", string.Empty, StringComparison.Ordinal).ToLowerInvariant(); var codec = codecText switch { "auto" => BlpOutputFormat.Auto, "dxt1" => BlpOutputFormat.Dxt1, "dxt1a" or "dxt1alpha" => BlpOutputFormat.Dxt1Alpha, "dxt3" => BlpOutputFormat.Dxt3, "dxt5" => BlpOutputFormat.Dxt5, _ => (BlpOutputFormat)(-1) }; if ((int)codec < 0) return Fail("--codec must be auto, dxt1, dxt1a, dxt3, or dxt5.");
+        var qualityText = (Option(textureComposeOptions, "--quality=") ?? "best").ToLowerInvariant(); var quality = qualityText switch { "fast" => BlpOutputQuality.Fast, "balanced" => BlpOutputQuality.Balanced, "best" => BlpOutputQuality.Best, _ => (BlpOutputQuality)(-1) }; if ((int)quality < 0) return Fail("--quality must be fast, balanced, or best.");
+        var reportFormat = (Option(textureComposeOptions, "--report=") ?? "text").ToLowerInvariant(); if (reportFormat is not "text" and not "json") return Fail("--report must be text or json.");
+        var overwrite = textureComposeOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var generateMipmaps = !textureComposeOptions.Contains("--no-mips", StringComparer.OrdinalIgnoreCase);
+        var unknown = textureComposeOptions.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.StartsWith("--layer=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--width=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--height=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--background=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--codec=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--quality=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--report=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--no-mips", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown asset texture-compose option: {unknown[0]}");
+        composeOutput = Path.GetFullPath(composeOutput); var decodedLayers = requestedLayers.Select(layer =>
+        {
+            var path = Path.GetFullPath(layer.Path); if (path.Equals(composeOutput, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Composition output must not overwrite a layer source."); var texture = DecodeTextureInput(path); return new TextureCompositionLayer(Path.GetFileName(path), texture, layer.Visible, layer.Opacity, layer.OffsetX, layer.OffsetY, layer.BlendMode);
+        }).ToArray();
+        var width = widthText is null ? decodedLayers[0].Texture.Width : int.Parse(widthText); var height = heightText is null ? decodedLayers[0].Texture.Height : int.Parse(heightText);
+        var composition = TextureLayerCompositionService.Compose(width, height, decodedLayers, background[0], background[1], background[2], background[3]); string encoding;
+        if (Path.GetExtension(composeOutput).Equals(".png", StringComparison.OrdinalIgnoreCase)) { BlpTextureService.WritePng(composeOutput, composition.Texture, overwrite); encoding = "PNG RGBA"; }
+        else if (Path.GetExtension(composeOutput).Equals(".blp", StringComparison.OrdinalIgnoreCase)) { BlpTextureService.EncodeBlp2(composition.Texture, composeOutput, new(codec, generateMipmaps, quality), overwrite); encoding = BlpTextureService.Inspect(composeOutput).Encoding; }
+        else return Fail("texture-compose output must end in .png or .blp.");
+        if (reportFormat == "json") Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Output = composeOutput, Width = width, Height = height, Encoding = encoding, OutputBytes = new FileInfo(composeOutput).Length, Layers = composition.Layers }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else { Console.WriteLine($"Output\t{composeOutput}\nDimensions\t{width}x{height}\nEncoding\t{encoding}\nOutputBytes\t{new FileInfo(composeOutput).Length:N0}\nLayers\t{composition.Layers.Count:N0} (bottom-to-top)"); foreach (var layer in composition.Layers) Console.WriteLine($"LAYER\t{layer.Name}\tvisible={layer.Visible}\tinCanvas={layer.PixelsInCanvas:N0}\tcontributing={layer.ContributingPixels:N0}\tchanged={layer.ChangedPixels:N0}\tclipped={layer.ClippedPixels:N0}"); }
+        return 0;
+    }
     if (args is ["texture-brush", var editSource, var editOutput, .. var editOptions])
     {
         var mipText = Option(editOptions, "--mip=") ?? "0"; if (!int.TryParse(mipText, out var mip) || mip < 0) return Fail("--mip must be a non-negative integer.");
@@ -1196,6 +1224,7 @@ Usage:
   wowcrucible asset texture-info <file.blp>
   wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]
   wowcrucible asset texture-proof <input.blp|image> [--mip=N] [--codec=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--amplify=N] [--difference=output.png] [--preview=output.png] [--max-rgb-mae=N] [--max-alpha-mae=N] [--max-alpha-crossings=N] [--report=text|json] [--overwrite]
+  wowcrucible asset texture-compose <output.png|blp> <bottom-source> [higher-sources...] [--layer="path|blend|opacity|x|y|visible"] [--width=N] [--height=N] [--background=R:G:B:A] [--codec=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--report=text|json] [--overwrite]
   wowcrucible asset texture-brush <input.blp|image> <output.png|blp> (--point=x:y [...]|--fill|--invert-alpha) [--mip=N] [--radius=N] [--opacity=0..1] [--color=R:G:B:A] [--tool=color-alpha|rgb|alpha|erase-alpha] [--falloff=smooth|linear|hard] [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
   wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
   wowcrucible asset texture-validate <file-or-folder> [--recursive]
@@ -2925,6 +2954,29 @@ static void WriteTextureProof(TextureEncodingProof proof, string source, double 
     if (differenceOutput is not null) Console.WriteLine($"DifferenceMap\t{Path.GetFullPath(differenceOutput)}"); if (previewOutput is not null) Console.WriteLine($"DecodedPreview\t{Path.GetFullPath(previewOutput)}");
     static void WriteChannel(string name, TextureChannelError value) => Console.WriteLine($"{name}\tchanged={value.ChangedSamples:N0}\tMAE={value.MeanAbsoluteError:0.######}\tRMSE={value.RootMeanSquareError:0.######}\tmax={value.MaximumAbsoluteError}\tPSNR={(value.PeakSignalToNoiseDb is { } psnr ? $"{psnr:0.###} dB" : "exact")}");
 }
+static TextureLayerArgument ParseTextureLayerArgument(string text)
+{
+    var parts = text.Split('|'); if (parts.Length is < 1 or > 6 || string.IsNullOrWhiteSpace(parts[0])) throw new ArgumentException("Each --layer must be path|blend|opacity|x|y|visible; trailing values may be omitted.");
+    var blend = parts.Length > 1 && parts[1].Length > 0 ? ParseTextureBlendMode(parts[1]) : TextureBlendMode.Normal;
+    var opacity = parts.Length > 2 && parts[2].Length > 0 ? double.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsedOpacity) && double.IsFinite(parsedOpacity) && parsedOpacity is >= 0 and <= 1 ? parsedOpacity : throw new ArgumentException("Layer opacity must be from 0 through 1.") : 1;
+    var x = parts.Length > 3 && parts[3].Length > 0 ? int.TryParse(parts[3], out var parsedX) ? parsedX : throw new ArgumentException("Layer X offset must be a whole pixel value.") : 0;
+    var y = parts.Length > 4 && parts[4].Length > 0 ? int.TryParse(parts[4], out var parsedY) ? parsedY : throw new ArgumentException("Layer Y offset must be a whole pixel value.") : 0;
+    var visible = parts.Length <= 5 || parts[5].Length == 0 || parts[5].Equals("visible", StringComparison.OrdinalIgnoreCase) || parts[5].Equals("true", StringComparison.OrdinalIgnoreCase) || parts[5] == "1" ? true : parts[5].Equals("hidden", StringComparison.OrdinalIgnoreCase) || parts[5].Equals("false", StringComparison.OrdinalIgnoreCase) || parts[5] == "0" ? false : throw new ArgumentException("Layer visibility must be visible/hidden, true/false, or 1/0.");
+    return new(parts[0], blend, opacity, x, y, visible);
+}
+static TextureBlendMode ParseTextureBlendMode(string text) => text.Trim().Replace("-", string.Empty, StringComparison.Ordinal).ToLowerInvariant() switch
+{
+    "normal" => TextureBlendMode.Normal,
+    "multiply" => TextureBlendMode.Multiply,
+    "screen" => TextureBlendMode.Screen,
+    "overlay" => TextureBlendMode.Overlay,
+    "add" or "additive" => TextureBlendMode.Add,
+    "subtract" or "subtractive" => TextureBlendMode.Subtract,
+    "darken" => TextureBlendMode.Darken,
+    "lighten" => TextureBlendMode.Lighten,
+    _ => throw new ArgumentException("Layer blend must be normal, multiply, screen, overlay, add, subtract, darken, or lighten.")
+};
+static RgbaTexture DecodeTextureInput(string path) => Path.GetExtension(path).Equals(".blp", StringComparison.OrdinalIgnoreCase) ? BlpTextureService.Decode(path) : BlpTextureService.DecodeImage(path);
 static (int Time, string Value) ParseLightingKey(string text)
 {
     var separator = text.IndexOf(':'); if (separator <= 0 || !int.TryParse(text[..separator], out var time)) throw new ArgumentException($"Invalid lighting key '{text}'. Expected --key=time:value.");
@@ -3022,6 +3074,8 @@ static IReadOnlyDictionary<string, string> ParseSetOptions(IEnumerable<string> o
     }
     return values;
 }
+
+sealed record TextureLayerArgument(string Path, TextureBlendMode BlendMode, double Opacity, int OffsetX, int OffsetY, bool Visible);
 
 sealed class ConsoleProgress : IProgress<(int Done, int Total, string Path)>
 {
