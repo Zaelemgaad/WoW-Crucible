@@ -49,7 +49,7 @@ public sealed record AdtMultiTilePlacementResult(
 /// </summary>
 public static class AdtMultiTilePlacementService
 {
-    private sealed record Workspace(string Prefix, string Directory, IReadOnlyList<AdtMultiTileSource> Tiles);
+    internal sealed record Workspace(string Prefix, string Directory, IReadOnlyList<AdtMultiTileSource> Tiles);
     private const int CurrentFormatVersion = 1;
     private const int MaximumTiles = 4_096;
     private const double TileSize = 1600.0 / 3.0;
@@ -172,6 +172,8 @@ public static class AdtMultiTilePlacementService
         foreach (var tile in workspace.Tiles.OrderBy(value => value.TileY).ThenBy(value => value.TileX))
         {
             var inspection = MapAssetInspectionService.Inspect(tile.Path);
+            var oppositeMatches = kind == AdtPlacementKind.M2 ? inspection.WmoPlacements.Count(value => value.UniqueId == uid) : inspection.M2Placements.Count(value => value.UniqueId == uid);
+            if (oppositeMatches > 0) throw new InvalidDataException($"UID {uid:N0} is also used by {oppositeMatches:N0} {(kind == AdtPlacementKind.M2 ? "WMO" : "M2")} record(s) in tile {tile.TileX},{tile.TileY}; coordinated deletion is blocked because the map UID namespace is corrupt or ambiguous.");
             if (kind == AdtPlacementKind.M2)
             {
                 var matches = inspection.M2Placements.Where(value => value.UniqueId == uid).ToArray(); if (matches.Length > 1) throw new InvalidDataException($"Tile {tile.TileX},{tile.TileY} contains duplicate M2 UID {uid:N0} records."); if (matches.Length == 0) continue;
@@ -219,21 +221,15 @@ public static class AdtMultiTilePlacementService
         if (!Equivalent(plan, rebuilt)) throw new InvalidDataException("Multi-tile placement plan no longer matches the exact map, geometry, UID occurrences, or tile-local references.");
     }
 
-    private static Workspace DiscoverWorkspace(string inputPath)
+    internal static Workspace DiscoverWorkspace(string inputPath)
     {
         inputPath = Path.GetFullPath(inputPath); if (!File.Exists(inputPath)) throw new FileNotFoundException("The selected ADT does not exist.", inputPath);
+        var transformed = AdtMultiTilePlacementTransformService.TryFindLineage(inputPath);
+        if (transformed is not null) return EffectiveWorkspace(inputPath, transformed.MapPrefix, transformed.SourceDirectory, transformed.SourceTiles, transformed.Outputs, "transform");
         var inherited = FindReceipt(inputPath);
         if (inherited is not null)
         {
-            var effective = inherited.Plan.SourceTiles.ToDictionary(tile => (tile.TileX, tile.TileY));
-            foreach (var output in inherited.Outputs)
-            {
-                if (!File.Exists(output.Path) || !Sha256(output.Path).Equals(output.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Inherited multi-tile output changed or disappeared: {output.Path}");
-                effective[(output.TileX, output.TileY)] = new(output.TileX, output.TileY, Path.GetFullPath(output.Path), output.Sha256);
-            }
-            var inheritedTiles = effective.Values.OrderBy(tile => tile.TileY).ThenBy(tile => tile.TileX).ToArray();
-            if (!inheritedTiles.Any(tile => tile.Path.Equals(inputPath, StringComparison.OrdinalIgnoreCase))) throw new InvalidDataException("Selected ADT is not an effective output in its inherited multi-tile receipt.");
-            return new(inherited.Plan.MapPrefix, inherited.Plan.SourceDirectory, inheritedTiles);
+            return EffectiveWorkspace(inputPath, inherited.Plan.MapPrefix, inherited.Plan.SourceDirectory, inherited.Plan.SourceTiles, inherited.Outputs, "placement");
         }
         var parsed = ParseTile(inputPath); var directory = Path.GetDirectoryName(inputPath)!;
         var candidates = Directory.EnumerateFiles(directory, parsed.Prefix + "_*.adt", SearchOption.TopDirectoryOnly).Select(path => (Path: Path.GetFullPath(path), Match: TileName.Match(Path.GetFileName(path)))).Where(value => value.Match.Success && value.Match.Groups[1].Value.Equals(parsed.Prefix, StringComparison.OrdinalIgnoreCase)).Select(value => new { value.Path, X = int.Parse(value.Match.Groups[2].Value), Y = int.Parse(value.Match.Groups[3].Value) }).ToArray();
@@ -246,6 +242,20 @@ public static class AdtMultiTilePlacementService
         }
         if (tiles.Count is 0 or > MaximumTiles) throw new InvalidDataException($"Discovered {tiles.Count:N0} effective ADT tiles; the safe bound is 1 through {MaximumTiles:N0}.");
         return new(parsed.Prefix, directory, tiles);
+    }
+
+    private static Workspace EffectiveWorkspace(string inputPath, string mapPrefix, string sourceDirectory,
+        IReadOnlyList<AdtMultiTileSource> sourceTiles, IReadOnlyList<AdtMultiTileOutput> outputs, string lineageKind)
+    {
+        var effective = sourceTiles.ToDictionary(tile => (tile.TileX, tile.TileY));
+        foreach (var output in outputs)
+        {
+            if (!File.Exists(output.Path) || !Sha256(output.Path).Equals(output.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Inherited multi-tile {lineageKind} output changed or disappeared: {output.Path}");
+            effective[(output.TileX, output.TileY)] = new(output.TileX, output.TileY, Path.GetFullPath(output.Path), output.Sha256);
+        }
+        var inheritedTiles = effective.Values.OrderBy(tile => tile.TileY).ThenBy(tile => tile.TileX).ToArray();
+        if (!inheritedTiles.Any(tile => tile.Path.Equals(inputPath, StringComparison.OrdinalIgnoreCase))) throw new InvalidDataException($"Selected ADT is not an effective output in its inherited multi-tile {lineageKind} receipt.");
+        return new(mapPrefix, sourceDirectory, inheritedTiles);
     }
 
     private static AdtMultiTilePlacementReceipt? FindReceipt(string inputPath)
@@ -274,12 +284,13 @@ public static class AdtMultiTilePlacementService
                 if (!Path.GetFullPath(output.Path).Equals(expectedOutput, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException($"Multi-tile receipt output is not in its exact path-correct payload location: {output.Path}");
             }
+            if (!receipt.Outputs.Any(output => output.Path.Equals(Path.GetFullPath(inputPath), StringComparison.OrdinalIgnoreCase))) continue;
             return receipt;
         }
         return null;
     }
 
-    private static IReadOnlyList<(int X, int Y)> TouchedTiles(Vector3 minimum, Vector3 maximum)
+    internal static IReadOnlyList<(int X, int Y)> TouchedTiles(Vector3 minimum, Vector3 maximum)
     {
         if (!Finite(minimum) || !Finite(maximum) || minimum.X > maximum.X || minimum.Z > maximum.Z) throw new InvalidDataException("Placement geometry produced invalid horizontal bounds.");
         if (minimum.X < 0 || maximum.X > 64 * TileSize || minimum.Z < 0 || maximum.Z > 64 * TileSize)
@@ -289,18 +300,18 @@ public static class AdtMultiTilePlacementService
         var result = new List<(int X, int Y)>(); for (var y = minY; y <= maxY; y++) for (var x = minX; x <= maxX; x++) result.Add((x, y)); return result;
     }
 
-    private static bool SamePlacement(MapM2Placement left, MapM2Placement right) => left.UniqueId == right.UniqueId && SamePath(left.ClientPath, right.ClientPath) && left.Position == right.Position && left.Orientation == right.Orientation && left.ScaleRaw == right.ScaleRaw && left.Flags == right.Flags;
-    private static bool SamePlacement(MapWmoPlacement left, MapWmoPlacement right) => left.UniqueId == right.UniqueId && SamePath(left.ClientPath, right.ClientPath) && left.Position == right.Position && left.Orientation == right.Orientation && left.MinimumExtent == right.MinimumExtent && left.MaximumExtent == right.MaximumExtent && left.Flags == right.Flags && left.DoodadSet == right.DoodadSet && left.NameSet == right.NameSet && left.ScaleRaw == right.ScaleRaw;
+    internal static bool SamePlacement(MapM2Placement left, MapM2Placement right) => left.UniqueId == right.UniqueId && SamePath(left.ClientPath, right.ClientPath) && left.Position == right.Position && left.Orientation == right.Orientation && left.ScaleRaw == right.ScaleRaw && left.Flags == right.Flags;
+    internal static bool SamePlacement(MapWmoPlacement left, MapWmoPlacement right) => left.UniqueId == right.UniqueId && SamePath(left.ClientPath, right.ClientPath) && left.Position == right.Position && left.Orientation == right.Orientation && left.MinimumExtent == right.MinimumExtent && left.MaximumExtent == right.MaximumExtent && left.Flags == right.Flags && left.DoodadSet == right.DoodadSet && left.NameSet == right.NameSet && left.ScaleRaw == right.ScaleRaw;
     private static bool SamePath(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
     private static bool Finite(Vector3 value) => float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
 
-    private static (string Prefix, int X, int Y) ParseTile(string path)
+    internal static (string Prefix, int X, int Y) ParseTile(string path)
     {
         var match = TileName.Match(Path.GetFileName(path)); if (!match.Success) throw new InvalidDataException($"ADT filename must be <map>_<x>_<y>.adt (an edit suffix is accepted): {path}");
         return (match.Groups[1].Value, int.Parse(match.Groups[2].Value), int.Parse(match.Groups[3].Value));
     }
 
-    private static string Fingerprint(IEnumerable<AdtMultiTileSource> source)
+    internal static string Fingerprint(IEnumerable<AdtMultiTileSource> source)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         foreach (var tile in source.OrderBy(value => value.TileY).ThenBy(value => value.TileX))
@@ -320,7 +331,7 @@ public static class AdtMultiTilePlacementService
         };
         return JsonSerializer.SerializeToUtf8Bytes(Canonical(expected), JsonOptions).SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(Canonical(actual), JsonOptions));
     }
-    private static string Sha256(string path) { using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.SequentialScan); return Convert.ToHexString(SHA256.HashData(stream)); }
+    internal static string Sha256(string path) { using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.SequentialScan); return Convert.ToHexString(SHA256.HashData(stream)); }
     private static void AtomicWrite(string path, byte[] bytes, bool overwrite) { var directory = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("Output path has no parent directory."); Directory.CreateDirectory(directory); var temporary = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp"); try { using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.WriteThrough)) { stream.Write(bytes); stream.Flush(true); } File.Move(temporary, path, overwrite); } finally { if (File.Exists(temporary)) File.Delete(temporary); } }
     private static void DeleteOwnedDirectory(string path) { if (!Directory.Exists(path) || !File.Exists(Path.Combine(path, PendingFileName))) return; Directory.Delete(path, true); }
 }

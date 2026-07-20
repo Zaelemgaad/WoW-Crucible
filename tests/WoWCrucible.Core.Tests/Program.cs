@@ -1518,12 +1518,37 @@ foreach (var output in multiResult.Outputs) AssertPlacementAdtPointers(output.Pa
 var firstMultiOutput = multiResult.Outputs.OrderBy(output => output.TileX).First(); var persistedMultiPlanBytes = File.ReadAllBytes(multiResult.PlanPath); File.AppendAllText(multiResult.PlanPath, Environment.NewLine);
 try { _ = AdtMultiTilePlacementService.PlanDelete(firstMultiOutput.Path, AdtPlacementKind.M2, 1); throw new InvalidOperationException("Multi-tile receipt lineage trusted a changed persisted plan."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("SHA-256", StringComparison.OrdinalIgnoreCase)) { }
-File.WriteAllBytes(multiResult.PlanPath, persistedMultiPlanBytes); var multiDelete = AdtMultiTilePlacementService.PlanDelete(firstMultiOutput.Path, AdtPlacementKind.M2, 1);
-if (multiDelete.Operation != AdtPlacementLifecycleOperation.Delete || multiDelete.UniqueId != 201 || multiDelete.Segments.Count != 2)
-    throw new InvalidOperationException("Multi-tile delete did not discover every duplicate occurrence of the selected UID through receipt lineage.");
-var multiDeleteRoot = Path.Combine(lifecycleRoot, "multi-delete-output"); var multiDeleteResult = AdtMultiTilePlacementService.Apply(multiDelete, multiDeleteRoot);
-if (multiDeleteResult.Outputs.Count != 2 || multiDeleteResult.Outputs.Any(output => MapAssetInspectionService.Inspect(output.Path).M2Placements.Count != 1 || MapAssetInspectionService.Inspect(output.Path).M2Placements.Any(value => value.UniqueId == 201)))
+File.WriteAllBytes(multiResult.PlanPath, persistedMultiPlanBytes);
+var transformSourceHashes = multiResult.Outputs.ToDictionary(output => output.Path, output => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(output.Path))));
+var multiTransform = AdtMultiTilePlacementTransformService.Plan(firstMultiOutput.Path, AdtPlacementKind.M2, 1, lifecycleModel, new Vector3(600, 12, 110), new Vector3(0, 45, 0), AdtPlacementTransformService.EncodeScale(1.5f));
+if (multiTransform.UniqueId != 201 || multiTransform.DeleteSegments.Count != 2 || multiTransform.TargetTiles.Count != 1 || multiTransform.TargetTiles.Single() != new AdtMultiTileCoordinate(1, 0))
+    throw new InvalidOperationException("Coordinated transform did not bind every old UID copy and the exact edited geometry footprint.");
+try { _ = AdtMultiTilePlacementTransformService.Plan(firstMultiOutput.Path, AdtPlacementKind.M2, 1, lifecycleModel, new Vector3(1065, 12, 110)); throw new InvalidOperationException("Coordinated transform accepted an edited footprint requiring a missing neighbor tile."); }
+catch (InvalidOperationException exception) when (exception.Message.Contains("missing ADT tile", StringComparison.OrdinalIgnoreCase)) { }
+var multiTransformPlanPath = Path.Combine(lifecycleRoot, "multi-transform.json"); AdtMultiTilePlacementTransformService.SavePlan(multiTransform, multiTransformPlanPath);
+var staleTransformAssetBytes = File.ReadAllBytes(lifecycleModel); staleTransformAssetBytes[0x20] ^= 1; File.WriteAllBytes(lifecycleModel, staleTransformAssetBytes);
+try { _ = AdtMultiTilePlacementTransformService.Apply(multiTransform, Path.Combine(lifecycleRoot, "stale-transform-output")); throw new InvalidOperationException("Coordinated transform applied after its geometry asset changed."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("asset", StringComparison.OrdinalIgnoreCase)) { }
+if (Directory.Exists(Path.Combine(lifecycleRoot, "stale-transform-output"))) throw new InvalidOperationException("Rejected coordinated transform left a published output directory."); staleTransformAssetBytes[0x20] ^= 1; File.WriteAllBytes(lifecycleModel, staleTransformAssetBytes);
+var multiTransformRoot = Path.Combine(lifecycleRoot, "multi-transform-output"); var multiTransformResult = AdtMultiTilePlacementTransformService.Apply(AdtMultiTilePlacementTransformService.LoadPlan(multiTransformPlanPath), multiTransformRoot);
+var transformedTile0 = multiTransformResult.Outputs.Single(output => output.TileX == 0); var transformedTile1 = multiTransformResult.Outputs.Single(output => output.TileX == 1);
+var transformedTile0Rows = MapAssetInspectionService.Inspect(transformedTile0.Path).M2Placements; var transformedTile1Rows = MapAssetInspectionService.Inspect(transformedTile1.Path).M2Placements;
+if (multiTransformResult.Outputs.Count != 2 || transformedTile0Rows.Any(value => value.UniqueId == 201) || transformedTile1Rows.Count(value => value.UniqueId == 201) != 1 || transformedTile1Rows.Single(value => value.UniqueId == 201).Position != new Vector3(600, 12, 110) ||
+    !File.Exists(multiTransformResult.ReceiptPath) || !PatchManifestService.Validate(PatchManifestService.Load(multiTransformResult.ManifestPath)).Passed || transformSourceHashes.Any(value => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(value.Key))) != value.Value))
+    throw new InvalidOperationException("Atomic multi-tile transform left an old copy, lost the edited copy, changed a source, or omitted its manifest/receipt.");
+foreach (var output in multiTransformResult.Outputs) AssertPlacementAdtPointers(output.Path);
+var persistedTransformPlanBytes = File.ReadAllBytes(multiTransformResult.PlanPath); File.AppendAllText(multiTransformResult.PlanPath, Environment.NewLine);
+try { _ = AdtMultiTilePlacementService.PlanDelete(transformedTile1.Path, AdtPlacementKind.M2, 1); throw new InvalidOperationException("Transform lineage trusted a changed persisted plan."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("plan", StringComparison.OrdinalIgnoreCase)) { }
+File.WriteAllBytes(multiTransformResult.PlanPath, persistedTransformPlanBytes); var multiDelete = AdtMultiTilePlacementService.PlanDelete(transformedTile1.Path, AdtPlacementKind.M2, 1);
+if (multiDelete.Operation != AdtPlacementLifecycleOperation.Delete || multiDelete.UniqueId != 201 || multiDelete.Segments.Count != 1 || multiDelete.SourceTiles.Count != 2)
+    throw new InvalidOperationException("Multi-tile delete did not inherit the transformed effective workspace and exact remaining UID occurrence.");
+var multiDeleteRoot = Path.Combine(multiTransformRoot, "nested-delete-output"); var multiDeleteResult = AdtMultiTilePlacementService.Apply(multiDelete, multiDeleteRoot);
+if (multiDeleteResult.Outputs.Count != 1 || multiDeleteResult.Outputs.Any(output => MapAssetInspectionService.Inspect(output.Path).M2Placements.Any(value => value.UniqueId == 201)))
     throw new InvalidOperationException("Coordinated delete left a ghost duplicate in an intersected ADT.");
+var nestedLineageAdd = AdtMultiTilePlacementService.PlanAdd(multiDeleteResult.Outputs[0].Path, AdtPlacementKind.M2, @"World\Model\Lifecycle\NewDoodad.m2", lifecycleModel, new Vector3(600, 12, 110), Vector3.Zero);
+if (nestedLineageAdd.SourceTiles.Count != 2 || nestedLineageAdd.SourceTiles.Count(tile => tile.Path.Equals(multiDeleteResult.Outputs[0].Path, StringComparison.OrdinalIgnoreCase)) != 1)
+    throw new InvalidOperationException("Nested coordinated output was poisoned by an ancestor transform receipt instead of using its nearest effective lineage.");
 var missingTileRoot = Path.Combine(placementEditRoot, "missing-neighbor"); Directory.CreateDirectory(missingTileRoot); var missingTile = Path.Combine(missingTileRoot, "Missing_0_0.adt"); WritePlacementLifecycleAdt(missingTile, 0, 0, 300); var missingModel = Path.Combine(missingTileRoot, "NewDoodad.m2"); File.Copy(lifecycleModel, missingModel);
 try { _ = AdtMultiTilePlacementService.PlanAdd(missingTile, AdtPlacementKind.M2, @"World\Model\Lifecycle\NewDoodad.m2", missingModel, new Vector3(532, 12, 110), Vector3.Zero); throw new InvalidOperationException("Multi-tile add accepted an absent required neighbor tile."); }
 catch (InvalidOperationException exception) when (exception.Message.Contains("missing ADT tile", StringComparison.OrdinalIgnoreCase)) { }
@@ -1880,6 +1905,8 @@ if (Directory.Exists(desktopSourceRoot))
         !mapWorkspaceSource.Contains("BuildMapSceneAsync", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("AdtTerrainSceneService.Load", StringComparison.Ordinal) ||
         !mapWorkspaceSource.Contains("Crucible never mixes patches", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("AdtTerrainMaterialService.Load", StringComparison.Ordinal) ||
         !mapWorkspaceSource.Contains("Preview add / clone", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("Review delete", StringComparison.Ordinal) ||
+        !mapWorkspaceSource.Contains("Preview coordinated transform", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("Build multi-tile transform payload", StringComparison.Ordinal) ||
+        !mapWorkspaceSource.Contains("AdtMultiTilePlacementTransformService.Plan", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("AdtMultiTilePlacementTransformService.Apply", StringComparison.Ordinal) ||
         !mapWorkspaceSource.Contains("Build multi-tile add payload", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("Build multi-tile delete payload", StringComparison.Ordinal) ||
         !mapWorkspaceSource.Contains("AdtMultiTilePlacementService.PlanAdd", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("AdtMultiTilePlacementService.PlanDelete", StringComparison.Ordinal) ||
         !mapWorkspaceSource.Contains("AdtMultiTilePlacementService.Apply", StringComparison.Ordinal) || !mapWorkspaceSource.Contains("HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled", StringComparison.Ordinal) ||

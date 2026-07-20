@@ -95,7 +95,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private AdtTextureLayerPlan? _texturePlan;
     private AdtTextureStructurePlan? _textureStructurePlan;
     private AdtAlphaBrushPlan? _alphaPlan;
-    private AdtPlacementTransformPlan? _placementPlan;
+    private AdtMultiTilePlacementTransformPlan? _placementPlan;
     private AdtMultiTilePlacementPlan? _placementMultiTilePlan;
     private uint? _pendingLightingId;
 
@@ -111,8 +111,8 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var openWmo = new Button { Content = "Preview extracted WMO…" }; openWmo.Click += async (_, _) => await PickWmoAsync();
         var chooseWmoLibrary = new Button { Content = "Choose processed library…" }; chooseWmoLibrary.Click += async (_, _) => await PickWmoLibraryAsync();
         var previewReference = new Button { Content = "Preview selected object" }; previewReference.Click += async (_, _) => await PreviewSelectedObjectAsync();
-        var previewPlacement = new Button { Content = "Preview placement transform" }; previewPlacement.Click += async (_, _) => await PreviewPlacementTransformAsync();
-        var savePlacement = new Button { Content = "Write placement-edited ADT…" }; savePlacement.Click += async (_, _) => await SavePlacementTransformAsync();
+        var previewPlacement = new Button { Content = "Preview coordinated transform" }; previewPlacement.Click += async (_, _) => await PreviewPlacementTransformAsync();
+        var savePlacement = new Button { Content = "Build multi-tile transform payload…" }; savePlacement.Click += async (_, _) => await SavePlacementTransformAsync();
         var previewPlacementAdd = new Button { Content = "Preview add / clone" }; previewPlacementAdd.Click += async (_, _) => await PreviewPlacementAddAsync();
         var savePlacementAdd = new Button { Content = "Build multi-tile add payload…" }; savePlacementAdd.Click += async (_, _) => await SavePlacementLifecycleAsync(AdtPlacementLifecycleOperation.Add);
         var previewPlacementDelete = new Button { Content = "Review delete" }; previewPlacementDelete.Click += async (_, _) => await PreviewPlacementDeleteAsync();
@@ -510,27 +510,26 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         {
             if (_inspection?.Kind != MapAssetKind.Adt) throw new InvalidOperationException("Load a WotLK ADT before editing object placements.");
             if (_wmoReferences.SelectedItem is not MapObjectReferenceChoice reference || reference.M2Placement is null && reference.WmoPlacement is null) throw new InvalidOperationException("Select an existing MDDF or MODF placement row first.");
-            var position = new Vector3(Number(_placementX, "placement X"), Number(_placementY, "placement Y"), Number(_placementZ, "placement Z"));
-            AdtPlacementTransformPlan plan;
+            if (_wmoCandidates.SelectedItem is not AssetCandidateChoice candidate) throw new InvalidOperationException("Choose one exact extracted provenance candidate. Coordinated transforms require real geometry to determine every old and edited ADT tile.");
+            var position = new Vector3(Number(_placementX, "placement X"), Number(_placementY, "placement Y"), Number(_placementZ, "placement Z")); var orientation = new Vector3(Number(_placementRotX, "rotation X"), Number(_placementRotY, "rotation Y"), Number(_placementRotZ, "rotation Z"));
+            AdtMultiTilePlacementTransformPlan plan;
             if (reference.M2Placement is { } m2)
             {
-                var orientation = new Vector3(Number(_placementRotX, "rotation X"), Number(_placementRotY, "rotation Y"), Number(_placementRotZ, "rotation Z"));
                 var scale = Number(_placementScale, "placement scale"); var rawScale = AdtPlacementTransformService.EncodeScale(scale);
-                plan = await Task.Run(() => AdtPlacementTransformService.Plan(_inspection.Path, AdtPlacementKind.M2, m2.Index, position, orientation, rawScale));
-                if (_wmoCandidates.SelectedItem is AssetCandidateChoice choice) await LoadM2Async(choice.Location.SourcePath, m2 with { Position = plan.EditedPosition.ToVector3(), Orientation = plan.EditedOrientation.ToVector3(), ScaleRaw = plan.EditedScaleRaw });
+                plan = await Task.Run(() => AdtMultiTilePlacementTransformService.Plan(_inspection.Path, AdtPlacementKind.M2, m2.Index, candidate.Location.SourcePath, position, orientation, rawScale));
+                await LoadM2Async(candidate.Location.SourcePath, m2 with { Position = plan.EditedPosition.ToVector3(), Orientation = plan.EditedOrientation.ToVector3(), ScaleRaw = plan.EditedScaleRaw });
             }
             else
             {
-                var wmo = reference.WmoPlacement!; var orientation = new Vector3(Number(_placementRotX, "rotation X"), Number(_placementRotY, "rotation Y"), Number(_placementRotZ, "rotation Z"));
+                var wmo = reference.WmoPlacement!;
                 var scale = Number(_placementScale, "placement scale"); var rawScale = wmo.ScaleRaw == 0 && BitConverter.SingleToInt32Bits(scale) == BitConverter.SingleToInt32Bits(1f) ? (ushort)0 : AdtPlacementTransformService.EncodeScale(scale);
-                var rootPath = (_wmoCandidates.SelectedItem as AssetCandidateChoice)?.Location.SourcePath;
-                plan = await Task.Run(() => AdtPlacementTransformService.Plan(_inspection.Path, AdtPlacementKind.Wmo, wmo.Index, position, orientation, rawScale, rootPath));
-                var edited = wmo with { Position = plan.EditedPosition.ToVector3(), Orientation = plan.EditedOrientation.ToVector3(), ScaleRaw = plan.EditedScaleRaw, MinimumExtent = plan.EditedMinimumExtent!.ToVector3(), MaximumExtent = plan.EditedMaximumExtent!.ToVector3() };
-                if (rootPath is not null) await LoadWmoAsync(rootPath, edited); else _wmoPreview.SetPlacement(edited);
+                plan = await Task.Run(() => AdtMultiTilePlacementTransformService.Plan(_inspection.Path, AdtPlacementKind.Wmo, wmo.Index, candidate.Location.SourcePath, position, orientation, rawScale));
+                var edited = wmo with { Position = plan.EditedPosition.ToVector3(), Orientation = plan.EditedOrientation.ToVector3(), ScaleRaw = plan.EditedScaleRaw, MinimumExtent = plan.EditedMinimum.ToVector3(), MaximumExtent = plan.EditedMaximum.ToVector3() };
+                await LoadWmoAsync(candidate.Location.SourcePath, edited);
             }
             _placementPlan = plan;
-            _placementStatus.Text = $"Preview only · {plan.Kind} index {plan.Index:N0} / UID {plan.UniqueId:N0} · position {VectorText(plan.OriginalPosition)} → {VectorText(plan.EditedPosition)} · rotation {VectorText(plan.OriginalOrientation)} → {VectorText(plan.EditedOrientation)} · scale {ScaleText(plan.OriginalScaleRaw)} → {ScaleText(plan.EditedScaleRaw)}" + (plan.Kind == AdtPlacementKind.Wmo ? plan.WmoRootPath is null ? " · MODF extents translated by exact delta" : $" · MODF extents rebuilt from hash-bound {Path.GetFileName(plan.WmoRootPath)} MOHD bounds" : string.Empty) + " · source bytes unchanged";
-            _status.Text = "Placement transform preview is ready. Write creates a separate hash-bound ADT plus receipt.";
+            _placementStatus.Text = $"Preview only · coordinated {plan.Kind} / UID {plan.UniqueId:N0} · remove {plan.DeleteSegments.Count:N0} old tile copy/copies → add {plan.TargetTiles.Count:N0} edited-footprint copy/copies · position {VectorText(plan.OriginalPosition)} → {VectorText(plan.EditedPosition)} · rotation {VectorText(plan.OriginalOrientation)} → {VectorText(plan.EditedOrientation)} · scale {ScaleText(plan.OriginalScaleRaw)} → {ScaleText(plan.EditedScaleRaw)} · exact asset SHA {plan.AssetSha256[..12]}… · every source unchanged";
+            _status.Text = "Coordinated transform preview is ready. Build publishes one tiny map payload containing the exact union of old and edited tiles.";
         }
         catch (Exception exception) { _placementStatus.Text = exception.Message; DesktopCrashLogger.Log("ADT placement transform preview failed", exception); }
     }
@@ -540,11 +539,11 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         try
         {
             if (_placementPlan is null) { await PreviewPlacementTransformAsync(); if (_placementPlan is null) return; }
-            var top = TopLevel.GetTopLevel(this); if (top is null) return; var stem = Path.GetFileNameWithoutExtension(_placementPlan.InputPath);
-            var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Write a separate placement-edited ADT", SuggestedFileName = stem + "-placement-edit.adt", DefaultExtension = "adt", FileTypeChoices = [new FilePickerFileType("WoW ADT") { Patterns = ["*.adt"] }] });
-            var output = file?.TryGetLocalPath(); if (output is null) return; _placementStatus.Text = "Writing one placement record and verifying every MDDF/MODF row…";
-            var result = await Task.Run(() => AdtPlacementTransformService.Apply(_placementPlan, output, overwrite: false)); await OpenAsync(result.OutputPath);
-            _status.Text = $"Wrote {result.Kind} placement index {result.Index:N0} / UID {result.UniqueId:N0} atomically · receipt {Path.GetFileName(result.ReceiptPath)} · original retained";
+            var top = TopLevel.GetTopLevel(this); if (top is null) return; var folders = await top.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose a parent for the new MPQ-ready coordinated transform bundle", AllowMultiple = false });
+            var parent = folders.FirstOrDefault()?.TryGetLocalPath(); if (parent is null) return; var output = Path.Combine(parent, $"Crucible-{_placementPlan.MapPrefix}-Transform-UID-{_placementPlan.UniqueId}-{DateTime.Now:yyyyMMdd-HHmmss}");
+            _placementStatus.Text = $"Removing {_placementPlan.DeleteSegments.Count:N0} old copy/copies, rebuilding {_placementPlan.TargetTiles.Count:N0} edited geometry copy/copies, and verifying every affected ADT…";
+            var result = await Task.Run(() => AdtMultiTilePlacementTransformService.Apply(_placementPlan, output)); var targetCoordinates = _placementPlan.TargetTiles.Select(value => (value.TileX, value.TileY)).ToHashSet(); var reopened = result.Outputs.FirstOrDefault(value => targetCoordinates.Contains((value.TileX, value.TileY)) && value.TileX == _inspection?.TileX && value.TileY == _inspection?.TileY) ?? result.Outputs.First(value => targetCoordinates.Contains((value.TileX, value.TileY))); await OpenAsync(reopened.Path);
+            _status.Text = $"Transformed {result.Kind} / UID {result.UniqueId:N0} atomically across {result.Outputs.Count:N0} changed tile(s) · tiny manifest {Path.GetFileName(result.ManifestPath)} · receipt {Path.GetFileName(result.ReceiptPath)} · every source retained";
         }
         catch (Exception exception) { _placementStatus.Text = exception.Message; DesktopCrashLogger.Log("ADT placement transform write failed", exception); }
     }

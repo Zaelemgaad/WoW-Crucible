@@ -420,7 +420,15 @@ public static partial class AdtPlacementLifecycleService
     private static uint NextUniqueId(uint maximum) => maximum == uint.MaxValue ? throw new InvalidOperationException("The sibling ADT set already uses uint.MaxValue; choose a reviewed unused UID explicitly.") : maximum + 1;
     private static float EffectiveScale(ushort raw) => raw == 0 ? 1f : raw / 1024f;
     private static string NormalizeClientPath(string path, AdtPlacementKind kind) { path = (path ?? string.Empty).Trim().Replace('/', '\\').TrimStart('\\'); var extension = Path.GetExtension(path).ToLowerInvariant(); var accepted = kind == AdtPlacementKind.M2 ? extension is ".m2" or ".mdx" : extension == ".wmo"; if (path.Length == 0 || path.IndexOf('\0') >= 0 || !accepted) throw new ArgumentException($"{kind} placement path must be a client-relative {(kind == AdtPlacementKind.M2 ? ".m2/.mdx" : ".wmo")} path.", nameof(path)); return path; }
-    private static void RequireMatchingAssetPath(string clientPath, string assetPath) { if (!Path.GetFileName(clientPath).Equals(Path.GetFileName(assetPath), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Extracted geometry '{Path.GetFileName(assetPath)}' does not match client path '{clientPath}'. Select the exact provenance candidate for this object."); }
+    private static void RequireMatchingAssetPath(string clientPath, string assetPath)
+    {
+        var clientName = Path.GetFileNameWithoutExtension(clientPath); var assetName = Path.GetFileNameWithoutExtension(assetPath);
+        var clientExtension = Path.GetExtension(clientPath); var assetExtension = Path.GetExtension(assetPath);
+        var compatibleExtension = clientExtension.Equals(assetExtension, StringComparison.OrdinalIgnoreCase) ||
+            clientExtension.Equals(".mdx", StringComparison.OrdinalIgnoreCase) && assetExtension.Equals(".m2", StringComparison.OrdinalIgnoreCase) ||
+            clientExtension.Equals(".m2", StringComparison.OrdinalIgnoreCase) && assetExtension.Equals(".mdx", StringComparison.OrdinalIgnoreCase);
+        if (!clientName.Equals(assetName, StringComparison.OrdinalIgnoreCase) || !compatibleExtension) throw new InvalidDataException($"Extracted geometry '{Path.GetFileName(assetPath)}' does not match client path '{clientPath}'. Select the exact provenance candidate for this object.");
+    }
     private static void RequireFinite(Vector3 value, string label) { if (!float.IsFinite(value.X) || !float.IsFinite(value.Y) || !float.IsFinite(value.Z)) throw new InvalidDataException($"{label} contains a non-finite value."); }
     private static TopChunk Single(List<TopChunk> chunks, string id) { var matches = chunks.Where(chunk => chunk.Id == id).ToArray(); return matches.Length == 1 ? matches[0] : throw new InvalidDataException($"ADT must contain exactly one {id} chunk; found {matches.Length:N0}."); }
     private static int SingleIndex(List<TopChunk> chunks, string id) { var matches = chunks.Select((chunk, index) => (chunk, index)).Where(value => value.chunk.Id == id).ToArray(); return matches.Length == 1 ? matches[0].index : throw new InvalidDataException($"ADT must contain exactly one {id} chunk; found {matches.Length:N0}."); }
