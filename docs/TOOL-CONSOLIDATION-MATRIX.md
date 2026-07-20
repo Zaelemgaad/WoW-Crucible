@@ -60,7 +60,7 @@ Every top-level Tools directory is assigned below, including redundant editors. 
 | `CASC`, `cascExplorer` | CASC list/browse/extract/diff source provider |
 | `CSVed*` | Built-in schema-aware table view, sort/filter, bulk transforms, CSV import/export |
 | `DBC`, `DBC Editor*`, `DBC Tool*`, `DBC Viewer*`, `DBC_XT`, `DBC2ConverSQL*`, `dbc2sql*`, `DBCtoCSV`, `DBCUtil*`, `MyDbcEditor*`, `WDBXEditor` | One generic DBC/DB2 workbench with raw and decoded modes |
-| `LightMapper` | Native build-12340 Light graph, coordinate/radius plot, wrapped time sampler, named color/float bands, skybox resolution, exact DBC-record handoff; direct curve authoring remains |
+| `LightMapper` | Native build-12340 Light graph, coordinate/radius plot, wrapped time sampler, named color/float bands, responsive 1–16-key curve authoring, staged/in-place verified writes, and exact DBC-record handoff |
 | `Map\AdtAdder`, `ADTGrids`, `FuTa`, `GroundEffects`, `GruulMeWDT`, `Rius Zone Masher` | ADT copy/add/grid/offset/alpha/ground-effect/zone and WDT project operations |
 | `Map\Noggit*` | Capabilities folded into native map editing rather than permanent launch integration |
 | `Models\anim porter` | Build-aware animation transfer with ID remap and companion validation |
@@ -72,7 +72,7 @@ Every top-level Tools directory is assigned below, including redundant editors. 
 | `Other\Mordred_LoginScreen` | GlueXML/UI project, protected-path validation, executable hash binding |
 | `Other\WMT335a` | Client/model/texture research assigned to corresponding native workspaces |
 | `pjdbcEditer*` | SQL-backed DBC editing and schema mapping in the shared SQL/DBC engine |
-| `skyboxeditor` | Native LightParams/LightSkybox resolution and exact editor handoff with sampled map-light context; direct graphical creation remains |
+| `skyboxeditor` | Native LightParams/LightSkybox resolution, exact editor handoff, and visually authored color/float bands with sampled map-light context; rendered in-world sky dome remains |
 | `spell editor 2` | Full spell authoring and effect workspace |
 | `Tallis` | Plugin/provider concepts incorporated into the Crucible extension boundary |
 | `Textures\BLPConverterGUI`, `BLPPhotoshopPlugin*` | Native BLP decode/encode, alpha/mipmap validation, PNG round trip, bulk queue |

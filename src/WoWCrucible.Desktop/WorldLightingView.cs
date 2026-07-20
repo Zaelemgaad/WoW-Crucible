@@ -38,11 +38,14 @@ internal sealed class WorldLightingView : UserControl, IDisposable
     private readonly TextBlock _skyboxDetail = Info("No skybox selected.");
     private readonly ListBox _colors = new();
     private readonly ListBox _floats = new();
+    private readonly WorldLightingBandEditorView _bandEditor = new();
     private readonly TextBlock _status = Info("Native Light.dbc inspection replaces legacy LightMapper and skybox viewers without copying their assets.");
     private WorldLightingCatalog? _catalog;
     private IReadOnlyList<WorldLightRecord> _visibleLights = [];
     private WorldLightProfile? _profile;
     private CancellationTokenSource? _operation;
+    private bool _refreshingBandLists;
+    private WorldLightingBandKind _editorKind = WorldLightingBandKind.Color;
 
     public event EventHandler<DbcRecordNavigationRequest>? OpenDbcRecordRequested;
 
@@ -66,23 +69,30 @@ internal sealed class WorldLightingView : UserControl, IDisposable
         });
         _floats.ItemTemplate = new FuncDataTemplate<FloatBandChoice>((choice, _) => choice is null ? new Border() : new TextBlock { Text = choice.ToString(), Margin = new Thickness(5), TextWrapping = TextWrapping.Wrap });
         _lights.SelectionChanged += (_, _) => SelectLight(_lights.SelectedItem as WorldLightRecord);
+        _colors.SelectionChanged += (_, _) => { if (_refreshingBandLists || _colors.SelectedItem is not ColorBandChoice choice) return; _editorKind = WorldLightingBandKind.Color; _bandEditor.LoadColor(_dbcRoot.Text?.Trim() ?? string.Empty, choice.Band, (int)(_time.Value ?? 0)); };
+        _floats.SelectionChanged += (_, _) => { if (_refreshingBandLists || _floats.SelectedItem is not FloatBandChoice choice) return; _editorKind = WorldLightingBandKind.Float; _bandEditor.LoadFloat(_dbcRoot.Text?.Trim() ?? string.Empty, choice.Band, (int)(_time.Value ?? 0)); };
+        _bandEditor.SourceApplied += async (_, _) => await LoadAsync();
         _plot.LightSelected += (_, light) => { _lights.SelectedItem = light; _lights.ScrollIntoView(light); };
         _continent.SelectionChanged += (_, _) => ApplyFilter(); _search.TextChanged += (_, _) => ApplyFilter(); _slot.SelectionChanged += (_, _) => ResolveProfile();
-        _time.ValueChanged += (_, _) => { RefreshTime(); RefreshBands(); };
+        _time.ValueChanged += (_, _) => { RefreshTime(); RefreshBands(); _bandEditor.SetPreviewTime((int)(_time.Value ?? 0)); };
 
         var load = Accent("Load / refresh lighting"); load.Click += async (_, _) => await LoadAsync();
         var browse = new Button { Content = "Choose DBC folder…" }; browse.Click += async (_, _) => await BrowseAsync();
         var openLight = new Button { Content = "Edit Light.dbc record" }; openLight.Click += (_, _) => Open("Light.dbc", (_lights.SelectedItem as WorldLightRecord)?.Id ?? 0);
         var openParams = new Button { Content = "Edit LightParams record" }; openParams.Click += (_, _) => Open("LightParams.dbc", _profile?.ParamsId ?? 0);
         var openSkybox = new Button { Content = "Edit LightSkybox record" }; openSkybox.Click += (_, _) => Open("LightSkybox.dbc", _profile?.Skybox?.Id ?? 0);
-        var openColor = new Button { Content = "Edit selected color band" }; openColor.Click += (_, _) => Open("LightIntBand.dbc", (_colors.SelectedItem as ColorBandChoice)?.Band.Id ?? 0);
-        var openFloat = new Button { Content = "Edit selected float band" }; openFloat.Click += (_, _) => Open("LightFloatBand.dbc", (_floats.SelectedItem as FloatBandChoice)?.Band.Id ?? 0);
+        var openColor = new Button { Content = "Open raw color-band row" }; openColor.Click += (_, _) => Open("LightIntBand.dbc", (_colors.SelectedItem as ColorBandChoice)?.Band.Id ?? 0);
+        var openFloat = new Button { Content = "Open raw float-band row" }; openFloat.Click += (_, _) => Open("LightFloatBand.dbc", (_floats.SelectedItem as FloatBandChoice)?.Band.Id ?? 0);
+        var authorColor = Accent("Author selected color curve");
+        var authorFloat = Accent("Author selected float curve");
 
         var source = new StackPanel { Spacing = 7, Margin = new Thickness(12, 8), Children = { new TextBlock { Text = "WOTLK WORLD LIGHTING GRAPH", FontSize = 16, FontWeight = FontWeight.SemiBold }, _dbcRoot, new WrapPanel { Children = { load, browse } }, _search, new WrapPanel { Children = { Field("MAP", _continent), Field("PROFILE", _slot), Field("TIME 0–2880", _time), _timeLabel } } } };
         var left = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new TextBlock { Text = "LIGHT SOURCES", Margin = new Thickness(8), FontWeight = FontWeight.SemiBold }, WithRow(_lights, 1), WithRow(openLight, 2) } };
         var plotPage = new Grid { RowDefinitions = new("*,Auto"), Children = { _plot, WithRow(new TextBlock { Text = "Neutral coordinate plot · X/Z world coordinates · click a marker · circles show outer falloff", Margin = new Thickness(8), Foreground = Brush.Parse("#8E99AD"), TextWrapping = TextWrapping.Wrap }, 1) } };
-        var profilePage = new ScrollViewer { Content = new StackPanel { Spacing = 8, Margin = new Thickness(10), Children = { Label("SELECTED LIGHT"), Card(_lightDetail), openLight, Label("PARAMETER PROFILE"), Card(_paramsDetail), openParams, Label("SKYBOX"), Card(_skyboxDetail), openSkybox, Label("18 TIME-SAMPLED COLOR BANDS"), _colors, openColor, Label("6 TIME-SAMPLED FLOAT BANDS"), _floats, openFloat } } };
-        var rightTabs = new TabControl { Items = { new TabItem { Header = "Coordinate plot", Content = plotPage }, new TabItem { Header = "Colors, floats & skybox", Content = profilePage } } };
+        var profilePage = new ScrollViewer { Content = new StackPanel { Spacing = 8, Margin = new Thickness(10), Children = { Label("SELECTED LIGHT"), Card(_lightDetail), openLight, Label("PARAMETER PROFILE"), Card(_paramsDetail), openParams, Label("SKYBOX"), Card(_skyboxDetail), openSkybox, Label("18 TIME-SAMPLED COLOR BANDS"), _colors, new WrapPanel { Children = { authorColor, openColor } }, Label("6 TIME-SAMPLED FLOAT BANDS"), _floats, new WrapPanel { Children = { authorFloat, openFloat } } } } };
+        var rightTabs = new TabControl { Items = { new TabItem { Header = "Coordinate plot", Content = plotPage }, new TabItem { Header = "Colors, floats & skybox", Content = profilePage }, new TabItem { Header = "Edit time band", Content = _bandEditor } } };
+        authorColor.Click += (_, _) => { if (_colors.SelectedItem is ColorBandChoice choice) { _editorKind = WorldLightingBandKind.Color; _bandEditor.LoadColor(_dbcRoot.Text?.Trim() ?? string.Empty, choice.Band, (int)(_time.Value ?? 0)); rightTabs.SelectedIndex = 2; } };
+        authorFloat.Click += (_, _) => { if (_floats.SelectedItem is FloatBandChoice choice) { _editorKind = WorldLightingBandKind.Float; _bandEditor.LoadFloat(_dbcRoot.Text?.Trim() ?? string.Empty, choice.Band, (int)(_time.Value ?? 0)); rightTabs.SelectedIndex = 2; } };
         var body = new ResponsiveSplitGrid(left, rightTabs, 2, 3);
         var root = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { source, WithRow(body, 1), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _status }, 2) } };
         Content = root;
@@ -95,7 +105,7 @@ internal sealed class WorldLightingView : UserControl, IDisposable
         {
             var path = _dbcRoot.Text?.Trim() ?? string.Empty; _status.Text = "Loading and validating all five world-lighting tables…";
             var catalog = await Task.Run(() => { token.ThrowIfCancellationRequested(); return WorldLightingService.Load(path); }, token); if (token.IsCancellationRequested) return;
-            _catalog = catalog; _session.Settings.CoreDbcPath = catalog.DbcDirectory; _session.Settings.Save();
+            _catalog = catalog; _bandEditor.ResetCatalog(); _session.Settings.CoreDbcPath = catalog.DbcDirectory; _session.Settings.Save();
             var choices = new[] { new ContinentChoice(null, catalog.Lights.Count) }.Concat(catalog.Lights.GroupBy(light => light.ContinentId).OrderBy(group => group.Key).Select(group => new ContinentChoice(group.Key, group.Count()))).ToArray();
             _continent.ItemsSource = choices; _continent.SelectedIndex = choices.Length > 1 ? 1 : 0; ApplyFilter();
             _status.Text = $"Validated {catalog.Lights.Count:N0} lights · {catalog.Parameters.Count:N0} profiles · {catalog.ColorBands.Count:N0} color bands · {catalog.FloatBands.Count:N0} float bands · {catalog.Skyboxes.Count:N0} skyboxes" + (catalog.Findings.Count == 0 ? " · no broken references" : $" · {catalog.Findings.Count:N0} finding(s)");
@@ -134,8 +144,13 @@ internal sealed class WorldLightingView : UserControl, IDisposable
     private void RefreshBands()
     {
         if (_profile is null) { _colors.ItemsSource = null; _floats.ItemsSource = null; return; } var time = (int)(_time.Value ?? 0);
+        var selectedColor = (_colors.SelectedItem as ColorBandChoice)?.Band.Id; var selectedFloat = (_floats.SelectedItem as FloatBandChoice)?.Band.Id;
         var colors = _profile.ColorBands.Select(band => new ColorBandChoice(band, WorldLightingService.Sample(band, time))).ToArray(); var floats = _profile.FloatBands.Select(band => new FloatBandChoice(band, WorldLightingService.Sample(band, time))).ToArray();
-        _colors.ItemsSource = colors; _floats.ItemsSource = floats; if (colors.Length > 0) _colors.SelectedIndex = 0; if (floats.Length > 0) _floats.SelectedIndex = 0;
+        var colorIndex = selectedColor is null ? -1 : Array.FindIndex(colors, choice => choice.Band.Id == selectedColor); if (colorIndex < 0 && colors.Length > 0) colorIndex = 0;
+        var floatIndex = selectedFloat is null ? -1 : Array.FindIndex(floats, choice => choice.Band.Id == selectedFloat); if (floatIndex < 0 && floats.Length > 0) floatIndex = 0;
+        _refreshingBandLists = true; _colors.ItemsSource = colors; _floats.ItemsSource = floats; _colors.SelectedIndex = colorIndex; _floats.SelectedIndex = floatIndex; _refreshingBandLists = false;
+        if (_editorKind == WorldLightingBandKind.Color && _colors.SelectedItem is ColorBandChoice color) _bandEditor.LoadColor(_dbcRoot.Text?.Trim() ?? string.Empty, color.Band, time);
+        else if (_floats.SelectedItem is FloatBandChoice value) _bandEditor.LoadFloat(_dbcRoot.Text?.Trim() ?? string.Empty, value.Band, time);
     }
 
     private async Task BrowseAsync()

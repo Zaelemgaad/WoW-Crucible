@@ -23,6 +23,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("pet level curve scale").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("pet family growth compare graph").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("pet talent ability evidence graph").FirstOrDefault()?.Command.Id != "workspace.pets" ||
+    CrucibleCommandCatalog.Search("lightmapper skybox curve").FirstOrDefault()?.Command.Id != "workspace.lighting" ||
     CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.assets" ||
     CrucibleCommandCatalog.Search("wiki field help").FirstOrDefault()?.Command.Id != "workspace.knowledge" ||
     CrucibleCommandCatalog.Search("wdb cache parser").FirstOrDefault()?.Command.Id != "workspace.cache" ||
@@ -42,6 +43,37 @@ if (packedLightColor.R != 0xC6 || packedLightColor.G != 0x99 || packedLightColor
 var wrapBand = new WorldLightFloatBand(1, 0, "fixture", [new(2400, 0), new(480, 1)]);
 if (Math.Abs(WorldLightingService.Sample(wrapBand, 0) - 0.5f) > 0.0001f || WorldLightingService.Sample(wrapBand, 2880) != WorldLightingService.Sample(wrapBand, 0))
     throw new InvalidOperationException("World-light time interpolation did not wrap cleanly across midnight.");
+
+var lightingEditRoot = Path.Combine(Path.GetTempPath(), $"crucible-lighting-edit-{Guid.NewGuid():N}"); Directory.CreateDirectory(lightingEditRoot);
+try
+{
+    var lightingEditPath = Path.Combine(lightingEditRoot, "LightIntBand.dbc"); File.Copy(Path.Combine(args[1], "LightIntBand.dbc"), lightingEditPath);
+    var originalLightingHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(lightingEditPath)));
+    var lightingEdit = WorldLightingEditService.PlanColor(lightingEditPath, 199,
+    [
+        (0, new WorldLightColor(1, 2, 3)),
+        (1440, new WorldLightColor(200, 150, 100)),
+        (2880, new WorldLightColor(4, 5, 6))
+    ]);
+    var lightingPlanPath = Path.Combine(lightingEditRoot, "color-plan.json"); WorldLightingEditService.SavePlan(lightingEdit, lightingPlanPath); var loadedLightingPlan = WorldLightingEditService.LoadPlan(lightingPlanPath);
+    if (loadedLightingPlan.BandId != lightingEdit.BandId || loadedLightingPlan.InputSha256 != lightingEdit.InputSha256 || !loadedLightingPlan.OriginalFields.SequenceEqual(lightingEdit.OriginalFields) || !loadedLightingPlan.Keys.SequenceEqual(lightingEdit.Keys)) throw new InvalidOperationException("Portable lighting-band plans did not round-trip their complete preimage and keys.");
+    var lightingResult = WorldLightingEditService.Apply(lightingEdit, lightingEditPath, overwrite: true, allowSourceReplacement: true);
+    if (!lightingResult.ReplacedSource || lightingResult.Keys != 3 || lightingResult.BackupPath is null || !File.Exists(lightingResult.BackupPath) || !File.Exists(lightingResult.ReceiptPath) || Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(lightingResult.BackupPath))) != originalLightingHash)
+        throw new InvalidOperationException("Guarded in-place lighting-band editing did not retain and report its exact source backup.");
+    var reparsedLightingEdit = WorldLightingEditService.PlanColor(lightingEditPath, 199, [(0, new WorldLightColor(1, 2, 3)), (1440, new WorldLightColor(200, 150, 100)), (2880, new WorldLightColor(4, 5, 6))]);
+    if (reparsedLightingEdit.OriginalFields[1] != 3 || reparsedLightingEdit.OriginalFields[2] != 0 || reparsedLightingEdit.OriginalFields[3] != 1440 || reparsedLightingEdit.OriginalFields[4] != 2880 || reparsedLightingEdit.OriginalFields[18] != 0x00030201 || reparsedLightingEdit.OriginalFields[19] != 0x006496C8)
+        throw new InvalidOperationException("Written lighting keys did not round-trip to the exact build-12340 row fields.");
+    try { _ = WorldLightingEditService.Apply(reparsedLightingEdit with { Keys = reparsedLightingEdit.Keys.Reverse().ToArray() }, Path.Combine(lightingEditRoot, "reordered", "LightIntBand.dbc")); throw new InvalidOperationException("Lighting-band authoring accepted reordered serialized keys."); } catch (InvalidDataException exception) when (exception.Message.Contains("chronological", StringComparison.OrdinalIgnoreCase)) { }
+    try { _ = WorldLightingEditService.Apply(reparsedLightingEdit, lightingEditPath, overwrite: false, allowSourceReplacement: true); throw new InvalidOperationException("Lighting-band authoring replaced its source without explicit overwrite authority."); } catch (InvalidOperationException exception) when (exception.Message.Contains("overwrite authority", StringComparison.OrdinalIgnoreCase)) { }
+    var floatSourceDirectory = Path.Combine(lightingEditRoot, "float-source"); Directory.CreateDirectory(floatSourceDirectory); var floatSource = Path.Combine(floatSourceDirectory, "LightFloatBand.dbc"); File.Copy(Path.Combine(args[1], "LightFloatBand.dbc"), floatSource);
+    var floatPlan = WorldLightingEditService.PlanFloat(floatSource, 67, [(0, 18000f), (1440, 9000.5f), (2880, 18000f)]); var floatOutput = Path.Combine(lightingEditRoot, "float-output", "LightFloatBand.dbc"); var floatResult = WorldLightingEditService.Apply(floatPlan, floatOutput);
+    var reparsedFloat = WorldLightingEditService.PlanFloat(floatOutput, 67, [(0, 18000f), (1440, 9000.5f), (2880, 18000f)]);
+    if (floatResult.Keys != 3 || reparsedFloat.OriginalFields[1] != 3 || BitConverter.UInt32BitsToSingle(reparsedFloat.OriginalFields[19]) != 9000.5f) throw new InvalidOperationException("Float lighting-band output did not round-trip exactly.");
+    try { _ = WorldLightingEditService.PlanFloat(floatSource, 67, [(0, float.NaN)]); throw new InvalidOperationException("Lighting-band authoring accepted a non-finite float key."); } catch (ArgumentOutOfRangeException) { }
+    var staleLightingPlan = reparsedLightingEdit; var staleLightingFile = WdbcFile.Load(lightingEditPath); staleLightingFile.SetRaw(staleLightingPlan.RowIndex, new(18, 72, 4, "Data0", DbcValueType.Raw32), 0x00010203); staleLightingFile.Save(lightingEditPath, false);
+    try { _ = WorldLightingEditService.Apply(staleLightingPlan, Path.Combine(lightingEditRoot, "stale", "LightIntBand.dbc")); throw new InvalidOperationException("Lighting-band authoring accepted a source changed after planning."); } catch (InvalidDataException exception) when (exception.Message.Contains("changed after", StringComparison.OrdinalIgnoreCase)) { }
+}
+finally { Directory.Delete(lightingEditRoot, true); }
 
 var cacheFixtureRoot = Path.Combine(Path.GetTempPath(), $"crucible-cache-{Guid.NewGuid():N}");
 Directory.CreateDirectory(cacheFixtureRoot);
@@ -1632,7 +1664,11 @@ if (Directory.Exists(desktopSourceRoot))
     var appSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("App.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var desktopSettingsSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("DesktopSettings.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var lightingWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingView.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var lightingEditorSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingBandEditorView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowMarkup = desktopMarkup.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml", StringComparison.OrdinalIgnoreCase)).Value;
+    if (!lightingWorkspaceSource.Contains("Edit time band", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Author selected color curve", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Author selected float curve", StringComparison.Ordinal) || !lightingEditorSource.Contains("new ResponsiveSplitGrid", StringComparison.Ordinal) || !lightingEditorSource.Contains("Apply to loaded DBC · keep .bak", StringComparison.Ordinal) || !lightingEditorSource.Contains("WorldLightingBandEditPlan", StringComparison.Ordinal) || !lightingEditorSource.Contains("_baselines", StringComparison.Ordinal) || !appSource.Contains("--lighting", StringComparison.Ordinal) || !mainWindowSource.Contains("OpenLightingWorkspace", StringComparison.Ordinal))
+        throw new InvalidOperationException("Same-window responsive world-light curve authoring or retained source-preimage wiring regressed.");
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 and 17802", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("_exactIds.TextChanged", StringComparison.Ordinal) ||

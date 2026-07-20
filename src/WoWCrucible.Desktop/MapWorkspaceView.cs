@@ -28,6 +28,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private static readonly MapBrushModeChoice[] BrushModes = [new("Raise / lower", AdtTerrainBrushMode.RaiseLower), new("Flatten toward height", AdtTerrainBrushMode.Flatten), new("Smooth terrain", AdtTerrainBrushMode.Smooth), new("Seeded noise", AdtTerrainBrushMode.Noise)];
     private readonly DesktopWorkspaceSession _session;
     private readonly WorldLightingView _lightingView;
+    private readonly TabControl _workspaceTabs = new();
     private readonly TextBox _path = new() { PlaceholderText = "Open or drop a WotLK ADT, WDT, or WDL file…" };
     private readonly TextBlock _summary = Info("No map file loaded.");
     private readonly TextBlock _selected = Info("Select a present grid cell for exact terrain metadata.");
@@ -138,20 +139,22 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Placed object preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
         var body = new ResponsiveSplitGrid(_visualTabs, details, 3, 2);
         var terrainPage = new Grid { RowDefinitions = new("Auto,*"), Children = { controls, body } }; Grid.SetRow(body, 1);
-        var workspaceTabs = new TabControl { Items = { new TabItem { Header = "Terrain, objects & textures", Content = terrainPage }, new TabItem { Header = "Lighting & skyboxes", Content = _lightingView } } };
+        _workspaceTabs.Items.Add(new TabItem { Header = "Terrain, objects & textures", Content = terrainPage }); _workspaceTabs.Items.Add(new TabItem { Header = "Lighting & skyboxes", Content = _lightingView }); _workspaceTabs.SelectedIndex = 0;
         var lightingLoadStarted = false;
-        workspaceTabs.SelectionChanged += async (_, _) =>
+        _workspaceTabs.SelectionChanged += async (_, _) =>
         {
-            if (workspaceTabs.SelectedIndex != 1 || lightingLoadStarted) return;
+            if (_workspaceTabs.SelectedIndex != 1 || lightingLoadStarted) return;
             lightingLoadStarted = true;
             await _lightingView.LoadAsync();
         };
         var root = new Grid { RowDefinitions = new("Auto,*,Auto") };
         root.Children.Add(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading });
-        root.Children.Add(workspaceTabs); Grid.SetRow(workspaceTabs, 1);
+        root.Children.Add(_workspaceTabs); Grid.SetRow(_workspaceTabs, 1);
         var footer = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _status }; root.Children.Add(footer); Grid.SetRow(footer, 2);
         Content = root;
     }
+
+    public void OpenLighting() => _workspaceTabs.SelectedIndex = 1;
 
     public async Task OpenAsync(string? path)
     {

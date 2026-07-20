@@ -927,6 +927,7 @@ public partial class MainWindow : Window
         if (_mapWorkspaceView is null) { _mapWorkspaceView = new MapWorkspaceView(_workspaceSession); _mapWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _mapWorkspaceView.OpenDbcRecordRequested += async (_, request) => await OpenDbcRecordAsync(request); }
         OpenFeatureWorkspace(_mapWorkspaceView, "Maps & World"); if (!string.IsNullOrWhiteSpace(path)) _ = _mapWorkspaceView.OpenAsync(path);
     }
+    public void OpenLightingWorkspace() { OpenMapWorkspace(); _mapWorkspaceView!.OpenLighting(); }
     private async Task OpenDbcRecordAsync(DbcRecordNavigationRequest request)
     {
         CloseAllFeatureWorkspaces(); await LoadDbcAsync(request.Path); var document = Current;
@@ -1229,6 +1230,7 @@ public partial class MainWindow : Window
             ["workspace.mpq"] = Done(OpenMpqWorkspace),
             ["workspace.client"] = Done(() => OpenClientWorkspaceClick(null, new RoutedEventArgs())),
             ["workspace.maps"] = Done(() => OpenMapWorkspace()),
+            ["workspace.lighting"] = Done(() => OpenLightingWorkspace()),
             ["workspace.textures"] = Done(() => OpenTextureWorkspace()),
             ["workspace.assets"] = Done(() => OpenAssetComparison()),
             ["workspace.conversion"] = Done(OpenNativeConversionWorkspace),
