@@ -18,6 +18,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _previewStatus = Status("Select a compatible Wrath M2 or version-17 WMO for a live geometry preview.");
     private readonly TextBox _details = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
     private readonly TextBox _listfile = new() { PlaceholderText = "Optional FileDataID listfile (.csv/.txt) for modern external texture paths" };
+    private readonly CheckBox _publishReadyOnly = new() { Content = "Path payload: publish eligible models while retaining blockers in receipt" };
     private readonly M2PreviewView _preview = new();
     private readonly WmoPreviewView _wmoPreview = new() { IsVisible = false };
     private readonly Grid _previewHost = new();
@@ -56,6 +57,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var open = new Button { Content = "Open conversion report" }; open.Click += async (_, _) => await OpenReportAsync();
         var convert = Accent("Convert selected verified static M2"); convert.Click += async (_, _) => await ConvertSelectedAsync();
         var convertEligible = new Button { Content = "Convert all eligible snapshots" }; convertEligible.Click += async (_, _) => await ConvertEligibleAsync();
+        var pathPayload = Accent("Build path-preserving payload"); pathPayload.Click += async (_, _) => await BuildPathPayloadAsync();
         var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _operation?.Cancel();
         var browseListfile = new Button { Content = "Choose listfile" }; browseListfile.Click += async (_, _) => await ChooseListfileAsync();
         var clearListfile = new Button { Content = "Clear listfile" }; clearListfile.Click += (_, _) => _listfile.Text = string.Empty;
@@ -63,7 +65,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         var header = new Border
         {
             BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 8),
-            Child = new WrapPanel { Children = { back, new TextBlock { Text = "MODERN ASSET CONVERSION", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, addFiles, addFolder, remove, clear, create, open, convert, convertEligible, cancel } }
+            Child = new WrapPanel { Children = { back, new TextBlock { Text = "MODERN ASSET CONVERSION", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, addFiles, addFolder, remove, clear, create, open, convert, convertEligible, pathPayload, _publishReadyOnly, cancel } }
         };
 
         var dropTarget = new Border
@@ -262,6 +264,32 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
         }
         catch (OperationCanceledException) { _summary.Text = "Batch conversion cancelled. Already published per-model outputs remain valid; no partial model folder was published."; }
         catch (Exception exception) { _summary.Text = $"Batch conversion failed: {exception.Message}"; DesktopCrashLogger.Log("Static M2 batch conversion failed", exception); }
+        finally { EndOperation(operation); }
+    }
+
+    private async Task BuildPathPayloadAsync()
+    {
+        var source = (await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose the source root whose relative paths must be preserved", AllowMultiple = false })).FirstOrDefault()?.TryGetLocalPath();
+        if (source is null) return;
+        var output = (await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Choose a new or empty batch output folder", AllowMultiple = false })).FirstOrDefault()?.TryGetLocalPath();
+        if (output is null) return;
+        var listfile = SelectedListfile(); var readyOnly = _publishReadyOnly.IsChecked == true;
+        var operation = BeginOperation("Planning the complete path-preserving source tree…"); var token = operation.Token;
+        try
+        {
+            var result = await Task.Run(() =>
+            {
+                var plan = StaticM2BatchDownportService.Plan(source, listfile, token);
+                if (!readyOnly && (plan.Blocked > 0 || plan.Failed > 0))
+                    throw new InvalidOperationException($"The tree has {plan.Ready:N0} eligible, {plan.Blocked:N0} blocked, and {plan.Failed:N0} failed model(s). Enable the explicit eligible-only option to publish the verified subset while retaining every blocker in the receipt.");
+                return StaticM2BatchDownportService.Convert(plan, output, readyOnly, cancellationToken: token);
+            }, token);
+            _details.Text = $"PATH-PRESERVING BATCH COMPLETE\n\nPayload: {result.PayloadDirectory}\nReceipt: {result.ReceiptPath}\nWorkers: {result.Workers:N0}\nConverted: {result.Outputs.Count:N0}\nBlocked retained in receipt: {result.Plan.Blocked:N0}\nFailed retained in receipt: {result.Plan.Failed:N0}\n\nOUTPUTS\n{Lines(result.Outputs.Select(value => $"{value.ModelRelativePath} · {value.Vertices:N0} vertices · {value.Triangles:N0} triangles"))}";
+            _summary.Text = $"MPQ-ready relative tree published atomically · {result.Outputs.Count:N0} model(s) · {result.PayloadDirectory}";
+            DesktopCrashLogger.Debug("CONVERT", "path-batch-complete", ("source", source), ("payload", result.PayloadDirectory), ("converted", result.Outputs.Count), ("blocked", result.Plan.Blocked));
+        }
+        catch (OperationCanceledException) { _summary.Text = "Path-preserving batch conversion cancelled before publication."; }
+        catch (Exception exception) { _summary.Text = $"Path-preserving batch blocked: {exception.Message}"; DesktopCrashLogger.Log("Path-preserving M2 batch failed", exception); }
         finally { EndOperation(operation); }
     }
 

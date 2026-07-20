@@ -303,10 +303,18 @@ public static class StaticM2DownportService
     }
 
     public static StaticM2DownportResult Convert(StaticM2DownportPlan plan, string outputDirectory, CancellationToken cancellationToken = default)
+        => ConvertCore(plan, outputDirectory, null, cancellationToken);
+
+    internal static StaticM2DownportResult ConvertPrepared(StaticM2DownportPlan plan, string outputDirectory, FileDataIdListfileSnapshot preparedListfile, CancellationToken cancellationToken = default)
+        => ConvertCore(plan, outputDirectory, preparedListfile, cancellationToken);
+
+    private static StaticM2DownportResult ConvertCore(StaticM2DownportPlan plan, string outputDirectory, FileDataIdListfileSnapshot? preparedListfile, CancellationToken cancellationToken)
     {
         if (plan.FormatVersion != PlanFormatVersion) throw new InvalidDataException($"Unsupported static M2 plan version {plan.FormatVersion}.");
         cancellationToken.ThrowIfCancellationRequested();
-        var current = Plan(plan.SourceModelPath, plan.SourceSkinPath, plan.SourceListfilePath, cancellationToken);
+        var current = preparedListfile is null
+            ? Plan(plan.SourceModelPath, plan.SourceSkinPath, plan.SourceListfilePath, cancellationToken)
+            : PlanWithListfileSnapshot(plan.SourceModelPath, plan.SourceSkinPath, preparedListfile, cancellationToken);
         if (!current.SourceModelSha256.Equals(plan.SourceModelSha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(current.SourceSkinSha256, plan.SourceSkinSha256, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(current.SourceListfileSha256, plan.SourceListfileSha256, StringComparison.OrdinalIgnoreCase))

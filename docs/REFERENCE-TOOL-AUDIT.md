@@ -135,6 +135,8 @@ MultiConverter remains valuable as behavioral evidence for the Legion-to-WotLK w
 4. Parse and validate the resulting M2/WMO structures, list removed or downgraded features (especially particles), and compare dependency closure before accepting output.
 5. Preserve source-relative paths and feed only approved results into a tiny manifest-driven MPQ.
 
+The native replacement now completes this staged contract for the verified version-274 static armor/head profile. It fingerprints a whole source root, resolves one optional listfile once, converts eligible M2/SKIN pairs in isolated bounded-parallel workspaces, independently reloads every result, and atomically publishes exact source-relative paths under one MPQ-ready `Payload` directory. Partial publication is refused by default; explicit ready-only publication keeps every unsupported sibling and reason in the receipt. A real `G:\extras\classic (1)` run converted 68 eligible pairs, retained 44 blockers and zero failures, and an independent follow-up plan classified all 68 outputs as already-Wrath with no blockers or read failures. The remaining native work is broader animated/material M2 coverage and WMO conversion, not wrapping the abandoned converter.
+
 The conversion project format remains backend-neutral so a user can compare another maintained converter's output without making it a trusted or required dependency.
 
 ### Explicitly reject
@@ -149,7 +151,7 @@ The conversion project format remains backend-neutral so a user can compare anot
 
 1. Reconstruct Cataclysm base-plus-`PTCH` effective tables and verify the complete base corpus, then add separately verified WDB5/WDB6/WDC providers without weakening fixed-layout safety.
 2. Bind the landed dependency graph to an effective target-client index so proven inherited assets are omitted from tiny patches.
-3. Native staged modern-to-3.3.5 M2 conversion with explicit feature-loss mapping, followed by WMO support.
+3. Broaden the landed native staged modern-to-3.3.5 M2 writer beyond the verified static profile, followed by WMO support.
 4. Guided NPC appearance import and additive display/extra/SQL planning.
 5. Extend the landed direct MPQ-index GameObject generation contract to CASC virtual paths after real later-client corpus verification.
 6. Extend the landed project-local SQLite spell/table staging foundation with visual query construction and explicit baseline rebase/merge.

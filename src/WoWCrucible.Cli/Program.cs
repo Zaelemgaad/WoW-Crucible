@@ -704,6 +704,32 @@ static int Asset(string[] args)
         }
         return scan.Blocked == 0 && scan.Failed == 0 ? 0 : 3;
     }
+    if (args is ["m2-downport-batch-plan", var batchSourceRoot, .. var batchPlanOptions])
+    {
+        var json = batchPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var listfilePath = Option(batchPlanOptions, "--listfile=");
+        var unknown = batchPlanOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown m2-downport-batch-plan option: {unknown[0]}");
+        var plan = StaticM2BatchDownportService.Plan(batchSourceRoot, listfilePath);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            Console.WriteLine($"SOURCE_ROOT\t{plan.SourceRoot}\nLISTFILE\t{plan.SourceListfilePath ?? "<not selected>"}\nFINGERPRINT\t{plan.Fingerprint}\nFILES\t{plan.Entries.Count:N0}\nCONVERSION_READY\t{plan.Ready:N0}\nALREADY_WOTLK_335\t{plan.AlreadyWotlk335:N0}\nBLOCKED\t{plan.Blocked:N0}\nFAILED\t{plan.Failed:N0}");
+            foreach (var entry in plan.Entries) { Console.WriteLine($"{entry.Status.ToString().ToUpperInvariant()}\t{entry.RelativePath}"); if (entry.Error is not null) Console.WriteLine($"  ERROR\t{entry.Error}"); else foreach (var blocker in entry.ModelPlan?.Blockers ?? []) Console.WriteLine($"  BLOCKER\t{blocker}"); }
+        }
+        return plan.Blocked == 0 && plan.Failed == 0 ? 0 : 3;
+    }
+    if (args is ["m2-downport-batch", var batchApplySourceRoot, var batchOutputRoot, .. var batchOptions])
+    {
+        var listfilePath = Option(batchOptions, "--listfile="); var readyOnly = batchOptions.Contains("--ready-only", StringComparer.OrdinalIgnoreCase); var workersText = Option(batchOptions, "--workers=") ?? "0";
+        var unknown = batchOptions.Where(option => !option.Equals("--ready-only", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--workers=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown m2-downport-batch option: {unknown[0]}");
+        if (!int.TryParse(workersText, out var workers) || workers is < 0 or > StaticM2BatchDownportService.MaximumWorkers) return Fail($"--workers must be 1 through {StaticM2BatchDownportService.MaximumWorkers}, or 0 for automatic.");
+        var plan = StaticM2BatchDownportService.Plan(batchApplySourceRoot, listfilePath);
+        var result = StaticM2BatchDownportService.Convert(plan, batchOutputRoot, readyOnly, workers);
+        Console.WriteLine($"OUTPUT\t{result.OutputDirectory}\nPAYLOAD\t{result.PayloadDirectory}\nRECEIPT\t{result.ReceiptPath}\nCONVERTED\t{result.Outputs.Count:N0}\nBLOCKED_RECORDED\t{result.Plan.Blocked:N0}\nFAILED_RECORDED\t{result.Plan.Failed:N0}\nWORKERS\t{result.Workers:N0}");
+        foreach (var output in result.Outputs) Console.WriteLine($"MODEL\t{output.ModelRelativePath}\t{output.ModelSha256}\nSKIN\t{output.SkinRelativePath}\t{output.SkinSha256}");
+        return result.Plan.Blocked == 0 && result.Plan.Failed == 0 ? 0 : 3;
+    }
     if (args is ["m2-downport", var downportModelPath, var downportOutput, .. var downportOptions])
     {
         var skinPath = Option(downportOptions, "--skin="); var listfilePath = Option(downportOptions, "--listfile="); var unknown = downportOptions.Where(option => !option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray();
@@ -1092,6 +1118,8 @@ Usage:
   wowcrucible asset m2-downport-plan <modern.m2> [--skin=file.skin] [--listfile=id-path.csv] [--format=text|json]
   wowcrucible asset m2-downport-scan <file-or-folder>... [--listfile=id-path.csv] [--format=text|json]
   wowcrucible asset m2-downport <modern.m2> <new-output-folder> [--skin=file.skin] [--listfile=id-path.csv]
+  wowcrucible asset m2-downport-batch-plan <source-root> [--listfile=id-path.csv] [--format=text|json]
+  wowcrucible asset m2-downport-batch <source-root> <new-output-folder> [--listfile=id-path.csv] [--ready-only] [--workers=N]
   wowcrucible asset dependency-graph <processed-library> <root.m2|wmo|adt|wdt> [--target-index=client-index] [--target-choice=client-path|archive]... [--only-problems] [--manifest=patch.json] [--output-mpq=name.MPQ] [--format=text|json]
   wowcrucible asset gameobject-index-plan <client-index> <GameObjectDisplayInfo.dbc> <schema.xml> <new-workspace> <virtual-model-path>... [--display-start=N] [--template-start=N] [--occupied=ids.txt] [--archive-choice=client-path|Data\archive.MPQ]... [--format=text|json]
   wowcrucible asset indexed-snapshot-verify <indexed-assets.snapshot.json> [--archives] [--format=text|json]
