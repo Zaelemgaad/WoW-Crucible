@@ -11,6 +11,20 @@ namespace WoWCrucible.Desktop;
 
 internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
 {
+    private sealed record BridgeTableChoice(int Index, string Label) { public override string ToString() => Label; }
+    private sealed class BridgeColumnChoice
+    {
+        public required string Source { get; init; }
+        public string Target { get; set; } = string.Empty;
+        public bool Drop { get; set; }
+        public bool IsKey { get; init; }
+    }
+    private sealed class BridgeDefaultChoice
+    {
+        public required string Target { get; init; }
+        public LegacyDatabaseAuditValueState State { get; set; } = LegacyDatabaseAuditValueState.Unknown;
+        public string Value { get; set; } = string.Empty;
+    }
     private readonly DesktopWorkspaceSession _session;
     private readonly TextBox _serverRoot = new();
     private readonly TextBox _host = new();
@@ -26,6 +40,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _legacyExcludes = new() { AcceptsReturn = true, PlaceholderText = "Optional table globs to exclude, one per line" };
     private readonly TextBlock _legacyStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly TextBox _recoveryAudit = new() { PlaceholderText = "Verified baseline-to-edited recovery audit" };
+    private readonly TextBox _recoveryTranslation = new() { PlaceholderText = "Optional target-schema bridge profile for old/different core layouts" };
     private readonly TextBox _recoveryPlan = new() { PlaceholderText = "Target-bound synchronization plan" };
     private readonly TextBox _recoveryReceipt = new() { PlaceholderText = "Apply receipt for exact rollback" };
     private readonly CheckBox _recoveryRemovals = new() { Content = "Include explicitly reviewed removals" };
@@ -34,6 +49,17 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _recoveryRemapStart = new() { PlaceholderText = "Optional first remapped ID" };
     private readonly TextBlock _recoveryRemapSummary = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#D5B56A")), IsVisible = false };
     private readonly ListBox _recoveryOperations = new();
+    private readonly ComboBox _bridgeTable = new();
+    private readonly ComboBox _bridgeTargetTable = new();
+    private readonly ListBox _bridgeColumns = new();
+    private readonly ListBox _bridgeDefaults = new();
+    private readonly TextBlock _bridgeStatus = new() { Text = "Generate or load a schema bridge to edit it here.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
+    private DatabaseSyncTranslationProfile? _loadedBridge;
+    private DatabaseCapabilities? _bridgeCapabilities;
+    private int _bridgeRuleIndex = -1;
+    private List<BridgeColumnChoice> _bridgeColumnRows = [];
+    private List<BridgeDefaultChoice> _bridgeDefaultRows = [];
+    private bool _bridgeUiChanging;
     private readonly Border _recoveryConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private DatabaseSyncPlan? _loadedRecoveryPlan;
     private readonly TextBox _syncSourceDbc = new() { PlaceholderText = "Edited source DBC" };
@@ -161,6 +187,8 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         var inspectAudit = new Button { Content = "Verify an audit…" };
         inspectAudit.Click += async (_, _) => await InspectAuditAsync();
         var browseAudit = new Button { Content = "Audit…" }; browseAudit.Click += async (_, _) => await PickRecoveryInputAsync(_recoveryAudit, "Select a verified baseline-to-edited audit", "*.crucible-db-audit");
+        var createBridge = new Button { Content = "Generate schema bridge…" }; createBridge.Click += async (_, _) => await BuildSchemaBridgeAsync();
+        var browseBridge = new Button { Content = "Bridge…" }; browseBridge.Click += async (_, _) => await PickAndLoadSchemaBridgeAsync();
         var buildPlan = AccentButton("Compare audit with connected target"); buildPlan.Click += async (_, _) => await BuildDatabaseSyncPlanAsync();
         var browsePlan = new Button { Content = "Plan…" }; browsePlan.Click += async (_, _) => await PickRecoveryInputAsync(_recoveryPlan, "Select a target-bound synchronization plan", "*.json");
         var inspectPlan = new Button { Content = "Verify / load plan" }; inspectPlan.Click += async (_, _) => await LoadDatabaseSyncPlanAsync();
@@ -190,6 +218,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             Content = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { _legacyIncludes, WithColumn(_legacyExcludes, 1) } }
         };
         var auditPath = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Children = { _recoveryAudit, WithColumn(browseAudit, 1) } };
+        var bridgePath = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { _recoveryTranslation, WithColumn(createBridge, 1), WithColumn(browseBridge, 2) } };
         var planPath = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { _recoveryPlan, WithColumn(browsePlan, 1), WithColumn(inspectPlan, 2) } };
         var receiptPath = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { _recoveryReceipt, WithColumn(chooseReceipt, 1), WithColumn(browseReceipt, 2) } };
         var configuration = new ScrollViewer
@@ -213,8 +242,9 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                     audit,
                     new Border { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _legacyStatus },
                     new TextBlock { Text = "Compare and synchronize with the connected target", FontSize = 18, FontWeight = FontWeight.SemiBold },
-                    new TextBlock { Text = "A plan requires a verified matching-core baseline audit. Crucible compares every selected primary-keyed row with the live target, excludes removals by default, and binds the result to this exact host/user/database. Dependency closure follows only exact declared or named core relationship values through other changed audit rows; every causal inclusion remains visible. Occupied added IDs remain conflicts unless remapping is explicitly enabled.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
+                    new TextBlock { Text = "A plan requires a verified matching-core baseline audit. For a different target layout, generate a schema bridge: unchanged names pass through automatically while table/column renames, omitted source fields, and required target defaults stay explicit. The bridge bytes and live target schema are hash-bound, and structural one-to-many conversions remain blocked instead of guessed. Dependency closure follows only exact relationships; occupied IDs remain conflicts unless remapping is enabled.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) },
                     auditPath,
+                    bridgePath,
                     new WrapPanel { Children = { _recoveryRemovals, _recoveryDependencyClosure, _recoveryAutoRemap, _recoveryRemapStart, buildPlan } },
                     _recoveryRemapSummary,
                     planPath,
@@ -225,7 +255,8 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                 }
             }
         };
-        return new ResponsiveSplitGrid(configuration, new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _recoveryOperations }, 3, 2, 1.7);
+        var reviewTabs = new TabControl { ItemsSource = new[] { new TabItem { Header = "Target plan rows", Content = _recoveryOperations }, new TabItem { Header = "Schema bridge editor", Content = BuildSchemaBridgeEditor() } } };
+        return new ResponsiveSplitGrid(configuration, new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = reviewTabs }, 3, 2, 1.7);
     }
 
     private Control DbcSqlDeploymentPage()
@@ -570,12 +601,195 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         try
         {
             var progress = new Progress<(string Stage, string? Table, int Completed, int Total)>(value => _legacyStatus.Text = $"{value.Stage}{(value.Table is null ? string.Empty : $" · {value.Table}")} · {value.Completed:N0}/{value.Total:N0} tables");
-            var result = await new DatabaseSynchronizationService().BuildPlanAsync(audit, _session.DatabaseProfile, output, new(Patterns(_legacyIncludes.Text), _recoveryRemovals.IsChecked == true, AutoRemapCollisions: _recoveryAutoRemap.IsChecked == true, RemapStart: remapStart, IncludeDependencyClosure: _recoveryDependencyClosure.IsChecked == true), progress, _operation!.Token);
+            var translation = string.IsNullOrWhiteSpace(_recoveryTranslation.Text) ? null : Path.GetFullPath(_recoveryTranslation.Text);
+            var result = await new DatabaseSynchronizationService().BuildPlanAsync(audit, _session.DatabaseProfile, output, new(Patterns(_legacyIncludes.Text), _recoveryRemovals.IsChecked == true, AutoRemapCollisions: _recoveryAutoRemap.IsChecked == true, RemapStart: remapStart, IncludeDependencyClosure: _recoveryDependencyClosure.IsChecked == true, TranslationProfilePath: translation), progress, _operation!.Token);
             _recoveryPlan.Text = result.Path; ShowDatabaseSyncPlan(result.Plan);
         }
         catch (OperationCanceledException) { _legacyStatus.Text = "Target comparison cancelled; no partial plan was published."; }
         catch (Exception exception) { _legacyStatus.Text = $"Target comparison failed: {exception.Message}"; DesktopCrashLogger.Log("Database synchronization plan failed", exception); }
         finally { EndOperation(); }
+    }
+
+    private async Task BuildSchemaBridgeAsync()
+    {
+        if (!_session.DatabaseTested || _session.DatabaseProfile is null) { _legacyStatus.Text = "Connect and verify the target database before generating its schema bridge."; return; }
+        var audit = _recoveryAudit.Text; if (string.IsNullOrWhiteSpace(audit) || !File.Exists(audit)) { _legacyStatus.Text = "Choose a verified baseline-to-edited recovery audit first."; return; }
+        var destination = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Save editable target-schema bridge", SuggestedFileName = $"{_session.DatabaseProfile.Database}.crucible-db-bridge.json", FileTypeChoices = [new FilePickerFileType("Crucible database schema bridge") { Patterns = ["*.crucible-db-bridge.json", "*.json"] }] });
+        var output = destination?.TryGetLocalPath(); if (output is null) return; if (File.Exists(output)) { _legacyStatus.Text = "That bridge path already exists. Choose a new path so reviewed mappings are never silently replaced."; return; }
+        BeginOperation("Comparing audited source fields with the connected target schema…");
+        try
+        {
+            var progress = new Progress<(string Stage, string? Table, int Completed, int Total)>(value => _legacyStatus.Text = $"{value.Stage}{(value.Table is null ? string.Empty : $" · {value.Table}")} · {value.Completed:N0}/{value.Total:N0} tables");
+            var result = await new DatabaseSynchronizationService().BuildTranslationTemplateAsync(audit, _session.DatabaseProfile, output, Patterns(_legacyIncludes.Text), progress: progress, cancellationToken: _operation!.Token);
+            _recoveryTranslation.Text = result.Path;
+            var capabilities = await new DatabaseCapabilityService().InspectAsync(_session.DatabaseProfile, _operation!.Token); SetBridgeEditor(result.Profile, capabilities, result.Path);
+            var unresolvedTables = result.Profile.Tables.Count(table => string.IsNullOrWhiteSpace(table.TargetTable));
+            var unresolvedColumns = result.Profile.Tables.Sum(table => table.ColumnMappings.Count(mapping => string.IsNullOrWhiteSpace(mapping.TargetColumn)) + table.TargetDefaults.Count(value => value.Value.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing));
+            _legacyStatus.Text = $"Generated an editable, audit-bound schema bridge with {result.Profile.Tables.Count:N0} table rule(s) from {result.Operations:N0} changed row(s).\n{unresolvedTables:N0} table target(s) and {unresolvedColumns:N0} column/default value(s) require review. Blank mappings intentionally block planning; assign a target name, move a non-key source column into DroppedSourceColumns, or provide a typed target default.\nArtifact: {result.Path}";
+        }
+        catch (OperationCanceledException) { _legacyStatus.Text = "Schema bridge generation cancelled; no partial artifact was published."; }
+        catch (Exception exception) { _legacyStatus.Text = $"Schema bridge generation failed safely: {exception.Message}"; DesktopCrashLogger.Log("Database schema bridge generation failed", exception); }
+        finally { EndOperation(); }
+    }
+
+    private Control BuildSchemaBridgeEditor()
+    {
+        const string unresolved = "⟨unresolved — blocks planning⟩";
+        var load = new Button { Content = "Load selected profile" }; load.Click += async (_, _) => await LoadSchemaBridgeEditorAsync(_recoveryTranslation.Text);
+        var save = AccentButton("Save reviewed bridge"); save.Click += async (_, _) => await SaveSchemaBridgeEditorAsync();
+        _bridgeTable.SelectionChanged += (_, _) =>
+        {
+            if (_bridgeUiChanging || _bridgeTable.SelectedItem is not BridgeTableChoice choice) return;
+            CommitBridgeRule(); _bridgeRuleIndex = choice.Index; RenderBridgeRule();
+        };
+        _bridgeTargetTable.SelectionChanged += (_, _) =>
+        {
+            if (_bridgeUiChanging || _loadedBridge is null || _bridgeRuleIndex < 0) return;
+            CommitBridgeRule(); var selected = Convert.ToString(_bridgeTargetTable.SelectedItem) ?? unresolved;
+            var rules = _loadedBridge.Tables.ToArray(); rules[_bridgeRuleIndex] = rules[_bridgeRuleIndex] with { TargetTable = selected == unresolved ? string.Empty : selected, ColumnMappings = [], DroppedSourceColumns = [], TargetDefaults = [] };
+            _loadedBridge = _loadedBridge with { Tables = rules }; RenderBridgeRule();
+        };
+        var header = new StackPanel
+        {
+            Margin = new Thickness(10), Spacing = 8, Children =
+            {
+                new TextBlock { Text = "Exact cross-core schema bridge", FontSize = 18, FontWeight = FontWeight.SemiBold },
+                new TextBlock { Text = "Select a source table and target table. Every observed source column then maps by name, maps to a selected target column, or is explicitly dropped. Primary keys cannot be dropped. Required INSERT defaults stay Unknown until reviewed; unresolved values block the plan.", TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) },
+                new WrapPanel { Children = { load, save } }, _bridgeStatus,
+                new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { _bridgeTable, WithColumn(_bridgeTargetTable, 1) } }
+            }
+        };
+        _bridgeColumns.ItemTemplate = new FuncDataTemplate<BridgeColumnChoice>((row, _) =>
+        {
+            if (row is null) return new TextBlock();
+            var targets = new[] { unresolved }.Concat(_bridgeCapabilities?.FindTable(CurrentBridgeTarget())?.Columns.Select(column => column.Name) ?? []).ToArray();
+            var target = new ComboBox { ItemsSource = targets, SelectedItem = string.IsNullOrWhiteSpace(row.Target) ? unresolved : row.Target };
+            var drop = new CheckBox { Content = row.IsKey ? "Primary key" : "Drop explicitly", IsChecked = row.Drop, IsEnabled = !row.IsKey };
+            target.SelectionChanged += (_, _) => { var selected = Convert.ToString(target.SelectedItem) ?? unresolved; row.Target = selected == unresolved ? string.Empty : selected; if (row.Target.Length > 0) { row.Drop = false; drop.IsChecked = false; } RebuildBridgeDefaultRows(); RefreshBridgeStatus(); };
+            drop.IsCheckedChanged += (_, _) => { row.Drop = drop.IsChecked == true; if (row.Drop) { row.Target = string.Empty; target.SelectedItem = unresolved; } RebuildBridgeDefaultRows(); RefreshBridgeStatus(); };
+            return new Grid { Margin = new Thickness(8, 4), ColumnDefinitions = new("*,*,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = row.Source, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap }, WithColumn(target, 1), WithColumn(drop, 2) } };
+        });
+        _bridgeDefaults.ItemTemplate = new FuncDataTemplate<BridgeDefaultChoice>((row, _) =>
+        {
+            if (row is null) return new TextBlock();
+            var state = new ComboBox { ItemsSource = new[] { LegacyDatabaseAuditValueState.Unknown, LegacyDatabaseAuditValueState.Scalar, LegacyDatabaseAuditValueState.Null, LegacyDatabaseAuditValueState.Binary }, SelectedItem = row.State };
+            var value = new TextBox { Text = row.Value, PlaceholderText = "Scalar text or base64 bytes" };
+            state.SelectionChanged += (_, _) => { if (state.SelectedItem is LegacyDatabaseAuditValueState selected) row.State = selected; value.IsEnabled = row.State is LegacyDatabaseAuditValueState.Scalar or LegacyDatabaseAuditValueState.Binary; RefreshBridgeStatus(); };
+            value.TextChanged += (_, _) => { row.Value = value.Text ?? string.Empty; RefreshBridgeStatus(); };
+            value.IsEnabled = row.State is LegacyDatabaseAuditValueState.Scalar or LegacyDatabaseAuditValueState.Binary;
+            return new Grid { Margin = new Thickness(8, 4), ColumnDefinitions = new("*,Auto,*"), ColumnSpacing = 8, Children = { new TextBlock { Text = row.Target, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap }, WithColumn(state, 1), WithColumn(value, 2) } };
+        });
+        return new Grid
+        {
+            RowDefinitions = new("Auto,Auto,*,Auto,*"),
+            Children =
+            {
+                header,
+                WithRow(new TextBlock { Margin = new Thickness(10, 5), Text = "Observed source columns", FontWeight = FontWeight.SemiBold }, 1),
+                WithRow(_bridgeColumns, 2),
+                WithRow(new TextBlock { Margin = new Thickness(10, 5), Text = "Required target defaults for added rows", FontWeight = FontWeight.SemiBold }, 3),
+                WithRow(_bridgeDefaults, 4)
+            }
+        };
+    }
+
+    private async Task PickAndLoadSchemaBridgeAsync()
+    {
+        var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Select a target-schema bridge profile", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("Crucible database schema bridge") { Patterns = ["*.crucible-db-bridge.json", "*.json"] }] });
+        var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return; _recoveryTranslation.Text = path; await LoadSchemaBridgeEditorAsync(path);
+    }
+
+    private async Task LoadSchemaBridgeEditorAsync(string? path)
+    {
+        if (!_session.DatabaseTested || _session.DatabaseProfile is null) { _bridgeStatus.Text = "Connect and verify the target database before loading its bridge editor."; return; }
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) { _bridgeStatus.Text = "Choose or generate an existing schema bridge profile first."; return; }
+        BeginOperation("Loading and verifying the schema bridge target…");
+        try
+        {
+            var service = new DatabaseSyncTranslationService(); var profile = await service.LoadAsync(path, _operation!.Token); var capabilities = await new DatabaseCapabilityService().InspectAsync(_session.DatabaseProfile, _operation.Token);
+            if (!profile.TargetSchemaSha256.Equals(DatabaseSyncTranslationService.HashTargetSchema(capabilities), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("This bridge belongs to a different or older target schema. Generate a new bridge so mappings cannot silently drift.");
+            _ = service.Translate([], profile, profile.SourceAuditSha256, capabilities); SetBridgeEditor(profile, capabilities, path);
+        }
+        catch (Exception exception) { _loadedBridge = null; _bridgeCapabilities = null; _bridgeRuleIndex = -1; _bridgeColumns.ItemsSource = null; _bridgeDefaults.ItemsSource = null; _bridgeStatus.Text = $"Bridge load failed safely: {exception.Message}"; DesktopCrashLogger.Log("Database schema bridge load failed", exception); }
+        finally { EndOperation(); }
+    }
+
+    private void SetBridgeEditor(DatabaseSyncTranslationProfile profile, DatabaseCapabilities capabilities, string path)
+    {
+        _loadedBridge = profile; _bridgeCapabilities = capabilities; _bridgeRuleIndex = profile.Tables.Count == 0 ? -1 : 0; _recoveryTranslation.Text = Path.GetFullPath(path);
+        _bridgeUiChanging = true; _bridgeTable.ItemsSource = profile.Tables.Select((rule, index) => new BridgeTableChoice(index, $"{rule.SourceTable} → {(string.IsNullOrWhiteSpace(rule.TargetTable) ? "UNRESOLVED" : rule.TargetTable)}")).ToArray(); _bridgeTable.SelectedIndex = _bridgeRuleIndex; _bridgeUiChanging = false; RenderBridgeRule();
+    }
+
+    private async Task SaveSchemaBridgeEditorAsync()
+    {
+        if (_loadedBridge is null || string.IsNullOrWhiteSpace(_recoveryTranslation.Text)) { _bridgeStatus.Text = "Load or generate a bridge before saving."; return; }
+        try
+        {
+            CommitBridgeRule(); await DatabaseSyncTranslationService.WriteAsync(_recoveryTranslation.Text, _loadedBridge, overwrite: true);
+            _bridgeUiChanging = true; _bridgeTable.ItemsSource = _loadedBridge.Tables.Select((rule, index) => new BridgeTableChoice(index, $"{rule.SourceTable} → {(string.IsNullOrWhiteSpace(rule.TargetTable) ? "UNRESOLVED" : rule.TargetTable)}")).ToArray(); _bridgeTable.SelectedIndex = _bridgeRuleIndex; _bridgeUiChanging = false;
+            RefreshBridgeStatus("Saved atomically. ");
+        }
+        catch (Exception exception) { _bridgeStatus.Text = $"Bridge save failed safely: {exception.Message}"; DesktopCrashLogger.Log("Database schema bridge save failed", exception); }
+    }
+
+    private void RenderBridgeRule()
+    {
+        const string unresolved = "⟨unresolved — blocks planning⟩";
+        if (_loadedBridge is null || _bridgeCapabilities is null || _bridgeRuleIndex < 0 || _bridgeRuleIndex >= _loadedBridge.Tables.Count) { _bridgeColumns.ItemsSource = null; _bridgeDefaults.ItemsSource = null; RefreshBridgeStatus(); return; }
+        var rule = _loadedBridge.Tables[_bridgeRuleIndex]; var target = _bridgeCapabilities.FindTable(rule.TargetTable);
+        _bridgeUiChanging = true; _bridgeTargetTable.ItemsSource = new[] { unresolved }.Concat(_bridgeCapabilities.Tables.Keys.Order(StringComparer.OrdinalIgnoreCase)).ToArray(); _bridgeTargetTable.SelectedItem = target?.Name ?? unresolved; _bridgeUiChanging = false;
+        var mappings = rule.ColumnMappings.ToDictionary(mapping => mapping.SourceColumn, StringComparer.OrdinalIgnoreCase); var drops = rule.DroppedSourceColumns.ToHashSet(StringComparer.OrdinalIgnoreCase); var keys = (rule.SourcePrimaryKeyColumns ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var observed = rule.ObservedSourceColumns ?? rule.ColumnMappings.Select(mapping => mapping.SourceColumn).Concat(rule.DroppedSourceColumns).Concat(rule.SourcePrimaryKeyColumns ?? []).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        _bridgeColumnRows = observed.Select(source => new BridgeColumnChoice { Source = source, IsKey = keys.Contains(source), Drop = drops.Contains(source), Target = mappings.TryGetValue(source, out var mapping) ? mapping.TargetColumn : target?.Find(source)?.Name ?? string.Empty }).ToList();
+        var defaults = rule.TargetDefaults.ToDictionary(value => value.TargetColumn, StringComparer.OrdinalIgnoreCase); var required = new HashSet<string>(defaults.Keys, StringComparer.OrdinalIgnoreCase);
+        if (rule.RequiresInsertDefaults && target is not null)
+        {
+            var mapped = _bridgeColumnRows.Where(row => !row.Drop && row.Target.Length > 0).Select(row => row.Target).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var column in target.Columns.Where(column => !mapped.Contains(column.Name) && !column.Nullable && column.DefaultValue is null && !column.Extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase) && !column.Extra.Contains("generated", StringComparison.OrdinalIgnoreCase))) required.Add(column.Name);
+        }
+        _bridgeDefaultRows = required.Order(StringComparer.OrdinalIgnoreCase).Select(column =>
+        {
+            var value = defaults.GetValueOrDefault(column)?.Value ?? LegacyDatabaseAuditValue.Unknown;
+            return new BridgeDefaultChoice { Target = column, State = value.State, Value = value.Value ?? string.Empty };
+        }).ToList();
+        _bridgeColumns.ItemsSource = _bridgeColumnRows; _bridgeDefaults.ItemsSource = _bridgeDefaultRows; RefreshBridgeStatus();
+    }
+
+    private void RebuildBridgeDefaultRows()
+    {
+        if (_loadedBridge is null || _bridgeCapabilities is null || _bridgeRuleIndex < 0 || _bridgeRuleIndex >= _loadedBridge.Tables.Count) return;
+        var rule = _loadedBridge.Tables[_bridgeRuleIndex]; var target = _bridgeCapabilities.FindTable(rule.TargetTable); if (target is null) { _bridgeDefaultRows = []; _bridgeDefaults.ItemsSource = _bridgeDefaultRows; return; }
+        var previous = _bridgeDefaultRows.ToDictionary(row => row.Target, StringComparer.OrdinalIgnoreCase); var mapped = _bridgeColumnRows.Where(row => !row.Drop && row.Target.Length > 0).Select(row => row.Target).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var required = rule.RequiresInsertDefaults
+            ? target.Columns.Where(column => !mapped.Contains(column.Name) && !column.Nullable && column.DefaultValue is null && !column.Extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase) && !column.Extra.Contains("generated", StringComparison.OrdinalIgnoreCase)).Select(column => column.Name).Order(StringComparer.OrdinalIgnoreCase).ToArray()
+            : rule.TargetDefaults.Select(value => value.TargetColumn).Where(column => !mapped.Contains(column)).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        _bridgeDefaultRows = required.Select(column => previous.TryGetValue(column, out var row) ? row : new BridgeDefaultChoice { Target = column }).ToList(); _bridgeDefaults.ItemsSource = _bridgeDefaultRows;
+    }
+
+    private void CommitBridgeRule()
+    {
+        if (_loadedBridge is null || _bridgeRuleIndex < 0 || _bridgeRuleIndex >= _loadedBridge.Tables.Count) return;
+        var rules = _loadedBridge.Tables.ToArray(); var rule = rules[_bridgeRuleIndex];
+        var mappings = _bridgeColumnRows.Where(row => !row.Drop && (row.Target.Length == 0 || !row.Target.Equals(row.Source, StringComparison.OrdinalIgnoreCase))).Select(row => new DatabaseSyncColumnTranslation(row.Source, row.Target)).ToArray();
+        var drops = _bridgeColumnRows.Where(row => row.Drop).Select(row => row.Source).ToArray();
+        var defaults = _bridgeDefaultRows.Select(row => new DatabaseSyncTargetDefault(row.Target, row.State switch
+        {
+            LegacyDatabaseAuditValueState.Null => LegacyDatabaseAuditValue.Null,
+            LegacyDatabaseAuditValueState.Scalar => new(LegacyDatabaseAuditValueState.Scalar, row.Value),
+            LegacyDatabaseAuditValueState.Binary => new(LegacyDatabaseAuditValueState.Binary, row.Value),
+            _ => LegacyDatabaseAuditValue.Unknown
+        })).ToArray();
+        rules[_bridgeRuleIndex] = rule with { ColumnMappings = mappings, DroppedSourceColumns = drops, TargetDefaults = defaults }; _loadedBridge = _loadedBridge with { Tables = rules };
+    }
+
+    private string CurrentBridgeTarget() => _loadedBridge is not null && _bridgeRuleIndex >= 0 && _bridgeRuleIndex < _loadedBridge.Tables.Count ? _loadedBridge.Tables[_bridgeRuleIndex].TargetTable : string.Empty;
+
+    private void RefreshBridgeStatus(string prefix = "")
+    {
+        if (_loadedBridge is null) { _bridgeStatus.Text = prefix + "Generate or load a schema bridge to edit it here."; return; }
+        var tableGaps = _loadedBridge.Tables.Count(rule => string.IsNullOrWhiteSpace(rule.TargetTable));
+        var currentColumnGaps = _bridgeColumnRows.Count(row => !row.Drop && string.IsNullOrWhiteSpace(row.Target)); var currentDefaultGaps = _bridgeDefaultRows.Count(row => row.State is LegacyDatabaseAuditValueState.Unknown or LegacyDatabaseAuditValueState.Missing);
+        _bridgeStatus.Text = prefix + $"{_loadedBridge.Name} · {_loadedBridge.Tables.Count:N0} table rule(s) · {tableGaps:N0} unresolved table(s). Current table: {currentColumnGaps:N0} unresolved column(s), {currentDefaultGaps:N0} unresolved default(s). Unknown/blank values block planning.";
     }
 
     private async Task LoadDatabaseSyncPlanAsync()
@@ -591,15 +805,19 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     {
         _loadedRecoveryPlan = plan; _recoveryOperations.ItemsSource = plan.Operations;
         var dependencyInclusions = plan.DependencyInclusions ?? [];
+        var schemaTranslations = plan.SchemaTranslations ?? [];
         var dependencyLines = dependencyInclusions.Take(500).Select(inclusion => $"{inclusion.IncludedIdentity} ← {inclusion.Relation} ({inclusion.SelectedEndpoint} = {inclusion.IncludedEndpoint} = {inclusion.MatchedValue}) from {inclusion.SelectedIdentity}").ToList();
         if (dependencyInclusions.Count > dependencyLines.Count) dependencyLines.Add($"… {dependencyInclusions.Count - dependencyLines.Count:N0} more causal edges remain in the hash-bound plan artifact and CLI inspection output.");
-        _recoveryRemapSummary.IsVisible = plan.IdRemaps.Count > 0 || dependencyInclusions.Count > 0;
+        var translationLines = schemaTranslations.Take(500).Select(item => $"{item.Action}: {item.SourceTable}.{item.SourceColumn} → {item.TargetTable}.{item.TargetColumn} · {item.Operations:N0} operation(s)").ToList();
+        if (schemaTranslations.Count > translationLines.Count) translationLines.Add($"… {schemaTranslations.Count - translationLines.Count:N0} more translation rules remain in the hash-bound plan artifact and CLI inspection output.");
+        _recoveryRemapSummary.IsVisible = plan.IdRemaps.Count > 0 || dependencyInclusions.Count > 0 || schemaTranslations.Count > 0;
         _recoveryRemapSummary.Text = string.Join(Environment.NewLine + Environment.NewLine, new[]
         {
             plan.IdRemaps.Count == 0 ? string.Empty : "ID remaps — review before apply:\n" + string.Join(Environment.NewLine, plan.IdRemaps.Select(remap => $"{remap.Table}.{remap.Column}: {remap.SourceId} → {remap.TargetId} · {remap.RewrittenReferences:N0} recognized reference(s) rewritten")),
-            dependencyInclusions.Count == 0 ? string.Empty : "Dependency additions — exact causal edges:\n" + string.Join(Environment.NewLine, dependencyLines)
+            dependencyInclusions.Count == 0 ? string.Empty : "Dependency additions — exact causal edges:\n" + string.Join(Environment.NewLine, dependencyLines),
+            schemaTranslations.Count == 0 ? string.Empty : $"Schema bridge — {plan.TranslationProfileName} · {plan.TranslationProfileSha256}:\n" + string.Join(Environment.NewLine, translationLines)
         }.Where(section => section.Length > 0));
-        _legacyStatus.Text = $"Verified target plan for {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}.\n{plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already applied · {plan.Conflicts:N0} conflicts · {plan.Blocked:N0} blocked · {plan.IdRemaps.Count:N0} ID remaps · {(plan.DependencyInclusions?.Count ?? 0):N0} dependency additions · {plan.Operations.Count:N0} total.\n{(plan.RemovalsIncluded ? "Explicit removals are included." : "Removals are excluded.")}";
+        _legacyStatus.Text = $"Verified target plan for {plan.Target.User}@{plan.Target.Host}:{plan.Target.Port}/{plan.Target.Database}.\n{plan.Ready:N0} ready · {plan.AlreadyApplied:N0} already applied · {plan.Conflicts:N0} conflicts · {plan.Blocked:N0} blocked · {plan.IdRemaps.Count:N0} ID remaps · {(plan.DependencyInclusions?.Count ?? 0):N0} dependency additions · {schemaTranslations.Count:N0} translation rules · {plan.Operations.Count:N0} total.\nTarget schema: {plan.TargetSchemaSha256 ?? "legacy plan without schema binding"}. {(plan.RemovalsIncluded ? "Explicit removals are included." : "Removals are excluded.")}";
     }
 
     private async Task ExportDatabaseSyncPreviewAsync()

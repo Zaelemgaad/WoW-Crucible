@@ -30,7 +30,8 @@ public partial class App : Application
                     library = arguments[assetComparisonIndex + 1].Trim('"');
                 window.Opened += (_, _) => window.OpenAssetComparison(library);
             }
-            if (arguments.Any(argument => IsOption(argument, "--sql-studio"))) window.Opened += (_, _) => window.OpenSqlWorkspace();
+            if (arguments.Any(argument => IsOption(argument, "--server-sql"))) window.Opened += (_, _) => window.OpenServerSqlWorkspace();
+            else if (arguments.Any(argument => IsOption(argument, "--sql-studio"))) window.Opened += (_, _) => window.OpenSqlWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--projects"))) window.Opened += (_, _) => window.OpenProjectWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--client"))) window.Opened += (_, _) => window.OpenClientWorkspace();
             else if (arguments.FirstOrDefault(argument => IsOption(argument, "--lighting")) is { } lightingArgument)

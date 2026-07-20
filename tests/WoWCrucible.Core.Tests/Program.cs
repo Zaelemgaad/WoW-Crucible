@@ -28,6 +28,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("texture luminance mask").FirstOrDefault()?.Command.Id != "workspace.textures" ||
     CrucibleCommandCatalog.Search("wiki field help").FirstOrDefault()?.Command.Id != "workspace.knowledge" ||
     CrucibleCommandCatalog.Search("wdb cache parser").FirstOrDefault()?.Command.Id != "workspace.cache" ||
+    CrucibleCommandCatalog.Search("cross core schema bridge").FirstOrDefault()?.Command.Id != "workspace.server" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
 
@@ -3211,6 +3212,64 @@ try
     throw new InvalidOperationException("Database recovery dependency closure exceeded its explicit operation cap.");
 }
 catch (InvalidOperationException exception) when (exception.Message.Contains("safety limit", StringComparison.OrdinalIgnoreCase)) { }
+var bridgeTargetTable = new DatabaseTableCapability("new_items",
+[
+    new("id", "int", "int unsigned", false, null, "PRI", "", 1),
+    new("title", "varchar", "varchar(255)", false, null, "", "", 2),
+    new("power", "int", "int unsigned", false, null, "", "", 3)
+]);
+var bridgeVendorTable = new DatabaseTableCapability("new_vendor", [new("owner_id", "int", "int unsigned", false, null, "PRI", "", 1), new("item_id", "int", "int unsigned", false, null, "PRI", "", 2)]);
+var bridgeCapabilities = new DatabaseCapabilities("fixture-mysql", "target_world", new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [bridgeTargetTable.Name] = bridgeTargetTable, [bridgeVendorTable.Name] = bridgeVendorTable },
+    [new("translated-item-vendor", "new_vendor", "item_id", "new_items", "id", false, "translated item vendor")]);
+var bridgeSourceHash = new string('b', 64);
+var bridgeAdded = new DatabaseSyncOperation("old_items", LegacyDatabaseContentDomain.ItemsAndSets, LegacyDatabaseRowChangeKind.Added,
+    [new("entry", DependencyValue(5))],
+    [new("entry", LegacyDatabaseAuditValue.Missing, DependencyValue(5)), new("name", LegacyDatabaseAuditValue.Missing, new(LegacyDatabaseAuditValueState.Scalar, "Bridge Blade")), new("obsolete", LegacyDatabaseAuditValue.Missing, new(LegacyDatabaseAuditValueState.Scalar, "legacy-only"))],
+    DatabaseSyncOperationStatus.Ready, "fixture");
+var bridgeService = new DatabaseSyncTranslationService(); var bridgeTemplate = bridgeService.CreateTemplate("fixture bridge", bridgeSourceHash, bridgeCapabilities, [bridgeAdded]);
+var templateRule = bridgeTemplate.Tables.Single();
+if (templateRule.TargetTable.Length != 0 || templateRule.ColumnMappings.Count != 3 || templateRule.ColumnMappings.Any(mapping => mapping.TargetColumn.Length != 0))
+    throw new InvalidOperationException("Cross-core schema bridge template guessed a missing target table or column mapping.");
+var resolvedBridge = bridgeTemplate with
+{
+    Tables = [templateRule with
+    {
+        TargetTable = "new_items",
+        ColumnMappings = [new("entry", "id"), new("name", "title")],
+        DroppedSourceColumns = ["obsolete"],
+        TargetDefaults = [new("power", DependencyValue(7))]
+    }]
+};
+var bridgeTranslation = bridgeService.Translate([bridgeAdded], resolvedBridge, bridgeSourceHash, bridgeCapabilities); var bridged = bridgeTranslation.Operations.Single();
+if (bridgeTranslation.BlockedOperations != 0 || bridged.Table != "new_items" || bridged.Key.Single().Column != "id" ||
+    !bridged.Fields.Select(field => field.Column).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(["id", "title", "power"]) ||
+    bridgeTranslation.Evidence.Select(item => item.Action).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(["Table", "Key", "Column", "Drop", "Default"]) == false)
+    throw new InvalidOperationException("Cross-core schema bridge lost an exact table/key/field rename, explicit drop, or typed target default.");
+var bridgeVendor = new DatabaseSyncOperation("old_vendor", LegacyDatabaseContentDomain.VendorsAndLoot, LegacyDatabaseRowChangeKind.Added,
+    [new("entry", DependencyValue(200)), new("item", DependencyValue(5))],
+    [new("entry", LegacyDatabaseAuditValue.Missing, DependencyValue(200)), new("item", LegacyDatabaseAuditValue.Missing, DependencyValue(5))], DatabaseSyncOperationStatus.Ready, "fixture");
+var bridgeWithVendor = resolvedBridge with { Tables = [.. resolvedBridge.Tables, new("old_vendor", "new_vendor", [new("entry", "owner_id"), new("item", "item_id")], [], [])] };
+var translatedClosureCandidates = bridgeService.Translate([bridgeAdded, bridgeVendor], bridgeWithVendor, bridgeSourceHash, bridgeCapabilities).Operations;
+var translatedClosure = DatabaseSynchronizationService.ExpandDependencyClosure([translatedClosureCandidates[0]], translatedClosureCandidates, bridgeCapabilities.Relationships);
+if (translatedClosure.Operations.Count != 2 || translatedClosure.Inclusions.Single().Relation != "translated-item-vendor" || translatedClosure.Inclusions.Single().MatchedValue != "5")
+    throw new InvalidOperationException("Dependency closure did not follow exact target-side relationships after cross-core schema translation.");
+var unresolvedBridge = bridgeService.Translate([bridgeAdded], bridgeTemplate, bridgeSourceHash, bridgeCapabilities);
+if (unresolvedBridge.BlockedOperations != 1 || !unresolvedBridge.Operations[0].Finding.Contains("no target table selected", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Cross-core schema bridge did not visibly block an unresolved template.");
+var keyDropBridge = resolvedBridge with { Tables = [resolvedBridge.Tables[0] with { ColumnMappings = [new("name", "title")], DroppedSourceColumns = ["entry", "obsolete"] }] };
+if (bridgeService.Translate([bridgeAdded], keyDropBridge, bridgeSourceHash, bridgeCapabilities).Operations[0].Finding.Contains("cannot be dropped", StringComparison.OrdinalIgnoreCase) == false)
+    throw new InvalidOperationException("Cross-core schema bridge allowed a primary-key column to be dropped.");
+var collapsingSource = bridgeAdded with { Table = "old_items_alias" }; var collapsingBridge = resolvedBridge with { Tables = [.. resolvedBridge.Tables, resolvedBridge.Tables[0] with { SourceTable = "old_items_alias" }] };
+var collapsedRows = bridgeService.Translate([bridgeAdded, collapsingSource], collapsingBridge, bridgeSourceHash, bridgeCapabilities);
+if (collapsedRows.BlockedOperations != 2 || collapsedRows.Operations.Any(operation => !operation.Finding.Contains("Multiple changed source rows", StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("Cross-core schema bridge allowed two source rows to collapse onto one target identity.");
+var changedBridgeCapabilities = bridgeCapabilities with { Tables = new Dictionary<string, DatabaseTableCapability>(StringComparer.OrdinalIgnoreCase) { [bridgeTargetTable.Name] = bridgeTargetTable with { Columns = [.. bridgeTargetTable.Columns, new("later", "int", "int", true, null, "", "", 4)] }, [bridgeVendorTable.Name] = bridgeVendorTable } };
+try { _ = bridgeService.Translate([bridgeAdded], resolvedBridge, bridgeSourceHash, changedBridgeCapabilities); throw new InvalidOperationException("A stale schema bridge was accepted against a changed target schema."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("stale", StringComparison.OrdinalIgnoreCase)) { }
+var bridgeProfilePath = Path.Combine(layerRoot, "fixture.crucible-db-bridge.json"); DatabaseSyncTranslationService.WriteAsync(bridgeProfilePath, resolvedBridge).GetAwaiter().GetResult();
+var loadedBridge = bridgeService.LoadAsync(bridgeProfilePath).GetAwaiter().GetResult();
+if (loadedBridge.Format != DatabaseSyncTranslationService.ProfileFormat || loadedBridge.Tables.Single().TargetDefaults.Single().Value.Value != "7")
+    throw new InvalidOperationException("Portable schema bridge profile did not preserve its typed reviewed mapping.");
 var legacySyncTarget = new DatabaseSyncTarget("127.0.0.1", 3306, "fixture", "fixture_world", "fixture-server");
 var legacySyncSourceHash = new string('a', 64); var legacySyncPatterns = new[] { "item_template" }; var legacySyncRemaps = Array.Empty<DatabaseSyncIdRemap>(); var legacySyncOperations = new[] { dependencyItem };
 var legacySyncHashOptions = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.General) { WriteIndented = false, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
@@ -3219,11 +3278,19 @@ var legacySyncHash = Convert.ToHexString(System.Security.Cryptography.SHA256.Has
 var legacySyncPlan = new DatabaseSyncPlan(DatabaseSynchronizationService.PlanFormat, 2, "fixture", DateTimeOffset.UtcNow, legacySyncSourceHash, legacySyncTarget, false, legacySyncPatterns, legacySyncRemaps, legacySyncOperations, legacySyncHash, ["legacy fixture"]);
 var legacySyncPath = Path.Combine(layerRoot, "legacy-v2-sync-plan.json");
 var legacySyncJsonOptions = new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
-var legacySyncJson = System.Text.Json.JsonSerializer.SerializeToNode(legacySyncPlan, legacySyncJsonOptions)!.AsObject(); legacySyncJson.Remove("DependencyClosureIncluded"); legacySyncJson.Remove("DependencyInclusions");
+var legacySyncJson = System.Text.Json.JsonSerializer.SerializeToNode(legacySyncPlan, legacySyncJsonOptions)!.AsObject(); legacySyncJson.Remove("DependencyClosureIncluded"); legacySyncJson.Remove("DependencyInclusions"); legacySyncJson.Remove("TargetSchemaSha256"); legacySyncJson.Remove("TranslationProfileName"); legacySyncJson.Remove("TranslationProfileSha256"); legacySyncJson.Remove("SchemaTranslations");
 File.WriteAllText(legacySyncPath, legacySyncJson.ToJsonString(legacySyncJsonOptions));
 var loadedLegacySync = new DatabaseSynchronizationService().LoadPlanAsync(legacySyncPath).GetAwaiter().GetResult();
 if (loadedLegacySync.FormatVersion != 2 || loadedLegacySync.Operations.Count != 1 || loadedLegacySync.DependencyClosureIncluded || loadedLegacySync.DependencyInclusions is not null)
-    throw new InvalidOperationException("Database synchronization format v3 broke verified readability of an existing v2 plan.");
+    throw new InvalidOperationException("Database synchronization format v4 broke verified readability of an existing v2 plan.");
+var legacyV3Inclusions = new[] { new DatabaseSyncDependencyInclusion("fixture-relation", false, dependencyItem.Identity, dependencyVendor.Identity, "item_template.entry", "npc_vendor.item", "100", "fixture") };
+var legacyV3Content = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { sourceAuditSha256 = legacySyncSourceHash, target = legacySyncTarget, removalsIncluded = false, patterns = legacySyncPatterns, remaps = legacySyncRemaps, operations = legacySyncOperations, dependencyClosureIncluded = true, dependencyInclusions = legacyV3Inclusions }, legacySyncHashOptions);
+var legacyV3Hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(legacyV3Content)).ToLowerInvariant();
+var legacyV3Plan = new DatabaseSyncPlan(DatabaseSynchronizationService.PlanFormat, 3, "fixture", DateTimeOffset.UtcNow, legacySyncSourceHash, legacySyncTarget, false, legacySyncPatterns, legacySyncRemaps, legacySyncOperations, legacyV3Hash, ["legacy v3 fixture"], true, legacyV3Inclusions);
+var legacyV3Path = Path.Combine(layerRoot, "legacy-v3-sync-plan.json"); var legacyV3Json = System.Text.Json.JsonSerializer.SerializeToNode(legacyV3Plan, legacySyncJsonOptions)!.AsObject(); legacyV3Json.Remove("TargetSchemaSha256"); legacyV3Json.Remove("TranslationProfileName"); legacyV3Json.Remove("TranslationProfileSha256"); legacyV3Json.Remove("SchemaTranslations"); File.WriteAllText(legacyV3Path, legacyV3Json.ToJsonString(legacySyncJsonOptions));
+var loadedLegacyV3 = new DatabaseSynchronizationService().LoadPlanAsync(legacyV3Path).GetAwaiter().GetResult();
+if (loadedLegacyV3.FormatVersion != 3 || loadedLegacyV3.DependencyInclusions?.Count != 1 || loadedLegacyV3.TargetSchemaSha256 is not null)
+    throw new InvalidOperationException("Database synchronization format v4 broke verified readability of an existing v3 plan.");
 using (var stream = File.Create(snapshotArtifact))
 using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Create))
 {

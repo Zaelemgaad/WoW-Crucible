@@ -998,7 +998,7 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
     }
     private void OpenServerSqlClick(object? sender, RoutedEventArgs e) => OpenServerSqlWorkspace();
-    private void OpenServerSqlWorkspace()
+    internal void OpenServerSqlWorkspace()
     {
         if (_serverSqlWorkspaceView is null)
         {
