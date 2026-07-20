@@ -81,9 +81,15 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _maskSummary = Text("Load a mask and decode a base texture draft to transform exact RGBA channels.");
     private readonly TextBox _usageLibraryPath = new() { PlaceholderText = "Processed asset library containing asset-catalog.csv…" };
     private readonly TextBox _usageTexturePath = new() { PlaceholderText = "Loaded processed BLP path, or exact client path such as Character\\Human\\Male\\Skin.blp…" };
+    private readonly TextBox _usageDbcRoot = new() { PlaceholderText = "Optional server DBC folder for CharSections and CreatureDisplayInfo bindings…" };
+    private readonly CheckBox _usageIncludeSql = new() { Content = "Include connected SQL creature-template uses", IsChecked = true };
     private readonly ListBox _usageConsumers = new();
+    private readonly ListBox _appearanceBindings = new();
+    private readonly ListBox _appearanceModels = new();
+    private readonly ListBox _appearanceSql = new();
     private readonly TextBlock _usageSummary = Text("Choose the processed library and an exact BLP path to find every direct M2, WMO, ADT, and WDT consumer.");
     private readonly TextBlock _usageCoverage = Text("No reverse dependency index has been queried yet.");
+    private readonly TextBlock _appearanceSummary = Text("Point Crucible at a server DBC folder to resolve character body/hair layers and creature replaceable slots 11–13.");
     private readonly List<byte[]> _undo = [];
     private CancellationTokenSource? _operation;
     private CancellationTokenSource? _statisticsOperation;
@@ -122,11 +128,14 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
 
     public event EventHandler? BackRequested;
     public event EventHandler<string>? ConsumerOpenRequested;
+    public event EventHandler<DbcRecordNavigationRequest>? AppearanceDbcOpenRequested;
+    public event EventHandler<SqlGuidedEditRequest>? AppearanceSqlOpenRequested;
 
     public TextureWorkspaceView(DesktopWorkspaceSession session)
     {
         _session = session;
         if (Directory.Exists(session.Settings.ProcessedAssetLibraryPath)) _usageLibraryPath.Text = session.Settings.ProcessedAssetLibraryPath;
+        if (Directory.Exists(session.Settings.CoreDbcPath)) _usageDbcRoot.Text = session.Settings.CoreDbcPath;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = AccentButton("Open BLP…"); open.Click += async (_, _) => { var path = await PickFileAsync("Open a BLP texture", ["*.blp"]); if (path is not null) await OpenAsync(path); };
         var reload = new Button { Content = "Reload" }; reload.Click += async (_, _) => { if (File.Exists(_sourcePath.Text)) await OpenAsync(_sourcePath.Text!); };
@@ -254,11 +263,45 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
             }
         });
         _usageConsumers.DoubleTapped += (_, _) => OpenSelectedConsumer();
+        _appearanceBindings.ItemTemplate = new FuncDataTemplate<TextureAppearanceBinding>((binding, _) => binding is null ? new Border() : new Border
+        {
+            BorderBrush = Brush.Parse("#293247"), BorderThickness = new Thickness(1), Padding = new Thickness(9), Margin = new Thickness(0, 0, 0, 6),
+            Child = new StackPanel
+            {
+                Spacing = 3,
+                Children =
+                {
+                    new TextBlock { Text = $"{binding.Table} {binding.RecordId:N0} · {binding.Field}", FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap },
+                    new TextBlock { Text = $"{binding.Kind} · replaceable slot {binding.ReplaceableType:N0} · {binding.ModelSources.Count:N0} model source(s) · {binding.SqlConsumers.Count:N0} SQL use(s)", Foreground = Brush.Parse("#9AA5B7"), FontSize = 10, TextWrapping = TextWrapping.Wrap },
+                    new TextBlock { Text = binding.Description, Foreground = Brush.Parse("#778397"), FontSize = 10, TextWrapping = TextWrapping.Wrap }
+                }
+            }
+        });
+        _appearanceModels.ItemTemplate = new FuncDataTemplate<TextureAppearanceModelSource>((source, _) => source is null ? new Border() : new Border
+        {
+            BorderBrush = Brush.Parse(source.SameProvenance ? "#35634E" : "#293247"), BorderThickness = new Thickness(1), Padding = new Thickness(9), Margin = new Thickness(0, 0, 0, 6),
+            Child = new StackPanel { Spacing = 3, Children = { new TextBlock { Text = source.ClientPath, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap }, new TextBlock { Text = $"{source.Provenance} · {(source.SameProvenance ? "same texture provenance" : "other/unselected provenance")}", Foreground = Brush.Parse(source.SameProvenance ? "#7BC79A" : "#9AA5B7"), FontSize = 10 }, new TextBlock { Text = source.SourcePath, Foreground = Brush.Parse("#778397"), FontSize = 10, TextWrapping = TextWrapping.Wrap } } }
+        });
+        _appearanceSql.ItemTemplate = new FuncDataTemplate<TextureSqlConsumer>((sql, _) => sql is null ? new Border() : new Border
+        {
+            BorderBrush = Brush.Parse("#293247"), BorderThickness = new Thickness(1), Padding = new Thickness(9), Margin = new Thickness(0, 0, 0, 6),
+            Child = new StackPanel { Spacing = 3, Children = { new TextBlock { Text = sql.Identity, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap }, new TextBlock { Text = sql.Description, Foreground = Brush.Parse("#9AA5B7"), FontSize = 10, TextWrapping = TextWrapping.Wrap } } }
+        });
+        _appearanceBindings.SelectionChanged += (_, _) => LoadSelectedAppearanceBinding();
+        _appearanceBindings.DoubleTapped += (_, _) => OpenSelectedAppearanceDbc();
+        _appearanceModels.DoubleTapped += (_, _) => OpenSelectedAppearanceModel();
+        _appearanceSql.DoubleTapped += (_, _) => OpenSelectedAppearanceSql();
         var browse = new Button { Content = "Choose library…" }; browse.Click += async (_, _) =>
         {
             var path = await PickFolderAsync("Choose the processed asset library"); if (path is null) return;
             _usageLibraryPath.Text = Path.GetFullPath(path); _session.Settings.ProcessedAssetLibraryPath = _usageLibraryPath.Text; _session.Settings.Save();
             _usageSummary.Text = "Library selected. Find uses will create the persistent index if it does not exist; Refresh index reparses only changed consumer files.";
+        };
+        var browseDbc = new Button { Content = "Choose DBC folder…" }; browseDbc.Click += async (_, _) =>
+        {
+            var path = await PickFolderAsync("Choose the server DBC folder"); if (path is null) return;
+            _usageDbcRoot.Text = Path.GetFullPath(path); _session.Settings.CoreDbcPath = _usageDbcRoot.Text; _session.Settings.Save();
+            _appearanceSummary.Text = "DBC folder selected. The next query will resolve exact CharSections and CreatureDisplayInfo fields; connected SQL remains read-only.";
         };
         var useLoaded = new Button { Content = "Use loaded BLP" }; useLoaded.Click += (_, _) => { if (File.Exists(_sourcePath.Text)) _usageTexturePath.Text = _sourcePath.Text; };
         var find = AccentButton("Find uses"); find.Click += async (_, _) => await FindConsumersAsync(false);
@@ -266,6 +309,9 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         var open = AccentButton("Open selected consumer"); open.Click += (_, _) => OpenSelectedConsumer();
         var reveal = new Button { Content = "Reveal source" }; reveal.Click += (_, _) => RevealSelectedConsumer();
         var copy = new Button { Content = "Copy client path" }; copy.Click += async (_, _) => await CopySelectedConsumerAsync();
+        var openAppearanceModel = AccentButton("Open selected model"); openAppearanceModel.Click += (_, _) => OpenSelectedAppearanceModel();
+        var openAppearanceDbc = new Button { Content = "Open exact DBC row" }; openAppearanceDbc.Click += (_, _) => OpenSelectedAppearanceDbc();
+        var openAppearanceSql = new Button { Content = "Open exact SQL row" }; openAppearanceSql.Click += (_, _) => OpenSelectedAppearanceSql();
         var controls = new StackPanel
         {
             Margin = new Thickness(10), Spacing = 8,
@@ -275,12 +321,19 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
                 new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { _usageLibraryPath, Column(browse, 1) } },
                 Label("EXACT TEXTURE"),
                 new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { _usageTexturePath, Column(useLoaded, 1) } },
+                Label("APPEARANCE DATA (OPTIONAL)"),
+                new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { _usageDbcRoot, Column(browseDbc, 1) } },
+                _usageIncludeSql,
                 new WrapPanel { Children = { find, refresh, open, reveal, copy } },
                 Card(_usageSummary), Card(_usageCoverage),
-                new TextBlock { Text = "The index follows exact binary references, never similar filenames. Results retain every provenance layer. M2 opens in the native renderer, WMO in the same-window model workspace, and ADT/WDT in Maps & World. Invalid or missing consumer files are reported as incomplete coverage so an empty result cannot impersonate proof of no use.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8E99AD"), FontSize = 11 }
+                new TextBlock { Text = "Direct results follow exact binary paths. Appearance results independently decode CharSections and CreatureDisplayInfo → CreatureModelData, then optionally read exact connected creature-template mappings. No filename similarity is treated as evidence, no SQL is changed, and missing/unsupported coverage never impersonates proof of no use.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8E99AD"), FontSize = 11 }
             }
         };
-        return new Grid { RowDefinitions = new("*,2*"), Children = { new ScrollViewer { VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = controls }, Row(_usageConsumers, 1) } };
+        var appearanceTabs = new TabControl(); appearanceTabs.Items.Add(new TabItem { Header = "Bindings", Content = _appearanceBindings }); appearanceTabs.Items.Add(new TabItem { Header = "Model sources", Content = _appearanceModels }); appearanceTabs.Items.Add(new TabItem { Header = "Live SQL uses", Content = _appearanceSql });
+        var appearanceHeader = new StackPanel { Margin = new Thickness(8), Spacing = 7, Children = { new WrapPanel { Children = { openAppearanceModel, openAppearanceDbc, openAppearanceSql } }, Card(_appearanceSummary) } };
+        var appearancePage = new Grid { RowDefinitions = new("*,2*"), Children = { new ScrollViewer { VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, Content = appearanceHeader }, Row(appearanceTabs, 1) } };
+        var resultTabs = new TabControl(); resultTabs.Items.Add(new TabItem { Header = "Direct binary consumers", Content = _usageConsumers }); resultTabs.Items.Add(new TabItem { Header = "DBC / SQL appearance bindings", Content = appearancePage });
+        return new Grid { RowDefinitions = new("*,2*"), Children = { new ScrollViewer { VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = controls }, Row(resultTabs, 1) } };
     }
 
     private async Task FindConsumersAsync(bool refresh)
@@ -302,15 +355,30 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
                 });
                 build = await Task.Run(() => service.Build(library, progress, token), token);
             }
-            var result = await Task.Run(() => service.Query(library, texture, token), token);
+            var result = await Task.Run(() => service.Query(library, texture, token), token); TextureAppearanceQueryResult? appearance = null;
+            var dbcRoot = _usageDbcRoot.Text?.Trim();
+            if (!string.IsNullOrWhiteSpace(dbcRoot) && Directory.Exists(dbcRoot))
+            {
+                dbcRoot = Path.GetFullPath(dbcRoot); _session.Settings.CoreDbcPath = dbcRoot; _session.Settings.Save();
+                var profile = _usageIncludeSql.IsChecked == true ? _session.DatabaseProfile : null; var capabilities = profile is null ? null : _session.DatabaseCapabilities;
+                appearance = await new TextureAppearanceReferenceService().QueryAsync(library, dbcRoot, _session.Settings.SchemaDefinitionPath, result.TextureClientPath, result.TextureProvenance, profile, capabilities, token);
+            }
             _usageConsumers.ItemsSource = result.Consumers;
             if (result.Consumers.Count > 0) { _usageConsumers.SelectedItem = result.Consumers[0]; _usageConsumers.ScrollIntoView(result.Consumers[0]); }
+            _appearanceBindings.ItemsSource = appearance?.Bindings ?? Array.Empty<TextureAppearanceBinding>();
+            if (appearance?.Bindings.Count > 0) { _appearanceBindings.SelectedItem = appearance.Bindings[0]; _appearanceBindings.ScrollIntoView(appearance.Bindings[0]); } else { _appearanceModels.ItemsSource = Array.Empty<TextureAppearanceModelSource>(); _appearanceSql.ItemsSource = Array.Empty<TextureSqlConsumer>(); }
             _usageSummary.Text = $"{result.TextureClientPath}\n{result.Consumers.Count:N0} exact direct consumer(s)" + (result.TextureProvenance is null ? " · client path query" : $" · selected provenance {result.TextureProvenance}") +
                 (build is null ? $"\nCached index generated {result.Summary.GeneratedUtc.LocalDateTime:G}." : $"\nIncremental refresh: {build.UpdatedAssets:N0} changed · {build.UnchangedAssets:N0} unchanged · {build.RemovedAssets:N0} removed in {build.DurationMilliseconds / 1000:0.###} seconds.");
             _usageCoverage.Text = result.Summary.CoverageComplete
                 ? $"COMPLETE PARSE COVERAGE · {result.Summary.IndexedAssets:N0} consumer assets · {result.Summary.TextureReferences:N0} exact texture edges."
                 : $"INCOMPLETE COVERAGE · {result.Summary.UnsupportedAssets:N0} unsupported format · {result.Summary.InvalidAssets:N0} invalid · {result.Summary.MissingAssets:N0} missing · {result.Summary.CatalogIssues:N0} catalog issue(s). An empty result is not proof of no use.";
-            _status.Text = $"Found {result.Consumers.Count:N0} exact consumer(s) for {result.TextureClientPath}.";
+            _appearanceSummary.Text = appearance is null
+                ? "Appearance lookup was skipped. Choose a DBC folder to include CharSections and CreatureDisplayInfo bindings."
+                : $"{appearance.Bindings.Count:N0} exact appearance binding(s) · {appearance.CharacterSectionRecords:N0} CharSections record(s) · {appearance.CreatureDisplayRecords:N0} CreatureDisplayInfo record(s) · {appearance.SqlRows:N0} live SQL row(s)." +
+                  (appearance.SqlRequested ? string.Empty : _usageIncludeSql.IsChecked == true ? " SQL was requested, but Server & SQL is not connected." : " Connected SQL lookup is disabled.") +
+                  (appearance.Findings.Count == 0 ? string.Empty : $"\n{string.Join(Environment.NewLine, appearance.Findings.Select(finding => $"• {finding}"))}") +
+                  (appearance.SqlTruncated ? "\n• Live SQL results reached the 10,000-row safety cap and are incomplete." : string.Empty);
+            _status.Text = $"Found {result.Consumers.Count:N0} direct and {(appearance?.Bindings.Count ?? 0):N0} appearance binding(s) for {result.TextureClientPath}.";
         }
         catch (OperationCanceledException) { _status.Text = "Texture consumer lookup cancelled; the last committed index was preserved."; }
         catch (Exception exception) { Fail("Texture consumer lookup failed", exception); }
@@ -322,6 +390,35 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         if (_usageConsumers.SelectedItem is not TextureConsumerReference selected) { _status.Text = "Select a consumer first."; return; }
         if (!File.Exists(selected.ConsumerSourcePath)) { _status.Text = "The selected consumer disappeared after indexing. Refresh the index before opening it."; return; }
         ConsumerOpenRequested?.Invoke(this, selected.ConsumerSourcePath);
+    }
+
+    private void LoadSelectedAppearanceBinding()
+    {
+        if (_appearanceBindings.SelectedItem is not TextureAppearanceBinding selected) { _appearanceModels.ItemsSource = Array.Empty<TextureAppearanceModelSource>(); _appearanceSql.ItemsSource = Array.Empty<TextureSqlConsumer>(); return; }
+        _appearanceModels.ItemsSource = selected.ModelSources; _appearanceSql.ItemsSource = selected.SqlConsumers;
+        if (selected.ModelSources.Count > 0) _appearanceModels.SelectedItem = selected.ModelSources[0];
+        if (selected.SqlConsumers.Count > 0) _appearanceSql.SelectedItem = selected.SqlConsumers[0];
+        _status.Text = $"Selected {selected.Table} {selected.RecordId:N0} · {selected.Field} · replaceable slot {selected.ReplaceableType:N0}.";
+    }
+
+    private void OpenSelectedAppearanceModel()
+    {
+        if (_appearanceModels.SelectedItem is not TextureAppearanceModelSource selected) { _status.Text = "Select an appearance model source first."; return; }
+        if (!File.Exists(selected.SourcePath)) { _status.Text = "The selected appearance model disappeared; rerun the lookup."; return; }
+        ConsumerOpenRequested?.Invoke(this, selected.SourcePath);
+    }
+
+    private void OpenSelectedAppearanceDbc()
+    {
+        if (_appearanceBindings.SelectedItem is not TextureAppearanceBinding selected) { _status.Text = "Select an appearance binding first."; return; }
+        if (!File.Exists(selected.DbcPath)) { _status.Text = "The source DBC disappeared; rerun the lookup."; return; }
+        AppearanceDbcOpenRequested?.Invoke(this, new(selected.DbcPath, selected.RecordId));
+    }
+
+    private void OpenSelectedAppearanceSql()
+    {
+        if (_appearanceSql.SelectedItem is not TextureSqlConsumer selected) { _status.Text = "Select a live SQL use first."; return; }
+        AppearanceSqlOpenRequested?.Invoke(this, new(selected.Table, selected.Key));
     }
 
     private void RevealSelectedConsumer()

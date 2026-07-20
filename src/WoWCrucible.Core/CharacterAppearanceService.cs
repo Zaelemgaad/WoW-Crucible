@@ -41,6 +41,10 @@ public static class CharacterAppearanceService
         new(6, 24, 4, "Geoset[3]", DbcValueType.UInt32), new(7, 28, 4, "Geoset[4]", DbcValueType.UInt32)
     ];
 
+    public static IReadOnlyList<CharacterAppearanceIdentity> KnownIdentities { get; } = Races
+        .GroupBy(race => race.Id).Select(group => group.First()).OrderBy(race => race.Id)
+        .SelectMany(race => new[] { new CharacterAppearanceIdentity(race.Id, 0, race.Name == "Undead" ? "Scourge" : race.Name, "Male"), new CharacterAppearanceIdentity(race.Id, 1, race.Name == "Undead" ? "Scourge" : race.Name, "Female") }).ToArray();
+
     public static CharacterAppearanceIdentity? Infer(string logicalPath, string fileName)
     {
         var tokens = (logicalPath + "\\" + Path.GetFileNameWithoutExtension(fileName)).Split(['\\', '/', '-', '_'], StringSplitOptions.RemoveEmptyEntries);
@@ -60,14 +64,19 @@ public static class CharacterAppearanceService
 
     public static IReadOnlyList<CharacterSection> LoadSections(string charSectionsPath, CharacterAppearanceIdentity identity)
     {
+        return LoadAllSections(charSectionsPath).Where(section => section.RaceId == identity.RaceId && section.SexId == identity.SexId)
+            .OrderBy(section => section.Kind).ThenBy(section => section.VariationIndex).ThenBy(section => section.ColorIndex).ThenBy(section => section.Id).ToArray();
+    }
+
+    public static IReadOnlyList<CharacterSection> LoadAllSections(string charSectionsPath)
+    {
         var file = WdbcFile.Load(charSectionsPath);
         if (file.FieldCount != Columns.Length || file.RecordSize != 40) throw new InvalidDataException($"CharSections.dbc has {file.FieldCount:N0} fields and {file.RecordSize:N0}-byte records; Wrath build 12340 requires 10 fields and 40-byte records.");
         var result = new List<CharacterSection>();
         for (var row = 0; row < file.RowCount; row++)
         {
-            if (file.GetRaw(row, Columns[1]) != identity.RaceId || file.GetRaw(row, Columns[2]) != identity.SexId) continue;
             var rawKind = file.GetRaw(row, Columns[3]); if (rawKind > 7) continue;
-            result.Add(new(file.GetRaw(row, Columns[0]), identity.RaceId, identity.SexId, (CharacterSectionKind)rawKind, file.GetRaw(row, Columns[7]), file.GetRaw(row, Columns[8]), file.GetRaw(row, Columns[9]),
+            result.Add(new(file.GetRaw(row, Columns[0]), file.GetRaw(row, Columns[1]), file.GetRaw(row, Columns[2]), (CharacterSectionKind)rawKind, file.GetRaw(row, Columns[7]), file.GetRaw(row, Columns[8]), file.GetRaw(row, Columns[9]),
                 Texture(4), Texture(5), Texture(6)));
             string? Texture(int column)
             {
@@ -75,7 +84,7 @@ public static class CharacterAppearanceService
                 return string.IsNullOrWhiteSpace(value) ? null : PatchInputMapper.NormalizeArchivePath(value);
             }
         }
-        return result.OrderBy(section => section.Kind).ThenBy(section => section.VariationIndex).ThenBy(section => section.ColorIndex).ThenBy(section => section.Id).ToArray();
+        return result.OrderBy(section => section.RaceId).ThenBy(section => section.SexId).ThenBy(section => section.Kind).ThenBy(section => section.VariationIndex).ThenBy(section => section.ColorIndex).ThenBy(section => section.Id).ToArray();
     }
 
     public static IReadOnlyList<CharacterHairGeoset> LoadHairGeosets(string path, CharacterAppearanceIdentity identity)

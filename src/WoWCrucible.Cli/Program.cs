@@ -304,7 +304,9 @@ static int Asset(string[] args, CancellationToken cancellationToken)
     if (args is ["texture-consumers", var queryLibrary, var textureQueryInput, .. var consumerQueryOptions])
     {
         var json = consumerQueryOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var refresh = consumerQueryOptions.Contains("--refresh", StringComparer.OrdinalIgnoreCase);
-        var unknown = consumerQueryOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.Equals("--refresh", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var dbcRoot = Option(consumerQueryOptions, "--dbc="); var schemaPath = Option(consumerQueryOptions, "--schema="); var serverRoot = Option(consumerQueryOptions, "--server=");
+        var unknown = consumerQueryOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.Equals("--refresh", StringComparison.OrdinalIgnoreCase) &&
+            !option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--schema=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--server=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown asset texture-consumers option: {unknown[0]}");
         var service = new TextureConsumerIndexService(); TextureConsumerIndexBuildResult? build = null;
         if (refresh || !File.Exists(TextureConsumerIndexService.GetIndexPath(queryLibrary)))
@@ -317,15 +319,33 @@ static int Asset(string[] args, CancellationToken cancellationToken)
             build = service.Build(queryLibrary, progress, cancellationToken);
         }
         var query = service.Query(queryLibrary, textureQueryInput, cancellationToken);
-        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Build = build, Query = query }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        ServerWorkspace? workspace = null;
+        if (!string.IsNullOrWhiteSpace(serverRoot)) { workspace = ServerWorkspaceDetector.DetectAsync(serverRoot, cancellationToken).GetAwaiter().GetResult(); dbcRoot ??= workspace.DbcPath; }
+        TextureAppearanceQueryResult? appearance = null;
+        if (!string.IsNullOrWhiteSpace(dbcRoot))
+            appearance = new TextureAppearanceReferenceService().QueryAsync(queryLibrary, dbcRoot, schemaPath, query.TextureClientPath, query.TextureProvenance, workspace?.WorldDatabase, cancellationToken: cancellationToken).GetAwaiter().GetResult();
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Build = build, Query = query, Appearance = appearance }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         else
         {
             if (build is not null) PrintTextureConsumerBuild(build);
             Console.WriteLine($"TEXTURE\t{query.TextureClientPath}\nTEXTURE_SOURCE\t{query.TextureSourcePath ?? "client path only"}\nTEXTURE_PROVENANCE\t{query.TextureProvenance ?? "not selected"}\nCONSUMERS\t{query.Consumers.Count:N0}\nCOVERAGE_COMPLETE\t{query.Summary.CoverageComplete}");
             foreach (var consumer in query.Consumers) Console.WriteLine($"CONSUMER\t{(consumer.SameProvenance ? "SAME_PROVENANCE" : "OTHER_OR_UNSELECTED_PROVENANCE")}\t{consumer.ReferenceKind}\t{consumer.ConsumerProvenance}\t{consumer.ConsumerClientPath}\t{consumer.ConsumerSourcePath}");
             if (!query.Summary.CoverageComplete) Console.Error.WriteLine($"INCOMPLETE COVERAGE: {query.Summary.UnsupportedAssets:N0} unsupported-format, {query.Summary.InvalidAssets:N0} invalid consumer file(s), {query.Summary.MissingAssets:N0} missing catalog file(s), {query.Summary.CatalogIssues:N0} catalog issue(s). Zero matches cannot be treated as proof of no use.");
+            if (appearance is not null)
+            {
+                Console.WriteLine($"APPEARANCE_BINDINGS\t{appearance.Bindings.Count:N0}\nCHARSECTION_RECORDS\t{appearance.CharacterSectionRecords:N0}\nCREATURE_DISPLAY_RECORDS\t{appearance.CreatureDisplayRecords:N0}\nSQL_ROWS\t{appearance.SqlRows:N0}\nAPPEARANCE_COVERAGE_COMPLETE\t{appearance.CoverageComplete}");
+                foreach (var binding in appearance.Bindings)
+                {
+                    Console.WriteLine($"APPEARANCE\t{binding.Kind}\t{binding.Table}\t{binding.RecordId}\t{binding.Field}\tslot={binding.ReplaceableType}\t{binding.ModelClientPath ?? "no-model-binding"}\t{binding.Description}");
+                    foreach (var source in binding.ModelSources) Console.WriteLine($"  MODEL\t{(source.SameProvenance ? "SAME_PROVENANCE" : "OTHER_OR_UNSELECTED_PROVENANCE")}\t{source.Provenance}\t{source.ClientPath}\t{source.SourcePath}");
+                    foreach (var sql in binding.SqlConsumers) Console.WriteLine($"  SQL\t{sql.Table}\t{string.Join(';', sql.Key.Select(pair => $"{pair.Key}={Convert.ToString(pair.Value, System.Globalization.CultureInfo.InvariantCulture)}"))}\t{sql.Field}\t{sql.Description}");
+                }
+                foreach (var finding in appearance.Findings) Console.Error.WriteLine($"APPEARANCE FINDING: {finding}");
+                if (appearance.SqlTruncated) Console.Error.WriteLine("APPEARANCE FINDING: live SQL uses exceeded the 10,000-row safety cap; results are explicitly truncated.");
+            }
         }
-        return query.Consumers.Count > 0 && query.Summary.CoverageComplete ? 0 : 3;
+        var found = query.Consumers.Count > 0 || appearance?.Bindings.Count > 0; var complete = query.Summary.CoverageComplete && (appearance?.CoverageComplete ?? true);
+        return found && complete ? 0 : 3;
     }
     if (args is ["m2-material-audit", var materialRoot, .. var materialOptions])
     {
@@ -1290,7 +1310,7 @@ static int Asset(string[] args, CancellationToken cancellationToken)
 static int AssetHelp(int code = 0) => GroupHelp("""
 Usage:
   wowcrucible asset texture-consumers-build <processed-library> [--format=text|json]
-  wowcrucible asset texture-consumers <processed-library> <texture.blp|client-path> [--refresh] [--format=text|json]
+  wowcrucible asset texture-consumers <processed-library> <texture.blp|client-path> [--refresh] [--dbc=folder] [--schema=file] [--server=installed-server] [--format=text|json]
   wowcrucible asset texture-info <file.blp>
   wowcrucible asset texture-decode <file.blp> <output.png> [--mip=N] [--overwrite]
   wowcrucible asset texture-proof <input.blp|image> [--mip=N] [--codec=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--amplify=N] [--difference=output.png] [--preview=output.png] [--max-rgb-mae=N] [--max-alpha-mae=N] [--max-alpha-crossings=N] [--report=text|json] [--overwrite]

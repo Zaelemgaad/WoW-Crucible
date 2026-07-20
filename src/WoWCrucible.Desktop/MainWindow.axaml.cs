@@ -944,6 +944,8 @@ public partial class MainWindow : Window
             _textureWorkspaceView = new TextureWorkspaceView(_workspaceSession);
             _textureWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
             _textureWorkspaceView.ConsumerOpenRequested += async (_, consumerPath) => await OpenTextureConsumerAsync(consumerPath);
+            _textureWorkspaceView.AppearanceDbcOpenRequested += async (_, request) => await OpenDbcRecordAsync(request);
+            _textureWorkspaceView.AppearanceSqlOpenRequested += async (_, request) => await OpenCompleteSqlRowAsync(request);
         }
         OpenFeatureWorkspace(_textureWorkspaceView, "Texture Lab");
         if (!string.IsNullOrWhiteSpace(path)) _ = _textureWorkspaceView.OpenAsync(path);
