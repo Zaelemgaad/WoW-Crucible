@@ -7,6 +7,7 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using WoWCrucible.Core;
 using WoWCrucible.Desktop.Controls;
+using System.Security.Cryptography;
 
 namespace WoWCrucible.Desktop;
 
@@ -14,14 +15,24 @@ internal sealed record DbcRecordNavigationRequest(string Path, uint Id);
 
 internal sealed class WorldLightingView : UserControl, IDisposable
 {
-    private sealed record ContinentChoice(uint? Id, int Lights) { public override string ToString() => Id is null ? $"Every map · {Lights:N0} lights" : $"Map {Id:N0} · {Lights:N0} lights"; }
-    private sealed record ColorBandChoice(WorldLightColorBand Band, WorldLightColor Color)
+    private sealed record SkyboxCandidateChoice(ClientAssetLocation Location, string Sha256)
     {
-        public override string ToString() => $"{Band.Index + 1:00} · {Band.Name} · {Color.Hex} · {Band.Keys.Count:N0} key(s)";
+        public override string ToString() => $"{Location.Provenance} · {Path.GetFileName(Location.SourcePath)} · {Sha256[..12]}";
     }
-    private sealed record FloatBandChoice(WorldLightFloatBand Band, float Value)
+    private sealed record SkyboxTextureChoice(string? Provenance, int Covered, int Required)
     {
-        public override string ToString() => $"{Band.Index + 1:00} · {Band.Name} · {Value:0.###} · {Band.Keys.Count:N0} key(s)";
+        public override string ToString() => Provenance is null
+            ? "Strict model provenance only (deployment-safe)"
+            : $"Preview textures from {Provenance} · {Covered:N0}/{Required:N0} referenced paths";
+    }
+    private sealed record ContinentChoice(uint? Id, int Lights) { public override string ToString() => Id is null ? $"Every map · {Lights:N0} lights" : $"Map {Id:N0} · {Lights:N0} lights"; }
+    private sealed record ColorBandChoice(WorldLightColorBand Band, WorldLightColor? Color)
+    {
+        public override string ToString() => $"{Band.Index + 1:00} · {Band.Name} · {(Color is { } color ? color.Hex : "NO KEYS")} · {Band.Keys.Count:N0} key(s)";
+    }
+    private sealed record FloatBandChoice(WorldLightFloatBand Band, float? Value)
+    {
+        public override string ToString() => $"{Band.Index + 1:00} · {Band.Name} · {(Value is { } value ? value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) : "NO KEYS")} · {Band.Keys.Count:N0} key(s)";
     }
 
     private readonly DesktopWorkspaceSession _session;
@@ -39,11 +50,19 @@ internal sealed class WorldLightingView : UserControl, IDisposable
     private readonly ListBox _colors = new();
     private readonly ListBox _floats = new();
     private readonly WorldLightingBandEditorView _bandEditor = new();
+    private readonly WorldLightingEnvironmentView _environment = new();
+    private readonly M2PreviewView _skyboxModel = new();
+    private readonly TextBox _assetLibrary = new() { PlaceholderText = "Processed asset library root for LightSkybox M2 resolution…" };
+    private readonly ComboBox _skyboxCandidates = new() { PlaceholderText = "No skybox model candidates resolved" };
+    private readonly ComboBox _skyboxTextureSources = new() { PlaceholderText = "Texture provenance is discovered after loading the model" };
+    private readonly TextBlock _skyboxModelStatus = Info("Select a profile with a LightSkybox model.");
     private readonly TextBlock _status = Info("Native Light.dbc inspection replaces legacy LightMapper and skybox viewers without copying their assets.");
     private WorldLightingCatalog? _catalog;
     private IReadOnlyList<WorldLightRecord> _visibleLights = [];
     private WorldLightProfile? _profile;
     private CancellationTokenSource? _operation;
+    private CancellationTokenSource? _skyboxOperation;
+    private AssetComparisonIndex? _assetIndex;
     private bool _refreshingBandLists;
     private WorldLightingBandKind _editorKind = WorldLightingBandKind.Color;
 
@@ -51,7 +70,7 @@ internal sealed class WorldLightingView : UserControl, IDisposable
 
     public WorldLightingView(DesktopWorkspaceSession session)
     {
-        _session = session; _dbcRoot.Text = session.Settings.CoreDbcPath;
+        _session = session; _dbcRoot.Text = session.Settings.CoreDbcPath; _assetLibrary.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
         _lights.ItemTemplate = new FuncDataTemplate<WorldLightRecord>((light, _) => light is null ? new Border() : new Border
         {
             BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(8, 6),
@@ -61,7 +80,7 @@ internal sealed class WorldLightingView : UserControl, IDisposable
         {
             if (choice is null) return new Border(); var swatch = new Border
             {
-                Background = new SolidColorBrush(Avalonia.Media.Color.FromRgb(choice.Color.R, choice.Color.G, choice.Color.B)),
+                Background = choice.Color is { } color ? new SolidColorBrush(Avalonia.Media.Color.FromRgb(color.R, color.G, color.B)) : Brushes.Transparent,
                 BorderBrush = Brush.Parse("#596579"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(3),
                 Child = new TextBlock { Text = "   ", Padding = new Thickness(6, 2) }
             };
@@ -79,20 +98,26 @@ internal sealed class WorldLightingView : UserControl, IDisposable
         var load = Accent("Load / refresh lighting"); load.Click += async (_, _) => await LoadAsync();
         var browse = new Button { Content = "Choose DBC folder…" }; browse.Click += async (_, _) => await BrowseAsync();
         var openLight = new Button { Content = "Edit Light.dbc record" }; openLight.Click += (_, _) => Open("Light.dbc", (_lights.SelectedItem as WorldLightRecord)?.Id ?? 0);
+        var openLightDetail = new Button { Content = "Edit selected Light.dbc record" }; openLightDetail.Click += (_, _) => Open("Light.dbc", (_lights.SelectedItem as WorldLightRecord)?.Id ?? 0);
         var openParams = new Button { Content = "Edit LightParams record" }; openParams.Click += (_, _) => Open("LightParams.dbc", _profile?.ParamsId ?? 0);
         var openSkybox = new Button { Content = "Edit LightSkybox record" }; openSkybox.Click += (_, _) => Open("LightSkybox.dbc", _profile?.Skybox?.Id ?? 0);
         var openColor = new Button { Content = "Open raw color-band row" }; openColor.Click += (_, _) => Open("LightIntBand.dbc", (_colors.SelectedItem as ColorBandChoice)?.Band.Id ?? 0);
         var openFloat = new Button { Content = "Open raw float-band row" }; openFloat.Click += (_, _) => Open("LightFloatBand.dbc", (_floats.SelectedItem as FloatBandChoice)?.Band.Id ?? 0);
         var authorColor = Accent("Author selected color curve");
         var authorFloat = Accent("Author selected float curve");
+        var chooseLibrary = new Button { Content = "Choose processed library…" }; chooseLibrary.Click += async (_, _) => await BrowseAssetLibraryAsync();
+        var resolveSkybox = new Button { Content = "Resolve selected skybox model" }; resolveSkybox.Click += async (_, _) => await ResolveSkyboxAsync();
+        var previewSkybox = Accent("Preview explicit skybox source"); previewSkybox.Click += async (_, _) => await PreviewSkyboxAsync();
 
         var source = new StackPanel { Spacing = 7, Margin = new Thickness(12, 8), Children = { new TextBlock { Text = "WOTLK WORLD LIGHTING GRAPH", FontSize = 16, FontWeight = FontWeight.SemiBold }, _dbcRoot, new WrapPanel { Children = { load, browse } }, _search, new WrapPanel { Children = { Field("MAP", _continent), Field("PROFILE", _slot), Field("TIME 0–2880", _time), _timeLabel } } } };
         var left = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new TextBlock { Text = "LIGHT SOURCES", Margin = new Thickness(8), FontWeight = FontWeight.SemiBold }, WithRow(_lights, 1), WithRow(openLight, 2) } };
         var plotPage = new Grid { RowDefinitions = new("*,Auto"), Children = { _plot, WithRow(new TextBlock { Text = "Neutral coordinate plot · X/Z world coordinates · click a marker · circles show outer falloff", Margin = new Thickness(8), Foreground = Brush.Parse("#8E99AD"), TextWrapping = TextWrapping.Wrap }, 1) } };
-        var profilePage = new ScrollViewer { Content = new StackPanel { Spacing = 8, Margin = new Thickness(10), Children = { Label("SELECTED LIGHT"), Card(_lightDetail), openLight, Label("PARAMETER PROFILE"), Card(_paramsDetail), openParams, Label("SKYBOX"), Card(_skyboxDetail), openSkybox, Label("18 TIME-SAMPLED COLOR BANDS"), _colors, new WrapPanel { Children = { authorColor, openColor } }, Label("6 TIME-SAMPLED FLOAT BANDS"), _floats, new WrapPanel { Children = { authorFloat, openFloat } } } } };
-        var rightTabs = new TabControl { Items = { new TabItem { Header = "Coordinate plot", Content = plotPage }, new TabItem { Header = "Colors, floats & skybox", Content = profilePage }, new TabItem { Header = "Edit time band", Content = _bandEditor } } };
-        authorColor.Click += (_, _) => { if (_colors.SelectedItem is ColorBandChoice choice) { _editorKind = WorldLightingBandKind.Color; _bandEditor.LoadColor(_dbcRoot.Text?.Trim() ?? string.Empty, choice.Band, (int)(_time.Value ?? 0)); rightTabs.SelectedIndex = 2; } };
-        authorFloat.Click += (_, _) => { if (_floats.SelectedItem is FloatBandChoice choice) { _editorKind = WorldLightingBandKind.Float; _bandEditor.LoadFloat(_dbcRoot.Text?.Trim() ?? string.Empty, choice.Band, (int)(_time.Value ?? 0)); rightTabs.SelectedIndex = 2; } };
+        var profilePage = new ScrollViewer { Content = new StackPanel { Spacing = 8, Margin = new Thickness(10), Children = { Label("SELECTED LIGHT"), Card(_lightDetail), openLightDetail, Label("PARAMETER PROFILE"), Card(_paramsDetail), openParams, Label("SKYBOX"), Card(_skyboxDetail), openSkybox, Label("18 TIME-SAMPLED COLOR BANDS"), _colors, new WrapPanel { Children = { authorColor, openColor } }, Label("6 TIME-SAMPLED FLOAT BANDS"), _floats, new WrapPanel { Children = { authorFloat, openFloat } } } } };
+        var skyboxModelPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { new StackPanel { Margin = new Thickness(8), Spacing = 6, Children = { _assetLibrary, new WrapPanel { Children = { chooseLibrary, resolveSkybox, previewSkybox } }, _skyboxCandidates, new TextBlock { Text = "Optional preview-only texture layer", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") }, _skyboxTextureSources } }, WithRow(_skyboxModel, 1), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(9), Child = _skyboxModelStatus }, 2) } };
+        var environmentPage = new TabControl { Items = { new TabItem { Header = "Composed environment", Content = _environment }, new TabItem { Header = "LightSkybox M2", Content = skyboxModelPage } } };
+        var rightTabs = new TabControl { Items = { new TabItem { Header = "Environment preview", Content = environmentPage }, new TabItem { Header = "Coordinate plot", Content = plotPage }, new TabItem { Header = "Colors, floats & skybox", Content = profilePage }, new TabItem { Header = "Edit time band", Content = _bandEditor } } };
+        authorColor.Click += (_, _) => { if (_colors.SelectedItem is ColorBandChoice choice) { _editorKind = WorldLightingBandKind.Color; _bandEditor.LoadColor(_dbcRoot.Text?.Trim() ?? string.Empty, choice.Band, (int)(_time.Value ?? 0)); rightTabs.SelectedIndex = 3; } };
+        authorFloat.Click += (_, _) => { if (_floats.SelectedItem is FloatBandChoice choice) { _editorKind = WorldLightingBandKind.Float; _bandEditor.LoadFloat(_dbcRoot.Text?.Trim() ?? string.Empty, choice.Band, (int)(_time.Value ?? 0)); rightTabs.SelectedIndex = 3; } };
         var body = new ResponsiveSplitGrid(left, rightTabs, 2, 3);
         var root = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { source, WithRow(body, 1), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _status }, 2) } };
         Content = root;
@@ -112,6 +137,11 @@ internal sealed class WorldLightingView : UserControl, IDisposable
         }
         catch (OperationCanceledException) { }
         catch (Exception exception) { _catalog = null; _lights.ItemsSource = null; _plot.SetLights([]); _status.Text = exception.Message; DesktopCrashLogger.Log("World lighting load failed", exception); }
+    }
+
+    public bool SelectLightId(uint id)
+    {
+        if (_catalog is null) return false; _continent.SelectedIndex = 0; ApplyFilter(); var light = _visibleLights.FirstOrDefault(value => value.Id == id); if (light is null) { _status.Text = $"Light {id:N0} is not present in the loaded graph."; return false; } _lights.SelectedItem = light; _lights.ScrollIntoView(light); return true;
     }
 
     private void ApplyFilter()
@@ -134,7 +164,7 @@ internal sealed class WorldLightingView : UserControl, IDisposable
         if (_catalog is null || _lights.SelectedItem is not WorldLightRecord light) return; _profile = WorldLightingService.Resolve(_catalog, light, Math.Max(0, _slot.SelectedIndex));
         var value = _profile.Parameters; _paramsDetail.Text = value is null ? string.Join("\n", _profile.Findings) : $"LightParams {value.Id:N0}\nHighlight sky {value.HighlightSky} · cloud type {value.CloudTypeId}\nGlow {value.Glow:0.###}\nWater alpha shallow/deep {value.WaterShallowAlpha:0.###} / {value.WaterDeepAlpha:0.###}\nOcean alpha shallow/deep {value.OceanShallowAlpha:0.###} / {value.OceanDeepAlpha:0.###}" + (_profile.Findings.Count == 0 ? string.Empty : "\n" + string.Join("\n", _profile.Findings));
         _skyboxDetail.Text = value?.LightSkyboxId == 0 ? "This profile uses no explicit LightSkybox record." : _profile.Skybox is null ? $"Missing LightSkybox {value?.LightSkyboxId}." : $"LightSkybox {_profile.Skybox.Id:N0}\n{_profile.Skybox.ClientModelPath}\nFlags 0x{_profile.Skybox.Flags:X8}";
-        RefreshBands();
+        RefreshBands(); _ = ResolveSkyboxAsync();
     }
 
     private void RefreshTime()
@@ -143,9 +173,9 @@ internal sealed class WorldLightingView : UserControl, IDisposable
     }
     private void RefreshBands()
     {
-        if (_profile is null) { _colors.ItemsSource = null; _floats.ItemsSource = null; return; } var time = (int)(_time.Value ?? 0);
+        if (_profile is null) { _colors.ItemsSource = null; _floats.ItemsSource = null; _environment.SetScene(null); return; } var time = (int)(_time.Value ?? 0); _environment.SetScene(WorldLightingEnvironmentService.Compose(_profile, time));
         var selectedColor = (_colors.SelectedItem as ColorBandChoice)?.Band.Id; var selectedFloat = (_floats.SelectedItem as FloatBandChoice)?.Band.Id;
-        var colors = _profile.ColorBands.Select(band => new ColorBandChoice(band, WorldLightingService.Sample(band, time))).ToArray(); var floats = _profile.FloatBands.Select(band => new FloatBandChoice(band, WorldLightingService.Sample(band, time))).ToArray();
+        var colors = _profile.ColorBands.Select(band => new ColorBandChoice(band, band.Keys.Count == 0 ? null : WorldLightingService.Sample(band, time))).ToArray(); var floats = _profile.FloatBands.Select(band => new FloatBandChoice(band, band.Keys.Count == 0 ? null : WorldLightingService.Sample(band, time))).ToArray();
         var colorIndex = selectedColor is null ? -1 : Array.FindIndex(colors, choice => choice.Band.Id == selectedColor); if (colorIndex < 0 && colors.Length > 0) colorIndex = 0;
         var floatIndex = selectedFloat is null ? -1 : Array.FindIndex(floats, choice => choice.Band.Id == selectedFloat); if (floatIndex < 0 && floats.Length > 0) floatIndex = 0;
         _refreshingBandLists = true; _colors.ItemsSource = colors; _floats.ItemsSource = floats; _colors.SelectedIndex = colorIndex; _floats.SelectedIndex = floatIndex; _refreshingBandLists = false;
@@ -157,8 +187,79 @@ internal sealed class WorldLightingView : UserControl, IDisposable
     {
         var storage = TopLevel.GetTopLevel(this)?.StorageProvider; if (storage is null) return; var folders = await storage.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Select the DBC folder containing all five Light tables", AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is not null) { _dbcRoot.Text = path; await LoadAsync(); }
     }
+    private async Task BrowseAssetLibraryAsync()
+    {
+        var storage = TopLevel.GetTopLevel(this)?.StorageProvider; if (storage is null) return; var folders = await storage.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Select the processed content-first asset library", AllowMultiple = false }); var path = folders.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return;
+        _assetLibrary.Text = Path.GetFullPath(path); _assetIndex = null; _session.Settings.ProcessedAssetLibraryPath = _assetLibrary.Text; _session.Settings.Save(); await ResolveSkyboxAsync();
+    }
+    private async Task ResolveSkyboxAsync()
+    {
+        _skyboxOperation?.Cancel(); _skyboxOperation?.Dispose(); var operation = _skyboxOperation = new CancellationTokenSource(); var token = operation.Token; _skyboxCandidates.ItemsSource = null; _skyboxTextureSources.ItemsSource = null; _skyboxModel.ClearGeometry();
+        var dbcPath = _profile?.Skybox?.ClientModelPath; if (string.IsNullOrWhiteSpace(dbcPath)) { _skyboxModelStatus.Text = "This light profile has no explicit LightSkybox model; the composed DBC environment remains available."; return; }
+        var library = _assetLibrary.Text?.Trim(); if (string.IsNullOrWhiteSpace(library)) { _skyboxModelStatus.Text = $"Skybox path: {dbcPath} · choose the processed asset library to resolve its M2."; return; }
+        try
+        {
+            _skyboxModelStatus.Text = $"Resolving exact provenance candidates for {dbcPath}…";
+            var resolved = await Task.Run(() =>
+            {
+                var root = Path.GetFullPath(library); var index = _assetIndex is { } cached && cached.LibraryRoot.Equals(root, StringComparison.OrdinalIgnoreCase) ? cached : ClientAssetDependencyService.OpenLibraryLayout(root);
+                var paths = new[] { dbcPath, Path.ChangeExtension(dbcPath, ".m2") }.Distinct(StringComparer.OrdinalIgnoreCase); var locations = paths.SelectMany(path => ClientAssetDependencyService.FindCandidates(index, path, token)).DistinctBy(value => value.SourcePath, StringComparer.OrdinalIgnoreCase).ToArray();
+                var choices = locations.Select(location => new SkyboxCandidateChoice(location, Hash(location.SourcePath))).OrderBy(choice => choice.Location.Provenance, StringComparer.OrdinalIgnoreCase).ToArray(); return (index, choices);
+            }, token); token.ThrowIfCancellationRequested(); if (!ReferenceEquals(_skyboxOperation, operation)) return; _assetIndex = resolved.index; _skyboxCandidates.ItemsSource = resolved.choices;
+            var hashes = resolved.choices.Select(choice => choice.Sha256).Distinct(StringComparer.Ordinal).Count(); DesktopCrashLogger.Debug("LIGHTING", "skybox-candidates-resolved", ("dbc_path", dbcPath), ("candidates", resolved.choices.Length), ("distinct_hashes", hashes)); if (resolved.choices.Length == 1 || resolved.choices.Length > 1 && hashes == 1) { _skyboxCandidates.SelectedIndex = 0; _skyboxModelStatus.Text = resolved.choices.Length == 1 ? $"Resolved {dbcPath} from {resolved.choices[0].Location.Provenance}. Loading native M2 preview…" : $"Resolved {resolved.choices.Length:N0} byte-identical sources for {dbcPath}; using {resolved.choices[0].Location.Provenance}."; await PreviewSkyboxAsync(); }
+            else _skyboxModelStatus.Text = resolved.choices.Length == 0 ? $"No extracted M2 matches {dbcPath} (including the client’s .mdx→.m2 filename form). The composed environment is still exact to the sampled DBC colors." : $"Resolved {resolved.choices.Length:N0} different provenance sources. Select one explicitly; Crucible will not guess between different skybox bytes.";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { if (ReferenceEquals(_skyboxOperation, operation)) { _skyboxModelStatus.Text = $"Skybox resolution failed: {exception.Message}"; DesktopCrashLogger.Log("World lighting skybox resolution failed", exception); } }
+    }
+    private async Task PreviewSkyboxAsync()
+    {
+        if (_skyboxCandidates.SelectedItem is not SkyboxCandidateChoice choice || _assetIndex is null) { _skyboxModelStatus.Text = "Select an explicit skybox provenance source first."; return; } var operation = _skyboxOperation ??= new CancellationTokenSource(); var token = operation.Token;
+        try
+        {
+            var requestedTextureProvenance = (_skyboxTextureSources.SelectedItem as SkyboxTextureChoice)?.Provenance;
+            _skyboxModelStatus.Text = requestedTextureProvenance is null
+                ? $"Loading {choice.Location.Provenance} skybox geometry and same-provenance textures…"
+                : $"Loading {choice.Location.Provenance} geometry with explicitly selected {requestedTextureProvenance} preview textures…";
+            var loaded = await Task.Run(() =>
+            {
+                var geometry = M2PreviewGeometryService.Load(choice.Location.SourcePath, visibilityMode: M2PreviewVisibilityMode.AllGeosets); var used = geometry.UsedTextureDefinitionIndices.ToHashSet();
+                var referencedTexturePaths = geometry.TextureSlots.Where(slot => used.Contains(slot.Index) && slot.Type == 0 && !string.IsNullOrWhiteSpace(slot.EmbeddedPath))
+                    .Select(slot => PatchInputMapper.NormalizeArchivePath(slot.EmbeddedPath!)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                var locations = referencedTexturePaths.ToDictionary(path => path, path => ClientAssetDependencyService.FindCandidates(_assetIndex, path, token), StringComparer.OrdinalIgnoreCase);
+                var textureChoices = new[] { new SkyboxTextureChoice(null, 0, referencedTexturePaths.Length) }
+                    .Concat(locations.SelectMany(pair => pair.Value.Select(location => (pair.Key, location.Provenance)))
+                        .GroupBy(value => value.Provenance, StringComparer.OrdinalIgnoreCase)
+                        .Select(group => new SkyboxTextureChoice(group.Key, group.Select(value => value.Key).Distinct(StringComparer.OrdinalIgnoreCase).Count(), referencedTexturePaths.Length))
+                        .OrderByDescending(value => value.Covered).ThenBy(value => value.Provenance, StringComparer.OrdinalIgnoreCase)).ToArray();
+                var overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrWhiteSpace(requestedTextureProvenance))
+                    foreach (var pair in locations)
+                    {
+                        var candidates = pair.Value.Where(location => location.Provenance.Equals(requestedTextureProvenance, StringComparison.OrdinalIgnoreCase)).ToArray();
+                        if (candidates.Length == 1) overrides[pair.Key] = candidates[0].SourcePath;
+                    }
+                var graph = ClientAssetDependencyService.Analyze(_assetIndex, choice.Location, overrides, token); var textures = new Dictionary<int, RgbaTexture>();
+                foreach (var slot in geometry.TextureSlots.Where(slot => used.Contains(slot.Index) && slot.Type == 0 && !string.IsNullOrWhiteSpace(slot.EmbeddedPath)))
+                {
+                    token.ThrowIfCancellationRequested(); var clientPath = PatchInputMapper.NormalizeArchivePath(slot.EmbeddedPath!); var source = graph.Resolved.FirstOrDefault(node => node.ClientPath.Equals(clientPath, StringComparison.OrdinalIgnoreCase) && node.SourcePath is not null)?.SourcePath; if (source is null) continue; try { textures[slot.Index] = BlpTextureService.Decode(source); } catch (Exception exception) { DesktopCrashLogger.Log($"Skybox texture decode failed: {source}", exception); }
+                }
+                return (geometry, graph, textures, used: used.Count, textureChoices);
+            }, token); token.ThrowIfCancellationRequested(); if (!ReferenceEquals(_skyboxOperation, operation)) return;
+            var selectedTextureProvenance = requestedTextureProvenance; _skyboxTextureSources.ItemsSource = loaded.textureChoices;
+            _skyboxTextureSources.SelectedItem = loaded.textureChoices.FirstOrDefault(value => string.Equals(value.Provenance, selectedTextureProvenance, StringComparison.OrdinalIgnoreCase)) ?? loaded.textureChoices[0];
+            _skyboxModel.SetGeometry(loaded.geometry); _skyboxModel.SetDecodedTextures(loaded.textures);
+            var blockers = loaded.graph.Blocking.Count == 0 ? string.Empty : " · " + string.Join(" · ", loaded.graph.Blocking.Take(2).Select(node => $"{node.ClientPath}: {node.Message}")) + (loaded.graph.Blocking.Count > 2 ? $" · {loaded.graph.Blocking.Count - 2:N0} more" : string.Empty);
+            var previewSource = requestedTextureProvenance is null ? "strict source" : $"preview textures: {requestedTextureProvenance}";
+            _skyboxModelStatus.Text = $"{Path.GetFileName(loaded.geometry.ModelPath)} · {choice.Location.Provenance} · {previewSource} · {loaded.geometry.TriangleIndices.Count / 3:N0} triangles · {loaded.textures.Count:N0}/{loaded.used:N0} used textures · {loaded.graph.Blocking.Count:N0} dependency blocker(s){blockers}";
+            DesktopCrashLogger.Debug("LIGHTING", "skybox-preview-loaded", ("source", loaded.geometry.ModelPath), ("provenance", choice.Location.Provenance), ("texture_provenance", requestedTextureProvenance), ("triangles", loaded.geometry.TriangleIndices.Count / 3), ("textures", loaded.textures.Count), ("used_textures", loaded.used), ("dependency_blockers", loaded.graph.Blocking.Count));
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { if (ReferenceEquals(_skyboxOperation, operation)) { _skyboxModelStatus.Text = $"Skybox preview unavailable: {exception.Message}"; DesktopCrashLogger.Log("World lighting skybox preview failed", exception); } }
+    }
     private void Open(string fileName, uint id) { if (id == 0) { _status.Text = $"Select a non-empty {fileName} record first."; return; } var path = Path.Combine(_dbcRoot.Text?.Trim() ?? string.Empty, fileName); if (!File.Exists(path)) { _status.Text = $"File not found: {path}"; return; } OpenDbcRecordRequested?.Invoke(this, new(path, id)); }
-    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); }
+    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _skyboxOperation?.Cancel(); _skyboxOperation?.Dispose(); _skyboxModel.Dispose(); }
+    private static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
     private static Button Accent(string text) => new() { Content = text, Background = Brush.Parse("#C58A2B"), Foreground = Brushes.Black, FontWeight = FontWeight.SemiBold };
     private static TextBlock Info(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
     private static TextBlock Label(string text) => new() { Text = text, FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") };

@@ -107,17 +107,18 @@ internal sealed class WorldLightingBandEditorView : UserControl
         try
         {
             PersistActive(); _inputPath = Path.GetFullPath(inputPath); _kind = kind; _bandId = bandId; _previewTime = previewTime; _draftIdentity = $"{_inputPath}|{kind}|{bandId}"; var sourceKeys = original.ToList();
+            var seed = new WorldLightBandDraftKey(kind, previewTime, kind == WorldLightingBandKind.Color ? WorldLightingEditService.Pack(default) : BitConverter.SingleToUInt32Bits(0)); var planKeys = sourceKeys.Count == 0 ? [seed] : sourceKeys;
             if (!_baselines.TryGetValue(_draftIdentity, out var baseline))
             {
                 baseline = kind == WorldLightingBandKind.Color
-                    ? WorldLightingEditService.PlanColor(_inputPath, bandId, sourceKeys.Select(key => (key.Time, key.Color)))
-                    : WorldLightingEditService.PlanFloat(_inputPath, bandId, sourceKeys.Select(key => (key.Time, key.FloatValue)));
+                    ? WorldLightingEditService.PlanColor(_inputPath, bandId, planKeys.Select(key => (key.Time, key.Color)))
+                    : WorldLightingEditService.PlanFloat(_inputPath, bandId, planKeys.Select(key => (key.Time, key.FloatValue)));
                 if (baseline.OriginalFields[1] != sourceKeys.Count || sourceKeys.Where((key, index) => baseline.OriginalFields[2 + index] != key.Time || baseline.OriginalFields[18 + index] != key.RawValue).Any()) throw new InvalidDataException("The lighting DBC changed after the graph was loaded. Refresh the five-table graph before drafting this band.");
                 _baselines[_draftIdentity] = baseline;
             }
-            _original = sourceKeys.OrderBy(key => key.Time).ToList(); _draft = _drafts.TryGetValue(_draftIdentity, out var saved) ? saved.Select(key => key with { }).ToList() : _original.Select(key => key with { }).ToList();
+            _original = sourceKeys.OrderBy(key => key.Time).ToList(); _draft = _drafts.TryGetValue(_draftIdentity, out var saved) ? saved.Select(key => key with { }).ToList() : (_original.Count == 0 ? [seed] : _original.Select(key => key with { }).ToList());
             _title.Text = $"{kind.ToString().ToUpperInvariant()} BAND {bandId:N0} · {name}"; _source.Text = _inputPath; _colorFields.IsVisible = kind == WorldLightingBandKind.Color; _floatFields.IsVisible = kind == WorldLightingBandKind.Float;
-            RefreshDraft(0); _status.Text = _draft.SequenceEqual(_original) ? "Loaded the exact source keys and retained their source preimage. Changes remain a draft until you choose a write action." : "Restored this band’s unsaved source-bound draft.";
+            RefreshDraft(0); _status.Text = _original.Count == 0 ? $"The source band contains no keys. Started a black/zero draft key at preview time {previewTime:N0}; writing it will make the band usable." : _draft.SequenceEqual(_original) ? "Loaded the exact source keys and retained their source preimage. Changes remain a draft until you choose a write action." : "Restored this band’s unsaved source-bound draft.";
         }
         catch (Exception exception) { _inputPath = null; _bandId = 0; _status.Text = exception.Message; DesktopCrashLogger.Log("World lighting band draft load failed", exception); }
     }
@@ -163,7 +164,7 @@ internal sealed class WorldLightingBandEditorView : UserControl
         catch (Exception exception) { _status.Text = exception.Message; }
     }
 
-    private void ResetDraft() { if (_inputPath is null) return; _draft = _original.Select(key => key with { }).ToList(); RefreshDraft(0); _status.Text = "Restored every key from the loaded DBC. No file has been changed."; }
+    private void ResetDraft() { if (_inputPath is null) return; _draft = _original.Count == 0 ? [new(_kind, _previewTime, _kind == WorldLightingBandKind.Color ? WorldLightingEditService.Pack(default) : BitConverter.SingleToUInt32Bits(0))] : _original.Select(key => key with { }).ToList(); RefreshDraft(0); _status.Text = _original.Count == 0 ? "Restored the empty source state as one safe draft key; no file has been changed." : "Restored every key from the loaded DBC. No file has been changed."; }
 
     private WorldLightBandDraftKey ReadFields()
     {

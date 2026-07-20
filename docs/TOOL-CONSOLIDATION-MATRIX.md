@@ -72,7 +72,7 @@ Every top-level Tools directory is assigned below, including redundant editors. 
 | `Other\Mordred_LoginScreen` | GlueXML/UI project, protected-path validation, executable hash binding |
 | `Other\WMT335a` | Client/model/texture research assigned to corresponding native workspaces |
 | `pjdbcEditer*` | SQL-backed DBC editing and schema mapping in the shared SQL/DBC engine |
-| `skyboxeditor` | Native LightParams/LightSkybox resolution, exact editor handoff, and visually authored color/float bands with sampled map-light context; rendered in-world sky dome remains |
+| `skyboxeditor` | Native LightParams/LightSkybox resolution, exact editor handoff, responsive sampled environment composition, hash-aware `.mdx`→`.m2` provenance resolution, native textured model preview, and visual color/float authoring; exact client atmosphere/draw ordering remains |
 | `spell editor 2` | Full spell authoring and effect workspace |
 | `Tallis` | Plugin/provider concepts incorporated into the Crucible extension boundary |
 | `Textures\BLPConverterGUI`, `BLPPhotoshopPlugin*` | Native BLP decode/encode, alpha/mipmap validation, PNG round trip, bulk queue |

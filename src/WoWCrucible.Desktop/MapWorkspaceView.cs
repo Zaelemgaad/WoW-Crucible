@@ -75,6 +75,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private AdtTextureLayerPlan? _texturePlan;
     private AdtTextureStructurePlan? _textureStructurePlan;
     private AdtAlphaBrushPlan? _alphaPlan;
+    private uint? _pendingLightingId;
 
     public event EventHandler? BackRequested;
     public event EventHandler<DbcRecordNavigationRequest>? OpenDbcRecordRequested;
@@ -146,6 +147,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             if (_workspaceTabs.SelectedIndex != 1 || lightingLoadStarted) return;
             lightingLoadStarted = true;
             await _lightingView.LoadAsync();
+            if (_pendingLightingId is { } id) _lightingView.SelectLightId(id);
         };
         var root = new Grid { RowDefinitions = new("Auto,*,Auto") };
         root.Children.Add(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading });
@@ -154,7 +156,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         Content = root;
     }
 
-    public void OpenLighting() => _workspaceTabs.SelectedIndex = 1;
+    public void OpenLighting(uint? lightId = null) { _pendingLightingId = lightId; _workspaceTabs.SelectedIndex = 1; if (lightId is { } id) _lightingView.SelectLightId(id); }
 
     public async Task OpenAsync(string? path)
     {

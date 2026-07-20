@@ -33,7 +33,10 @@ public partial class App : Application
             if (arguments.Any(argument => IsOption(argument, "--sql-studio"))) window.Opened += (_, _) => window.OpenSqlWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--projects"))) window.Opened += (_, _) => window.OpenProjectWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--client"))) window.Opened += (_, _) => window.OpenClientWorkspace();
-            else if (arguments.Any(argument => IsOption(argument, "--lighting"))) window.Opened += (_, _) => window.OpenLightingWorkspace();
+            else if (arguments.FirstOrDefault(argument => IsOption(argument, "--lighting")) is { } lightingArgument)
+            {
+                var separator = lightingArgument.IndexOf('='); uint? lightId = separator >= 0 && uint.TryParse(lightingArgument[(separator + 1)..], out var parsedLightId) ? parsedLightId : null; window.Opened += (_, _) => window.OpenLightingWorkspace(lightId);
+            }
             else if (arguments.Any(argument => IsOption(argument, "--maps"))) window.Opened += (_, _) => window.OpenMapWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--items"))) window.Opened += (_, _) => window.OpenItemWorkbench();
             else if (arguments.Any(argument => IsOption(argument, "--creatures"))) window.Opened += (_, _) => window.OpenCreatureWorkspace();
