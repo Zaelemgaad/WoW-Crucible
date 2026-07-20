@@ -209,6 +209,14 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         _status.Text = "Loaded the selected SQL row into the decoded item editor. Open every SQL field returns to the same exact live row, including custom/unknown columns.";
     }
 
+    public void ActivateAcquisition(string? exactIds = null)
+    {
+        _tabs.SelectedIndex = 1;
+        if (!string.IsNullOrWhiteSpace(exactIds)) _exactIds.Text = exactIds.Trim();
+        if (_audit is not null) ApplyAuditFilter();
+        else if (CanQueryDatabase() && !_auditLoading) _ = AuditAsync(automatic: true);
+    }
+
     private Control ConnectionBar()
     {
         var connect = AccentButton("Connect & share with SQL Studio"); connect.Click += async (_, _) => await ConnectDatabaseAsync(false);

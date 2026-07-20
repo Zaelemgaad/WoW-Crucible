@@ -17,7 +17,7 @@ Exit codes are consistent across workflows:
 wowcrucible tools commands [search words...] [--format=text|json]
 ```
 
-The command catalog is the same source used by the desktop's same-window `Ctrl+K` palette. Search accepts multiple intent terms rather than requiring an exact feature name, so queries such as `cut items`, `Heidi favorites`, `MPQ merge`, `model viewer animation`, and `server restart` resolve to their native workspaces. Empty search lists all commands in navigation order; no matches return review exit code `3`. Launch `WoWCrucible.Desktop-latest.exe --command-palette="search words"` to open the desktop directly into the filtered palette.
+The command catalog is the same source used by the desktop's same-window `Ctrl+K` palette. Search accepts multiple intent terms rather than requiring an exact feature name, so queries such as `cut items`, `Heidi favorites`, `MPQ merge`, `model viewer animation`, and `server restart` resolve to their native workspaces. Cut-item, favorites, and merge results activate the exact child tab, not merely the containing workspace. Empty search lists all commands in navigation order; no matches return review exit code `3`. Launch `WoWCrucible.Desktop-latest.exe --command-palette="search words"` to open the desktop directly into the filtered palette. Direct desktop routes are also available as `--cut-items` or `--cut-items=17,17802`, `--sql-favorites`, and `--mpq-merge`.
 
 ## Tool consolidation inventory
 

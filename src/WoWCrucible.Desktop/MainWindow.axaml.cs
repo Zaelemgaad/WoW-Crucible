@@ -742,6 +742,11 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
     }
+    public void OpenItemAcquisition(string? exactIds = null)
+    {
+        OpenItemWorkbench();
+        _itemWorkbenchView!.ActivateAcquisition(exactIds);
+    }
     private void OpenCreatureWorkspaceClick(object? sender, RoutedEventArgs e) => OpenCreatureWorkspace();
     public void OpenCreatureWorkspace()
     {
@@ -903,7 +908,7 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
     }
-    private void OpenMpqMergeWorkspace()
+    public void OpenMpqMergeWorkspace()
     {
         OpenMpqWorkspace();
         _mpqWorkspaceView!.ActivateMerge();
@@ -1024,7 +1029,7 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(_sqlWorkspaceView, "SQL Studio"); _sqlWorkspaceView.Activate();
     }
 
-    private void OpenSqlFavorites()
+    public void OpenSqlFavorites()
     {
         OpenSqlWorkspace();
         _sqlWorkspaceView!.ActivateFavorites();
@@ -1234,12 +1239,14 @@ public partial class MainWindow : Window
             ["workspace.cache"] = Done(OpenCacheTableWorkspace),
             ["workspace.projects"] = Done(OpenProjectWorkspace),
             ["workspace.items"] = Done(OpenItemWorkbench),
+            ["workspace.item-acquisition"] = Done(() => OpenItemAcquisition()),
             ["workspace.creatures"] = Done(OpenCreatureWorkspace),
             ["workspace.gameobjects"] = Done(OpenGameObjectWorkspace),
             ["workspace.quests"] = Done(OpenQuestWorkspace),
             ["workspace.pets"] = Done(OpenPetWorkspace),
             ["workspace.behaviors"] = Done(OpenBehaviorWorkspace),
             ["workspace.mpq"] = Done(OpenMpqWorkspace),
+            ["workspace.mpq-merge"] = Done(OpenMpqMergeWorkspace),
             ["workspace.client"] = Done(() => OpenClientWorkspaceClick(null, new RoutedEventArgs())),
             ["workspace.maps"] = Done(() => OpenMapWorkspace()),
             ["workspace.lighting"] = Done(() => OpenLightingWorkspace()),
@@ -1250,6 +1257,7 @@ public partial class MainWindow : Window
             ["workspace.tools"] = OpenToolInventoryAsync,
             ["workspace.server"] = Done(OpenServerSqlWorkspace),
             ["workspace.sql"] = Done(OpenSqlWorkspace),
+            ["workspace.sql-favorites"] = Done(OpenSqlFavorites),
             ["workspace.cli-guide"] = Done(() => OpenCliGuideClick(null, new RoutedEventArgs())),
             ["action.open-dbc"] = Done(() => OpenDbcClick(null, new RoutedEventArgs())),
             ["action.open-m2"] = Done(() => OpenM2Click(null, new RoutedEventArgs())),

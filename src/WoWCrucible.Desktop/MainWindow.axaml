@@ -51,13 +51,13 @@
                         <Button HorizontalContentAlignment="Left" Click="OpenDbdSchemasClick"><TextBlock Text="≣  DBD schemas &amp; audit" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenCacheTablesClick"><TextBlock Text="▥  Client cache tables" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenProjectWorkspaceClick"><TextBlock Text="◆  Projects &amp; shared IDs" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenItemWorkbenchClick"><TextBlock Text="◈  Items &amp; sets" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenItemWorkbenchClick"><TextBlock Text="◈  Items, sets &amp; cut-item audit" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenCreatureWorkspaceClick"><TextBlock Text="♟  Creatures &amp; NPCs" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenGameObjectWorkspaceClick"><TextBlock Text="▱  Gameobjects" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenQuestWorkspaceClick"><TextBlock Text="✦  Quests" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenPetWorkspaceClick"><TextBlock Text="♞  Pets &amp; companions" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenBehaviorWorkspaceClick"><TextBlock Text="⌘  Behaviors &amp; dialogue" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenMpqWorkspaceClick"><TextBlock Text="◇  MPQ patches" TextWrapping="Wrap" /></Button>
+                        <Button HorizontalContentAlignment="Left" Click="OpenMpqWorkspaceClick"><TextBlock Text="◇  MPQ patches &amp; merge" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenClientWorkspaceClick"><TextBlock Text="▣  Client workshop" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenMapWorkspaceClick"><TextBlock Text="▦  Maps &amp; world" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenTextureWorkspaceClick"><TextBlock Text="▧  Texture lab" TextWrapping="Wrap" /></Button>

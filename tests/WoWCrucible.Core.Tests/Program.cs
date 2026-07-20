@@ -11,11 +11,11 @@ if (args.Length != 2)
     throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
 
 if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(command => command.Id).Distinct(StringComparer.Ordinal).Count() != CrucibleCommandCatalog.All.Count ||
-    CrucibleCommandCatalog.Search("heidi favorites").FirstOrDefault()?.Command.Id != "workspace.sql" ||
+    CrucibleCommandCatalog.Search("heidi favorites").FirstOrDefault()?.Command.Id != "workspace.sql-favorites" ||
     CrucibleCommandCatalog.Search("foreign key constraint").FirstOrDefault()?.Command.Id != "workspace.sql" ||
-    CrucibleCommandCatalog.Search("mpq merge").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
+    CrucibleCommandCatalog.Search("mpq merge").FirstOrDefault()?.Command.Id != "workspace.mpq-merge" ||
     CrucibleCommandCatalog.Search("casc later client extract").FirstOrDefault()?.Command.Id != "workspace.mpq" ||
-    CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.items" ||
+    CrucibleCommandCatalog.Search("cut unobtainable item").FirstOrDefault()?.Command.Id != "workspace.item-acquisition" ||
     CrucibleCommandCatalog.Search("amaroth launcher optional release rollback").FirstOrDefault()?.Command.Id != "workspace.client" ||
     CrucibleCommandCatalog.Search("project collision ids").FirstOrDefault()?.Command.Id != "workspace.projects" ||
     CrucibleCommandCatalog.Search("playable class clone chrclasses").FirstOrDefault()?.Command.Id != "workspace.projects" ||
@@ -1862,6 +1862,7 @@ if (Directory.Exists(desktopSourceRoot))
         !itemWorkbenchSource.Contains("Find exact ID(s) — bypass every filter", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("ItemIdQueryParser.Parse(query)", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("ShowPinnedExactItems(exactIds)", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("public void ActivateAcquisition", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("the catalog is not capped", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Optional AzerothCore/TrinityCore source root", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("AuditAsync(profile, EmptyNull(_acquisitionDbc.Text), EmptyNull(_coreSource.Text))", StringComparison.Ordinal) ||
@@ -1880,6 +1881,10 @@ if (Directory.Exists(desktopSourceRoot))
         !clientWorkspaceSource.Contains("ClientReleaseService.Apply", StringComparison.Ordinal) ||
         !clientWorkspaceSource.Contains("ClientReleaseService.ValidateRollback", StringComparison.Ordinal) ||
         !appSource.Contains("--client", StringComparison.Ordinal) ||
+        !appSource.Contains("--cut-items", StringComparison.Ordinal) ||
+        !appSource.Contains("--sql-favorites", StringComparison.Ordinal) ||
+        !appSource.Contains("--mpq-merge", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("OpenItemAcquisition", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenSqlFavorites", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenMpqMergeWorkspace", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("_workspaceSession.Dispose()", StringComparison.Ordinal) ||

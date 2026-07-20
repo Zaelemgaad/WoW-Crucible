@@ -31,6 +31,7 @@ public partial class App : Application
                 window.Opened += (_, _) => window.OpenAssetComparison(library);
             }
             if (arguments.Any(argument => IsOption(argument, "--server-sql"))) window.Opened += (_, _) => window.OpenServerSqlWorkspace();
+            else if (arguments.Any(argument => IsOption(argument, "--sql-favorites"))) window.Opened += (_, _) => window.OpenSqlFavorites();
             else if (arguments.Any(argument => IsOption(argument, "--sql-studio"))) window.Opened += (_, _) => window.OpenSqlWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--projects"))) window.Opened += (_, _) => window.OpenProjectWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--client"))) window.Opened += (_, _) => window.OpenClientWorkspace();
@@ -39,6 +40,11 @@ public partial class App : Application
                 var separator = lightingArgument.IndexOf('='); uint? lightId = separator >= 0 && uint.TryParse(lightingArgument[(separator + 1)..], out var parsedLightId) ? parsedLightId : null; window.Opened += (_, _) => window.OpenLightingWorkspace(lightId);
             }
             else if (arguments.Any(argument => IsOption(argument, "--maps"))) window.Opened += (_, _) => window.OpenMapWorkspace();
+            else if (arguments.FirstOrDefault(argument => IsOption(argument, "--cut-items")) is { } cutItemsArgument)
+            {
+                var separator = cutItemsArgument.IndexOf('='); var exactIds = separator < 0 ? null : cutItemsArgument[(separator + 1)..].Trim('"');
+                window.Opened += (_, _) => window.OpenItemAcquisition(exactIds);
+            }
             else if (arguments.Any(argument => IsOption(argument, "--items"))) window.Opened += (_, _) => window.OpenItemWorkbench();
             else if (arguments.Any(argument => IsOption(argument, "--creatures"))) window.Opened += (_, _) => window.OpenCreatureWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--textures"))) window.Opened += (_, _) => window.OpenTextureWorkspace();
@@ -51,6 +57,7 @@ public partial class App : Application
             else if (arguments.Any(argument => IsOption(argument, "--tool-inventory"))) window.Opened += async (_, _) => await window.OpenToolInventoryAsync();
             else if (arguments.Any(argument => IsOption(argument, "--knowledge"))) window.Opened += async (_, _) => await window.OpenKnowledgeAsync();
             else if (arguments.Any(argument => IsOption(argument, "--dbd-schemas"))) window.Opened += (_, _) => window.OpenDbdSchemaAudit();
+            else if (arguments.Any(argument => IsOption(argument, "--mpq-merge"))) window.Opened += (_, _) => window.OpenMpqMergeWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--mpq") || IsOption(argument, "--casc"))) window.Opened += (_, _) => window.OpenMpqWorkspace();
             var paletteIndex = Array.FindIndex(arguments, argument => IsOption(argument, "--command-palette"));
             if (paletteIndex >= 0)
