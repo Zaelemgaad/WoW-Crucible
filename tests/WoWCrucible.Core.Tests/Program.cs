@@ -34,6 +34,15 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
 
+var cliGroups = new[] { "asset", "project", "tools", "knowledge", "cache", "client", "server", "db", "dbc", "mpq", "casc", "manifest" };
+if (CliHelpRouting.Resolve(["--help"]) != CliHelpRouting.Root ||
+    CliHelpRouting.Resolve(["help"]) != CliHelpRouting.Root ||
+    CliHelpRouting.Resolve(["help", "mpq"]) != "mpq" ||
+    cliGroups.Any(group => CliHelpRouting.Resolve([group, "operation", "input", "--format=json", "--help"]) != group) ||
+    cliGroups.Any(group => CliHelpRouting.Resolve([group, "-h", "input"]) != group) ||
+    CliHelpRouting.Resolve(["mpq", "list", "archive.mpq"]) is not null)
+    throw new InvalidOperationException("CLI help routing is no longer position-independent or is intercepting ordinary commands.");
+
 var lighting = WorldLightingService.Load(args[1]);
 if (lighting.Parameters.Count * 18 != lighting.ColorBands.Count || lighting.Parameters.Count * 6 != lighting.FloatBands.Count || lighting.Lights.Count == 0 || lighting.Skyboxes.Count == 0)
     throw new InvalidOperationException("Build-12340 world-light parameter-to-band relationships did not resolve completely.");

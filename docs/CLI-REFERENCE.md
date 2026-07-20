@@ -1,6 +1,6 @@
 # WoW Crucible CLI reference
 
-The CLI executable is `wowcrucible.exe`. Run `wowcrucible --help` for the short command map or `wowcrucible <group> --help` for group-specific syntax. Paths containing spaces must be quoted.
+The CLI executable is `wowcrucible.exe`. Run `wowcrucible --help` for the short command map or `wowcrucible <group> --help` for group-specific syntax. `--help` and `-h` are position-independent after a command group, so even `wowcrucible mpq list --content-only --help` shows MPQ help without opening an archive. `wowcrucible help <group>` is also supported. Paths containing spaces must be quoted.
 
 Add `--devbug` anywhere in a command to keep a detailed portable diagnostic log while preserving normal terminal output. Example: `wowcrucible --devbug mpq list patch-H.MPQ`. Logs are written under `Logs\Debug` beside the executable when that location is writable, and only the newest three CLI Devbug sessions are retained. Normal CLI use creates no routine log.
 

@@ -15,7 +15,8 @@ var exitCode = 0;
 
 try
 {
-    exitCode = commandArguments.Length == 0 || commandArguments[0] is "help" or "--help" or "-h" ? Help() : commandArguments[0].ToLowerInvariant() switch
+    var requestedHelp = CliHelpRouting.Resolve(commandArguments);
+    exitCode = commandArguments.Length == 0 ? Help() : requestedHelp is not null ? RoutedHelp(requestedHelp) : commandArguments[0].ToLowerInvariant() switch
     {
         "dbc" => Dbc(commandArguments[1..]),
         "db" => Database(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
@@ -50,6 +51,24 @@ finally
 
 devbug?.Complete(exitCode);
 return exitCode;
+
+static int RoutedHelp(string group) => group switch
+{
+    CliHelpRouting.Root => Help(),
+    "asset" => AssetHelp(),
+    "project" => ProjectHelp(),
+    "tools" => ToolingHelp(),
+    "knowledge" => KnowledgeHelp(),
+    "cache" => CacheHelp(),
+    "client" => ClientHelp(),
+    "server" => ServerHelp(),
+    "db" => DatabaseHelp(),
+    "dbc" => DbcHelp(),
+    "mpq" => MpqHelp(),
+    "casc" => CascHelp(),
+    "manifest" => ManifestHelp(),
+    _ => Fail($"Unknown command group for help: {group}")
+};
 
 static async Task<int> Cache(string[] args, CancellationToken cancellationToken)
 {
