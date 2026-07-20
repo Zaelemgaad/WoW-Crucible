@@ -24,6 +24,8 @@ public sealed record StaticM2DownportPlan(
     int MaterialCount,
     int ShadowBatchCount,
     int ConstantColorTrackCount,
+    int GlobalSequenceCount,
+    int AnimationSequenceCount,
     IReadOnlyList<string> Transformations,
     IReadOnlyList<string> Losses,
     IReadOnlyList<string> Blockers)
@@ -74,18 +76,20 @@ public sealed record StaticM2DownportScanResult(
     int Failed);
 
 /// <summary>
-/// Clean-room, loss-accounted conversion for the deliberately narrow modern static M2 profile
-/// found in the imported corpus. Unsupported structures are refused instead of discarded.
+/// Clean-room, loss-accounted conversion for a deliberately conservative modern M2 profile.
+/// Unsupported structures are refused instead of discarded.
 /// </summary>
 public static class StaticM2DownportService
 {
-    private const int PlanFormatVersion = 5;
+    private const int PlanFormatVersion = 6;
     private const int ReceiptFormatVersion = 1;
     private const uint ModernVersion = 274;
     private const uint WotlkVersion = 264;
     private const uint RequiredModernFlags = 0x2080;
     private const uint NewExporterLayoutFlag = 0x200000;
-    private const uint SupportedModernFlagMask = RequiredModernFlags | NewExporterLayoutFlag;
+    private const uint WotlkPassthroughFlagMask = 0x10;
+    private const uint ClearedModernFlagMask = RequiredModernFlags | NewExporterLayoutFlag;
+    private const uint SupportedSourceFlagMask = ClearedModernFlagMask | WotlkPassthroughFlagMask;
     private const int MaximumArrayCount = 20_000_000;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -114,7 +118,7 @@ public static class StaticM2DownportService
         if (!File.Exists(sourceModelPath)) throw new FileNotFoundException("The modern M2 source does not exist.", sourceModelPath);
         var source = File.ReadAllBytes(sourceModelPath);
         var blockers = new List<string>(); var transformations = new List<string>(); var losses = new List<string>();
-        var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0;
+        var modelHash = Hash(source); uint version = 0, flags = 0; int vertices = 0, triangles = 0, submeshes = 0, materials = 0, shadows = 0, globalSequenceCount = 0, animationSequenceCount = 0;
         byte[]? payload = null; ModernSkin? skin = null; string? skinHash = null; var omittedEmptyTxac = false; var omittedSingleProfileLdv1 = false; var constantColorTracks = 0;
         var materialTranslation = MaterialTranslation.None;
         FileDataIdListfileSnapshot? listfile = null; var resolvedTextures = new List<M2ResolvedTexturePath>();
@@ -158,22 +162,20 @@ public static class StaticM2DownportService
                 {
                     version = U32(payload, 4); flags = U32(payload, 0x10);
                     if (version != ModernVersion) blockers.Add($"Static downport currently requires modern M2 version {ModernVersion}; found {version}.");
-                    if ((flags & RequiredModernFlags) != RequiredModernFlags || (flags & ~SupportedModernFlagMask) != 0)
-                        blockers.Add($"Static downport requires flags 0x{RequiredModernFlags:X} with only the optional verified newer-exporter bit 0x{NewExporterLayoutFlag:X}; found 0x{flags:X}.");
+                    if ((flags & RequiredModernFlags) != RequiredModernFlags || (flags & ~SupportedSourceFlagMask) != 0)
+                        blockers.Add($"Static downport requires flags 0x{RequiredModernFlags:X}; it accepts only the optional newer-exporter bit 0x{NewExporterLayoutFlag:X} and native WotLK passthrough bit 0x{WotlkPassthroughFlagMask:X}. Found 0x{flags:X}.");
                     vertices = Count(payload, 0x3C, "vertex", blockers);
                     ValidateArray(payload, 0x3C, 0x40, 48, "vertices", blockers);
                     var viewCount = Count(payload, 0x44, "skin profile", blockers);
                     if (viewCount != 1) blockers.Add($"Static profile requires exactly one skin profile; found {viewCount:N0}.");
-                    RequireZero(payload, 0x14, "global sequences", blockers);
-                    var animationCount = Count(payload, 0x1C, "animation", blockers);
-                    if (animationCount > 1) blockers.Add($"Static profile supports at most one embedded animation; found {animationCount:N0}.");
-                    if (animationCount > 0)
-                    {
-                        ValidateArray(payload, 0x1C, 0x20, 64, "animations", blockers);
-                        var animationOffset = Offset(payload, 0x20, "animations", blockers);
-                        if (animationOffset >= 0 && animationOffset + 2 <= payload.Length && U16(payload, animationOffset) != 0)
-                            blockers.Add($"Static profile accepts only animation ID 0 (Stand); found {U16(payload, animationOffset)}.");
-                    }
+                    globalSequenceCount = Count(payload, 0x14, "global sequence", blockers);
+                    ValidateArray(payload, 0x14, 0x18, 4, "global sequences", blockers);
+                    animationSequenceCount = Count(payload, 0x1C, "animation", blockers);
+                    ValidateArray(payload, 0x1C, 0x20, 64, "animations", blockers);
+                    ValidateAnimationSequences(payload, animationSequenceCount, blockers);
+                    ValidateArray(payload, 0x24, 0x28, 2, "animation lookup", blockers);
+                    ValidateAnimationLookup(payload, animationSequenceCount, blockers);
+                    ValidateEmbeddedAnimationOwnership(sourceModelPath, payload, animationSequenceCount, blockers);
                     ValidateArray(payload, 0x2C, 0x30, 88, "bones", blockers);
                     var colorCount = Count(payload, 0x48, "color track", blockers);
                     if (colorCount > 0 && ValidateConstantColorTracks(payload, colorCount, blockers)) constantColorTracks = colorCount;
@@ -252,7 +254,10 @@ public static class StaticM2DownportService
         transformations.Add("Unwrap the MD21 container into its embedded MD20 payload.");
         transformations.Add($"Translate M2 version {ModernVersion} to Wrath version {WotlkVersion} after structural validation.");
         transformations.Add("Clear verified modern FileDataID/LOD flags only after resolving every external texture ID and proving exactly one SKIN is present.");
+        if ((flags & WotlkPassthroughFlagMask) != 0) transformations.Add($"Preserve native WotLK model flag 0x{WotlkPassthroughFlagMask:X}; it is not part of the modern container translation mask.");
         if ((flags & NewExporterLayoutFlag) != 0) transformations.Add("Clear the newer-exporter layout flag after validating every translated array by its absolute offset; physical record order is not copied into Wrath semantics.");
+        if (globalSequenceCount > 0) transformations.Add($"Preserve {globalSequenceCount:N0} native global-sequence duration(s) byte-for-byte, including zero-duration clock entries.");
+        if (animationSequenceCount > 1) transformations.Add($"Preserve {animationSequenceCount:N0} fully embedded animation sequence record(s) and their lookup table byte-for-byte; every staged sequence must independently parse and sample without an external .anim file.");
         transformations.Add(materialTranslation.Enabled
             ? materialTranslation.BlendOverrides.Count > 0
                 ? "Synthesize primary/environment texture-coordinate routes and a WotLK global blend-override table for verified packed shader-14 materials."
@@ -276,10 +281,10 @@ public static class StaticM2DownportService
             transformations.Add("Omit the verified single-profile LDV1 selection chunk after proving the model exposes exactly one SKIN.");
             losses.Add("Wrath's chunkless M2 container has no LDV1 distance-selection metadata; its finite modern threshold is omitted while the sole validated SKIN geometry remains unchanged.");
         }
-        var outputFlags = flags & ~SupportedModernFlagMask;
+        var outputFlags = flags & ~ClearedModernFlagMask;
         if (materialTranslation.BlendOverrides.Count > 0) outputFlags |= 0x8;
         return new(PlanFormatVersion, DateTimeOffset.UtcNow, sourceModelPath, modelHash, sourceSkinPath, skinHash, listfile?.SourcePath, listfile?.SourceSha256, resolvedTextures, version, flags,
-            outputFlags, vertices, triangles, submeshes, materials, shadows, constantColorTracks, transformations, losses, blockers.Distinct().ToArray())
+            outputFlags, vertices, triangles, submeshes, materials, shadows, constantColorTracks, globalSequenceCount, animationSequenceCount, transformations, losses, blockers.Distinct().ToArray())
         {
             OutputTextureCoordinateLookup = materialTranslation.TextureCoordinates,
             OutputBlendOverrides = materialTranslation.BlendOverrides,
@@ -356,6 +361,7 @@ public static class StaticM2DownportService
             cancellationToken.ThrowIfCancellationRequested();
             var modelSource = File.ReadAllBytes(current.SourceModelPath); var chunks = ReadChunks(modelSource, []); var md21 = chunks.Single(chunk => chunk.Id == "MD21");
             var payload = modelSource.AsSpan(checked((int)md21.DataOffset), checked((int)md21.Size)).ToArray();
+            var originalPayload = payload.ToArray();
             if (current.UsesBlendOverrides) RelocateBlendOverrideHeaderName(ref payload);
             BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), WotlkVersion); BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x10, 4), current.OutputFlags);
             AppendSignedLookup(ref payload, 0x88, 0x8C, current.OutputTextureCoordinateLookup);
@@ -377,6 +383,9 @@ public static class StaticM2DownportService
             var outputColorBlockers = new List<string>(); var outputColorCount = Count(payload, 0x48, "output color track", outputColorBlockers);
             if (outputColorCount != current.ConstantColorTrackCount || (outputColorCount > 0 && !ValidateConstantColorTracks(payload, outputColorCount, outputColorBlockers)))
                 throw new InvalidDataException("Converted M2 color tracks failed independent constant-track validation: " + string.Join("; ", outputColorBlockers));
+            ValidateBytePreservedArray(originalPayload, payload, 0x14, 0x18, 4, "global sequences");
+            ValidateBytePreservedArray(originalPayload, payload, 0x1C, 0x20, 64, "animation sequences");
+            ValidateBytePreservedArray(originalPayload, payload, 0x24, 0x28, 2, "animation lookup");
 
             var skinSource = File.ReadAllBytes(current.SourceSkinPath); var skin = ParseModernSkin(skinSource, []) ?? throw new InvalidDataException("Companion SKIN changed into an invalid layout.");
             var outputSkin = BuildWotlkSkin(skinSource, skin, current.OutputMaterialShaderIds);
@@ -389,6 +398,9 @@ public static class StaticM2DownportService
             var geometry = M2PreviewGeometryService.Load(stagedModel, stagedSkin, M2PreviewVisibilityMode.AllGeosets);
             if (geometry.Vertices.Count != current.VertexCount || geometry.TotalTriangleIndices / 3 != current.TriangleCount || geometry.Submeshes.Count != current.SubmeshCount || geometry.MaterialUnits.Count != current.MaterialCount)
                 throw new InvalidDataException("Converted M2/SKIN geometry or material counts differ from the immutable plan.");
+            if (geometry.Sequences.Count != current.AnimationSequenceCount || geometry.AnimationRig?.GlobalSequenceDurations.Length != current.GlobalSequenceCount)
+                throw new InvalidDataException($"Converted animation metadata differs from the immutable plan. Expected {current.AnimationSequenceCount:N0} sequence(s) and {current.GlobalSequenceCount:N0} global clock(s); found {geometry.Sequences.Count:N0} and {geometry.AnimationRig?.GlobalSequenceDurations.Length ?? 0:N0}.");
+            M2AnimationService.ValidateAllSequences(geometry);
             if (current.OutputMaterialCombiners.Count > 0 && !geometry.MaterialUnits.Select(material => material.Combiner.Name).SequenceEqual(current.OutputMaterialCombiners))
                 throw new InvalidDataException($"Converted material combiners differ from the immutable plan. Expected {string.Join(", ", current.OutputMaterialCombiners)}; found {string.Join(", ", geometry.MaterialUnits.Select(material => material.Combiner.Name))}.");
             var slots = M2PreviewGeometryService.InspectTextureSlots(stagedModel);
@@ -643,6 +655,51 @@ public static class StaticM2DownportService
     }
 
     private static void RequireZero(byte[] data, int countOffset, string label, List<string> blockers) { var count = Count(data, countOffset, label, blockers); if (count != 0) blockers.Add($"Static profile requires zero {label}; found {count:N0}."); }
+    private static void ValidateAnimationSequences(byte[] data, int count, List<string> blockers)
+    {
+        var offset = Offset(data, 0x20, "animations", blockers);
+        if (!HasRange(data, offset, count, 64)) return;
+        for (var index = 0; index < count; index++)
+        {
+            var item = offset + index * 64; var speed = BitConverter.ToSingle(data, item + 8); var next = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(item + 60, 2)); var flags = U32(data, item + 12); var alias = U16(data, item + 62);
+            if (!float.IsFinite(speed)) blockers.Add($"Animation sequence {index:N0} has a non-finite move speed.");
+            if (next < -1 || next >= count) blockers.Add($"Animation sequence {index:N0} points to next sequence {next:N0}, outside -1..{count - 1:N0}.");
+            if ((flags & 0x40) != 0 && alias >= count) blockers.Add($"Alias animation sequence {index:N0} points to sequence {alias:N0}, but only {count:N0} sequence(s) exist.");
+        }
+    }
+
+    private static void ValidateAnimationLookup(byte[] data, int animationCount, List<string> blockers)
+    {
+        var count = Count(data, 0x24, "animation lookup", blockers); var offset = Offset(data, 0x28, "animation lookup", blockers);
+        if (!HasRange(data, offset, count, 2)) return;
+        for (var index = 0; index < count; index++)
+        {
+            var value = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(offset + index * 2, 2));
+            if (value < -1 || value >= animationCount) { blockers.Add($"Animation lookup slot {index:N0} points to sequence {value:N0}, but only {animationCount:N0} sequence(s) exist."); break; }
+        }
+    }
+
+    private static void ValidateEmbeddedAnimationOwnership(string modelPath, byte[] data, int animationCount, List<string> blockers)
+    {
+        if (animationCount == 0) return;
+        var rawOffset = U32(data, 0x20);
+        if (rawOffset > int.MaxValue || !HasRange(data, (int)rawOffset, animationCount, 64)) return;
+        var offset = (int)rawOffset; var directory = Path.GetDirectoryName(modelPath)!; var stem = Path.GetFileNameWithoutExtension(modelPath);
+        for (var index = 0; index < animationCount; index++)
+        {
+            var item = offset + index * 64; var path = Path.Combine(directory, $"{stem}{U16(data, item):D4}-{U16(data, item + 2):D2}.anim");
+            if (File.Exists(path)) { blockers.Add($"Animation sequence {index:N0} has external companion {Path.GetFileName(path)}. External .anim translation is not part of the embedded-only profile."); break; }
+        }
+    }
+
+    private static void ValidateBytePreservedArray(byte[] source, byte[] output, int countOffset, int offsetOffset, int stride, string label)
+    {
+        var sourceCount = checked((int)U32(source, countOffset)); var outputCount = checked((int)U32(output, countOffset));
+        var sourceOffset = checked((int)U32(source, offsetOffset)); var outputOffset = checked((int)U32(output, offsetOffset));
+        if (sourceCount != outputCount || !HasRange(source, sourceOffset, sourceCount, stride) || !HasRange(output, outputOffset, outputCount, stride) ||
+            !source.AsSpan(sourceOffset, checked(sourceCount * stride)).SequenceEqual(output.AsSpan(outputOffset, checked(outputCount * stride))))
+            throw new InvalidDataException($"Converted {label} were not preserved byte-for-byte.");
+    }
     private static bool ValidateConstantColorTracks(byte[] data, int count, List<string> blockers)
     {
         var valid = true; var offset = Offset(data, 0x4C, "color tracks", blockers);

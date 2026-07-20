@@ -135,6 +135,18 @@ public static class M2AnimationService
         return new(geometry.Vertices.Count, geometry.Bones.Count, geometry.Attachments.Count, geometry.Cameras.Count, geometry.Lights.Count);
     }
 
+    internal static void ValidateAllSequences(M2PreviewGeometry geometry)
+    {
+        ArgumentNullException.ThrowIfNull(geometry);
+        if (geometry.Sequences.Count == 0) return;
+        var pose = CreatePose(geometry);
+        foreach (var sequence in geometry.Sequences)
+        {
+            SampleInto(geometry, sequence.Index, 0, pose);
+            if (sequence.DurationMilliseconds > 1) SampleInto(geometry, sequence.Index, sequence.DurationMilliseconds / 2d, pose);
+        }
+    }
+
     public static M2AnimationPose SnapshotPose(M2PreviewGeometry geometry, M2AnimationPose pose)
     {
         ArgumentNullException.ThrowIfNull(geometry); ArgumentNullException.ThrowIfNull(pose);

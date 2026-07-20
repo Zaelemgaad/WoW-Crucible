@@ -56,3 +56,22 @@ The expanded strict plan produced:
 - Converted M2/SKIN pairs: 88
 
 An independent plan over the expanded output classified 88/88 files as already valid Wrath MD20/version-264, with zero conversion-ready, blocked, or failed records. Before consolidating the earlier 68-model payload, all 136 overlapping M2/SKIN files were SHA-256 compared and proven byte-identical. Its prior receipt remains under `PreviousReceipts`; only the verified duplicate payload bytes were removed.
+
+## WotLK flags, global clocks, and embedded sequences
+
+The profile was then extended without relaxing its preservation rules:
+
+- The WotLK-compatible model flag `0x10` is retained while only the verified modern flags are removed; unknown flag bits still block conversion.
+- Global-sequence arrays are bounds-checked and byte-preserved, including zero-duration clocks.
+- Multiple embedded 64-byte animation sequences and their signed lookup table are bounds- and reference-checked, byte-preserved, and accepted only when no conventional external `.anim` companion exists.
+- Every sequence in every emitted output is parsed and sampled at time zero and its bounded midpoint before atomic publication. This traverses nested tracks and prevents an unverified embedded/external payload from hiding behind an unused animation.
+
+The same 112-model corpus then produced:
+
+- Eligible and converted M2/SKIN pairs: 94
+- Explicitly blocked: 18
+- Read/parse/conversion failures: 0
+- Newly supported pairs: 6
+- Byte comparison against the previous payload: all 176 overlapping M2/SKIN files identical, 0 changed
+
+The stable `G:\Crucible-Converted-Assets\classic-1-static-m2` payload now contains 94 M2 and 94 SKIN files. The prior 68-model, 88-model, and temporary 94-model audit receipts remain under `PreviousReceipts`; temporary duplicate payloads were removed only after all 367 retained counterparts were SHA-256 identical.
