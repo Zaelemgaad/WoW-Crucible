@@ -1027,12 +1027,12 @@ static int Asset(string[] args, CancellationToken cancellationToken)
     }
     if (args is ["model-export", var exportModelPath, var exportObjPath, .. var exportOptions])
     {
-        var overwrite = exportOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var allGeosets = exportOptions.Contains("--all-geosets", StringComparer.OrdinalIgnoreCase); var naked = exportOptions.Contains("--naked", StringComparer.OrdinalIgnoreCase);
+        var overwrite = exportOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var allGeosets = exportOptions.Contains("--all-geosets", StringComparer.OrdinalIgnoreCase); var naked = exportOptions.Contains("--naked", StringComparer.OrdinalIgnoreCase); var baseBody = exportOptions.Contains("--base-body", StringComparer.OrdinalIgnoreCase);
         var skinPath = Option(exportOptions, "--skin="); var animationText = Option(exportOptions, "--animation="); var timeText = Option(exportOptions, "--time="); var groupText = Option(exportOptions, "--groups=");
         var textureOptions = exportOptions.Where(option => option.StartsWith("--texture=", StringComparison.OrdinalIgnoreCase)).ToArray();
-        var unknown = exportOptions.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) && !option.Equals("--naked", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--texture=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var unknown = exportOptions.Where(option => !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) && !option.Equals("--naked", StringComparison.OrdinalIgnoreCase) && !option.Equals("--base-body", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--texture=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown model-export option: {unknown[0]}");
-        if (allGeosets && (naked || groupText is not null)) return Fail("--all-geosets cannot be combined with --naked or --groups.");
+        if ((allGeosets ? 1 : 0) + (naked ? 1 : 0) + (baseBody ? 1 : 0) + (groupText is null ? 0 : 1) > 1) return Fail("--all-geosets, --naked, --base-body, and --groups are mutually exclusive.");
         if (timeText is not null && animationText is null) return Fail("--time requires --animation=<sequence-index>.");
         var selectedGroups = naked ? new Dictionary<int, int>(M2GeosetCatalog.NakedCharacterSelection) : new Dictionary<int, int>();
         if (groupText is not null)
@@ -1045,7 +1045,8 @@ static int Asset(string[] args, CancellationToken cancellationToken)
             }
         }
         var selection = selectedGroups.Count == 0 ? null : new M2GeosetSelection(selectedGroups, naked ? "naked CLI export preset" : "explicit CLI export selection");
-        var geometry = M2PreviewGeometryService.Load(exportModelPath, skinPath, allGeosets ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.Automatic, selection);
+        var exportVisibility = allGeosets ? M2PreviewVisibilityMode.AllGeosets : baseBody ? M2PreviewVisibilityMode.BaseBodyOnly : M2PreviewVisibilityMode.Automatic;
+        var geometry = M2PreviewGeometryService.Load(exportModelPath, skinPath, exportVisibility, selection);
         M2AnimationPose? pose = null;
         if (animationText is not null)
         {
@@ -1236,13 +1237,14 @@ static int Asset(string[] args, CancellationToken cancellationToken)
     }
     if (args is ["preview-info", var previewModelPath, .. var previewOptions])
     {
-        var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.Equals("--naked", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var known = previewOptions.Where(option => option.Equals("--all-geosets", StringComparison.OrdinalIgnoreCase) || option.Equals("--naked", StringComparison.OrdinalIgnoreCase) || option.Equals("--base-body", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--skin=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--groups=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--dbc=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--facial-hair=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--animation=", StringComparison.OrdinalIgnoreCase) || option.StartsWith("--time=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (known.Length != previewOptions.Length) return Fail($"Unknown preview-info option: {previewOptions.Except(known).First()}");
-        var allGeosets = previewOptions.Contains("--all-geosets", StringComparer.OrdinalIgnoreCase); var naked = previewOptions.Contains("--naked", StringComparer.OrdinalIgnoreCase); var groupText = Option(previewOptions, "--groups=");
-        if (allGeosets && (naked || groupText is not null)) return Fail("--all-geosets cannot be combined with --naked or --groups because it intentionally shows every variant.");
-        var mode = allGeosets ? M2PreviewVisibilityMode.AllGeosets : M2PreviewVisibilityMode.Automatic;
+        var allGeosets = previewOptions.Contains("--all-geosets", StringComparer.OrdinalIgnoreCase); var naked = previewOptions.Contains("--naked", StringComparer.OrdinalIgnoreCase); var baseBody = previewOptions.Contains("--base-body", StringComparer.OrdinalIgnoreCase); var groupText = Option(previewOptions, "--groups=");
+        if ((allGeosets ? 1 : 0) + (naked ? 1 : 0) + (baseBody ? 1 : 0) + (groupText is null ? 0 : 1) > 1) return Fail("--all-geosets, --naked, --base-body, and --groups are mutually exclusive.");
+        var mode = allGeosets ? M2PreviewVisibilityMode.AllGeosets : baseBody ? M2PreviewVisibilityMode.BaseBodyOnly : M2PreviewVisibilityMode.Automatic;
         var dbcFolder = Option(previewOptions, "--dbc="); var hairText = Option(previewOptions, "--hair="); var facialText = Option(previewOptions, "--facial-hair=");
         if (naked && (hairText is not null || facialText is not null)) return Fail("--naked cannot be combined with --hair or --facial-hair.");
+        if ((allGeosets || baseBody) && (hairText is not null || facialText is not null)) return Fail("--all-geosets and --base-body cannot be combined with --hair or --facial-hair because those modes do not apply appearance geoset selections.");
         var selectedGroups = naked ? new Dictionary<int, int>(M2GeosetCatalog.NakedCharacterSelection) : new Dictionary<int, int>(); var selectionSource = naked ? "naked character preset" : string.Empty;
         if (hairText is not null || facialText is not null)
         {
@@ -1398,8 +1400,8 @@ Usage:
   wowcrucible asset creature-appearance-patch-plan <port-receipt.json> <processed-library> [--provenance=name] [--output=patch-plan.json] [--format=text|json] [--overwrite]
   wowcrucible asset creature-appearance-patch-manifest <patch-plan.json> <manifest.json> [--mpq=patch-name.MPQ] [--overwrite]
   wowcrucible asset creature-appearances <model-client-path> [--dbc=folder] [--schema=file] [--library=folder --provenance=name] [--format=text|json]
-  wowcrucible asset preview-info <wrath-model.m2> [--skin=file.skin] [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--naked|--groups=group:variant,...|--all-geosets]
-  wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--naked|--groups=group:variant,...|--all-geosets] [--overwrite]
+  wowcrucible asset preview-info <wrath-model.m2> [--skin=file.skin] [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--base-body|--naked|--groups=group:variant,...|--all-geosets]
+  wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--base-body|--naked|--groups=group:variant,...|--all-geosets] [--overwrite]
   wowcrucible asset wmo-preview-info <root-or-group.wmo> [--groups] [--content-root=folder] [--format=text|json]
   wowcrucible asset path-candidates <processed-library> <client-path> [--preferred=provenance] [--format=text|json]
   wowcrucible asset appearance-info <CharSections.dbc> <logical-path> <model-file>

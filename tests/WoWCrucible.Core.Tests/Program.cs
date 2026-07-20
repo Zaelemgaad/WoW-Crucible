@@ -969,12 +969,22 @@ if (!Path.GetFullPath(relativeSkinGeometry.SkinPath).Equals(Path.GetFullPath(Pat
 var environmentModelPath = Path.Combine(assetFixture, "geometry-environment.m2"); var environmentBytes = geometryBytes.ToArray(); BitConverter.GetBytes((short)-1).CopyTo(environmentBytes, textureCoordinateLookupOffset + 2); File.WriteAllBytes(environmentModelPath, environmentBytes); File.Copy(Path.Combine(assetFixture, "geometry00.skin"), Path.Combine(assetFixture, "geometry-environment00.skin"));
 var environmentGeometry = M2PreviewGeometryService.Load(environmentModelPath);
 var allGeosetGeometry = M2PreviewGeometryService.Load(geometryModelPath, visibilityMode: M2PreviewVisibilityMode.AllGeosets);
+var baseBodyGeometry = M2PreviewGeometryService.Load(geometryModelPath, visibilityMode: M2PreviewVisibilityMode.BaseBodyOnly);
+if ((int)M2PreviewVisibilityMode.AllGeosets != 2 || (int)M2PreviewVisibilityMode.BaseBodyOnly != 3)
+    throw new InvalidOperationException("M2 visibility enum persistence compatibility changed while adding raw base-body mode.");
 if (!ResponsiveLayoutService.UseSideBySide(1000, 500, 1) || !ResponsiveLayoutService.UseSideBySide(500, 500, 1) || ResponsiveLayoutService.UseSideBySide(499, 500, 1) || ResponsiveLayoutService.UseSideBySide(0, 500, 1) || ResponsiveLayoutService.UseSideBySide(double.NaN, 500, 1))
     throw new InvalidOperationException("Aspect-driven responsive layout policy regressed at wide, boundary, compact, empty, or non-finite dimensions.");
 try { _ = ResponsiveLayoutService.UseSideBySide(500, 500, 0); throw new InvalidOperationException("Responsive layout accepted a non-positive aspect threshold."); } catch (ArgumentOutOfRangeException) { }
 var selectedHairGeometry = M2PreviewGeometryService.Load(geometryModelPath, geosetSelection: new M2GeosetSelection(new Dictionary<int, int> { [0] = 2 }, "test selection"));
 var missingEarGeometry = M2PreviewGeometryService.Load(geometryModelPath, geosetSelection: new M2GeosetSelection(new Dictionary<int, int> { [0] = 2, [7] = 3 }, "missing selection test"));
 var nakedGeometry = M2PreviewGeometryService.Load(geometryModelPath, geosetSelection: new M2GeosetSelection(M2GeosetCatalog.NakedCharacterSelection, "naked test"));
+if (baseBodyGeometry.Submeshes.Count(section => section.Visible) != 1 || baseBodyGeometry.Submeshes.Single(section => section.Visible).GeosetId != 0 || baseBodyGeometry.TriangleIndices.Count != 3)
+    throw new InvalidOperationException("Raw base-body M2 visibility rendered customization/equipment geosets instead of only geoset ID 0.");
+var noBaseBodyModel = Path.Combine(assetFixture, "geometry-no-base.m2"); var noBaseBodySkin = Path.Combine(assetFixture, "geometry-no-base00.skin");
+File.Copy(geometryModelPath, noBaseBodyModel); var noBaseBodyBytes = geometrySkin.ToArray(); BitConverter.GetBytes((ushort)1).CopyTo(noBaseBodyBytes, 72); File.WriteAllBytes(noBaseBodySkin, noBaseBodyBytes);
+var missingBaseBodyGeometry = M2PreviewGeometryService.Load(noBaseBodyModel, visibilityMode: M2PreviewVisibilityMode.BaseBodyOnly);
+if (missingBaseBodyGeometry.Submeshes.Any(section => section.Visible) || missingBaseBodyGeometry.TriangleIndices.Count != 0)
+    throw new InvalidOperationException("Raw base-body M2 visibility guessed a substitute when geoset ID 0 was absent.");
 var describedGeosets = M2GeosetCatalog.Describe(allGeosetGeometry.Submeshes); var describedHair = describedGeosets.Single(group => group.Group == 0);
 if (M2GeosetCatalog.GroupName(4) != "Hands / gloves" || M2GeosetCatalog.GroupName(99) != "Unknown/custom group 99" || describedHair.Variants.Select(variant => variant.Variant).SequenceEqual([0, 2]) == false || describedHair.Variants.Sum(variant => variant.Triangles) != 2)
     throw new InvalidOperationException("Decoded M2 geoset catalog did not preserve named groups, exact variants, submeshes, and triangle counts.");

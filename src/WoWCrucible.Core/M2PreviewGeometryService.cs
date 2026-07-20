@@ -46,7 +46,7 @@ public sealed record M2PreviewRibbonEmitter(int Index, int BoneIndex, Vector3 Po
 {
     public override string ToString() => $"Ribbon · bone {BoneIndex:N0} · texture {TextureDefinitionIndex:N0} · {EdgesPerSecond:0.##} edges/s for {EdgeLifetimeSeconds:0.###} s";
 }
-public enum M2PreviewVisibilityMode { Automatic, BaseAppearance, AllGeosets }
+public enum M2PreviewVisibilityMode { Automatic = 0, BaseAppearance = 1, AllGeosets = 2, BaseBodyOnly = 3 }
 public enum M2PreviewTextureCoordinateSource { Primary, Secondary, Environment, Unsupported }
 public enum M2PreviewTextureStageBlend { Source, Modulate, Modulate2X, Add, AddNoAlpha, Unsupported }
 public enum M2PreviewTextureCombinerKind
@@ -538,9 +538,12 @@ public static class M2PreviewGeometryService
             raw[index] = (ReadUShort(skin, item), ReadUShort(skin, item + 2), ReadUShort(skin, item + 4), ReadUShort(skin, item + 6), triangleStart, triangleCount);
         }
 
-        var visible = visibilityMode == M2PreviewVisibilityMode.AllGeosets
-            ? Enumerable.Repeat(true, count).ToArray()
-            : raw.Select(section => IsBaseAppearanceGeoset(section.Id)).ToArray();
+        var visible = visibilityMode switch
+        {
+            M2PreviewVisibilityMode.AllGeosets => Enumerable.Repeat(true, count).ToArray(),
+            M2PreviewVisibilityMode.BaseBodyOnly => raw.Select(section => section.Id == 0).ToArray(),
+            _ => raw.Select(section => IsBaseAppearanceGeoset(section.Id)).ToArray()
+        };
         if (visibilityMode == M2PreviewVisibilityMode.BaseAppearance && geosetSelection is not null)
         {
             foreach (var (group, variant) in geosetSelection.GroupVariants)
@@ -565,7 +568,7 @@ public static class M2PreviewGeometryService
             var fixedEarId = raw.Where(section => section.Id / 100 == 7 && section.Id % 100 > 0).Select(section => section.Id).DefaultIfEmpty().Min();
             if (fixedEarId > 0) for (var index = 0; index < raw.Length; index++) if (raw[index].Id == fixedEarId) visible[index] = true;
         }
-        if (!visible.Any(value => value))
+        if (!visible.Any(value => value) && visibilityMode != M2PreviewVisibilityMode.BaseBodyOnly)
         {
             var fallback = Array.FindIndex(raw, section => section.Id == 0);
             visible[fallback >= 0 ? fallback : 0] = true;

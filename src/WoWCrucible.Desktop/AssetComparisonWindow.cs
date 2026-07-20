@@ -49,7 +49,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly ComboBox _modelSkinPicker = new() { PlaceholderText = "No compatible SKIN views" };
     private readonly TextBox _modelSearch = new() { PlaceholderText = "Filter discovered M2 models…" };
     private readonly ComboBox _modelFilter = new() { ItemsSource = new[] { "Ready models", "All models" }, SelectedIndex = 0 };
-    private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Automatic: character DBC / complete generic model", "Naked character (no hair or facial hair)", "Manual: exactly one variant per group", "Everything stacked (diagnostic only)" }, SelectedIndex = 0 };
+    private readonly ComboBox _geosetMode = new() { ItemsSource = new[] { "Automatic: character DBC / complete generic model", "Naked/default body (no hair or facial hair)", "Raw base body only (geoset ID 0)", "Manual: exactly one variant per group", "Everything stacked (diagnostic only)" }, SelectedIndex = 0 };
     private readonly ItemsControl _geosetGroups = new();
     private readonly TextBlock _geosetInspectorStatus = new() { Text = "Load a compatible character M2 to inspect its named geoset groups.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8"), FontSize = 11 };
     private readonly CheckBox _showAttachmentPoints = new() { Content = "Show native attachment points" };
@@ -573,14 +573,15 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             var visibilityMode = geosetMode switch
             {
                 0 => M2PreviewVisibilityMode.Automatic,
-                3 => M2PreviewVisibilityMode.AllGeosets,
+                2 => M2PreviewVisibilityMode.BaseBodyOnly,
+                4 => M2PreviewVisibilityMode.AllGeosets,
                 _ => M2PreviewVisibilityMode.BaseAppearance
             };
             M2GeosetSelection? geosetSelection = geosetMode switch
             {
                 0 when appearance.Geosets is { GroupVariants.Count: > 0 } geosets => new(geosets.GroupVariants, "CharHairGeosets.dbc + CharacterFacialHairStyles.dbc"),
                 1 => new(M2GeosetCatalog.NakedCharacterSelection, "naked character preset"),
-                2 when _manualGeosetVariants.Count > 0 => new(new Dictionary<int, int>(_manualGeosetVariants), "manual exact geoset inspector"),
+                3 when _manualGeosetVariants.Count > 0 => new(new Dictionary<int, int>(_manualGeosetVariants), "manual exact geoset inspector"),
                 _ => null
             };
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(model.ModelPath, selectedSkinPath, visibilityMode, geosetSelection), token); if (!IsCurrent(token, activity) || request != _modelRequest || directoryRequest != _directoryRequest) return;
@@ -753,7 +754,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var missing = geometry.GeosetSelectionFindings.Where(finding => finding.Missing).ToArray();
         _geosetInspectorStatus.Text = $"{groups.Count:N0} decoded group(s) · {editable.Sum(group => group.Variants.Count(variant => variant.Variant > 0)):N0} selectable variant(s) · {baseSections:N0} always-on base section(s). " +
             (missing.Length == 0 ? string.Empty : $"{missing.Length:N0} requested DBC/manual variant(s) are absent from this SKIN: {string.Join("; ", missing.Select(finding => $"group {finding.Group:N0} variant {finding.RequestedVariant:N0}"))}. ") +
-            (_geosetMode.SelectedIndex == 2 ? "Manual selections are live." : "Switch to Manual mode to change the selectors below without stacking variants.");
+            (_geosetMode.SelectedIndex == 3 ? "Manual selections are live." : "Switch to Manual mode to change the selectors below without stacking variants.");
     }
 
     private void ClearGeosetInspector(string message)
@@ -803,7 +804,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         {
             if (selector.SelectedItem is not GeosetChoice choice) return;
             _manualGeosetVariants[group.Group] = choice.Variant;
-            if (_geosetMode.SelectedIndex == 2) await RunUiActionAsync("manual-geoset-change", LoadSelectedModelAsync);
+            if (_geosetMode.SelectedIndex == 3) await RunUiActionAsync("manual-geoset-change", LoadSelectedModelAsync);
         };
         return new Grid
         {
@@ -852,6 +853,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
             ? "Geosets: no SKIN submesh table; showing the complete mesh."
             : $"Geosets: {_loadedModelGeometry.Submeshes.Count(section => section.Visible):N0} visible of {_loadedModelGeometry.Submeshes.Count:N0} · {_loadedModelGeometry.VisibilityMode} · {_loadedModelGeometry.TriangleIndices.Count / 3:N0} of {_loadedModelGeometry.TotalTriangleIndices / 3:N0} triangles" +
               (_loadedModelGeometry.GeosetSelection is null ? string.Empty : $" · {_loadedModelGeometry.GeosetSelection.Source}: {string.Join(", ", _loadedModelGeometry.GeosetSelection.GroupVariants.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}:{pair.Value}"))}") +
+              (_loadedModelGeometry.VisibilityMode == M2PreviewVisibilityMode.BaseBodyOnly ? (_loadedModelGeometry.Submeshes.Any(section => section.Visible) ? " · RAW ID 0 ONLY: no customization/equipment sections" : " · RAW ID 0 IS ABSENT: no substitute shown") : string.Empty) +
               (_loadedModelGeometry.VisibilityMode == M2PreviewVisibilityMode.AllGeosets ? " · WARNING: mutually exclusive variants are intentionally stacked" : string.Empty);
         if (_loadedModelGeometry is not null)
         {
