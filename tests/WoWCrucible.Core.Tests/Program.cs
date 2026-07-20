@@ -19,6 +19,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("amaroth launcher optional release rollback").FirstOrDefault()?.Command.Id != "workspace.client" ||
     CrucibleCommandCatalog.Search("project collision ids").FirstOrDefault()?.Command.Id != "workspace.projects" ||
     CrucibleCommandCatalog.Search("playable class clone chrclasses").FirstOrDefault()?.Command.Id != "workspace.projects" ||
+    CrucibleCommandCatalog.Search("playable race clone chrraces charsections").FirstOrDefault()?.Command.Id != "workspace.projects" ||
     CrucibleCommandCatalog.Search("sqlite spell staging").FirstOrDefault()?.Command.Id != "action.dbc-staging" ||
     CrucibleCommandCatalog.Search("pet companion level stats").FirstOrDefault()?.Command.Id != "workspace.pets" ||
     CrucibleCommandCatalog.Search("pet level curve scale").FirstOrDefault()?.Command.Id != "workspace.pets" ||
@@ -34,6 +35,21 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("cross row lookup exact map").FirstOrDefault()?.Command.Id != "workspace.server" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
+
+if (!PlayableBundleSqlService.IsRecognizedIdentityTable(PlayableBundleIdentityKind.Class, "player_class_stats") ||
+    !PlayableBundleSqlService.IsRecognizedIdentityTable(PlayableBundleIdentityKind.Class, "chrclasses_dbc") ||
+    !PlayableBundleSqlService.IsRecognizedIdentityTable(PlayableBundleIdentityKind.Race, "charsections_dbc") ||
+    PlayableBundleSqlService.IsRecognizedIdentityTable(PlayableBundleIdentityKind.Class, "creature_classlevelstats") ||
+    PlayableBundleSqlService.IsRecognizedIdentityTable(PlayableBundleIdentityKind.Class, "item_dbc") ||
+    PlayableBundleSqlService.IsRecognizedIdentityTable(PlayableBundleIdentityKind.Race, "creature_template"))
+    throw new InvalidOperationException("Playable class/race SQL identity-table allowlists regressed or admitted a semantic name collision.");
+
+var maskOne = new LegacyDatabaseAuditValue(LegacyDatabaseAuditValueState.Scalar, "1"); var maskExpanded = new LegacyDatabaseAuditValue(LegacyDatabaseAuditValueState.Scalar, "2097153");
+var guardedMaskRow = new PlayableBundleSqlRow([new("ID", maskOne)], [new("ID", maskOne)], [new("ID", maskOne), new("RaceMask", maskExpanded)], "RaceMask", maskOne, maskExpanded);
+var guardedMaskSql = PlayableBundleSqlService.PreviewSql("race", "Human", 1, "Fixture", 22, new("localhost", 3306, "fixture", "world", "fixture", new Dictionary<string, string>()), [new("skilllineability_dbc", "fixture", 1, 0, 0, [guardedMaskRow])]);
+if (!PlayableBundleSqlService.RequiresGuardedMaskExpansion("RaceMask", ["ID"]) || PlayableBundleSqlService.RequiresGuardedMaskExpansion("RaceMask", ["ID", "RaceMask"]) ||
+    !guardedMaskSql.Contains("UPDATE `skilllineability_dbc` SET `RaceMask`=", StringComparison.Ordinal) || !guardedMaskSql.Contains("`ID` <=>", StringComparison.Ordinal) || !guardedMaskSql.Contains("`RaceMask` <=>", StringComparison.Ordinal))
+    throw new InvalidOperationException("Guarded playable-bundle mask expansion planning or SQL rendering regressed.");
 
 var cliGroups = new[] { "asset", "project", "tools", "knowledge", "cache", "client", "server", "db", "dbc", "mpq", "casc", "manifest" };
 if (CliHelpRouting.Resolve(["--help"]) != CliHelpRouting.Root ||

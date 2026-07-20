@@ -35,9 +35,18 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
     private readonly TextBox _classOutput = new() { PlaceholderText = "New/empty bundle output folder…" };
     private readonly TextBlock _classStatus = Status("Choose a reserved Class ID, then create a read-only dependency plan.");
     private readonly ListBox _classDetails = new();
+    private readonly TextBox _raceSource = new() { Text = "1", PlaceholderText = "Existing source race ID" };
+    private readonly TextBox _raceTarget = new() { PlaceholderText = "Reserved unoccupied race ID" };
+    private readonly TextBox _raceName = new() { PlaceholderText = "New playable race name" };
+    private readonly TextBox _racePrefix = new() { PlaceholderText = "1–4 character client prefix" };
+    private readonly TextBox _raceToken = new() { PlaceholderText = "Client file/path token" };
+    private readonly TextBox _raceOutput = new() { PlaceholderText = "New/empty bundle output folder…" };
+    private readonly TextBlock _raceStatus = Status("Choose a genuinely unoccupied reserved Race ID, then create a read-only dependency plan.");
+    private readonly ListBox _raceDetails = new();
     private IReadOnlyList<TargetProfile> _profiles = [];
     private ContentIdOccupancyReport? _report;
     private PlayableClassClonePlan? _classPlan;
+    private PlayableRaceClonePlan? _racePlan;
     private CancellationTokenSource? _operation;
 
     public event EventHandler? BackRequested;
@@ -50,9 +59,10 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         _domain.ItemsSource = ContentIdDomainCatalog.All; _domain.SelectedItem = ContentIdDomainCatalog.Get(ContentIdDomain.Item);
         _dbc.Text = session.Settings.CoreDbcPath; _schema.Text = session.Settings.SchemaDefinitionPath; _root.Text = session.Settings.ActiveProjectPath;
         _domain.SelectionChanged += (_, _) => { InvalidateReport(); ShowPolicy(); };
-        _root.TextChanged += (_, _) => InvalidateClassPlan();
-        _dbc.TextChanged += (_, _) => { InvalidateReport(); InvalidateClassPlan(); }; _schema.TextChanged += (_, _) => { InvalidateReport(); InvalidateClassPlan(); }; _manualIds.TextChanged += (_, _) => InvalidateReport();
+        _root.TextChanged += (_, _) => { InvalidateClassPlan(); InvalidateRacePlan(); };
+        _dbc.TextChanged += (_, _) => { InvalidateReport(); InvalidateClassPlan(); InvalidateRacePlan(); }; _schema.TextChanged += (_, _) => { InvalidateReport(); InvalidateClassPlan(); InvalidateRacePlan(); }; _manualIds.TextChanged += (_, _) => InvalidateReport();
         foreach (var field in new[] { _classSource, _classTarget, _className, _classToken, _classPower }) field.TextChanged += (_, _) => InvalidateClassPlan();
+        foreach (var field in new[] { _raceSource, _raceTarget, _raceName, _racePrefix, _raceToken }) field.TextChanged += (_, _) => InvalidateRacePlan();
 
         _sources.ItemTemplate = new FuncDataTemplate<ContentIdOccupancySource>((source, _) => source is null ? new TextBlock() : new Grid
         {
@@ -90,6 +100,12 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         var browseClassOutput = new Button { Content = "Browse…" }; browseClassOutput.Click += async (_, _) => await PickFolderAsync(_classOutput, "Choose a new or empty playable-class bundle folder");
         var classPlan = Accent("Create dependency plan"); classPlan.Click += async (_, _) => await PlanClassAsync();
         var classBuild = Accent("Build reviewed bundle"); classBuild.Click += async (_, _) => await BuildClassAsync();
+        var connectRace = new Button { Content = "Connect Server & SQL" }; connectRace.Click += (_, _) => ServerSqlRequested?.Invoke(this, EventArgs.Empty);
+        var cancelRace = new Button { Content = "Cancel" }; cancelRace.Click += (_, _) => _operation?.Cancel();
+        var latestRace = new Button { Content = "Use latest reserved Race ID" }; latestRace.Click += (_, _) => UseLatestRaceReservation();
+        var browseRaceOutput = new Button { Content = "Browse…" }; browseRaceOutput.Click += async (_, _) => await PickFolderAsync(_raceOutput, "Choose a new or empty playable-race bundle folder");
+        var racePlan = Accent("Create dependency plan"); racePlan.Click += async (_, _) => await PlanRaceAsync();
+        var raceBuild = Accent("Build reviewed bundle"); raceBuild.Click += async (_, _) => await BuildRaceAsync();
 
         var heading = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Padding = new Thickness(12, 8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "PROJECTS & SHARED IDS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, create, open } } };
         var projectForm = Form(("Project folder", Row(_root, browseRoot)), ("Project name", _name), ("Target profile", _target), ("Asset library", Row(_assetLibrary, browseAssets)));
@@ -116,10 +132,21 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         } } };
         var classEvidence = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Margin = new Thickness(12), Children = { new TextBlock { Text = "Dependency evidence", FontSize = 17, FontWeight = FontWeight.SemiBold }, WithRow(_classDetails, 1) } };
         var classBody = new ResponsiveSplitGrid(classConfiguration, classEvidence);
+        var raceForm = Form(("Source race ID", _raceSource), ("Reserved target ID", Row(_raceTarget, latestRace)), ("Race name", _raceName), ("Client prefix", _racePrefix), ("Client file token", _raceToken), ("Bundle output", Row(_raceOutput, browseRaceOutput)));
+        var raceConfiguration = new ScrollViewer { Content = new StackPanel { Spacing = 10, Margin = new Thickness(12), Children =
+        {
+            new TextBlock { Text = "PLAYABLE RACE BUNDLE", FontSize = 17, FontWeight = FontWeight.SemiBold },
+            Status("Clones the complete WotLK character-creation surface for one source race: race identity, playable classes, appearances, barber/hair/facial options, outfits, names, vocal/emote data, faction reputation masks, skills, talents, and recognized SQL starting/stat rows. Nothing is applied live."),
+            raceForm, new WrapPanel { Children = { connectRace, racePlan, raceBuild, cancelRace } }, _raceStatus,
+            Status("A client can contain occupied non-player race IDs above 11. The plan checks ChrRaces and every dependent table and refuses overwrite. This foundation reuses the source models until a complete custom asset/UI/core chain is supplied.")
+        } } };
+        var raceEvidence = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 7, Margin = new Thickness(12), Children = { new TextBlock { Text = "Dependency evidence", FontSize = 17, FontWeight = FontWeight.SemiBold }, WithRow(_raceDetails, 1) } };
+        var raceBody = new ResponsiveSplitGrid(raceConfiguration, raceEvidence);
         var tabs = new TabControl { ItemsSource = new[]
         {
             new TabItem { Header = "ID reservations", Content = body },
-            new TabItem { Header = "Playable class bundle", Content = classBody }
+            new TabItem { Header = "Playable class bundle", Content = classBody },
+            new TabItem { Header = "Playable race bundle", Content = raceBody }
         } };
         Content = new Grid { RowDefinitions = new("Auto,*"), Children = { heading, WithRow(tabs, 1) } };
         ShowPolicy(); TryLoadConfiguredProject();
@@ -243,7 +270,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         details.AddRange(plan.DbcTables.Select(table => $"DBC     {table.Table} · {table.AffectedRows:N0} row(s) · {table.Action}"));
         details.AddRange(plan.SqlTables.Select(table => $"SQL     {table.Table} · source {table.SourceRows:N0} · plan {table.Rows.Count:N0} · covered {table.AlreadyCovered:N0} · conflicts {table.Conflicts:N0}"));
         details.AddRange(plan.Blockers.Select(value => $"BLOCKER {value}")); details.AddRange(plan.Warnings.Select(value => $"WARNING {value}")); _classDetails.ItemsSource = details;
-        _classStatus.Text = plan.Ready ? $"Ready · {plan.DbcTables.Sum(table => table.AffectedRows):N0} DBC row operation(s) · {plan.SqlRows:N0} additive SQL row(s). Review the evidence, then build." : $"Blocked · {plan.Blockers.Count:N0} issue(s). Nothing can be built until they are resolved.";
+        _classStatus.Text = plan.Ready ? $"Ready · {plan.DbcTables.Sum(table => table.AffectedRows):N0} DBC row operation(s) · {plan.SqlRows:N0} reviewed SQL operation(s). Review the evidence, then build." : $"Blocked · {plan.Blockers.Count:N0} issue(s). Nothing can be built until they are resolved.";
         if (string.IsNullOrWhiteSpace(_classOutput.Text)) _classOutput.Text = Path.Combine(plan.ProjectRoot, "Staging", $"Class-{plan.TargetClassId}-{plan.TargetFileToken}");
     }
 
@@ -255,6 +282,50 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
             _classTarget.Text = reservation.Values.Last().ToString();
         }
         catch (Exception exception) { FailClass("Could not load a reserved Class ID", exception); }
+    }
+
+    private async Task PlanRaceAsync()
+    {
+        _operation?.Cancel(); _operation?.Dispose(); _operation = new();
+        try
+        {
+            var (root, source, target, name, prefix, token) = RaceInputs(); var profile = _session.DatabaseProfile ?? throw new InvalidOperationException("Connect Server & SQL first so Crucible can inspect authoritative race and player-create tables."); var capabilities = _session.DatabaseCapabilities ?? throw new InvalidOperationException("Connect Server & SQL first so Crucible can inspect authoritative race and player-create tables.");
+            _raceStatus.Text = $"Inspecting every dependency for race {source:N0} -> {target:N0}…"; _racePlan = await new PlayableRaceCloneService().CreatePlanAsync(root, RequiredPath(_dbc.Text, "Choose the authoritative DBC folder."), RequiredPath(_schema.Text, "Choose the matching WDBX schema XML."), source, target, name, prefix, token, profile, capabilities, _operation.Token); ShowRacePlan(_racePlan);
+            _session.Settings.CoreDbcPath = _dbc.Text ?? string.Empty; _session.Settings.SchemaDefinitionPath = _schema.Text ?? string.Empty; _session.Settings.Save(); DesktopCrashLogger.Debug("PROJECT", "race-plan", ("sourceRace", source), ("targetRace", target), ("ready", _racePlan.Ready), ("dbcRows", _racePlan.DbcRows), ("sqlRows", _racePlan.SqlRows));
+        }
+        catch (OperationCanceledException) { _raceStatus.Text = "Playable-race planning cancelled."; }
+        catch (Exception exception) { FailRace("Playable-race planning failed", exception); }
+    }
+
+    private async Task BuildRaceAsync()
+    {
+        _operation?.Cancel(); _operation?.Dispose(); _operation = new();
+        try
+        {
+            if (_racePlan is null) { await PlanRaceAsync(); if (_racePlan is null) return; } if (!_racePlan.Ready) throw new InvalidOperationException($"Resolve the {_racePlan.Blockers.Count:N0} dependency blocker(s) before building."); var profile = _session.DatabaseProfile ?? throw new InvalidOperationException("Reconnect Server & SQL before building."); var output = RequiredPath(_raceOutput.Text, "Choose a new or empty bundle output folder.");
+            _raceStatus.Text = "Revalidating bound DBC/SQL inputs and building a new reviewable race bundle…"; var result = await new PlayableRaceCloneService().BuildAsync(_racePlan, profile, output, _operation.Token); _raceStatus.Text = $"Built race {_racePlan.TargetRaceId:N0} bundle. Patch: {result.PatchPath} · SQL: {result.SqlPath} · receipt: {result.ReceiptPath}"; DesktopCrashLogger.Debug("PROJECT", "race-bundle-built", ("race", _racePlan.TargetRaceId), ("output", result.OutputRoot), ("patch", result.PatchPath));
+        }
+        catch (OperationCanceledException) { _raceStatus.Text = "Playable-race build cancelled."; }
+        catch (Exception exception) { FailRace("Playable-race build failed", exception); }
+    }
+
+    private (string Root, uint Source, uint Target, string Name, string Prefix, string Token) RaceInputs()
+    {
+        var root = RequiredPath(_root.Text, "Open or create a Crucible project first."); _ = CrucibleContentProjectService.Load(root); if (!uint.TryParse(_raceSource.Text, out var source) || source is 0 or > 31) throw new FormatException("Source race ID must be from 1 through 31."); if (!uint.TryParse(_raceTarget.Text, out var target) || target is 0 or > 31) throw new FormatException("Target race ID must be from 1 through 31.");
+        var name = (_raceName.Text ?? string.Empty).Trim(); if (name.Length == 0) throw new FormatException("Enter the new race name."); var prefix = (_racePrefix.Text ?? string.Empty).Trim(); if (prefix.Length == 0) throw new FormatException("Enter the client prefix, such as Cr."); var token = (_raceToken.Text ?? string.Empty).Trim(); if (token.Length == 0) throw new FormatException("Enter the client file token, such as CrucibleRace."); return (root, source, target, name, prefix, token);
+    }
+
+    private void ShowRacePlan(PlayableRaceClonePlan plan)
+    {
+        var details = new List<string> { $"SOURCE  {plan.SourceRaceId:N0} · {plan.SourceRaceName}", $"TARGET  {plan.TargetRaceId:N0} · {plan.TargetRaceName} · {plan.TargetClientPrefix} · {plan.TargetFileToken}", $"BINDING {plan.ContentSha256}" };
+        details.AddRange(plan.DbcTables.Select(table => $"DBC     {table.Table} · {table.AffectedRows:N0} row(s) · {table.Action}")); details.AddRange(plan.SqlTables.Select(table => $"SQL     {table.Table} · source {table.SourceRows:N0} · plan {table.Rows.Count:N0} · covered {table.AlreadyCovered:N0} · conflicts {table.Conflicts:N0}")); details.AddRange(plan.Blockers.Select(value => $"BLOCKER {value}")); details.AddRange(plan.Warnings.Select(value => $"WARNING {value}")); _raceDetails.ItemsSource = details;
+        _raceStatus.Text = plan.Ready ? $"Ready · {plan.DbcRows:N0} DBC row operation(s) · {plan.SqlRows:N0} reviewed SQL operation(s). Review the evidence, then build." : $"Blocked · {plan.Blockers.Count:N0} issue(s). Nothing can be built until they are resolved."; if (string.IsNullOrWhiteSpace(_raceOutput.Text)) _raceOutput.Text = Path.Combine(plan.ProjectRoot, "Staging", $"Race-{plan.TargetRaceId}-{plan.TargetFileToken}");
+    }
+
+    private void UseLatestRaceReservation()
+    {
+        try { var root = RequiredPath(_root.Text, "Open or create a Crucible project first."); var reservation = CrucibleContentProjectService.LoadRegistry(root).Reservations.Where(value => value.Domain == ContentIdDomain.Race).OrderByDescending(value => value.CreatedUtc).FirstOrDefault() ?? throw new InvalidOperationException("This project has no reserved Race ID yet."); _raceTarget.Text = reservation.Values.Last().ToString(); }
+        catch (Exception exception) { FailRace("Could not load a reserved Race ID", exception); }
     }
 
     private void TryLoadConfiguredProject()
@@ -282,9 +353,11 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
     private void SetActive(string root) { root = Path.GetFullPath(root); _root.Text = root; _session.Settings.ActiveProjectPath = root; _session.Settings.Save(); }
     private void InvalidateReport() { _report = null; _sources.ItemsSource = Array.Empty<ContentIdOccupancySource>(); _status.Text = "Occupancy inputs changed · scan again before reserving."; }
     private void InvalidateClassPlan() { _classPlan = null; _classDetails.ItemsSource = Array.Empty<string>(); _classStatus.Text = "Class inputs changed · create a fresh dependency plan before building."; }
-    private void SessionChanged(object? sender, EventArgs e) { InvalidateReport(); InvalidateClassPlan(); }
+    private void InvalidateRacePlan() { _racePlan = null; _raceDetails.ItemsSource = Array.Empty<string>(); _raceStatus.Text = "Race inputs changed · create a fresh dependency plan before building."; }
+    private void SessionChanged(object? sender, EventArgs e) { InvalidateReport(); InvalidateClassPlan(); InvalidateRacePlan(); }
     private void Fail(string operation, Exception exception) { _status.Text = $"{operation}: {exception.Message}"; DesktopCrashLogger.Log(operation, exception); }
     private void FailClass(string operation, Exception exception) { _classStatus.Text = $"{operation}: {exception.Message}"; DesktopCrashLogger.Log(operation, exception); }
+    private void FailRace(string operation, Exception exception) { _raceStatus.Text = $"{operation}: {exception.Message}"; DesktopCrashLogger.Log(operation, exception); }
     private static string RequiredPath(string? value, string message) { if (string.IsNullOrWhiteSpace(value)) throw new InvalidOperationException(message); return Path.GetFullPath(value.Trim()); }
     private static string? EmptyNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static string Range(IReadOnlyList<uint> values) => values.Count == 0 ? "none" : values.Count == 1 ? values[0].ToString("N0") : $"{values.Min():N0}–{values.Max():N0}";

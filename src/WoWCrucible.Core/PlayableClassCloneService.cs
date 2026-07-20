@@ -3,18 +3,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using MySqlConnector;
 
 namespace WoWCrucible.Core;
 
-public sealed record PlayableClassDatabaseTarget(string Host, uint Port, string User, string Database, string ServerVersion,
-    IReadOnlyDictionary<string, string> TableSchemaSha256);
-public sealed record PlayableClassSqlValue(string Column, LegacyDatabaseAuditValue Value);
-public sealed record PlayableClassSqlRow(IReadOnlyList<LegacyDatabaseAuditKeyPart> SourceKey,
-    IReadOnlyList<LegacyDatabaseAuditKeyPart> TargetKey, IReadOnlyList<PlayableClassSqlValue> Values);
-public sealed record PlayableClassSqlTablePlan(string Table, string Selector, int SourceRows, int AlreadyCovered,
-    int Conflicts, IReadOnlyList<PlayableClassSqlRow> Rows);
-public sealed record PlayableClassDbcTablePlan(string Table, string Action, int AffectedRows);
 public sealed record PlayableClassClonePlan(
     string Format,
     int FormatVersion,
@@ -33,9 +24,9 @@ public sealed record PlayableClassClonePlan(
     uint TargetClassMask,
     string SchemaSha256,
     IReadOnlyDictionary<string, string> DbcSha256,
-    PlayableClassDatabaseTarget DatabaseTarget,
-    IReadOnlyList<PlayableClassDbcTablePlan> DbcTables,
-    IReadOnlyList<PlayableClassSqlTablePlan> SqlTables,
+    PlayableBundleDatabaseTarget DatabaseTarget,
+    IReadOnlyList<PlayableBundleDbcTablePlan> DbcTables,
+    IReadOnlyList<PlayableBundleSqlTablePlan> SqlTables,
     IReadOnlyList<string> Blockers,
     IReadOnlyList<string> Warnings,
     string ContentSha256)
@@ -44,34 +35,7 @@ public sealed record PlayableClassClonePlan(
     public int SqlRows => SqlTables.Sum(table => table.Rows.Count);
     public int DbcRows => DbcTables.Sum(table => table.AffectedRows);
 
-    public string PreviewSql()
-    {
-        var builder = new StringBuilder();
-        builder.AppendLine("-- WoW Crucible project-scoped playable class clone");
-        builder.AppendLine($"-- {SourceClassName} ({SourceClassId}) -> {TargetClassName} ({TargetClassId})");
-        builder.AppendLine($"-- Target: {DatabaseTarget.User}@{DatabaseTarget.Host}:{DatabaseTarget.Port}/{DatabaseTarget.Database}");
-        builder.AppendLine("-- Additive INSERT migration. No source class row is updated or deleted.");
-        builder.AppendLine("START TRANSACTION;");
-        foreach (var table in SqlTables)
-        foreach (var row in table.Rows)
-        {
-            var values = row.Values;
-            builder.Append("INSERT INTO ").Append(Quote(table.Table)).Append(" (")
-                .Append(string.Join(',', values.Select(value => Quote(value.Column)))).Append(") VALUES (")
-                .Append(string.Join(',', values.Select(value => Literal(value.Value)))).AppendLine(");");
-        }
-        builder.AppendLine("COMMIT;");
-        return builder.ToString();
-    }
-
-    private static string Quote(string value) => ItemWritePlan.QuoteIdentifier(value);
-    private static string Literal(LegacyDatabaseAuditValue value) => value.State switch
-    {
-        LegacyDatabaseAuditValueState.Null => "NULL",
-        LegacyDatabaseAuditValueState.Binary => $"X'{Convert.ToHexString(Convert.FromBase64String(value.Value ?? string.Empty))}'",
-        LegacyDatabaseAuditValueState.Scalar => $"CONVERT(X'{Convert.ToHexString(Encoding.UTF8.GetBytes(value.Value ?? string.Empty))}' USING utf8mb4)",
-        _ => throw new InvalidDataException("Playable class SQL contains an unresolved value.")
-    };
+    public string PreviewSql() => PlayableBundleSqlService.PreviewSql("class", SourceClassName, SourceClassId, TargetClassName, TargetClassId, DatabaseTarget, SqlTables);
 }
 
 public sealed record PlayableClassCloneResult(string OutputRoot, string PlanPath, string ReceiptPath, string SqlPath,
@@ -102,7 +66,7 @@ public sealed class PlayableClassCloneService
         if (!profile.Database.Equals(capabilities.Database, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The database profile and inspected capabilities name different databases.");
 
         var schema = DbcSchemaCatalog.Load(schemaPath); var dbcHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var dbcPlans = new List<PlayableClassDbcTablePlan>(); var blockers = new List<string>(); var warnings = new List<string>();
+        var dbcPlans = new List<PlayableBundleDbcTablePlan>(); var blockers = new List<string>(); var warnings = new List<string>();
         string sourceName = $"Class {sourceClassId}"; uint resolvedPower = 0;
         foreach (var table in DbcTables)
         {
@@ -146,28 +110,15 @@ public sealed class PlayableClassCloneService
         resolvedPower = displayPower ?? resolvedPower;
         if (resolvedPower > 6) blockers.Add($"DisplayPower {resolvedPower:N0} is outside the verified WotLK power-type range 0–6.");
 
-        var sqlPlans = new List<PlayableClassSqlTablePlan>(); var tableFingerprints = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var candidates = capabilities.Tables.Values.Where(IsClassTable).OrderBy(table => table.Name, StringComparer.OrdinalIgnoreCase).ToArray();
-        if (!candidates.Any(table => table.Name.Equals("playercreateinfo", StringComparison.OrdinalIgnoreCase))) blockers.Add("The connected schema has no playercreateinfo table.");
-        if (!candidates.Any(table => table.Name.Contains("class", StringComparison.OrdinalIgnoreCase) && table.Name.Contains("stat", StringComparison.OrdinalIgnoreCase))) warnings.Add("No recognized class-stat table was found; the class may have no level/stat curve on this core.");
-        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
-        foreach (var table in candidates)
-        {
-            cancellationToken.ThrowIfCancellationRequested(); tableFingerprints[table.Name] = CacheServerPlanService.SchemaFingerprint(table);
-            var direct = DirectClassColumn(table); var mask = direct is null ? MaskClassColumn(table) : null;
-            var result = direct is not null
-                ? await PlanDirectTableAsync(connection, table, direct, sourceClassId, targetClassId, blockers, cancellationToken)
-                : await PlanMaskTableAsync(connection, table, mask!, ClassMask(sourceClassId), ClassMask(targetClassId), blockers, cancellationToken);
-            sqlPlans.Add(result);
-        }
+        var sql = await PlayableBundleSqlService.InspectAsync(PlayableBundleIdentityKind.Class, sourceClassId, targetClassId, ClassMask(sourceClassId), ClassMask(targetClassId), profile, capabilities, blockers, cancellationToken);
+        var sqlPlans = sql.Tables; warnings.AddRange(sql.Warnings);
         warnings.Add("WotLK ChrClasses.DisplayPower controls one primary client power bar. Rage, energy, runic power, form sharing, and simultaneous custom resource systems still require separately reviewed core/UI/spell work; this bundle never claims otherwise.");
         warnings.Add("The bundle clones source-class availability, starting data, masks, and complete recognized SQL rows. Review class-family spells, talents, UI strings, GlueXML, core enums/bitmasks, and runtime handlers before treating the new class as playable.");
         warnings.Add("Building writes a new DBC/SQL/manifest/MPQ bundle only. It does not mutate the configured server, live database, or client.");
 
-        var target = new PlayableClassDatabaseTarget(profile.Host, profile.Port, profile.User, profile.Database, capabilities.ServerVersion, tableFingerprints);
         var plan = new PlayableClassClonePlan(PlanFormat, PlanFormatVersion, DateTimeOffset.UtcNow, projectRoot, project.Name, dbcRoot, schemaPath,
             sourceClassId, targetClassId, sourceName, targetClassName, targetFileToken, resolvedPower, ClassMask(sourceClassId), ClassMask(targetClassId),
-            Hash(schemaPath), dbcHashes, target, dbcPlans, sqlPlans, blockers.Distinct(StringComparer.Ordinal).ToArray(), warnings.Distinct(StringComparer.Ordinal).ToArray(), string.Empty);
+            Hash(schemaPath), dbcHashes, sql.Target, dbcPlans, sqlPlans, blockers.Distinct(StringComparer.Ordinal).ToArray(), warnings.Distinct(StringComparer.Ordinal).ToArray(), string.Empty);
         return plan with { ContentSha256 = ContentHash(plan) };
     }
 
@@ -234,89 +185,6 @@ public sealed class PlayableClassCloneService
         finally { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
     }
 
-    private static async Task<PlayableClassSqlTablePlan> PlanDirectTableAsync(MySqlConnection connection, DatabaseTableCapability table, DatabaseColumnCapability selector,
-        uint sourceClass, uint targetClass, ICollection<string> blockers, CancellationToken cancellationToken)
-    {
-        var source = await ReadRowsAsync(connection, table, $"{Quote(selector.Name)} <=> @value", sourceClass, cancellationToken); var target = await ReadRowsAsync(connection, table, $"{Quote(selector.Name)} <=> @value", targetClass, cancellationToken);
-        var targetByKey = target.GroupBy(row => Identity(table, row, null), StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal); var planned = new List<PlayableClassSqlRow>(); var covered = 0; var conflicts = 0;
-        foreach (var row in source)
-        {
-            var changed = new Dictionary<string, LegacyDatabaseAuditValue>(row, StringComparer.OrdinalIgnoreCase) { [selector.Name] = Scalar(targetClass) }; var identity = Identity(table, changed, null);
-            if (targetByKey.TryGetValue(identity, out var existing)) { if (existing.Any(candidate => RowsEqual(changed, candidate))) covered++; else { conflicts++; blockers.Add($"{table.Name} target identity {DisplayKey(table, changed)} already exists with different values."); } continue; }
-            planned.Add(ToPlanRow(table, row, changed));
-        }
-        return new(table.Name, $"{selector.Name}={sourceClass}", source.Count, covered, conflicts, planned);
-    }
-
-    private static async Task<PlayableClassSqlTablePlan> PlanMaskTableAsync(MySqlConnection connection, DatabaseTableCapability table, DatabaseColumnCapability selector,
-        uint sourceMask, uint targetMask, ICollection<string> blockers, CancellationToken cancellationToken)
-    {
-        var source = await ReadRowsAsync(connection, table, $"({Quote(selector.Name)} & @value) <> 0", sourceMask, cancellationToken); var target = await ReadRowsAsync(connection, table, $"({Quote(selector.Name)} & @value) <> 0", targetMask, cancellationToken);
-        var targetBySemanticKey = target.GroupBy(row => Identity(table, row, selector.Name), StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
-        var planned = new List<PlayableClassSqlRow>(); var covered = 0; var conflicts = 0;
-        foreach (var row in source)
-        {
-            var changed = new Dictionary<string, LegacyDatabaseAuditValue>(row, StringComparer.OrdinalIgnoreCase) { [selector.Name] = Scalar(targetMask) }; var identity = Identity(table, changed, selector.Name);
-            if (targetBySemanticKey.TryGetValue(identity, out var candidates))
-            {
-                if (candidates.Any(candidate => RowsEqualExcept(changed, candidate, selector.Name))) covered++;
-                else { conflicts++; blockers.Add($"{table.Name} already has target-mask data for {DisplayKey(table, changed, selector.Name)} with different values."); }
-                continue;
-            }
-            planned.Add(ToPlanRow(table, row, changed));
-        }
-        return new(table.Name, $"{selector.Name} includes 0x{sourceMask:X8}", source.Count, covered, conflicts, planned);
-    }
-
-    private static async Task<List<Dictionary<string, LegacyDatabaseAuditValue>>> ReadRowsAsync(MySqlConnection connection, DatabaseTableCapability table, string where, object value, CancellationToken cancellationToken)
-    {
-        var columns = table.Columns.Where(column => !column.Extra.Contains("generated", StringComparison.OrdinalIgnoreCase)).OrderBy(column => column.Ordinal).ToArray();
-        var primary = columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase)).ToArray(); var order = primary.Length == 0 ? string.Empty : $" ORDER BY {string.Join(',', primary.Select(column => Quote(column.Name)))}";
-        await using var command = new MySqlCommand($"SELECT {string.Join(',', columns.Select(column => Quote(column.Name)))} FROM {Quote(table.Name)} WHERE {where}{order} LIMIT 100001", connection) { CommandTimeout = 120 }; command.Parameters.AddWithValue("@value", value);
-        var rows = new List<Dictionary<string, LegacyDatabaseAuditValue>>(); await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            if (rows.Count == 100_000) throw new InvalidDataException($"{table.Name} matched more than 100,000 class rows; refine the adapter before cloning.");
-            var row = new Dictionary<string, LegacyDatabaseAuditValue>(StringComparer.OrdinalIgnoreCase); for (var index = 0; index < reader.FieldCount; index++) row[reader.GetName(index)] = Encode(reader.IsDBNull(index) ? null : reader.GetValue(index)); rows.Add(row);
-        }
-        rows.Sort((left, right) => string.CompareOrdinal(Identity(table, left, null), Identity(table, right, null))); return rows;
-    }
-
-    private static PlayableClassSqlRow ToPlanRow(DatabaseTableCapability table, IReadOnlyDictionary<string, LegacyDatabaseAuditValue> source, IReadOnlyDictionary<string, LegacyDatabaseAuditValue> target)
-    {
-        var primary = table.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase)).OrderBy(column => column.Ordinal).ToArray();
-        IReadOnlyList<LegacyDatabaseAuditKeyPart> Key(IReadOnlyDictionary<string, LegacyDatabaseAuditValue> row) => (primary.Length > 0 ? primary.Select(column => column.Name) : row.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase)).Select(name => new LegacyDatabaseAuditKeyPart(name, row[name])).ToArray();
-        var values = table.Columns.Where(column => target.ContainsKey(column.Name) && !column.Extra.Contains("generated", StringComparison.OrdinalIgnoreCase)).OrderBy(column => column.Ordinal).Select(column => new PlayableClassSqlValue(column.Name, target[column.Name])).ToArray();
-        return new(Key(source), Key(target), values);
-    }
-
-    private static string Identity(DatabaseTableCapability table, IReadOnlyDictionary<string, LegacyDatabaseAuditValue> row, string? omit)
-    {
-        var primary = table.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase) && !column.Name.Equals(omit, StringComparison.OrdinalIgnoreCase)).OrderBy(column => column.Ordinal).Select(column => column.Name).ToArray();
-        var names = primary.Length > 0 ? primary : row.Keys.Where(name => !name.Equals(omit, StringComparison.OrdinalIgnoreCase)).OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
-        return string.Join('\u001e', names.Select(name => $"{name}\u001d{(int)row[name].State}\u001d{row[name].Value}"));
-    }
-
-    private static string DisplayKey(DatabaseTableCapability table, IReadOnlyDictionary<string, LegacyDatabaseAuditValue> row, string? omit = null)
-    {
-        var primary = table.Columns.Where(column => column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase) && !column.Name.Equals(omit, StringComparison.OrdinalIgnoreCase)).OrderBy(column => column.Ordinal).Select(column => column.Name).ToArray();
-        var names = primary.Length > 0 ? primary : row.Keys.Where(name => !name.Equals(omit, StringComparison.OrdinalIgnoreCase)).Take(4).ToArray(); return string.Join(", ", names.Select(name => $"{name}={row[name].Value ?? "NULL"}"));
-    }
-
-    private static bool RowsEqual(IReadOnlyDictionary<string, LegacyDatabaseAuditValue> left, IReadOnlyDictionary<string, LegacyDatabaseAuditValue> right) => RowsEqualExcept(left, right, null);
-    private static bool RowsEqualExcept(IReadOnlyDictionary<string, LegacyDatabaseAuditValue> left, IReadOnlyDictionary<string, LegacyDatabaseAuditValue> right, string? omit) =>
-        left.Where(pair => !pair.Key.Equals(omit, StringComparison.OrdinalIgnoreCase)).All(pair => right.TryGetValue(pair.Key, out var value) && Equal(pair.Value, value)) &&
-        right.Keys.Where(name => !name.Equals(omit, StringComparison.OrdinalIgnoreCase)).All(left.ContainsKey);
-    private static bool Equal(LegacyDatabaseAuditValue left, LegacyDatabaseAuditValue right) => left.State == right.State && string.Equals(left.Value, right.Value, StringComparison.Ordinal);
-    private static LegacyDatabaseAuditValue Encode(object? value) => value switch { null or DBNull => LegacyDatabaseAuditValue.Null, byte[] bytes => new(LegacyDatabaseAuditValueState.Binary, Convert.ToBase64String(bytes)), DateTime date => new(LegacyDatabaseAuditValueState.Scalar, date.ToString("O", CultureInfo.InvariantCulture)), DateTimeOffset date => new(LegacyDatabaseAuditValueState.Scalar, date.ToString("O", CultureInfo.InvariantCulture)), TimeSpan span => new(LegacyDatabaseAuditValueState.Scalar, span.ToString("c", CultureInfo.InvariantCulture)), IFormattable formattable => new(LegacyDatabaseAuditValueState.Scalar, formattable.ToString(null, CultureInfo.InvariantCulture)), _ => new(LegacyDatabaseAuditValueState.Scalar, Convert.ToString(value, CultureInfo.InvariantCulture)) };
-    private static LegacyDatabaseAuditValue Scalar(uint value) => new(LegacyDatabaseAuditValueState.Scalar, value.ToString(CultureInfo.InvariantCulture));
-
-    private static bool IsClassTable(DatabaseTableCapability table) =>
-        (table.Name.StartsWith("playercreateinfo", StringComparison.OrdinalIgnoreCase) && (DirectClassColumn(table) is not null || MaskClassColumn(table) is not null)) ||
-        table.Name.Equals("player_class_stats", StringComparison.OrdinalIgnoreCase) || table.Name.Equals("player_classlevelstats", StringComparison.OrdinalIgnoreCase) || table.Name.Equals("player_levelstats", StringComparison.OrdinalIgnoreCase);
-    private static DatabaseColumnCapability? DirectClassColumn(DatabaseTableCapability table) => table.Find("class") ?? table.Find("Class");
-    private static DatabaseColumnCapability? MaskClassColumn(DatabaseTableCapability table) => table.Find("classMask") ?? table.Find("classmask");
-
     private static DbcSchemaResolution Exact(DbcSchemaCatalog schema, string table, WdbcFile file) { var result = schema.ResolveColumns(table, file.FieldCount); if (result.MatchKind != DbcSchemaMatchKind.NamedMatch || result.Columns.Count != file.FieldCount) throw new InvalidDataException($"{table}.dbc requires an exact named WotLK schema; resolved {result.MatchKind} and {result.Columns.Count:N0}/{file.FieldCount:N0} fields."); return result; }
     private static DbcColumn PhysicalKey(DbcSchemaResolution resolution, string table) => DbcRecordIdentity.PhysicalColumn(resolution.Columns, resolution.KeyStrategy) ?? throw new InvalidDataException($"{table}.dbc requires a physical record key.");
     private static DbcColumn Column(DbcSchemaResolution resolution, string name) => resolution.Columns.FirstOrDefault(column => column.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidDataException($"DBC schema is missing {name}.");
@@ -327,14 +195,15 @@ public sealed class PlayableClassCloneService
     private static string RequiredDirectory(string path, string label) { path = Path.GetFullPath(path ?? string.Empty); if (!Directory.Exists(path)) throw new DirectoryNotFoundException($"{label} does not exist: {path}"); return path; }
     private static string RequiredFile(string path, string label) { path = Path.GetFullPath(path ?? string.Empty); if (!File.Exists(path)) throw new FileNotFoundException($"{label} does not exist.", path); return path; }
     private static string RequiredTablePath(string root, string table) => Directory.EnumerateFiles(root, "*", SearchOption.TopDirectoryOnly).FirstOrDefault(path => Path.GetFileName(path).Equals(table + ".dbc", StringComparison.OrdinalIgnoreCase)) ?? throw new FileNotFoundException($"Required {table}.dbc is unavailable.", Path.Combine(root, table + ".dbc"));
-    private static string Quote(string value) => ItemWritePlan.QuoteIdentifier(value);
     private static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
     private static string ContentHash(PlayableClassClonePlan plan)
     {
-        var identity = new { plan.Format, plan.FormatVersion, plan.ProjectRoot, plan.ProjectName, plan.DbcRoot, plan.SchemaPath, plan.SourceClassId, plan.TargetClassId, plan.SourceClassName, plan.TargetClassName, plan.TargetFileToken, plan.DisplayPower, plan.SourceClassMask, plan.TargetClassMask, plan.SchemaSha256, plan.DbcSha256, plan.DatabaseTarget, plan.DbcTables, plan.SqlTables, plan.Blockers, plan.Warnings };
+        object sqlTables = plan.SqlTables.Any(table => table.Rows.Any(row => row.IsGuardedUpdate)) ? plan.SqlTables : LegacySqlIdentity(plan.SqlTables);
+        var identity = new { plan.Format, plan.FormatVersion, plan.ProjectRoot, plan.ProjectName, plan.DbcRoot, plan.SchemaPath, plan.SourceClassId, plan.TargetClassId, plan.SourceClassName, plan.TargetClassName, plan.TargetFileToken, plan.DisplayPower, plan.SourceClassMask, plan.TargetClassMask, plan.SchemaSha256, plan.DbcSha256, plan.DatabaseTarget, plan.DbcTables, SqlTables = sqlTables, plan.Blockers, plan.Warnings };
         return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(identity, HashJson)));
     }
+    private static object LegacySqlIdentity(IReadOnlyList<PlayableBundleSqlTablePlan> tables) => tables.Select(table => new { table.Table, table.Selector, table.SourceRows, table.AlreadyCovered, table.Conflicts, Rows = table.Rows.Select(row => new { row.SourceKey, row.TargetKey, row.Values }).ToArray() }).ToArray();
     private static void ValidatePlan(PlayableClassClonePlan plan) { if (plan.Format != PlanFormat || plan.FormatVersion != PlanFormatVersion) throw new InvalidDataException("Unsupported playable class plan format."); if (!ContentHash(plan).Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Playable class plan content hash is invalid."); }
-    private static void ValidateTarget(PlayableClassDatabaseTarget target, DatabaseConnectionProfile profile) { if (!target.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) || target.Port != profile.Port || !target.User.Equals(profile.User, StringComparison.Ordinal) || !target.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The selected database connection does not match the class plan's reviewed target."); }
+    private static void ValidateTarget(PlayableBundleDatabaseTarget target, DatabaseConnectionProfile profile) { if (!target.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) || target.Port != profile.Port || !target.User.Equals(profile.User, StringComparison.Ordinal) || !target.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The selected database connection does not match the class plan's reviewed target."); }
     private static void AtomicJson(string path, object value, bool overwrite) { path = Path.GetFullPath(path); if (File.Exists(path) && !overwrite) throw new IOException($"Output already exists: {path}"); Directory.CreateDirectory(Path.GetDirectoryName(path)!); var temporary = path + $".{Guid.NewGuid():N}.tmp"; try { File.WriteAllText(temporary, JsonSerializer.Serialize(value, Json), new UTF8Encoding(false)); File.Move(temporary, path, overwrite); } finally { if (File.Exists(temporary)) File.Delete(temporary); } }
 }
