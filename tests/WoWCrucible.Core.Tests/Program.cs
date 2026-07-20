@@ -2023,6 +2023,23 @@ if (creatureDisplayCatalog.Entries.Count != creatureDisplayFile.RowCount || crea
 var creatureDisplay = creatureDisplayService.ResolveDisplay(args[1], args[0], creatureDisplayId);
 if (creatureDisplay.DisplayId != creatureDisplayId || creatureDisplay.ModelId == 0 || !creatureDisplay.ModelClientPath.EndsWith(".m2", StringComparison.OrdinalIgnoreCase) || creatureDisplay.TextureVariations.Count != 3)
     throw new InvalidOperationException("Creature display preview did not resolve the build-12340 display/model/texture chain.");
+var displayBindings = CreatureDisplayBindingService.CreatePlans(args[1], args[0], [new("male", creatureDisplayId), new("female", creatureDisplayId)]);
+if (displayBindings.Count != 2 || displayBindings.Any(binding => !binding.Ready || binding.DisplayId != creatureDisplayId || binding.ModelId != creatureDisplay.ModelId || binding.Assets.Count != 0) ||
+    displayBindings.Any(binding => binding.Warnings.All(warning => !warning.Contains("target client", StringComparison.OrdinalIgnoreCase))))
+    throw new InvalidOperationException("Existing-display race binding did not validate both sex roles while explicitly retaining target-client asset inheritance.");
+var missingDisplayBinding = CreatureDisplayBindingService.CreatePlans(args[1], args[0], [new("male", uint.MaxValue)]).Single();
+if (missingDisplayBinding.Ready || missingDisplayBinding.Blockers.All(blocker => !blocker.Contains("no positive display ID", StringComparison.OrdinalIgnoreCase)))
+    throw new InvalidOperationException("Race display binding did not block a missing CreatureDisplayInfo identity.");
+var boundAssetFixture = Path.Combine(Path.GetTempPath(), $"crucible-bound-asset-{Guid.NewGuid():N}.m2"); File.WriteAllBytes(boundAssetFixture, [1, 2, 3, 4]);
+try
+{
+    var boundAssetHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(boundAssetFixture)));
+    var boundPlan = new CreatureDisplayBindingPlan("male", creatureDisplayId, creatureDisplay.ModelId, creatureDisplay.ModelClientPath, 1, 1, [], "fixture", [new("model", creatureDisplay.ModelClientPath, boundAssetFixture, "fixture", boundAssetHash)], [], []);
+    CreatureDisplayBindingService.VerifyAssets([boundPlan]); File.AppendAllText(boundAssetFixture, "changed");
+    try { CreatureDisplayBindingService.VerifyAssets([boundPlan]); throw new InvalidOperationException("Stale bound appearance bytes were accepted."); }
+    catch (InvalidDataException) { }
+}
+finally { if (File.Exists(boundAssetFixture)) File.Delete(boundAssetFixture); }
 var modelCreatureDisplays = creatureDisplayService.ResolveModelDisplays(args[1], args[0], Path.ChangeExtension(creatureDisplay.ModelClientPath, ".mdx"));
 if (!modelCreatureDisplays.Any(display => display.DisplayId == creatureDisplayId) || modelCreatureDisplays.Any(display => !display.ModelClientPath.Equals(creatureDisplay.ModelClientPath, StringComparison.OrdinalIgnoreCase)))
     throw new InvalidOperationException("Creature model-path appearance lookup did not normalize MDX/M2 paths and return every matching display record.");

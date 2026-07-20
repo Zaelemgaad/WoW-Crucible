@@ -31,10 +31,24 @@ public sealed record PlayableRaceClonePlan(
     IReadOnlyList<string> Warnings,
     string ContentSha256)
 {
+    public uint? MaleDisplayIdOverride { get; init; }
+    public uint? FemaleDisplayIdOverride { get; init; }
+    public string? ProcessedAssetLibraryRoot { get; init; }
+    public string? RequestedAssetProvenance { get; init; }
+    public IReadOnlyList<CreatureDisplayBindingPlan> DisplayBindings { get; init; } = [];
     public bool Ready => Blockers.Count == 0;
     public int SqlRows => SqlTables.Sum(table => table.Rows.Count);
     public int DbcRows => DbcTables.Sum(table => table.AffectedRows);
     public string PreviewSql() => PlayableBundleSqlService.PreviewSql("race", SourceRaceName, SourceRaceId, TargetRaceName, TargetRaceId, DatabaseTarget, SqlTables);
+}
+
+public sealed record PlayableRaceAppearanceOptions(
+    uint? MaleDisplayId = null,
+    uint? FemaleDisplayId = null,
+    string? ProcessedAssetLibraryRoot = null,
+    string? RequestedAssetProvenance = null)
+{
+    public bool Enabled => MaleDisplayId.HasValue || FemaleDisplayId.HasValue || !string.IsNullOrWhiteSpace(ProcessedAssetLibraryRoot) || !string.IsNullOrWhiteSpace(RequestedAssetProvenance);
 }
 
 public sealed record PlayableRaceCloneResult(string OutputRoot, string PlanPath, string ReceiptPath, string SqlPath,
@@ -62,6 +76,13 @@ public sealed class PlayableRaceCloneService
     public async Task<PlayableRaceClonePlan> CreatePlanAsync(string projectRoot, string dbcRoot, string schemaPath,
         uint sourceRaceId, uint targetRaceId, string targetRaceName, string targetClientPrefix, string targetFileToken,
         DatabaseConnectionProfile profile, DatabaseCapabilities capabilities, CancellationToken cancellationToken = default)
+        => await CreatePlanAsync(projectRoot, dbcRoot, schemaPath, sourceRaceId, targetRaceId, targetRaceName, targetClientPrefix, targetFileToken,
+            profile, capabilities, null, cancellationToken);
+
+    public async Task<PlayableRaceClonePlan> CreatePlanAsync(string projectRoot, string dbcRoot, string schemaPath,
+        uint sourceRaceId, uint targetRaceId, string targetRaceName, string targetClientPrefix, string targetFileToken,
+        DatabaseConnectionProfile profile, DatabaseCapabilities capabilities, PlayableRaceAppearanceOptions? appearance,
+        CancellationToken cancellationToken = default)
     {
         projectRoot = RequiredDirectory(projectRoot, "Content project"); var project = CrucibleContentProjectService.Load(projectRoot);
         if (!project.TargetProfile.Equals(TargetProfileCatalog.DefaultProfileId, StringComparison.OrdinalIgnoreCase)) throw new NotSupportedException("Playable race bundle authoring is currently verified only for WotLK 3.3.5a build 12340 projects.");
@@ -69,14 +90,21 @@ public sealed class PlayableRaceCloneService
         targetRaceName = RequiredText(targetRaceName, "Target race name"); targetClientPrefix = NormalizeToken(targetClientPrefix, "Client prefix", 4); targetFileToken = NormalizeToken(targetFileToken, "Client file token", 32);
         var registry = CrucibleContentProjectService.LoadRegistry(projectRoot); if (!registry.Reservations.Any(reservation => reservation.Domain == ContentIdDomain.Race && reservation.Values.Contains(targetRaceId))) throw new InvalidOperationException($"Race ID {targetRaceId:N0} is not reserved in this project's Race namespace. Reserve it through Projects & shared IDs first.");
         dbcRoot = RequiredDirectory(dbcRoot, "Authoritative DBC folder"); schemaPath = RequiredFile(schemaPath, "WotLK schema"); var schema = DbcSchemaCatalog.Load(schemaPath);
-        var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var plans = new List<PlayableBundleDbcTablePlan>(); var blockers = new List<string>(); var warnings = new List<string>(); var sourceName = $"Race {sourceRaceId}";
+        appearance ??= new();
+        if (!string.IsNullOrWhiteSpace(appearance.RequestedAssetProvenance) && string.IsNullOrWhiteSpace(appearance.ProcessedAssetLibraryRoot))
+            throw new ArgumentException("An exact appearance provenance requires a processed asset library.", nameof(appearance));
+        var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var plans = new List<PlayableBundleDbcTablePlan>(); var blockers = new List<string>(); var warnings = new List<string>(); var sourceName = $"Race {sourceRaceId}"; uint sourceMaleDisplay = 0; uint sourceFemaleDisplay = 0;
         foreach (var table in DbcTables)
         {
             cancellationToken.ThrowIfCancellationRequested(); var path = RequiredTablePath(dbcRoot, table); var file = WdbcFile.Load(path); var resolution = Exact(schema, table, file); hashes[table] = Hash(path);
             if (table == "ChrRaces")
             {
                 var rows = DbcRecordIdentity.IndexRows(file, resolution.Columns, resolution.KeyStrategy); if (!rows.TryGetValue(sourceRaceId, out var sourceRow)) blockers.Add($"ChrRaces.dbc has no source race ID {sourceRaceId:N0}.");
-                else sourceName = Convert.ToString(file.GetDisplayValue(sourceRow, Column(resolution, "Name_Lang[enUS]")), CultureInfo.InvariantCulture) ?? sourceName;
+                else
+                {
+                    sourceName = Convert.ToString(file.GetDisplayValue(sourceRow, Column(resolution, "Name_Lang[enUS]")), CultureInfo.InvariantCulture) ?? sourceName;
+                    sourceMaleDisplay = file.GetRaw(sourceRow, Column(resolution, "MaleDisplayId")); sourceFemaleDisplay = file.GetRaw(sourceRow, Column(resolution, "FemaleDisplayId"));
+                }
                 if (rows.ContainsKey(targetRaceId)) blockers.Add($"ChrRaces.dbc already contains target race ID {targetRaceId:N0}.");
                 plans.Add(new(table, "Clone complete source row, replace ID/all enUS names/client prefix/client file token", 1)); continue;
             }
@@ -90,12 +118,34 @@ public sealed class PlayableRaceCloneService
             var affected = Enumerable.Range(0, file.RowCount).Count(row => maskColumns.Any(column => (file.GetRaw(row, column) & sourceMask) != 0 && (file.GetRaw(row, column) & targetMask) == 0));
             plans.Add(new(table, $"Add target race bit to {string.Join(", ", maskPlan.MaskColumns)} wherever source access exists", affected));
         }
+        var bindings = Array.Empty<CreatureDisplayBindingPlan>();
+        if (appearance.Enabled)
+        {
+            var library = string.IsNullOrWhiteSpace(appearance.ProcessedAssetLibraryRoot) ? null : RequiredDirectory(appearance.ProcessedAssetLibraryRoot, "Processed asset library");
+            var male = appearance.MaleDisplayId ?? sourceMaleDisplay; var female = appearance.FemaleDisplayId ?? sourceFemaleDisplay;
+            bindings = CreatureDisplayBindingService.CreatePlans(dbcRoot, schemaPath,
+                [new("male", male), new("female", female)], library, appearance.RequestedAssetProvenance, cancellationToken).ToArray();
+            blockers.AddRange(bindings.SelectMany(binding => binding.Blockers)); warnings.AddRange(bindings.SelectMany(binding => binding.Warnings));
+            foreach (var conflict in bindings.SelectMany(binding => binding.Assets).GroupBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase).Where(group => group.Select(asset => asset.Sha256).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1))
+                blockers.Add($"Male/female appearance closures resolve client path {conflict.Key} to different bytes. Select one shared provenance before building.");
+            foreach (var table in new[] { "CreatureDisplayInfo", "CreatureModelData" }) { var path = RequiredTablePath(dbcRoot, table); hashes[table] = Hash(path); }
+            if (appearance.MaleDisplayId.HasValue || appearance.FemaleDisplayId.HasValue)
+                warnings.Add($"ChrRaces will bind reviewed display IDs male {male:N0} and female {female:N0}. Character customization rows are still cloned from {sourceName}; verify UVs, geosets, animations, armor attachment points, and GlueXML in-client.");
+            else warnings.Add("The source male/female display IDs remain unchanged, but their selected processed-library asset closure is included in the bundle.");
+        }
+        else warnings.Add("This first bundle deliberately reuses the source race's male/female display IDs and client assets. Import or author a complete model/texture/animation/GlueXML chain before claiming a visually distinct race.");
         var sql = await PlayableBundleSqlService.InspectAsync(PlayableBundleIdentityKind.Race, sourceRaceId, targetRaceId, RaceMask(sourceRaceId), RaceMask(targetRaceId), profile, capabilities, blockers, cancellationToken); warnings.AddRange(sql.Warnings);
-        warnings.Add("This first bundle deliberately reuses the source race's male/female display IDs and client assets. Import or author a complete model/texture/animation/GlueXML chain before claiming a visually distinct race.");
         warnings.Add("CreatureDisplayInfoExtra is NPC appearance data. Crucible does not create unreferenced duplicate NPC rows; promote a complete dependent CreatureDisplayInfo chain separately when the new race needs custom NPC appearances.");
         warnings.Add("Core race enums/masks, character-create GlueXML, faction behavior, language, cinematics, achievements, spells, and runtime handlers still require separate reviewed work before the new race is fully playable.");
         warnings.Add("Building writes a new DBC/SQL/manifest/MPQ bundle only. It does not mutate the configured server, live database, or client.");
-        var plan = new PlayableRaceClonePlan(PlanFormat, PlanFormatVersion, DateTimeOffset.UtcNow, projectRoot, project.Name, dbcRoot, schemaPath, sourceRaceId, targetRaceId, sourceName, targetRaceName, targetClientPrefix, targetFileToken, RaceMask(sourceRaceId), RaceMask(targetRaceId), Hash(schemaPath), hashes, sql.Target, plans, sql.Tables, blockers.Distinct(StringComparer.Ordinal).ToArray(), warnings.Distinct(StringComparer.Ordinal).ToArray(), string.Empty);
+        var plan = new PlayableRaceClonePlan(PlanFormat, PlanFormatVersion, DateTimeOffset.UtcNow, projectRoot, project.Name, dbcRoot, schemaPath, sourceRaceId, targetRaceId, sourceName, targetRaceName, targetClientPrefix, targetFileToken, RaceMask(sourceRaceId), RaceMask(targetRaceId), Hash(schemaPath), hashes, sql.Target, plans, sql.Tables, blockers.Distinct(StringComparer.Ordinal).ToArray(), warnings.Distinct(StringComparer.Ordinal).ToArray(), string.Empty)
+        {
+            MaleDisplayIdOverride = appearance.MaleDisplayId,
+            FemaleDisplayIdOverride = appearance.FemaleDisplayId,
+            ProcessedAssetLibraryRoot = string.IsNullOrWhiteSpace(appearance.ProcessedAssetLibraryRoot) ? null : Path.GetFullPath(appearance.ProcessedAssetLibraryRoot),
+            RequestedAssetProvenance = string.IsNullOrWhiteSpace(appearance.RequestedAssetProvenance) ? null : appearance.RequestedAssetProvenance.Trim(),
+            DisplayBindings = bindings
+        };
         return plan with { ContentSha256 = ContentHash(plan) };
     }
 
@@ -105,7 +155,9 @@ public sealed class PlayableRaceCloneService
     public async Task<PlayableRaceCloneResult> BuildAsync(PlayableRaceClonePlan plan, DatabaseConnectionProfile profile, string outputRoot, CancellationToken cancellationToken = default)
     {
         ValidatePlan(plan); if (!plan.Ready) throw new InvalidOperationException($"Playable race plan has {plan.Blockers.Count:N0} blocker(s); nothing was built."); ValidateTarget(plan.DatabaseTarget, profile);
-        var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, cancellationToken); var fresh = await CreatePlanAsync(plan.ProjectRoot, plan.DbcRoot, plan.SchemaPath, plan.SourceRaceId, plan.TargetRaceId, plan.TargetRaceName, plan.TargetClientPrefix, plan.TargetFileToken, profile, capabilities, cancellationToken);
+        CreatureDisplayBindingService.VerifyAssets(plan.DisplayBindings);
+        var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, cancellationToken); var fresh = await CreatePlanAsync(plan.ProjectRoot, plan.DbcRoot, plan.SchemaPath, plan.SourceRaceId, plan.TargetRaceId, plan.TargetRaceName, plan.TargetClientPrefix, plan.TargetFileToken, profile, capabilities,
+            new(plan.MaleDisplayIdOverride, plan.FemaleDisplayIdOverride, plan.ProcessedAssetLibraryRoot, plan.RequestedAssetProvenance), cancellationToken);
         if (!fresh.ContentSha256.Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("DBC, project reservation, database rows, or target schema changed after review; rebuild the race plan.");
         outputRoot = Path.GetFullPath(outputRoot); if (Directory.Exists(outputRoot) && Directory.EnumerateFileSystemEntries(outputRoot).Any()) throw new IOException($"Playable race output must be new or empty: {outputRoot}"); var parent = Path.GetDirectoryName(outputRoot) ?? throw new InvalidOperationException("Output folder has no parent."); Directory.CreateDirectory(parent);
         var staging = Path.Combine(parent, $".{Path.GetFileName(outputRoot)}.crucible-{Guid.NewGuid():N}"); Directory.CreateDirectory(staging);
@@ -121,6 +173,8 @@ public sealed class PlayableRaceCloneService
                     var rows = DbcRecordIdentity.IndexRows(file, resolution.Columns, resolution.KeyStrategy); var row = file.CloneRowWithId(rows[plan.SourceRaceId], PhysicalKey(resolution, table), plan.TargetRaceId);
                     foreach (var name in new[] { "Name_Lang[enUS]", "Name_Female_Lang[enUS]", "Name_Male_Lang[enUS]" }) file.SetDisplayValue(row, Column(resolution, name), plan.TargetRaceName);
                     file.SetDisplayValue(row, Column(resolution, "ClientPrefix"), plan.TargetClientPrefix); file.SetDisplayValue(row, Column(resolution, "ClientFilestring"), plan.TargetFileToken); changed = true;
+                    if (plan.MaleDisplayIdOverride is { } male) file.SetRaw(row, Column(resolution, "MaleDisplayId"), male);
+                    if (plan.FemaleDisplayIdOverride is { } female) file.SetRaw(row, Column(resolution, "FemaleDisplayId"), female);
                 }
                 else
                 {
@@ -136,9 +190,14 @@ public sealed class PlayableRaceCloneService
                 }
                 if (!changed) continue; var output = Path.Combine(dbcOutput, table + ".dbc"); file.Save(output, false); var reloaded = WdbcFile.Load(output); if (reloaded.RowCount != file.RowCount || reloaded.FieldCount != file.FieldCount) throw new InvalidDataException($"Written {table}.dbc failed independent structural reload validation."); hashes[Path.GetRelativePath(staging, output)] = Hash(output); entries.Add(new(output, $@"DBFilesClient\{table}.dbc"));
             }
+            foreach (var asset in plan.DisplayBindings.SelectMany(binding => binding.Assets).GroupBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).OrderBy(asset => asset.ClientPath, StringComparer.OrdinalIgnoreCase))
+            {
+                cancellationToken.ThrowIfCancellationRequested(); var relative = asset.ClientPath.Replace('\\', Path.DirectorySeparatorChar); var output = Path.Combine(staging, "Assets", relative); Directory.CreateDirectory(Path.GetDirectoryName(output)!); File.Copy(asset.SourcePath, output, false);
+                if (!Hash(output).Equals(asset.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Copied appearance asset failed SHA-256 validation: {asset.ClientPath}"); hashes[Path.GetRelativePath(staging, output)] = asset.Sha256; entries.Add(new(output, asset.ClientPath));
+            }
             var sqlPath = Path.Combine(sqlOutput, $"race-{plan.TargetRaceId}-clone.sql"); await File.WriteAllTextAsync(sqlPath, plan.PreviewSql(), new UTF8Encoding(false), cancellationToken); hashes[Path.GetRelativePath(staging, sqlPath)] = Hash(sqlPath);
             var planPath = Path.Combine(staging, "race-clone.plan.json"); SavePlan(planPath, plan); hashes[Path.GetRelativePath(staging, planPath)] = Hash(planPath);
-            var manifestPath = Path.Combine(manifestOutput, "race-clone.patch.json"); var patchName = $"patch-Crucible-Race-{plan.TargetRaceId}.MPQ"; PatchManifestService.Save(manifestPath, $"Playable race {plan.TargetRaceName} ({plan.TargetRaceId})", patchName, entries, policy: new([@"DBFilesClient\*.dbc"], null, entries.Count, entries.Select(entry => entry.ArchivePath).ToArray()));
+            var manifestPath = Path.Combine(manifestOutput, "race-clone.patch.json"); var patchName = $"patch-Crucible-Race-{plan.TargetRaceId}.MPQ"; var archivePaths = entries.Select(entry => entry.ArchivePath).ToArray(); PatchManifestService.Save(manifestPath, $"Playable race {plan.TargetRaceName} ({plan.TargetRaceId})", patchName, entries, policy: new(archivePaths, null, entries.Count, archivePaths.Where(path => path.StartsWith("DBFilesClient\\", StringComparison.OrdinalIgnoreCase)).ToArray()));
             PatchManifestService.Build(manifestPath, staging); var patchPath = Path.Combine(staging, patchName); var validation = PatchManifestService.Validate(PatchManifestService.Load(manifestPath), patchPath); if (!validation.Passed) throw new InvalidDataException(string.Join(Environment.NewLine, validation.Errors.Select(error => error.Message))); hashes[Path.GetRelativePath(staging, manifestPath)] = Hash(manifestPath); hashes[Path.GetRelativePath(staging, patchPath)] = Hash(patchPath);
             var receiptPath = Path.Combine(staging, "race-clone.receipt.json"); var final = new PlayableRaceCloneResult(outputRoot, Path.Combine(outputRoot, Path.GetFileName(planPath)), Path.Combine(outputRoot, Path.GetFileName(receiptPath)), Path.Combine(outputRoot, "SQL", Path.GetFileName(sqlPath)), Path.Combine(outputRoot, "Manifests", Path.GetFileName(manifestPath)), Path.Combine(outputRoot, Path.GetFileName(patchPath)), hashes, plan);
             await File.WriteAllTextAsync(receiptPath, JsonSerializer.Serialize(final, Json), new UTF8Encoding(false), cancellationToken); hashes[Path.GetRelativePath(staging, receiptPath)] = Hash(receiptPath); if (Directory.Exists(outputRoot)) Directory.Delete(outputRoot); Directory.Move(staging, outputRoot); return final with { OutputSha256 = hashes };
@@ -157,7 +216,15 @@ public sealed class PlayableRaceCloneService
     private static string RequiredFile(string path, string label) { path = Path.GetFullPath(path ?? string.Empty); if (!File.Exists(path)) throw new FileNotFoundException($"{label} does not exist.", path); return path; }
     private static string RequiredTablePath(string root, string table) => Directory.EnumerateFiles(root, "*", SearchOption.TopDirectoryOnly).FirstOrDefault(path => Path.GetFileName(path).Equals(table + ".dbc", StringComparison.OrdinalIgnoreCase)) ?? throw new FileNotFoundException($"Required {table}.dbc is unavailable.", Path.Combine(root, table + ".dbc"));
     private static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
-    private static string ContentHash(PlayableRaceClonePlan plan) { object sqlTables = plan.SqlTables.Any(table => table.Rows.Any(row => row.IsGuardedUpdate)) ? plan.SqlTables : LegacySqlIdentity(plan.SqlTables); var identity = new { plan.Format, plan.FormatVersion, plan.ProjectRoot, plan.ProjectName, plan.DbcRoot, plan.SchemaPath, plan.SourceRaceId, plan.TargetRaceId, plan.SourceRaceName, plan.TargetRaceName, plan.TargetClientPrefix, plan.TargetFileToken, plan.SourceRaceMask, plan.TargetRaceMask, plan.SchemaSha256, plan.DbcSha256, plan.DatabaseTarget, plan.DbcTables, SqlTables = sqlTables, plan.Blockers, plan.Warnings }; return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(identity, HashJson))); }
+    private static string ContentHash(PlayableRaceClonePlan plan)
+    {
+        object sqlTables = plan.SqlTables.Any(table => table.Rows.Any(row => row.IsGuardedUpdate)) ? plan.SqlTables : LegacySqlIdentity(plan.SqlTables);
+        var legacy = new { plan.Format, plan.FormatVersion, plan.ProjectRoot, plan.ProjectName, plan.DbcRoot, plan.SchemaPath, plan.SourceRaceId, plan.TargetRaceId, plan.SourceRaceName, plan.TargetRaceName, plan.TargetClientPrefix, plan.TargetFileToken, plan.SourceRaceMask, plan.TargetRaceMask, plan.SchemaSha256, plan.DbcSha256, plan.DatabaseTarget, plan.DbcTables, SqlTables = sqlTables, plan.Blockers, plan.Warnings };
+        if (plan.MaleDisplayIdOverride is null && plan.FemaleDisplayIdOverride is null && plan.ProcessedAssetLibraryRoot is null && plan.RequestedAssetProvenance is null && plan.DisplayBindings.Count == 0)
+            return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(legacy, HashJson)));
+        var identity = new { Legacy = legacy, plan.MaleDisplayIdOverride, plan.FemaleDisplayIdOverride, plan.ProcessedAssetLibraryRoot, plan.RequestedAssetProvenance, plan.DisplayBindings };
+        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(identity, HashJson)));
+    }
     private static object LegacySqlIdentity(IReadOnlyList<PlayableBundleSqlTablePlan> tables) => tables.Select(table => new { table.Table, table.Selector, table.SourceRows, table.AlreadyCovered, table.Conflicts, Rows = table.Rows.Select(row => new { row.SourceKey, row.TargetKey, row.Values }).ToArray() }).ToArray();
     private static void ValidatePlan(PlayableRaceClonePlan plan) { if (plan.Format != PlanFormat || plan.FormatVersion != PlanFormatVersion) throw new InvalidDataException("Unsupported playable race plan format."); if (!ContentHash(plan).Equals(plan.ContentSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Playable race plan content hash is invalid."); }
     private static void ValidateTarget(PlayableBundleDatabaseTarget target, DatabaseConnectionProfile profile) { if (!target.Host.Equals(profile.Host, StringComparison.OrdinalIgnoreCase) || target.Port != profile.Port || !target.User.Equals(profile.User, StringComparison.Ordinal) || !target.Database.Equals(profile.Database, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The selected database connection does not match the race plan's reviewed target."); }
