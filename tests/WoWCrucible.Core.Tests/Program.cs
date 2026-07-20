@@ -29,6 +29,20 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
 
+var lighting = WorldLightingService.Load(args[1]);
+if (lighting.Parameters.Count * 18 != lighting.ColorBands.Count || lighting.Parameters.Count * 6 != lighting.FloatBands.Count || lighting.Lights.Count == 0 || lighting.Skyboxes.Count == 0)
+    throw new InvalidOperationException("Build-12340 world-light parameter-to-band relationships did not resolve completely.");
+var globalLight = lighting.Lights.Single(light => light.Id == 1);
+var globalProfile = WorldLightingService.Resolve(lighting, globalLight, 0);
+if (!globalLight.IsGlobal || globalLight.ContinentId != 0 || globalProfile.ParamsId != 12 || globalProfile.ColorBands.Count != 18 || globalProfile.FloatBands.Count != 6 || globalProfile.Parameters is null)
+    throw new InvalidOperationException("The real default Azeroth light did not resolve its complete first parameter profile.");
+var packedLightColor = WorldLightColor.FromPacked(0x005E99C6);
+if (packedLightColor.R != 0xC6 || packedLightColor.G != 0x99 || packedLightColor.B != 0x5E || packedLightColor.Hex != "#C6995E" || Math.Abs(new WorldLightRecord(1, 0, 0, 0, 0, 19200, 0, new uint[8]).FalloffStart - 533.3333f) > 0.001f)
+    throw new InvalidOperationException("Packed client color decoding or Light.dbc's 36x world-coordinate conversion regressed.");
+var wrapBand = new WorldLightFloatBand(1, 0, "fixture", [new(2400, 0), new(480, 1)]);
+if (Math.Abs(WorldLightingService.Sample(wrapBand, 0) - 0.5f) > 0.0001f || WorldLightingService.Sample(wrapBand, 2880) != WorldLightingService.Sample(wrapBand, 0))
+    throw new InvalidOperationException("World-light time interpolation did not wrap cleanly across midnight.");
+
 var cacheFixtureRoot = Path.Combine(Path.GetTempPath(), $"crucible-cache-{Guid.NewGuid():N}");
 Directory.CreateDirectory(cacheFixtureRoot);
 try

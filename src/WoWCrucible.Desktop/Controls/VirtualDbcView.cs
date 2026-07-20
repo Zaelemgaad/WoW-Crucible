@@ -99,6 +99,17 @@ public sealed class VirtualDbcView : Control
         InvalidateVisual();
     }
 
+    public void SelectSourceRow(int sourceRow, int column = 0)
+    {
+        if (_file is null || sourceRow < 0 || sourceRow >= _file.RowCount) return;
+        _selectedDisplayRow = _filteredRows is null ? sourceRow : IndexOf(_filteredRows, sourceRow);
+        if (_selectedDisplayRow < 0) { _filteredRows = null; _selectedDisplayRow = sourceRow; }
+        _selectedColumn = _columns.Count == 0 ? -1 : Math.Clamp(column, 0, _columns.Count - 1);
+        _verticalOffset = Math.Max(0, _selectedDisplayRow * RowHeight - Math.Max(0, Bounds.Height - HeaderHeight) * 0.45);
+        ClampOffsets(); InvalidateVisual();
+        if (_selectedColumn >= 0) SelectionChanged?.Invoke(this, new(sourceRow, _selectedColumn, _columns[_selectedColumn], CachedValue(sourceRow, _selectedColumn)));
+    }
+
     public void SetFilteredRows(IReadOnlyList<int>? rows)
     {
         _filteredRows = rows;

@@ -924,8 +924,16 @@ public partial class MainWindow : Window
     private void OpenMapWorkspaceClick(object? sender, RoutedEventArgs e) => OpenMapWorkspace();
     public void OpenMapWorkspace(string? path = null)
     {
-        if (_mapWorkspaceView is null) { _mapWorkspaceView = new MapWorkspaceView(_workspaceSession); _mapWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+        if (_mapWorkspaceView is null) { _mapWorkspaceView = new MapWorkspaceView(_workspaceSession); _mapWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _mapWorkspaceView.OpenDbcRecordRequested += async (_, request) => await OpenDbcRecordAsync(request); }
         OpenFeatureWorkspace(_mapWorkspaceView, "Maps & World"); if (!string.IsNullOrWhiteSpace(path)) _ = _mapWorkspaceView.OpenAsync(path);
+    }
+    private async Task OpenDbcRecordAsync(DbcRecordNavigationRequest request)
+    {
+        CloseAllFeatureWorkspaces(); await LoadDbcAsync(request.Path); var document = Current;
+        if (document is null || !document.FullPath.Equals(Path.GetFullPath(request.Path), StringComparison.OrdinalIgnoreCase)) return;
+        var rows = DbcRecordIdentity.IndexRows(document.File, document.Schema.Columns, document.Schema.KeyStrategy);
+        if (!rows.TryGetValue(request.Id, out var row)) { StatusText.Text = $"Opened {Path.GetFileName(request.Path)}, but record {request.Id:N0} is missing."; return; }
+        DbcView.SelectSourceRow(row); StatusText.Text = $"Opened {Path.GetFileName(request.Path)} at exact record {request.Id:N0} · edit normally, then save or stage for MPQ.";
     }
     private async Task OpenMapWorkspaceAsync(string path) { OpenMapWorkspace(); await _mapWorkspaceView!.OpenAsync(path); }
     public void OpenTextureWorkspace(string? path = null)

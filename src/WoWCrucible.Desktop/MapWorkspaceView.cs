@@ -27,6 +27,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     }
     private static readonly MapBrushModeChoice[] BrushModes = [new("Raise / lower", AdtTerrainBrushMode.RaiseLower), new("Flatten toward height", AdtTerrainBrushMode.Flatten), new("Smooth terrain", AdtTerrainBrushMode.Smooth), new("Seeded noise", AdtTerrainBrushMode.Noise)];
     private readonly DesktopWorkspaceSession _session;
+    private readonly WorldLightingView _lightingView;
     private readonly TextBox _path = new() { PlaceholderText = "Open or drop a WotLK ADT, WDT, or WDL file…" };
     private readonly TextBlock _summary = Info("No map file loaded.");
     private readonly TextBlock _selected = Info("Select a present grid cell for exact terrain metadata.");
@@ -75,10 +76,11 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private AdtAlphaBrushPlan? _alphaPlan;
 
     public event EventHandler? BackRequested;
+    public event EventHandler<DbcRecordNavigationRequest>? OpenDbcRecordRequested;
 
     public MapWorkspaceView(DesktopWorkspaceSession session)
     {
-        _session = session; _wmoLibrary.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
+        _session = session; _lightingView = new WorldLightingView(session); _lightingView.OpenDbcRecordRequested += (_, request) => OpenDbcRecordRequested?.Invoke(this, request); _wmoLibrary.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
         var inspect = new Button { Content = "Inspect / reload" }; inspect.Click += async (_, _) => await OpenAsync(_path.Text);
@@ -135,11 +137,19 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, objectPreviewHost, wmoFooter } };
         _visualTabs.Items.Add(new TabItem { Header = "Terrain / world grid", Content = drop }); _visualTabs.Items.Add(new TabItem { Header = "Placed object preview", Content = wmoPage }); _visualTabs.SelectedIndex = 0;
         var body = new ResponsiveSplitGrid(_visualTabs, details, 3, 2);
-        var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
+        var terrainPage = new Grid { RowDefinitions = new("Auto,*"), Children = { controls, body } }; Grid.SetRow(body, 1);
+        var workspaceTabs = new TabControl { Items = { new TabItem { Header = "Terrain, objects & textures", Content = terrainPage }, new TabItem { Header = "Lighting & skyboxes", Content = _lightingView } } };
+        var lightingLoadStarted = false;
+        workspaceTabs.SelectionChanged += async (_, _) =>
+        {
+            if (workspaceTabs.SelectedIndex != 1 || lightingLoadStarted) return;
+            lightingLoadStarted = true;
+            await _lightingView.LoadAsync();
+        };
+        var root = new Grid { RowDefinitions = new("Auto,*,Auto") };
         root.Children.Add(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading });
-        root.Children.Add(controls); Grid.SetRow(controls, 1);
-        root.Children.Add(body); Grid.SetRow(body, 2);
-        var footer = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _status }; root.Children.Add(footer); Grid.SetRow(footer, 3);
+        root.Children.Add(workspaceTabs); Grid.SetRow(workspaceTabs, 1);
+        var footer = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _status }; root.Children.Add(footer); Grid.SetRow(footer, 2);
         Content = root;
     }
 
@@ -508,7 +518,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private static TextBlock Label(string text) => new() { Text = text, FontSize = 11, FontWeight = FontWeight.SemiBold, Foreground = Brush.Parse("#7F8A9F") };
     private static StackPanel Field(string label, Control control) => new() { Spacing = 3, Children = { Label(label), control } };
     private static Border Card(Control child) => new() { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Padding = new Thickness(9), Child = child };
-    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _operation = null; _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = null; _wmoPreview.Dispose(); _m2Preview.Dispose(); }
+    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _operation = null; _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = null; _lightingView.Dispose(); _wmoPreview.Dispose(); _m2Preview.Dispose(); }
 }
 
 internal sealed class MapGridControl : Control
