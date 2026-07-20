@@ -6,6 +6,8 @@ namespace WoWCrucible.Desktop;
 internal sealed class DesktopSettings
 {
     public bool DevbugMode { get; set; }
+    public bool NavigationPaneOpen { get; set; } = true;
+    public bool InspectorPaneOpen { get; set; } = true;
     public string ActiveProjectPath { get; set; } = string.Empty;
     public string ServerRootPath { get; set; } = string.Empty;
     public string CoreDbcPath { get; set; } = string.Empty;

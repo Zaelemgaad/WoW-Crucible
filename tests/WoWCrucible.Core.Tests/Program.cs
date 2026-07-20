@@ -1510,22 +1510,26 @@ var desktopSourceRoot = Path.Combine(FindRepositoryRoot(AppContext.BaseDirectory
 if (Directory.Exists(desktopSourceRoot))
 {
     var desktopSources = Directory.EnumerateFiles(desktopSourceRoot, "*.cs", SearchOption.AllDirectories).ToDictionary(path => path, File.ReadAllText);
+    var desktopMarkup = Directory.EnumerateFiles(desktopSourceRoot, "*.axaml", SearchOption.AllDirectories).ToDictionary(path => path, File.ReadAllText);
     var featureWindows = desktopSources.Where(pair => !Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase) &&
         (pair.Value.Contains(": Window", StringComparison.Ordinal) || pair.Value.Contains("new Window", StringComparison.Ordinal) || pair.Value.Contains(".ShowDialog(", StringComparison.Ordinal) || pair.Value.Contains(".Show(", StringComparison.Ordinal))).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
     var rigidConstraints = desktopSources.Where(pair => pair.Value.Contains("MinWidth =", StringComparison.Ordinal) || pair.Value.Contains("MaxWidth =", StringComparison.Ordinal) || pair.Value.Contains("MinHeight =", StringComparison.Ordinal) || pair.Value.Contains("MaxHeight =", StringComparison.Ordinal)).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
     var permanentHorizontalSplitters = desktopSources.Where(pair => !Path.GetFileName(pair.Key).Equals("ResponsiveSplitGrid.cs", StringComparison.OrdinalIgnoreCase) && Regex.IsMatch(pair.Value, @"new\s+GridSplitter\s*\{[^}]*ResizeDirection\s*=\s*GridResizeDirection\.Columns", RegexOptions.CultureInvariant)).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
     var responsiveSplitters = desktopSources.Sum(pair => Regex.Matches(pair.Value, @"new\s+ResponsiveSplitGrid\s*\(", RegexOptions.CultureInvariant).Count);
-    var markupConstraints = Directory.EnumerateFiles(desktopSourceRoot, "*.axaml", SearchOption.AllDirectories).Where(path =>
+    var markupConstraints = desktopMarkup.Where(pair =>
     {
-        var markup = File.ReadAllText(path); return markup.Contains(" MinWidth=", StringComparison.Ordinal) || markup.Contains(" MaxWidth=", StringComparison.Ordinal) || markup.Contains(" MinHeight=", StringComparison.Ordinal) || markup.Contains(" MaxHeight=", StringComparison.Ordinal) || markup.Contains(" Width=\"", StringComparison.Ordinal) && !markup.Contains("d:DesignWidth=", StringComparison.Ordinal) || markup.Contains(" Height=\"", StringComparison.Ordinal) && !markup.Contains("d:DesignHeight=", StringComparison.Ordinal);
-    }).Select(path => Path.GetRelativePath(desktopSourceRoot, path)).ToArray();
-    if (featureWindows.Length > 0 || rigidConstraints.Length > 0 || markupConstraints.Length > 0 || permanentHorizontalSplitters.Length > 0 || responsiveSplitters < 15)
-        throw new InvalidOperationException($"Single-window/responsive desktop contract regressed. Feature windows: {string.Join(", ", featureWindows)}; C# rigid constraints: {string.Join(", ", rigidConstraints)}; markup constraints: {string.Join(", ", markupConstraints)}; permanent horizontal splitters: {string.Join(", ", permanentHorizontalSplitters)}; responsive splitter uses: {responsiveSplitters}.");
+        var markup = pair.Value; return markup.Contains(" MinWidth=", StringComparison.Ordinal) || markup.Contains(" MaxWidth=", StringComparison.Ordinal) || markup.Contains(" MinHeight=", StringComparison.Ordinal) || markup.Contains(" MaxHeight=", StringComparison.Ordinal) || markup.Contains(" Width=\"", StringComparison.Ordinal) && !markup.Contains("d:DesignWidth=", StringComparison.Ordinal) || markup.Contains(" Height=\"", StringComparison.Ordinal) && !markup.Contains("d:DesignHeight=", StringComparison.Ordinal);
+    }).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
+    var windowMarkup = desktopMarkup.Where(pair => Regex.IsMatch(pair.Value, @"^\s*<Window\b", RegexOptions.CultureInvariant)).Select(pair => Path.GetRelativePath(desktopSourceRoot, pair.Key)).ToArray();
+    if (featureWindows.Length > 0 || rigidConstraints.Length > 0 || markupConstraints.Length > 0 || permanentHorizontalSplitters.Length > 0 || responsiveSplitters < 15 || windowMarkup.Length != 1 || !Path.GetFileName(windowMarkup.SingleOrDefault() ?? string.Empty).Equals("MainWindow.axaml", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException($"Single-window/responsive desktop contract regressed. Feature windows: {string.Join(", ", featureWindows)}; window markup: {string.Join(", ", windowMarkup)}; C# rigid constraints: {string.Join(", ", rigidConstraints)}; markup constraints: {string.Join(", ", markupConstraints)}; permanent horizontal splitters: {string.Join(", ", permanentHorizontalSplitters)}; responsive splitter uses: {responsiveSplitters}.");
     var itemWorkbenchSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ItemWorkbenchWindow.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var sqlWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("SqlWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var clientWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ClientWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var appSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("App.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var mainWindowSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var desktopSettingsSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("DesktopSettings.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var mainWindowMarkup = desktopMarkup.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml", StringComparison.OrdinalIgnoreCase)).Value;
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 17802", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Find exact ID(s) — bypass every filter", StringComparison.Ordinal) ||
@@ -1548,7 +1552,14 @@ if (Directory.Exists(desktopSourceRoot))
         !clientWorkspaceSource.Contains("ClientReleaseService.ValidateRollback", StringComparison.Ordinal) ||
         !appSource.Contains("--client", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("OpenSqlFavorites", StringComparison.Ordinal) ||
-        !mainWindowSource.Contains("OpenMpqMergeWorkspace", StringComparison.Ordinal))
+        !mainWindowSource.Contains("OpenMpqMergeWorkspace", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("ApplyShellPaneState", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("RootLayout.ColumnDefinitions[0].Width", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("RootLayout.ColumnDefinitions[4].Width", StringComparison.Ordinal) ||
+        !desktopSettingsSource.Contains("NavigationPaneOpen", StringComparison.Ordinal) ||
+        !desktopSettingsSource.Contains("InspectorPaneOpen", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("x:Name=\"NavigationPaneButton\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("x:Name=\"InspectorPaneButton\"", StringComparison.Ordinal))
         throw new InvalidOperationException("Cut-item navigation, SQL-row favorites, same-window authenticated client releases, or their direct workspace routes regressed.");
 }
 

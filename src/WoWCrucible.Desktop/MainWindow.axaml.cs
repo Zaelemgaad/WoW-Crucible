@@ -70,6 +70,7 @@ public partial class MainWindow : Window
         ToolTip.SetTip(BuildIdentityText, $"{buildIdentity.FullVersion}\nRunning from {AppContext.BaseDirectory}");
         Title = $"WoW Crucible · {buildIdentity.Label}";
         DevbugModeToggle.IsChecked = DesktopCrashLogger.IsDevbugEnabled;
+        ApplyShellPaneState();
         _commandRoutes = BuildCommandRoutes();
         var unrouted = CrucibleCommandCatalog.All.Where(command => !_commandRoutes.ContainsKey(command.Id)).Select(command => command.Id).ToArray();
         if (unrouted.Length > 0 || _commandRoutes.Count != CrucibleCommandCatalog.All.Count) throw new InvalidOperationException($"Desktop command routes do not exactly match the shared catalog. Missing: {string.Join(", ", unrouted)}");
@@ -114,6 +115,37 @@ public partial class MainWindow : Window
         StatusText.Text = enabled
             ? $"Devbug Mode enabled · live terminal + {DesktopCrashLogger.DebugLogPath}"
             : "Devbug Mode disabled · normal mode only records failures";
+    }
+
+    private void ToggleNavigationPaneClick(object? sender, RoutedEventArgs e)
+    {
+        _workspaceSession.Settings.NavigationPaneOpen = !_workspaceSession.Settings.NavigationPaneOpen;
+        ApplyShellPaneState();
+        _workspaceSession.Settings.Save();
+        StatusText.Text = _workspaceSession.Settings.NavigationPaneOpen ? "Workspace pane restored · drag its divider to choose any width" : "Workspace pane hidden · the editor now owns that space";
+    }
+
+    private void ToggleInspectorPaneClick(object? sender, RoutedEventArgs e)
+    {
+        _workspaceSession.Settings.InspectorPaneOpen = !_workspaceSession.Settings.InspectorPaneOpen;
+        ApplyShellPaneState();
+        _workspaceSession.Settings.Save();
+        StatusText.Text = _workspaceSession.Settings.InspectorPaneOpen ? "Inspector pane restored · drag its divider to choose any width" : "Inspector pane hidden · the editor now owns that space";
+    }
+
+    private void ApplyShellPaneState()
+    {
+        var shellVisible = !FeatureWorkspaceHost.IsVisible;
+        var navigationVisible = shellVisible && _workspaceSession.Settings.NavigationPaneOpen;
+        var inspectorVisible = shellVisible && _workspaceSession.Settings.InspectorPaneOpen;
+        NavigationPane.IsVisible = NavigationSplitter.IsVisible = navigationVisible;
+        InspectorPane.IsVisible = InspectorSplitter.IsVisible = inspectorVisible;
+        RootLayout.ColumnDefinitions[0].Width = navigationVisible ? new GridLength(1.1, GridUnitType.Star) : new GridLength(0);
+        RootLayout.ColumnDefinitions[1].Width = navigationVisible ? GridLength.Auto : new GridLength(0);
+        RootLayout.ColumnDefinitions[3].Width = inspectorVisible ? GridLength.Auto : new GridLength(0);
+        RootLayout.ColumnDefinitions[4].Width = inspectorVisible ? new GridLength(1.5, GridUnitType.Star) : new GridLength(0);
+        NavigationPaneButton.Content = _workspaceSession.Settings.NavigationPaneOpen ? "Hide workspace pane" : "Show workspace pane";
+        InspectorPaneButton.Content = _workspaceSession.Settings.InspectorPaneOpen ? "Hide inspector pane" : "Show inspector pane";
     }
 
     public Task LoadPathAsync(string path)
@@ -1055,7 +1087,8 @@ public partial class MainWindow : Window
             _featureHistory.Push((current, _featureTitle));
         FeatureWorkspaceHost.Child = workspace;
         FeatureWorkspaceHost.IsVisible = true;
-        MainHeader.IsVisible = NavigationPane.IsVisible = NavigationSplitter.IsVisible = EditorWorkspace.IsVisible = InspectorSplitter.IsVisible = InspectorPane.IsVisible = MainStatusBar.IsVisible = false;
+        MainHeader.IsVisible = EditorWorkspace.IsVisible = MainStatusBar.IsVisible = false;
+        ApplyShellPaneState();
         _featureTitle = title;
         Title = $"WoW Crucible — {title}";
         DesktopCrashLogger.Debug("UI", "feature-workspace-opened", ("title", title), ("view", workspace.GetType().Name), ("history_depth", _featureHistory.Count));
@@ -1081,7 +1114,8 @@ public partial class MainWindow : Window
         _assetComparisonView?.Suspend();
         FeatureWorkspaceHost.IsVisible = false;
         FeatureWorkspaceHost.Child = null;
-        MainHeader.IsVisible = NavigationPane.IsVisible = NavigationSplitter.IsVisible = EditorWorkspace.IsVisible = InspectorSplitter.IsVisible = InspectorPane.IsVisible = MainStatusBar.IsVisible = true;
+        MainHeader.IsVisible = EditorWorkspace.IsVisible = MainStatusBar.IsVisible = true;
+        ApplyShellPaneState();
         Title = "WoW Crucible";
         DesktopCrashLogger.Debug("UI", "feature-workspace-closed");
     }

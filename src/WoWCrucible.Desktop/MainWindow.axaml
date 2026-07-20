@@ -7,7 +7,7 @@
         x:Class="WoWCrucible.Desktop.MainWindow"
         Title="WoW Crucible"
         WindowStartupLocation="CenterScreen">
-    <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="1.1*,Auto,3*,Auto,1.5*">
+    <Grid x:Name="RootLayout" RowDefinitions="Auto,*,Auto" ColumnDefinitions="1.1*,Auto,3*,Auto,1.5*">
         <Border x:Name="MainHeader" Grid.Row="0" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,0,0,1">
             <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" Margin="14,4">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="9" Margin="0,2,10,4">
@@ -33,6 +33,8 @@
                         <Button Margin="0,0,8,0" Content="CLI Guide" Click="OpenCliGuideClick" />
                         <Button Margin="0,0,8,0" Content="Field Help · F1" Click="OpenKnowledgeClick" />
                         <Button Margin="0,0,8,0" Content="Commands · Ctrl+K" Click="OpenCommandPaletteClick" />
+                        <Button x:Name="NavigationPaneButton" Margin="0,0,8,0" Content="Hide workspace pane" Click="ToggleNavigationPaneClick" />
+                        <Button x:Name="InspectorPaneButton" Margin="0,0,8,0" Content="Hide inspector pane" Click="ToggleInspectorPaneClick" />
                         <TextBox x:Name="SearchBox" PlaceholderText="Search loaded table…" TextChanged="SearchChanged" />
                     </WrapPanel>
                 </ScrollViewer>
