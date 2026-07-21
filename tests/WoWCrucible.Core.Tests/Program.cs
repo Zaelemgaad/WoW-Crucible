@@ -1943,6 +1943,7 @@ if (Directory.Exists(desktopSourceRoot))
     if (featureWindows.Length > 0 || rigidConstraints.Length > 0 || markupConstraints.Length > 0 || permanentHorizontalSplitters.Length > 0 || responsiveSplitters < 15 || windowMarkup.Length != 1 || !Path.GetFileName(windowMarkup.SingleOrDefault() ?? string.Empty).Equals("MainWindow.axaml", StringComparison.OrdinalIgnoreCase))
         throw new InvalidOperationException($"Single-window/responsive desktop contract regressed. Feature windows: {string.Join(", ", featureWindows)}; window markup: {string.Join(", ", windowMarkup)}; C# rigid constraints: {string.Join(", ", rigidConstraints)}; markup constraints: {string.Join(", ", markupConstraints)}; permanent horizontal splitters: {string.Join(", ", permanentHorizontalSplitters)}; responsive splitter uses: {responsiveSplitters}.");
     var itemWorkbenchSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ItemWorkbenchWindow.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var questWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("QuestWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var sqlWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("SqlWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var serverSqlWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ServerSqlWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var clientWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("ClientWorkspaceView.cs", StringComparison.OrdinalIgnoreCase)).Value;
@@ -2048,6 +2049,10 @@ if (Directory.Exists(desktopSourceRoot))
         !desktopWorkspaceSessionSource.Contains("public ServerLifecycleService Lifecycle", StringComparison.Ordinal) ||
         !desktopSettingsSource.Contains("WorkspaceRootPath", StringComparison.Ordinal))
         throw new InvalidOperationException("Cut-item navigation, SQL-row favorites, same-window authenticated client releases, or their direct workspace routes regressed.");
+    if (!questWorkspaceSource.Contains("ResetSemanticControls();", StringComparison.Ordinal) ||
+        !questWorkspaceSource.Contains("CreateQuestTypeEditor()", StringComparison.Ordinal) ||
+        !questWorkspaceSource.Contains("semantic controls must belong to the new rebuild rather than be remounted", StringComparison.Ordinal))
+        throw new InvalidOperationException("Quest field rebuilds can remount semantic controls that still have visual parents.");
     if (!serverSqlWorkspaceSource.Contains("Named row lookups", StringComparison.Ordinal) || !serverSqlWorkspaceSource.Contains("BuildBridgeLookupEditor", StringComparison.Ordinal) ||
         !serverSqlWorkspaceSource.Contains("_session.DatabaseTransportDescription", StringComparison.Ordinal) ||
         !desktopWorkspaceSessionSource.Contains("ServerDatabaseConnectionSession.ConnectAsync", StringComparison.Ordinal) ||

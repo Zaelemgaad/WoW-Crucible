@@ -13,7 +13,7 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
 {
     private readonly DesktopWorkspaceSession _session; private readonly TabControl _fieldTabs = new();
     private readonly Dictionary<string, (DatabaseColumnCapability Column, TextBox Text, CheckBox Null)> _editors = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ComboBox _questType = new() { ItemsSource = QuestSemanticCatalog.Types }; private readonly WrapPanel _flagPanel = new();
+    private ComboBox _questType = CreateQuestTypeEditor(); private WrapPanel _flagPanel = new();
     private readonly Dictionary<uint, CheckBox> _flagBoxes = [];
     private readonly TextBox _creatureStarters = Ids("Creature template IDs that start this quest"); private readonly TextBox _creatureEnders = Ids("Creature template IDs that end this quest"); private readonly TextBox _gameObjectStarters = Ids("Gameobject template IDs that start this quest"); private readonly TextBox _gameObjectEnders = Ids("Gameobject template IDs that end this quest");
     private readonly TextBlock _summary = Status("Quest draft summary"); private readonly TextBox _sql = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
@@ -26,8 +26,7 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
     public QuestWorkspaceView(DesktopWorkspaceSession session)
     {
         _session = session; _session.Changed += SessionChanged;
-        foreach (var flag in QuestSemanticCatalog.Flags) { var box = new CheckBox { Content = flag.Name }; ToolTip.SetTip(box, $"0x{flag.Value:X8} · {flag.Meaning}"); box.IsCheckedChanged += (_, _) => FlagsChanged(); _flagBoxes[flag.Value] = box; _flagPanel.Children.Add(box); }
-        _questType.SelectionChanged += (_, _) => TypeChanged(); foreach (var links in LinkInputs()) links.TextChanged += (_, _) => RefreshPreview();
+        foreach (var links in LinkInputs()) links.TextChanged += (_, _) => RefreshPreview();
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty); var create = new Button { Content = "New blank quest" }; create.Click += (_, _) => ResetNew();
         var heading = new Grid { ColumnDefinitions = new("Auto,*,Auto"), Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "QUESTS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) }, 1), WithColumn(create, 2) } };
         var editor = new TabControl { Items = { new TabItem { Header = "Quest fields", Content = _fieldTabs }, new TabItem { Header = "Starters & enders", Content = LinksPage() } } };
@@ -58,7 +57,7 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
 
     private void RebuildFields()
     {
-        _fieldTabs.ItemsSource = null; _editors.Clear(); var table = Table(); var initial = new Dictionary<string, object?>(QuestTemplateAdapter.CreateDefaultValues(table), StringComparer.OrdinalIgnoreCase); if (_loadedValues is not null) foreach (var pair in _loadedValues) initial[pair.Key] = pair.Value; var tabs = new List<TabItem>();
+        _fieldTabs.ItemsSource = null; _editors.Clear(); ResetSemanticControls(); var table = Table(); var initial = new Dictionary<string, object?>(QuestTemplateAdapter.CreateDefaultValues(table), StringComparer.OrdinalIgnoreCase); if (_loadedValues is not null) foreach (var pair in _loadedValues) initial[pair.Key] = pair.Value; var tabs = new List<TabItem>();
         foreach (var group in table.Columns.GroupBy(column => QuestTemplateAdapter.Group(column.Name)).OrderBy(group => GroupOrder(group.Key)))
         {
             var panel = new StackPanel { Spacing = 7, Margin = new Thickness(12) };
@@ -90,6 +89,27 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
         }
         _fieldTabs.ItemsSource = tabs; SyncSemanticControls(); RefreshPreview();
     }
+
+    private void ResetSemanticControls()
+    {
+        // RebuildFields creates a new set of tab panels. Controls nested in the old
+        // panels keep those panels as visual parents even after ItemsSource is reset,
+        // so semantic controls must belong to the new rebuild rather than be remounted.
+        _questType = CreateQuestTypeEditor();
+        _questType.SelectionChanged += (_, _) => TypeChanged();
+        _flagPanel = new WrapPanel();
+        _flagBoxes.Clear();
+        foreach (var flag in QuestSemanticCatalog.Flags)
+        {
+            var box = new CheckBox { Content = flag.Name };
+            ToolTip.SetTip(box, $"0x{flag.Value:X8} · {flag.Meaning}");
+            box.IsCheckedChanged += (_, _) => FlagsChanged();
+            _flagBoxes[flag.Value] = box;
+            _flagPanel.Children.Add(box);
+        }
+    }
+
+    private static ComboBox CreateQuestTypeEditor() => new() { ItemsSource = QuestSemanticCatalog.Types };
 
     private Control LinksPage() => new ScrollViewer { Content = new StackPanel { Spacing = 9, Margin = new Thickness(12), Children = { new TextBlock { Text = "Quest-giver relationships", FontSize = 17, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = "Enter template IDs separated by commas, spaces, or new lines, or use the searchable pickers. These become creature_queststarter/ender and gameobject_queststarter/ender rows in the same transaction. Existing link identities are refused rather than replaced.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, LinkPicker("Creature starters", _creatureStarters, ReferenceDomain.Creature), LinkPicker("Creature enders", _creatureEnders, ReferenceDomain.Creature), LinkPicker("Gameobject starters", _gameObjectStarters, ReferenceDomain.GameObject), LinkPicker("Gameobject enders", _gameObjectEnders, ReferenceDomain.GameObject) } } };
 
