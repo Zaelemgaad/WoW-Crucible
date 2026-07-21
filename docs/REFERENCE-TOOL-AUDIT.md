@@ -115,7 +115,7 @@ The July 2026 workspace review covered the added Amaroth Toolpack directories pl
 
 `Coffee` is a 2016 preservation repository containing 4,156 files (about 459 MiB) across ADT, BLP, DBC, M2, MPQ, WDB, WDL, WDT, and WMO categories. Its own README says that most material was authored by other people, complete credits are unavailable, and the tools are probably obsolete. Some individual subprojects have licenses, but there is no umbrella license that makes the entire collection safe to copy or redistribute.
 
-Use Coffee as format and workflow archaeology only. Source from a particular subproject may be studied or reused only after its individual origin and license are verified. Its strongest contribution is the breadth of map edge cases: holes, water, terrain offsets, WDT creation, reference repair, ground doodads, zone data, model collision, and import/export scripts. Those cases should become fixtures for Crucible's future asset validators rather than bundled executables.
+Use Coffee as format and workflow archaeology only. Source from a particular subproject may be studied or reused only after its individual origin and license are verified. Its strongest contribution is the breadth of map edge cases: holes, water, terrain offsets, WDT creation, reference repair, ground doodads, zone data, model collision, and import/export scripts. Crucible now clean-room creates MVER-18 terrain WDTs and edits their 64×64 MAIN presence table through exact-byte hash-bound plans while preserving unrelated flags/chunks; global-WMO WDTs remain an explicit different-lifecycle gap. The remaining cases should become fixtures for Crucible's future asset validators rather than bundled executables.
 
 #### Noggit Studio 3.2614
 

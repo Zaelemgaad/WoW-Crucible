@@ -45,6 +45,8 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly ListBox _dependencies = new();
     private readonly TextBlock _status = Info("Read-only native inspection · no legacy map executable required");
     private readonly MapGridControl _grid = new();
+    private readonly StackPanel _wdtEditor = new() { Spacing = 8, IsVisible = false };
+    private readonly StackPanel _adtEditor = new() { Spacing = 8, IsVisible = false };
     private readonly WmoPreviewView _wmoPreview = new();
     private readonly M2PreviewView _m2Preview = new() { IsVisible = false };
     private readonly MapSceneView _mapScene = new();
@@ -97,6 +99,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private AdtTextureLayerPlan? _texturePlan;
     private AdtTextureStructurePlan? _textureStructurePlan;
     private AdtAlphaBrushPlan? _alphaPlan;
+    private WdtTileEditPlan? _wdtPlan;
     private AdtMultiTilePlacementTransformPlan? _placementPlan;
     private AdtMultiTilePlacementPlan? _placementMultiTilePlan;
     private uint? _pendingLightingId;
@@ -108,11 +111,12 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     public MapWorkspaceView(DesktopWorkspaceSession session)
     {
         _session = session; _lightingView = new WorldLightingView(session); _lightingView.OpenDbcRecordRequested += (_, request) => OpenDbcRecordRequested?.Invoke(this, request); _wmoLibrary.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
-        AutomationProperties.SetName(_placementX, "Placement X"); AutomationProperties.SetName(_placementY, "Placement Y"); AutomationProperties.SetName(_placementZ, "Placement Z"); AutomationProperties.SetName(_placementRotX, "Placement rotation X"); AutomationProperties.SetName(_placementRotY, "Placement rotation Y"); AutomationProperties.SetName(_placementRotZ, "Placement rotation Z"); AutomationProperties.SetName(_placementScale, "Placement scale"); AutomationProperties.SetName(_placementPositionSnap, "Placement position snap step"); AutomationProperties.SetName(_placementRotationSnap, "Placement rotation snap step"); AutomationProperties.SetName(_placementScaleSnap, "Placement scale snap step"); AutomationProperties.SetName(_wmoReferences, "Map object reference"); AutomationProperties.SetName(_wmoCandidates, "Map object provenance"); AutomationProperties.SetName(_sceneProvenance, "Map scene provenance"); AutomationProperties.SetName(_scenePlacementLimit, "Map scene placement limit"); AutomationProperties.SetName(_sceneStatus, "Map scene status");
+        AutomationProperties.SetName(_grid, "Map terrain and world tile grid"); AutomationProperties.SetName(_placementX, "Placement X"); AutomationProperties.SetName(_placementY, "Placement Y"); AutomationProperties.SetName(_placementZ, "Placement Z"); AutomationProperties.SetName(_placementRotX, "Placement rotation X"); AutomationProperties.SetName(_placementRotY, "Placement rotation Y"); AutomationProperties.SetName(_placementRotZ, "Placement rotation Z"); AutomationProperties.SetName(_placementScale, "Placement scale"); AutomationProperties.SetName(_placementPositionSnap, "Placement position snap step"); AutomationProperties.SetName(_placementRotationSnap, "Placement rotation snap step"); AutomationProperties.SetName(_placementScaleSnap, "Placement scale snap step"); AutomationProperties.SetName(_wmoReferences, "Map object reference"); AutomationProperties.SetName(_wmoCandidates, "Map object provenance"); AutomationProperties.SetName(_sceneProvenance, "Map scene provenance"); AutomationProperties.SetName(_scenePlacementLimit, "Map scene placement limit"); AutomationProperties.SetName(_sceneStatus, "Map scene status");
         _sceneStatus.TextWrapping = TextWrapping.NoWrap;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
         var inspect = new Button { Content = "Inspect / reload" }; inspect.Click += async (_, _) => await OpenAsync(_path.Text);
+        var createWdt = new Button { Content = "Create empty terrain WDT…" }; createWdt.Click += async (_, _) => await CreateWdtAsync();
         var openWmo = new Button { Content = "Preview extracted WMO…" }; openWmo.Click += async (_, _) => await PickWmoAsync();
         var chooseWmoLibrary = new Button { Content = "Choose processed library…" }; chooseWmoLibrary.Click += async (_, _) => await PickWmoLibraryAsync();
         var previewReference = new Button { Content = "Preview selected object" }; previewReference.Click += async (_, _) => await PreviewSelectedObjectAsync();
@@ -130,9 +134,16 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         _wmoCandidates.SelectionChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; _mapScene.ClearPlacementPreview(); DescribeSelectedWmoCandidate(); };
         foreach (var input in PlacementInputs()) input.TextChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; UpdateScenePlacementPreviewFromFields(); };
         foreach (var input in PlacementSnapInputs()) input.TextChanged += (_, _) => UpdateScenePlacementSnapSettings();
-        _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
+        _grid.CellsSelected += (_, cells) => { _heightPlan = null; _wdtPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
         var selectAll = new Button { Content = "Select all present" }; selectAll.Click += (_, _) => _grid.SelectAllPresent();
+        var selectAllWdt = new Button { Content = "Select all present" }; selectAllWdt.Click += (_, _) => _grid.SelectAllPresent();
+        var selectMissing = new Button { Content = "Select all missing WDT tiles" }; selectMissing.Click += (_, _) => _grid.SelectAllAbsent();
         var clear = new Button { Content = "Clear selection" }; clear.Click += (_, _) => _grid.ClearSelection();
+        var clearWdt = new Button { Content = "Clear selection" }; clearWdt.Click += (_, _) => _grid.ClearSelection();
+        var previewWdtPresent = new Button { Content = "Preview selected as present" }; previewWdtPresent.Click += async (_, _) => await PreviewWdtAsync(true);
+        var previewWdtAbsent = new Button { Content = "Preview selected as absent" }; previewWdtAbsent.Click += async (_, _) => await PreviewWdtAsync(false);
+        var saveWdt = new Button { Content = "Write reviewed WDT…" }; saveWdt.Click += async (_, _) => await SaveWdtAsync();
+        AutomationProperties.SetName(previewWdtPresent, "Preview WDT tiles present"); AutomationProperties.SetName(previewWdtAbsent, "Preview WDT tiles absent"); AutomationProperties.SetName(saveWdt, "Write reviewed WDT tile table");
         var previewHeight = new Button { Content = "Preview height offset" }; previewHeight.Click += async (_, _) => await PreviewHeightAsync();
         var saveHeight = new Button { Content = "Write edited ADT…" }; saveHeight.Click += async (_, _) => await SaveHeightAsync();
         var previewBrush = new Button { Content = "Preview vertex brush" }; previewBrush.Click += async (_, _) => await PreviewBrushAsync();
@@ -159,11 +170,14 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         heading.Children.Add(title); Grid.SetColumn(title, 1);
 
         open.Margin = new Thickness(0, 0, 6, 0);
-        var controls = new StackPanel { Margin = new Thickness(12, 8), Spacing = 8, Children = { _path, new WrapPanel { Children = { open, inspect } } } };
+        var controls = new StackPanel { Margin = new Thickness(12, 8), Spacing = 8, Children = { _path, new WrapPanel { Children = { open, inspect, createWdt } } } };
         var drop = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(1), Background = Brush.Parse("#090D14"), Child = _grid };
         DragDrop.SetAllowDrop(drop, true);
         DragDrop.AddDragOverHandler(drop, (_, args) => { args.DragEffects = args.DataTransfer.TryGetFiles()?.Any(file => IsMap(file.TryGetLocalPath())) == true ? DragDropEffects.Copy : DragDropEffects.None; args.Handled = true; });
         DragDrop.AddDropHandler(drop, async (_, args) => { var path = args.DataTransfer.TryGetFiles()?.Select(file => file.TryGetLocalPath()).FirstOrDefault(IsMap); if (path is not null) await OpenAsync(path); args.Handled = true; });
+
+        _wdtEditor.Children.Add(Label("WDT 64×64 TERRAIN TILE TABLE")); _wdtEditor.Children.Add(new WrapPanel { Children = { selectAllWdt, selectMissing, clearWdt } }); _wdtEditor.Children.Add(new WrapPanel { Children = { previewWdtPresent, previewWdtAbsent, saveWdt } }); _wdtEditor.Children.Add(Info("WDT mode lets missing and present tiles be selected. Preview changes only MAIN presence bit 0 and preserves every other flag, async ID, chunk, and source byte. Global-WMO WDTs are refused because their MWMO/MODF lifecycle is not a terrain-grid edit."));
+        _adtEditor.Children.Add(Label("ADT TERRAIN HEIGHT OFFSET")); _adtEditor.Children.Add(_heightDelta); _adtEditor.Children.Add(new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }); _adtEditor.Children.Add(Label("ADT VERTEX BRUSH")); _adtEditor.Children.Add(BrushFields()); _adtEditor.Children.Add(new WrapPanel { Children = { previewBrush, saveBrush } }); _adtEditor.Children.Add(Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable.")); _adtEditor.Children.Add(Label("ADT TEXTURE LAYER")); _adtEditor.Children.Add(TextureFields()); _adtEditor.Children.Add(new WrapPanel { Children = { previewTexture, saveTexture } }); _adtEditor.Children.Add(Info("Reassigns an existing MCLY layer slot to one of this ADT's existing MTEX textures.")); _adtEditor.Children.Add(Label("ADD MTEX + MCLY LAYER")); _adtEditor.Children.Add(NewTextureFields()); _adtEditor.Children.Add(new WrapPanel { Children = { previewNewTexture, saveNewTexture } }); _adtEditor.Children.Add(Info("Appends one client-relative BLP to MTEX and adds a matching MCLY/MCAL layer to every selected cell. Wrath's four-layer limit is enforced. Auto preserves the tile's existing packed-versus-8-bit alpha family; mixed or evidence-free tiles require an explicit encoding.")); _adtEditor.Children.Add(Label("ADT ALPHA TEXTURE BRUSH")); _adtEditor.Children.Add(AlphaFields()); _adtEditor.Children.Add(_alphaRestrict); _adtEditor.Children.Add(new WrapPanel { Children = { previewAlpha, saveAlpha } }); _adtEditor.Children.Add(Info("Uses the click-positioned center and radius above to paint an existing additional layer toward alpha 0–255. Packed, big, and RLE maps preserve their current fixed-width encoding; an RLE result that cannot fit is refused instead of shifting MCNK offsets."));
 
         var details = new ScrollViewer
         {
@@ -172,7 +186,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             Content = new StackPanel
             {
                 Margin = new Thickness(10), Spacing = 8,
-                Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable."), Label("ADT TEXTURE LAYER"), TextureFields(), new WrapPanel { Children = { previewTexture, saveTexture } }, Info("Reassigns an existing MCLY layer slot to one of this ADT's existing MTEX textures."), Label("ADD MTEX + MCLY LAYER"), NewTextureFields(), new WrapPanel { Children = { previewNewTexture, saveNewTexture } }, Info("Appends one client-relative BLP to MTEX and adds a matching MCLY/MCAL layer to every selected cell. Wrath's four-layer limit is enforced. Auto preserves the tile's existing packed-versus-8-bit alpha family; mixed or evidence-free tiles require an explicit encoding."), Label("ADT ALPHA TEXTURE BRUSH"), AlphaFields(), _alphaRestrict, new WrapPanel { Children = { previewAlpha, saveAlpha } }, Info("Uses the click-positioned center and radius above to paint an existing additional layer toward alpha 0–255. Packed, big, and RLE maps preserve their current fixed-width encoding; an RLE stroke that cannot fit is refused instead of shifting MCNK offsets."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
+                Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), _wdtEditor, _adtEditor, Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
             }
         };
         var wmoResolver = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(7), Spacing = 6, Children = { _wmoLibrary, new WrapPanel { Children = { chooseWmoLibrary, previewReference, openWmo } }, _wmoReferences, _wmoCandidates, Label("PLACEMENT TRANSFORM & LIFECYCLE"), PlacementFields(), new WrapPanel { Children = { showPlacementInScene, previewPlacement, savePlacement, previewPlacementAdd, savePlacementAdd, previewPlacementDelete, savePlacementDelete } }, Info("Show live placement preview loads the exact selected provenance into the terrain scene and keeps position, rotation, and scale synchronized with these unsaved fields. Terrain movement snaps absolute world X/Y and recomputes exact height. Axis translation can follow world or verified local-model X/Y/Z; its drag distance comes from the visible projected axis and current zoom, with position snapping applied to signed movement increments. Rotation modes edit exact stored Euler X/Y/Z fields; Wrath supports one uniform placement scale, not invented per-axis scale. Zero disables each snap independently. One completed drag is one undo step; Ctrl+Z/Ctrl+Y work while the scene editor has focus. Transform/add/delete remain coordinated map transactions that retain every source and publish only changed ADTs beneath a tiny MPQ-ready Payload tree with manifest and receipt."), _placementStatus } } };
@@ -212,7 +226,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             _path.Text = Path.GetFullPath(path!); _status.Text = $"Inspecting {Path.GetFileName(path)}…";
             var loaded = await Task.Run(() => { token.ThrowIfCancellationRequested(); var inspection = MapAssetInspectionService.Inspect(path!); var textureResult = inspection.Kind == MapAssetKind.Adt ? TryInspectTextures(path!) : (Inspection: (AdtTextureLayerInspection?)null, Error: (string?)null); var alphaResult = inspection.Kind == MapAssetKind.Adt ? TryInspectAlpha(path!) : (Inspection: (AdtAlphaMapInspection?)null, Error: (string?)null); return (inspection, textureResult, alphaResult); }, token); var inspection = loaded.inspection;
             if (token.IsCancellationRequested) return;
-            _inspection = inspection; _textureSourceInspection = _textureInspection = loaded.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = loaded.alphaResult.Inspection; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; _placementPlan = null; _placementMultiTilePlan = null; _mapScene.ClearScene(); _sceneProvenance.ItemsSource = null; _sceneStatus.Text = inspection.Kind == MapAssetKind.Adt ? "ADT loaded. Build the composed scene to discover effective-client and raw-provenance coverage." : "Terrain scene composition requires an ADT tile."; SetTextureChoices(_textureInspection); _grid.SetInspection(inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(inspection); _selected.Text = "Select a present grid cell for exact terrain, texture-layer, and alpha-map metadata.";
+            _inspection = inspection; _textureSourceInspection = _textureInspection = loaded.textureResult.Inspection; _alphaSourceInspection = _alphaInspection = loaded.alphaResult.Inspection; _heightPlan = null; _brushPlan = null; _texturePlan = null; _textureStructurePlan = null; _alphaPlan = null; _wdtPlan = null; _placementPlan = null; _placementMultiTilePlan = null; _mapScene.ClearScene(); _sceneProvenance.ItemsSource = null; _sceneStatus.Text = inspection.Kind == MapAssetKind.Adt ? "ADT loaded. Build the composed scene to discover effective-client and raw-provenance coverage." : "Terrain scene composition requires an ADT tile."; SetTextureChoices(_textureInspection); _grid.SetInspection(inspection); _grid.SetBrush(null, null, null); _summary.Text = Summary(inspection); _selected.Text = inspection.Kind == MapAssetKind.Wdt ? "Select present or missing WDT tiles. Hold Ctrl to build a sparse selection." : "Select a present grid cell for exact terrain, texture-layer, and alpha-map metadata."; _wdtEditor.IsVisible = inspection.Kind == MapAssetKind.Wdt; _adtEditor.IsVisible = inspection.Kind == MapAssetKind.Adt;
             _chunks.ItemsSource = inspection.Chunks.Select(chunk => $"{chunk.Id} · {chunk.Occurrences:N0} chunk(s) · {chunk.PayloadBytes:N0} bytes").ToArray();
             _dependencies.ItemsSource = inspection.TexturePaths.Select(value => "Texture · " + value).Concat(inspection.ModelPaths.Select(value => "Model · " + value)).Concat(inspection.WmoPaths.Select(value => "WMO · " + value)).DefaultIfEmpty("No path-list dependencies in this file.").ToArray();
             _wmoCandidates.ItemsSource = null;
@@ -227,7 +241,47 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             _status.Text = $"Loaded {inspection.Kind} · {inspection.PresentCells:N0}/{inspection.Cells.Count:N0} present cells · click a cell for details · drop another map file anywhere on the grid" + (loaded.textureResult.Error is null ? string.Empty : $" · texture layers unavailable: {loaded.textureResult.Error}") + (loaded.alphaResult.Error is null ? string.Empty : $" · alpha maps unavailable: {loaded.alphaResult.Error}");
         }
         catch (OperationCanceledException) { }
-        catch (Exception exception) { _grid.SetInspection(null); _summary.Text = "Inspection failed."; _status.Text = exception.Message; DesktopCrashLogger.Log("Map inspection failed", exception); }
+        catch (Exception exception) { _grid.SetInspection(null); _wdtEditor.IsVisible = false; _adtEditor.IsVisible = false; _summary.Text = "Inspection failed."; _status.Text = exception.Message; DesktopCrashLogger.Log("Map inspection failed", exception); }
+    }
+
+    private async Task CreateWdtAsync()
+    {
+        try
+        {
+            var top = TopLevel.GetTopLevel(this); if (top is null) return;
+            var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Create a new empty WotLK terrain WDT", SuggestedFileName = "NewMap.wdt", DefaultExtension = "wdt", FileTypeChoices = [new FilePickerFileType("WoW WDT") { Patterns = ["*.wdt"] }] });
+            var output = file?.TryGetLocalPath(); if (output is null) return; _status.Text = "Creating and validating an empty 64×64 terrain WDT…";
+            var result = await Task.Run(() => WdtTileTableService.Create(output, [], overwrite: false)); await OpenAsync(result.OutputPath);
+            _status.Text = $"Created an empty MVER 18 terrain WDT atomically · receipt {Path.GetFileName(result.ReceiptPath)} · select missing tiles and preview them as present to author its MAIN table";
+        }
+        catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("WDT creation failed", exception); }
+    }
+
+    private async Task PreviewWdtAsync(bool present)
+    {
+        try
+        {
+            if (_inspection?.Kind != MapAssetKind.Wdt) throw new InvalidOperationException("WDT tile-table editing requires a loaded WDT file.");
+            var selected = _grid.SelectedCells.Select(cell => (cell.X, cell.Y)).ToArray(); _status.Text = $"Planning {selected.Length:N0} WDT tile state review(s)…";
+            var plan = await Task.Run(() => WdtTileTableService.Plan(_inspection.Path, selected, present)); var preview = await Task.Run(() => WdtTileTableService.Preview(plan));
+            _grid.SetInspection(preview, plan.Edits.Select(edit => (edit.X, edit.Y))); _wdtPlan = plan; _summary.Text = Summary(preview); _selected.Text = DescribeSelection(_grid.SelectedCells);
+            _status.Text = $"Preview only · {plan.Edits.Count:N0} tile(s) become {(present ? "present" : "absent")} · {plan.AlreadyDesiredCells:N0} already in that state · every non-presence flag/async value and the source file remain unchanged";
+        }
+        catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("WDT tile-table preview failed", exception); }
+    }
+
+    private async Task SaveWdtAsync()
+    {
+        try
+        {
+            if (_wdtPlan is null) throw new InvalidOperationException("Preview selected WDT tiles as present or absent before writing the reviewed change.");
+            var top = TopLevel.GetTopLevel(this); if (top is null) return; var stem = Path.GetFileNameWithoutExtension(_wdtPlan.InputPath);
+            var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Write a separate tile-edited WDT", SuggestedFileName = stem + "-tiles.wdt", DefaultExtension = "wdt", FileTypeChoices = [new FilePickerFileType("WoW WDT") { Patterns = ["*.wdt"] }] });
+            var output = file?.TryGetLocalPath(); if (output is null) return; _status.Text = "Writing and re-validating the exact WDT MAIN tile slots…";
+            var result = await Task.Run(() => WdtTileTableService.Apply(_wdtPlan, output, overwrite: false)); await OpenAsync(result.OutputPath);
+            _status.Text = $"Wrote {result.EditedCells:N0} WDT tile state edit(s) atomically · receipt {Path.GetFileName(result.ReceiptPath)} · original WDT retained";
+        }
+        catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("WDT tile-table write failed", exception); }
     }
 
     private async Task PreviewHeightAsync()
@@ -422,7 +476,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
 
     private string DescribeSelection(IReadOnlyList<MapTileCell> cells)
     {
-        if (cells.Count == 0) return "No cells selected."; if (cells.Count > 1) return $"{cells.Count:N0} present terrain cells selected.\nHold Ctrl while clicking to toggle individual cells."; var cell = cells[0]; var layers = _textureInspection?.Layers.Where(layer => layer.CellX == cell.X && layer.CellY == cell.Y).OrderBy(layer => layer.Slot).ToArray() ?? []; var alpha = _alphaInspection?.Maps.Where(map => map.CellX == cell.X && map.CellY == cell.Y).OrderBy(map => map.Slot).ToArray() ?? [];
+        if (cells.Count == 0) return "No cells selected."; if (cells.Count > 1) return _inspection?.Kind == MapAssetKind.Wdt ? $"{cells.Count:N0} WDT tiles selected · {cells.Count(cell => cell.Present):N0} present · {cells.Count(cell => !cell.Present):N0} missing.\nHold Ctrl while clicking to toggle individual tiles." : $"{cells.Count:N0} present terrain cells selected.\nHold Ctrl while clicking to toggle individual cells."; var cell = cells[0]; var layers = _textureInspection?.Layers.Where(layer => layer.CellX == cell.X && layer.CellY == cell.Y).OrderBy(layer => layer.Slot).ToArray() ?? []; var alpha = _alphaInspection?.Maps.Where(map => map.CellX == cell.X && map.CellY == cell.Y).OrderBy(map => map.Slot).ToArray() ?? [];
         var layerText = layers.Length == 0 ? "\nTexture layers: none" : "\nTexture layers:\n" + string.Join("\n", layers.Select(layer => $"  {layer.Slot}: MTEX {layer.TextureId} · {layer.TexturePath ?? "MISSING"} · flags 0x{layer.Flags:X} · alpha {layer.AlphaOffset:N0} · effect {layer.EffectId}"));
         var alphaText = alpha.Length == 0 ? "\nPaintable alpha maps: none" : "\nPaintable alpha maps:\n" + string.Join("\n", alpha.Select(map => $"  {map.Slot}: {map.Encoding} · {map.Minimum}..{map.Maximum} · avg {map.Average:0.###} · {map.EncodedBytesUsed:N0}/{map.Capacity:N0} bytes"));
         return Describe(cell) + layerText + alphaText;
@@ -861,6 +915,7 @@ internal sealed class MapGridControl : Control
     public MapGridControl() { ClipToBounds = true; }
     public void SetInspection(MapAssetInspection? inspection, IEnumerable<(int X, int Y)>? selection = null) { _inspection = inspection; _selected.Clear(); if (selection is not null) foreach (var cell in selection) _selected.Add(cell); Notify(); }
     public void SelectAllPresent() { _selected.Clear(); if (_inspection is not null) foreach (var cell in _inspection.Cells.Where(cell => cell.Present)) _selected.Add((cell.X, cell.Y)); Notify(); }
+    public void SelectAllAbsent() { _selected.Clear(); if (_inspection?.Kind == MapAssetKind.Wdt) foreach (var cell in _inspection.Cells.Where(cell => !cell.Present)) _selected.Add((cell.X, cell.Y)); Notify(); }
     public void ClearSelection() { _selected.Clear(); Notify(); }
     public void SetBrush(double? x, double? y, double? radius) { _brushX = x; _brushY = y; _brushRadius = radius; InvalidateVisual(); }
 
@@ -890,7 +945,7 @@ internal sealed class MapGridControl : Control
         base.OnPointerPressed(e); if (_inspection is null) return; var size = Math.Max(1, Math.Min(Bounds.Width, Bounds.Height) - 28); var left = (Bounds.Width - size) / 2; var top = (Bounds.Height - size) / 2; var point = e.GetPosition(this);
         var localX = (point.X - left) / size * _inspection.GridWidth; var localY = (point.Y - top) / size * _inspection.GridHeight; var x = (int)localX; var y = (int)localY;
         if (localX >= 0 && localX <= _inspection.GridWidth && localY >= 0 && localY <= _inspection.GridHeight && _inspection.Kind == MapAssetKind.Adt) TerrainPointSelected?.Invoke(this, new(Math.Clamp(localX, 0, 16), Math.Clamp(localY, 0, 16)));
-        var cell = x >= 0 && x < _inspection.GridWidth && y >= 0 && y < _inspection.GridHeight ? _inspection.Cells.FirstOrDefault(candidate => candidate.X == x && candidate.Y == y && candidate.Present) : null;
+        var cell = x >= 0 && x < _inspection.GridWidth && y >= 0 && y < _inspection.GridHeight ? _inspection.Cells.FirstOrDefault(candidate => candidate.X == x && candidate.Y == y && (candidate.Present || _inspection.Kind == MapAssetKind.Wdt)) : null;
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) _selected.Clear();
         if (cell is not null && !_selected.Add((cell.X, cell.Y))) _selected.Remove((cell.X, cell.Y)); Notify(); e.Handled = true;
     }
