@@ -19,6 +19,7 @@ try
     exitCode = commandArguments.Length == 0 ? Help() : requestedHelp is not null ? RoutedHelp(requestedHelp) : commandArguments[0].ToLowerInvariant() switch
     {
         "dbc" => Dbc(commandArguments[1..]),
+        "workspace" => Workspace(commandArguments[1..]),
         "db" => Database(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "server" => Server(commandArguments[1..]).GetAwaiter().GetResult(),
         "client" => Client(commandArguments[1..]),
@@ -55,6 +56,7 @@ return exitCode;
 static int RoutedHelp(string group) => group switch
 {
     CliHelpRouting.Root => Help(),
+    "workspace" => WorkspaceHelp(),
     "asset" => AssetHelp(),
     "project" => ProjectHelp(),
     "tools" => ToolingHelp(),
@@ -69,6 +71,34 @@ static int RoutedHelp(string group) => group switch
     "manifest" => ManifestHelp(),
     _ => Fail($"Unknown command group for help: {group}")
 };
+
+static int Workspace(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return WorkspaceHelp();
+    var operation = args[0].ToLowerInvariant();
+    if (args.Length < 2) return Fail($"workspace {operation} requires a top-level workspace folder.");
+    var root = args[1]; var json = args.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+    var unknown = args[2..].Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase)).ToArray();
+    if (unknown.Length > 0) return Fail($"Unknown workspace option: {unknown[0]}");
+    CrucibleWorkspaceLayout layout;
+    if (operation == "show") layout = CrucibleWorkspaceLayoutService.Load(root);
+    else if (operation is "discover" or "init")
+    {
+        layout = CrucibleWorkspaceLayoutService.Discover(root);
+        if (operation == "init") CrucibleWorkspaceLayoutService.Save(layout);
+    }
+    else return WorkspaceHelp(2);
+    if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(layout, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+    else
+    {
+        Console.WriteLine($"Name\t{layout.Name}\nRoot\t{layout.RootPath}\nServer\t{layout.ServerRootPath}\nCoreSource\t{layout.CoreSourcePath}\nClient\t{layout.ClientRootPath}\nClientData\t{layout.ClientDataPath}\nClientExecutable\t{layout.ClientExecutablePath}\nServerDBC\t{layout.CoreDbcPath}\nSchema\t{layout.SchemaDefinitionPath}\nWoWDBDefs\t{layout.DbdDefinitionsPath}\nProjects\t{layout.ProjectsPath}\nStaging\t{layout.StagingPath}\nTools\t{layout.ToolsPath}\nNoggit\t{layout.NoggitExecutablePath}\nMaps\t{layout.MapSourcePath}");
+        foreach (var finding in layout.Findings) Console.WriteLine($"FINDING\t{finding}");
+    }
+    if (operation == "init") Console.Error.WriteLine($"Saved portable workspace manifest: {CrucibleWorkspaceLayout.ManifestPath(layout.RootPath)}");
+    return 0;
+}
+
+static int WorkspaceHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible workspace discover <top-level-folder> [--format=json]\n  wowcrucible workspace init <top-level-folder> [--format=json]\n  wowcrucible workspace show <top-level-folder> [--format=json]\n\ndiscover is read-only. init writes .crucible/workspace.json with relative paths whenever possible. Credentials and passwords are never stored in the workspace manifest.", code);
 
 static async Task<int> Cache(string[] args, CancellationToken cancellationToken)
 {
@@ -3494,7 +3524,7 @@ static int GroupHelp(string message, int code)
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  tools     search native commands and inventory the local legacy-tool corpus\n  knowledge search the local wiki for fields, flags, commands, and systems\n  cache     inspect and export WDB/WCH2 ADB client cache tables read-only\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  casc      browse and extract later-client CASC storage read-only\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible cache info creaturecache.wdb --definitions=WDB.xml\n  wowcrucible cache info Item-sparse.adb --definitions=adb-definitions.xml\n  wowcrucible casc list \"D:\\World of Warcraft\" \"**\\*.m2\" --local-only\n  wowcrucible tools commands \"cut items\"\n  wowcrucible knowledge search item_template flags\n  wowcrucible tools inventory --unassigned-only\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
+    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  workspace discover and remember one complete WoW development install\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  tools     search native commands and inventory the local legacy-tool corpus\n  knowledge search the local wiki for fields, flags, commands, and systems\n  cache     inspect and export WDB/WCH2 ADB client cache tables read-only\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  casc      browse and extract later-client CASC storage read-only\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible workspace init G:\\WotLK\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible cache info creaturecache.wdb --definitions=WDB.xml\n  wowcrucible cache info Item-sparse.adb --definitions=adb-definitions.xml\n  wowcrucible casc list \"D:\\World of Warcraft\" \"**\\*.m2\" --local-only\n  wowcrucible tools commands \"cut items\"\n  wowcrucible knowledge search item_template flags\n  wowcrucible tools inventory --unassigned-only\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 

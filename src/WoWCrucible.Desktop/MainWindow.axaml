@@ -7,8 +7,9 @@
         x:Class="WoWCrucible.Desktop.MainWindow"
         Title="WoW Crucible"
         WindowStartupLocation="CenterScreen">
-    <Grid x:Name="RootLayout" RowDefinitions="Auto,*,Auto" ColumnDefinitions="1.1*,Auto,3*,Auto,1.5*">
-        <Border x:Name="MainHeader" Grid.Row="0" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,0,0,1">
+    <Grid x:Name="RootLayout" RowDefinitions="Auto,Auto,*,Auto" ColumnDefinitions="1.1*,Auto,3*,Auto,1.5*">
+        <local:WorkspaceRuntimeStrip x:Name="RuntimeStrip" Grid.Row="0" Grid.ColumnSpan="5" />
+        <Border x:Name="MainHeader" Grid.Row="1" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,0,0,1">
             <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" Margin="14,4">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="9" Margin="0,2,10,4">
                     <TextBlock Text="WOW CRUCIBLE" FontWeight="SemiBold" FontSize="15" VerticalAlignment="Center" />
@@ -41,11 +42,12 @@
             </Grid>
         </Border>
 
-        <Border x:Name="NavigationPane" Grid.Row="1" Grid.Column="0" BorderBrush="#2B3445" BorderThickness="0,0,1,0" Background="#0E1219">
+        <Border x:Name="NavigationPane" Grid.Row="2" Grid.Column="0" BorderBrush="#2B3445" BorderThickness="0,0,1,0" Background="#0E1219">
             <Grid RowDefinitions="Auto,*,Auto" Margin="12">
                 <TextBlock Text="WORKSPACE" Foreground="#7F8A9F" FontSize="10" FontWeight="Bold" Margin="6,4,0,9" />
                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel Spacing="4">
+                        <Button HorizontalContentAlignment="Left" Click="OpenWorkspaceSetupClick"><TextBlock Text="⌂  Workspace setup" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenEditorWorkspaceClick"><TextBlock Text="▦  DBC tables" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenLayeredDbcsClick"><TextBlock Text="◫  DBC layers &amp; promotion" TextWrapping="Wrap" /></Button>
                         <Button HorizontalContentAlignment="Left" Click="OpenDbdSchemasClick"><TextBlock Text="≣  DBD schemas &amp; audit" TextWrapping="Wrap" /></Button>
@@ -78,9 +80,9 @@
             </Grid>
         </Border>
 
-        <GridSplitter x:Name="NavigationSplitter" Grid.Row="1" Grid.Column="1" ResizeDirection="Columns" Background="#2B3445" />
+        <GridSplitter x:Name="NavigationSplitter" Grid.Row="2" Grid.Column="1" ResizeDirection="Columns" Background="#2B3445" />
 
-        <Grid x:Name="EditorWorkspace" Grid.Row="1" Grid.Column="2" RowDefinitions="Auto,*" Background="#090C11">
+        <Grid x:Name="EditorWorkspace" Grid.Row="2" Grid.Column="2" RowDefinitions="Auto,*" Background="#090C11">
             <Border BorderBrush="#2B3445" BorderThickness="0,0,0,1" Background="#0E131C">
                 <Grid RowDefinitions="Auto,Auto">
                     <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
@@ -129,9 +131,9 @@
             </Grid>
         </Grid>
 
-        <GridSplitter x:Name="InspectorSplitter" Grid.Row="1" Grid.Column="3" ResizeDirection="Columns" Background="#2B3445" />
+        <GridSplitter x:Name="InspectorSplitter" Grid.Row="2" Grid.Column="3" ResizeDirection="Columns" Background="#2B3445" />
 
-        <Border x:Name="InspectorPane" Grid.Row="1" Grid.Column="4" BorderBrush="#2B3445" BorderThickness="1,0,0,0" Background="#0E1219">
+        <Border x:Name="InspectorPane" Grid.Row="2" Grid.Column="4" BorderBrush="#2B3445" BorderThickness="1,0,0,0" Background="#0E1219">
             <Grid RowDefinitions="Auto,Auto,*" Margin="14">
                 <TextBlock Text="INSPECTOR" Foreground="#7F8A9F" FontSize="10" FontWeight="Bold" Margin="2,4,0,12" />
                 <StackPanel Grid.Row="1" Spacing="8">
@@ -146,15 +148,15 @@
             </Grid>
         </Border>
 
-        <Border x:Name="MainStatusBar" Grid.Row="2" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,1,0,0" Background="#0B0F16">
+        <Border x:Name="MainStatusBar" Grid.Row="3" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,1,0,0" Background="#0B0F16">
             <Grid ColumnDefinitions="*,Auto" Margin="12,0">
                 <TextBlock x:Name="StatusText" Text="Ready" VerticalAlignment="Center" Foreground="#98A2B4" FontSize="11" />
                 <TextBlock x:Name="RenderText" Grid.Column="1" Text="Viewport idle" VerticalAlignment="Center" Foreground="#758197" FontSize="11" />
             </Grid>
         </Border>
 
-        <Border x:Name="FeatureWorkspaceHost" Grid.Row="0" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#090C11" />
-        <Grid x:Name="CommandPaletteHost" Grid.Row="0" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#B805070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,6*,*">
+        <Border x:Name="FeatureWorkspaceHost" Grid.Row="1" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#090C11" />
+        <Grid x:Name="CommandPaletteHost" Grid.Row="0" Grid.RowSpan="4" Grid.ColumnSpan="5" IsVisible="False" Background="#B805070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,6*,*">
             <Border Grid.Row="1" Grid.Column="1" Padding="16" CornerRadius="10" BorderBrush="#4A5A76" BorderThickness="1" Background="#111722">
                 <Grid RowDefinitions="Auto,Auto,*,Auto" RowSpacing="9">
                     <Grid ColumnDefinitions="*,Auto">
@@ -176,7 +178,7 @@
                 </Grid>
             </Border>
         </Grid>
-        <Grid x:Name="DialogOverlayHost" Grid.Row="0" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#CC05070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,8*,*">
+        <Grid x:Name="DialogOverlayHost" Grid.Row="0" Grid.RowSpan="4" Grid.ColumnSpan="5" IsVisible="False" Background="#CC05070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,8*,*">
             <Border Grid.Row="1" Grid.Column="1" Padding="20" CornerRadius="10" BorderBrush="#39465E" BorderThickness="1" Background="#111722">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
                     <ContentControl x:Name="DialogContent" />

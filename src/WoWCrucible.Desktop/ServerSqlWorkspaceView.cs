@@ -112,7 +112,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly Border _syncConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _detect = AccentButton("Detect server and connect");
     private readonly Button _test = AccentButton("Test and use connection");
-    private readonly ServerLifecycleService _lifecycle = new();
+    private readonly ServerLifecycleService _lifecycle;
     private readonly TextBlock _runtimeStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly List<Button> _lifecycleButtons = [];
     private CancellationTokenSource? _operation;
@@ -122,7 +122,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
 
     public ServerSqlWorkspaceView(DesktopWorkspaceSession session)
     {
-        _session = session; _session.Changed += SessionChanged;
+        _session = session; _lifecycle = session.Lifecycle; _session.Changed += SessionChanged;
         var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var heading = new Grid { ColumnDefinitions = new("Auto,*"), Margin = new Thickness(12, 8), Children = { back, WithColumn(new TextBlock { Text = "SERVER & SQL", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, 1) } };
 
@@ -185,11 +185,13 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             Children =
             {
                 refresh,
-                Action("Start auth + world", _lifecycle.StartAllAsync, true),
-                Action("Start worldserver only", _lifecycle.StartWorldAsync),
+                Action("Start SQL", _lifecycle.StartDatabaseAsync, true),
+                Action("Stop SQL", _lifecycle.StopDatabaseAsync),
+                Action("Start authserver", _lifecycle.StartAuthAsync),
+                Action("Stop authserver", _lifecycle.StopAuthAsync),
+                Action("Start worldserver", _lifecycle.StartWorldAsync, true),
                 Action("Gracefully stop worldserver", _lifecycle.StopWorldAsync),
                 Action("Gracefully restart worldserver", _lifecycle.RestartWorldAsync, true),
-                Action("Gracefully stop auth + world", _lifecycle.StopAllAsync)
             }
         };
         return new ScrollViewer
@@ -203,7 +205,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                     new TextBlock { Text = "Server lifecycle", FontSize = 22, FontWeight = FontWeight.SemiBold },
                     new TextBlock
                     {
-                        Text = "Worldserver stop and restart always use the core's graceful shutdown path and wait for its save to finish. The database stays online for HeidiSQL and Crucible. A local worldserver not launched by this Crucible session is never force-killed.",
+                        Text = "SQL, authserver, and worldserver are controlled independently. Worldserver stop and restart always use the core's graceful save/shutdown path. SQL refuses to stop while either server is running, and a local process not launched by this Crucible session is never force-killed.",
                         TextWrapping = TextWrapping.Wrap,
                         Foreground = new SolidColorBrush(Color.Parse("#9AA5B7"))
                     },
@@ -1362,7 +1364,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         _summary.Text = $"Core family\t{server.CoreFamily}\nServer root\t{server.RootPath}\nConfiguration\t{server.ConfigLocation}\nLayout\t{(server.UsesWsl ? $"Windows + WSL ({server.WslDistribution})" : "Native/local")}\nServer DBCs\t{(string.IsNullOrWhiteSpace(server.DbcPath) ? "Not found" : server.DbcPath)}\nWorld database\t{server.WorldDatabase.Database} on {server.WorldDatabase.Host}:{server.WorldDatabase.Port}\nDatabase user\t{server.WorldDatabase.User}\nConnection\t{(capabilities is null ? "Not tested" : $"Verified · MySQL {capabilities.ServerVersion}")}\nTransport\t{_session.DatabaseTransportDescription}\nRecognized tables\t{capabilities?.Tables.Count ?? 0:N0}\nDBC overlay tables\t{capabilities?.DbcOverlayTables.Count ?? 0:N0}";
     }
 
-    public void Dispose() { _session.Changed -= SessionChanged; _operation?.Cancel(); _operation?.Dispose(); _lifecycle.Dispose(); }
+    public void Dispose() { _session.Changed -= SessionChanged; _operation?.Cancel(); _operation?.Dispose(); }
 
     private static Grid Form(params (string Label, Control Input)[] rows)
     {

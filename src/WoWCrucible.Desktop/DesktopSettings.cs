@@ -8,6 +8,13 @@ internal sealed class DesktopSettings
     public bool DevbugMode { get; set; }
     public bool NavigationPaneOpen { get; set; } = true;
     public bool InspectorPaneOpen { get; set; } = true;
+    public string WorkspaceRootPath { get; set; } = string.Empty;
+    public string WorkspaceName { get; set; } = string.Empty;
+    public string WorkspaceStagingPath { get; set; } = string.Empty;
+    public string WorkspaceProjectsPath { get; set; } = string.Empty;
+    public string ToolsPath { get; set; } = string.Empty;
+    public string NoggitExecutablePath { get; set; } = string.Empty;
+    public string MapSourcePath { get; set; } = string.Empty;
     public string ActiveProjectPath { get; set; } = string.Empty;
     public string ServerRootPath { get; set; } = string.Empty;
     public string CoreDbcPath { get; set; } = string.Empty;

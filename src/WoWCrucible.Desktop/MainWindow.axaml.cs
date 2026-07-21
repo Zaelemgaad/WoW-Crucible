@@ -51,6 +51,7 @@ public partial class MainWindow : Window
     private PetAbilityGraphView? _petAbilityGraphView;
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
     private SqlWorkspaceView? _sqlWorkspaceView;
+    private WorkspaceSetupView? _workspaceSetupView;
     private readonly Stack<(Control Workspace, string Title)> _featureHistory = new();
     private string _featureTitle = string.Empty;
     private readonly Dictionary<string, (WdbcFile File, IReadOnlyList<DbcColumn> Columns)> _referenceDbcCache = new(StringComparer.OrdinalIgnoreCase);
@@ -70,6 +71,8 @@ public partial class MainWindow : Window
         ToolTip.SetTip(BuildIdentityText, $"{buildIdentity.FullVersion}\nRunning from {AppContext.BaseDirectory}");
         Title = $"WoW Crucible · {buildIdentity.Label}";
         DevbugModeToggle.IsChecked = DesktopCrashLogger.IsDevbugEnabled;
+        RuntimeStrip.Attach(_workspaceSession);
+        RuntimeStrip.WorkspaceRequested += (_, _) => OpenWorkspaceSetup();
         ApplyShellPaneState();
         _commandRoutes = BuildCommandRoutes();
         var unrouted = CrucibleCommandCatalog.All.Where(command => !_commandRoutes.ContainsKey(command.Id)).Select(command => command.Id).ToArray();
@@ -92,8 +95,8 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
-        if (Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
+        Closed += (_, _) => { RuntimeStrip.Dispose(); _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
+        if (Directory.Exists(_workspaceSession.Settings.WorkspaceRootPath) || Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
     private static (string Label, string FullVersion) ReadBuildIdentity()
@@ -167,10 +170,14 @@ public partial class MainWindow : Window
 
     private async void OpenDbcClick(object? sender, RoutedEventArgs e)
     {
+        var start = Directory.Exists(_workspaceSession.Settings.CoreDbcPath)
+            ? await StorageProvider.TryGetFolderFromPathAsync(_workspaceSession.Settings.CoreDbcPath)
+            : null;
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
             Title = "Open one or more WDBC or WDB2 client tables",
             AllowMultiple = true,
+            SuggestedStartLocation = start,
             FileTypeFilter = [new FilePickerFileType("WoW client tables") { Patterns = ["*.dbc", "*.db2"] }]
         });
         foreach (var file in files)
@@ -1003,6 +1010,17 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
     }
     private void OpenServerSqlClick(object? sender, RoutedEventArgs e) => OpenServerSqlWorkspace();
+    private void OpenWorkspaceSetupClick(object? sender, RoutedEventArgs e) => OpenWorkspaceSetup();
+    private void OpenWorkspaceSetup()
+    {
+        if (_workspaceSetupView is null)
+        {
+            _workspaceSetupView = new WorkspaceSetupView(_workspaceSession);
+            _workspaceSetupView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        _workspaceSetupView.Activate();
+        OpenFeatureWorkspace(_workspaceSetupView, "Workspace Setup");
+    }
     internal void OpenServerSqlWorkspace()
     {
         if (_serverSqlWorkspaceView is null)
@@ -1083,9 +1101,14 @@ public partial class MainWindow : Window
     {
         try
         {
-            StatusText.Text = "Restoring the saved server workspace…";
+            StatusText.Text = "Restoring the saved Crucible workspace…";
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            await _workspaceSession.DetectServerAndConnectAsync(_workspaceSession.Settings.ServerRootPath, timeout.Token);
+            if (Directory.Exists(_workspaceSession.Settings.WorkspaceRootPath) && File.Exists(CrucibleWorkspaceLayout.ManifestPath(_workspaceSession.Settings.WorkspaceRootPath)))
+            {
+                var layout = CrucibleWorkspaceLayoutService.Load(_workspaceSession.Settings.WorkspaceRootPath);
+                await _workspaceSession.ConfigureWorkspaceAsync(layout, timeout.Token);
+            }
+            else await _workspaceSession.DetectServerAndConnectAsync(_workspaceSession.Settings.ServerRootPath, timeout.Token);
             StatusText.Text = $"Server ready · {_workspaceSession.Server?.CoreFamily} · {_workspaceSession.DatabaseCapabilities?.Database} · MySQL {_workspaceSession.DatabaseCapabilities?.ServerVersion} · {_workspaceSession.DatabaseTransportDescription}";
         }
         catch (Exception exception)
@@ -1233,6 +1256,7 @@ public partial class MainWindow : Window
         Func<Task> Done(Action action) => () => { action(); return Task.CompletedTask; };
         return new Dictionary<string, Func<Task>>(StringComparer.Ordinal)
         {
+            ["workspace.setup"] = Done(OpenWorkspaceSetup),
             ["workspace.dbc"] = Done(CloseAllFeatureWorkspaces),
             ["workspace.dbc-layers"] = Done(() => OpenLayeredDbcsClick(null, new RoutedEventArgs())),
             ["workspace.dbd"] = Done(OpenDbdSchemaAudit),
@@ -1414,8 +1438,10 @@ public partial class MainWindow : Window
         return null;
     }
 
-    private static string? FindSchemaDefinitionPath()
+    private string? FindSchemaDefinitionPath()
     {
+        if (!string.IsNullOrWhiteSpace(_workspaceSession.Settings.SchemaDefinitionPath) && File.Exists(_workspaceSession.Settings.SchemaDefinitionPath))
+            return Path.GetFullPath(_workspaceSession.Settings.SchemaDefinitionPath);
         try
         {
             var settingsPath = CruciblePaths.SettingsFileForRead;

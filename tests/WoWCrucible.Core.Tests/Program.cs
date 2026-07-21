@@ -54,7 +54,7 @@ if (!PlayableBundleSqlService.RequiresGuardedMaskExpansion("RaceMask", ["ID"]) |
     !guardedMaskSql.Contains("UPDATE `skilllineability_dbc` SET `RaceMask`=", StringComparison.Ordinal) || !guardedMaskSql.Contains("`ID` <=>", StringComparison.Ordinal) || !guardedMaskSql.Contains("`RaceMask` <=>", StringComparison.Ordinal))
     throw new InvalidOperationException("Guarded playable-bundle mask expansion planning or SQL rendering regressed.");
 
-var cliGroups = new[] { "asset", "project", "tools", "knowledge", "cache", "client", "server", "db", "dbc", "mpq", "casc", "manifest" };
+var cliGroups = new[] { "workspace", "asset", "project", "tools", "knowledge", "cache", "client", "server", "db", "dbc", "mpq", "casc", "manifest" };
 if (CliHelpRouting.Resolve(["--help"]) != CliHelpRouting.Root ||
     CliHelpRouting.Resolve(["help"]) != CliHelpRouting.Root ||
     CliHelpRouting.Resolve(["help", "mpq"]) != "mpq" ||
@@ -1950,6 +1950,8 @@ if (Directory.Exists(desktopSourceRoot))
     var mainWindowSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.axaml.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var desktopWorkspaceSessionSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("DesktopWorkspaceSession.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var desktopSettingsSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("DesktopSettings.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var workspaceSetupSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorkspaceSetupView.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var runtimeStripSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorkspaceRuntimeStrip.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingEditorSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingBandEditorView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingEnvironmentSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingEnvironmentView.cs", StringComparison.OrdinalIgnoreCase)).Value;
@@ -2022,7 +2024,17 @@ if (Directory.Exists(desktopSourceRoot))
         !desktopSettingsSource.Contains("NavigationPaneOpen", StringComparison.Ordinal) ||
         !desktopSettingsSource.Contains("InspectorPaneOpen", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"NavigationPaneButton\"", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("x:Name=\"InspectorPaneButton\"", StringComparison.Ordinal))
+        !mainWindowMarkup.Contains("x:Name=\"InspectorPaneButton\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("x:Name=\"RuntimeStrip\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("Grid.Row=\"1\" Grid.RowSpan=\"3\"", StringComparison.Ordinal) ||
+        !workspaceSetupSource.Contains("CrucibleWorkspaceLayoutService.Discover", StringComparison.Ordinal) ||
+        !workspaceSetupSource.Contains("ConfigureWorkspaceAsync", StringComparison.Ordinal) ||
+        !workspaceSetupSource.Contains("Remember this workspace", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("StartDatabaseAsync", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("StartAuthAsync", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("StartWorldAsync", StringComparison.Ordinal) ||
+        !desktopWorkspaceSessionSource.Contains("public ServerLifecycleService Lifecycle", StringComparison.Ordinal) ||
+        !desktopSettingsSource.Contains("WorkspaceRootPath", StringComparison.Ordinal))
         throw new InvalidOperationException("Cut-item navigation, SQL-row favorites, same-window authenticated client releases, or their direct workspace routes regressed.");
     if (!serverSqlWorkspaceSource.Contains("Named row lookups", StringComparison.Ordinal) || !serverSqlWorkspaceSource.Contains("BuildBridgeLookupEditor", StringComparison.Ordinal) ||
         !serverSqlWorkspaceSource.Contains("_session.DatabaseTransportDescription", StringComparison.Ordinal) ||
@@ -2067,6 +2079,45 @@ var addedIncomingHash = SqlDatabaseObjectDependencyService.GraphHash(SqlDatabase
 var removedOutgoingHash = SqlDatabaseObjectDependencyService.GraphHash(SqlDatabaseObjectType.View, "world", "root_view", true, [], dependencyIncoming);
 if (dependencyHash.Equals(addedIncomingHash, StringComparison.Ordinal) || dependencyHash.Equals(removedOutgoingHash, StringComparison.Ordinal))
     throw new InvalidOperationException("SQL object dependency fingerprints did not bind relevant incoming/outgoing edge changes.");
+
+var workspaceFixture = Path.Combine(Path.GetTempPath(), $"crucible-workspace-{Guid.NewGuid():N}");
+try
+{
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Server", "etc"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Server", "data", "dbc"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Core", "src", "server"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Client", "Data"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Tools", "Definitions", "WoWDBDefs", "definitions"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Tools", "Schemas"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Tools", "Noggit"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Processed Assets"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Extracted", "World", "Maps"));
+    File.WriteAllText(Path.Combine(workspaceFixture, "Server", "etc", "worldserver.conf"), "WorldDatabaseInfo = \"localhost;3306;fixture;fixture_password;fixture_world\"\nDataDir = \"../data\"");
+    File.WriteAllBytes(Path.Combine(workspaceFixture, "Server", "data", "dbc", "Spell.dbc"), [0]);
+    File.WriteAllText(Path.Combine(workspaceFixture, "Core", "CMakeLists.txt"), "project(Fixture)");
+    File.WriteAllBytes(Path.Combine(workspaceFixture, "Client", "Wow.exe"), [0]);
+    File.WriteAllText(Path.Combine(workspaceFixture, "Tools", "Schemas", "WotLK 3.3.5 (12340).xml"), "<DBFilesClient />");
+    File.WriteAllText(Path.Combine(workspaceFixture, "Tools", "Definitions", "WoWDBDefs", "definitions", "Spell.dbd"), "COLUMNS");
+    File.WriteAllBytes(Path.Combine(workspaceFixture, "Tools", "Noggit", "noggit.exe"), [0]);
+    File.WriteAllBytes(Path.Combine(workspaceFixture, "Extracted", "World", "Maps", "Azeroth.wdt"), [0]);
+    var discoveredWorkspace = CrucibleWorkspaceLayoutService.Discover(workspaceFixture);
+    if (!discoveredWorkspace.ServerRootPath.EndsWith("Server", StringComparison.OrdinalIgnoreCase) ||
+        !discoveredWorkspace.ClientRootPath.EndsWith("Client", StringComparison.OrdinalIgnoreCase) ||
+        !discoveredWorkspace.CoreSourcePath.EndsWith("Core", StringComparison.OrdinalIgnoreCase) ||
+        !discoveredWorkspace.CoreDbcPath.EndsWith(Path.Combine("data", "dbc"), StringComparison.OrdinalIgnoreCase) ||
+        !discoveredWorkspace.SchemaDefinitionPath.EndsWith("WotLK 3.3.5 (12340).xml", StringComparison.OrdinalIgnoreCase) ||
+        !discoveredWorkspace.DbdDefinitionsPath.EndsWith("definitions", StringComparison.OrdinalIgnoreCase) ||
+        !discoveredWorkspace.NoggitExecutablePath.EndsWith("noggit.exe", StringComparison.OrdinalIgnoreCase) ||
+        !discoveredWorkspace.MapSourcePath.EndsWith("Maps", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("One-root workspace discovery did not identify the synthetic server/core/client/schema/tool layout.");
+    CrucibleWorkspaceLayoutService.Save(discoveredWorkspace);
+    var manifestText = File.ReadAllText(CrucibleWorkspaceLayout.ManifestPath(workspaceFixture));
+    var loadedWorkspace = CrucibleWorkspaceLayoutService.Load(workspaceFixture);
+    if (manifestText.Contains(workspaceFixture, StringComparison.OrdinalIgnoreCase) || manifestText.Contains("fixture_password", StringComparison.Ordinal) ||
+        loadedWorkspace.ServerRootPath != discoveredWorkspace.ServerRootPath || loadedWorkspace.ClientExecutablePath != discoveredWorkspace.ClientExecutablePath)
+        throw new InvalidOperationException("Portable workspace manifest paths or credential exclusion regressed.");
+}
+finally { if (Directory.Exists(workspaceFixture)) Directory.Delete(workspaceFixture, true); }
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
 Directory.CreateDirectory(Path.Combine(serverFixture, "etc")); Directory.CreateDirectory(Path.Combine(serverFixture, "data", "dbc"));
