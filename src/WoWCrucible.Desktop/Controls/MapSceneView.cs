@@ -14,35 +14,51 @@ namespace WoWCrucible.Desktop.Controls;
 
 public sealed record MapSceneM2Instance(M2PreviewGeometry Geometry, MapM2Placement Placement, string SourcePath);
 public sealed record MapSceneWmoInstance(WmoPreviewGeometry Geometry, MapWmoPlacement Placement, string SourcePath);
+public enum MapScenePlacementEditMode { MoveOnTerrain, RotateZ, UniformScale }
+public sealed record MapScenePlacementPreview(IReadOnlyList<Vector3> Vertices, IReadOnlyList<int> TriangleIndices, AdtPlacementKind Kind,
+    uint? UniqueId, string Label, Vector3 Position, Vector3 Orientation, float Scale);
+public sealed record MapScenePlacementPreviewChanged(Vector3 Position, Vector3 Orientation, float Scale, MapScenePlacementEditMode Mode);
 
 public sealed class MapSceneView : UserControl
 {
-    private readonly MapSceneCanvas _canvas = new(); private readonly CheckBox _terrain = new() { Content = "Terrain", IsChecked = true }; private readonly CheckBox _objects = new() { Content = "Placed objects", IsChecked = true }; private readonly CheckBox _wireframe = new() { Content = "Wireframe overlay" }; private readonly CheckBox _pick = new() { Content = "Pick placement position" };
+    private readonly MapSceneCanvas _canvas = new(); private readonly CheckBox _terrain = new() { Content = "Terrain", IsChecked = true }; private readonly CheckBox _objects = new() { Content = "Placed objects", IsChecked = true }; private readonly CheckBox _wireframe = new() { Content = "Wireframe overlay" }; private readonly CheckBox _pick = new() { Content = "Pick placement position" }; private readonly CheckBox _edit = new() { Content = "Edit placement preview" }; private readonly ComboBox _editMode = new() { ItemsSource = new[] { "Move on terrain", "Rotate Z", "Uniform scale" }, SelectedIndex = 0 };
     public event EventHandler<MapSceneTerrainPick>? TerrainPicked;
+    public event EventHandler<MapScenePlacementPreviewChanged>? PlacementPreviewChanged;
     public event EventHandler<string>? StatusChanged;
     public MapSceneView()
     {
         AutomationProperties.SetName(_canvas, "Interactive terrain placement canvas"); AutomationProperties.SetHelpText(_canvas, "Enable Pick placement position, then click a visible terrain triangle to choose exact ADT coordinates.");
+        AutomationProperties.SetName(_editMode, "Placement gizmo mode");
         var reset = new Button { Content = "Reset view" }; reset.Click += (_, _) => _canvas.ResetView();
         var clearPick = new Button { Content = "Clear marker" }; clearPick.Click += (_, _) => { _canvas.ClearPick(); StatusChanged?.Invoke(this, "Placement marker cleared. Enable placement picking and click terrain to choose another exact point."); };
         _terrain.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true); _objects.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true); _wireframe.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true);
-        _pick.IsCheckedChanged += (_, _) => { _canvas.SetPickMode(_pick.IsChecked == true); StatusChanged?.Invoke(this, _pick.IsChecked == true ? "PICK MODE · terrain is framed for exact selection. Click one visible triangle; drag rotation is paused until pick mode is disabled." : "View mode · drag to rotate and use the wheel to zoom. The current marker remains visible."); };
+        _pick.IsCheckedChanged += (_, _) => { if (_pick.IsChecked == true && _edit.IsChecked == true) _edit.IsChecked = false; _canvas.SetPickMode(_pick.IsChecked == true); StatusChanged?.Invoke(this, _pick.IsChecked == true ? "PICK MODE · terrain is framed for exact selection. Click one visible triangle; drag rotation is paused until pick mode is disabled." : "View mode · drag to rotate and use the wheel to zoom. The current marker remains visible."); };
+        _edit.IsCheckedChanged += (_, _) => { if (_edit.IsChecked == true && _pick.IsChecked == true) _pick.IsChecked = false; _canvas.SetEditEnabled(_edit.IsChecked == true); StatusChanged?.Invoke(this, _edit.IsChecked == true ? "PLACEMENT EDIT · use the selected gizmo mode on the gold preview. Changes update unsaved fields only." : "Placement preview remains visible. Edit mode is off; drag rotates the camera again."); };
+        _editMode.SelectionChanged += (_, _) => _canvas.SetEditMode((MapScenePlacementEditMode)Math.Clamp(_editMode.SelectedIndex, 0, 2));
         _canvas.TerrainPicked += (_, value) => { StatusChanged?.Invoke(this, $"PICKED MCNK {value.CellX},{value.CellY} · X {value.WorldPosition.X:0.###} · Y {value.WorldPosition.Y:0.###} · Z {value.WorldPosition.Z:0.###}"); TerrainPicked?.Invoke(this, value); };
         _canvas.TerrainPickMissed += (_, _) => StatusChanged?.Invoke(this, "No visible terrain triangle exists under that pixel. Rotate or zoom the scene and try again.");
-        Content = new Grid { RowDefinitions = new("Auto,*"), Children = { new WrapPanel { Margin = new Thickness(7), Children = { _terrain, _objects, _wireframe, _pick, clearPick, reset } }, WithRow(_canvas, 1) } };
+        _canvas.PlacementPreviewChanged += (_, value) => { StatusChanged?.Invoke(this, value.Mode switch { MapScenePlacementEditMode.MoveOnTerrain => $"PREVIEW MOVED · X {value.Position.X:0.###} · Y {value.Position.Y:0.###} · Z {value.Position.Z:0.###}", MapScenePlacementEditMode.RotateZ => $"PREVIEW ROTATED · Z {value.Orientation.Z:0.###}°", _ => $"PREVIEW SCALED · {value.Scale:0.####}" }); PlacementPreviewChanged?.Invoke(this, value); };
+        var toolbar = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Margin = new Thickness(7), Children = { _terrain, _objects, _wireframe, _pick, _edit, _editMode, clearPick, reset } } };
+        Content = new Grid { RowDefinitions = new("Auto,*"), Children = { toolbar, WithRow(_canvas, 1) } };
     }
     public void SetScene(AdtTerrainSceneGeometry terrain, AdtTerrainMaterialSet? materials, IReadOnlyList<MapSceneM2Instance> m2, IReadOnlyList<MapSceneWmoInstance> wmo, int unresolved, string provenance) => _canvas.SetScene(terrain, materials, m2, wmo, unresolved, provenance);
     public void ClearScene() => _canvas.ClearScene();
+    public bool HasScene => _canvas.HasScene;
+    public void SetPlacementPreview(MapScenePlacementPreview preview) => _canvas.SetPlacementPreview(preview);
+    public void UpdatePlacementPreviewTransform(Vector3 position, Vector3 orientation, float scale) => _canvas.UpdatePlacementPreviewTransform(position, orientation, scale);
+    public void ClearPlacementPreview() => _canvas.ClearPlacementPreview();
     private static T WithRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
 }
 
 internal sealed class MapSceneCanvas : Control
 {
-    private sealed record Mesh(IReadOnlyList<Vector3> Vertices, IReadOnlyList<int> Indices, IReadOnlyList<SKColor>? VertexColors, Matrix4x4 Transform, SKColor Color, string Kind);
+    private sealed record Mesh(IReadOnlyList<Vector3> Vertices, IReadOnlyList<int> Indices, IReadOnlyList<SKColor>? VertexColors, Matrix4x4 Transform, SKColor Color, string Kind, uint? UniqueId = null);
     private sealed record Scene(AdtTerrainSceneGeometry TerrainGeometry, IReadOnlyList<Mesh> Meshes, Vector3 Minimum, Vector3 Maximum, Vector3 TerrainMinimum, Vector3 TerrainMaximum, int M2, int Wmo, int Unresolved, string Provenance, int SourceTriangles, int MaterialCells, int CompleteMaterialCells);
-    private Scene? _scene; private MapSceneTerrainPick? _pick; private float _yaw = -0.72f; private float _pitch = 0.72f; private float _zoom = 1f; private Point? _dragStart; private bool _terrain = true; private bool _objects = true; private bool _wireframe; private bool _pickMode;
+    private Scene? _scene; private MapSceneTerrainPick? _pick; private MapScenePlacementPreview? _preview; private float _yaw = -0.72f; private float _pitch = 0.72f; private float _zoom = 1f; private Point? _dragStart; private Point? _editStart; private MapScenePlacementPreview? _editBaseline; private bool _terrain = true; private bool _objects = true; private bool _wireframe; private bool _pickMode; private bool _editEnabled; private MapScenePlacementEditMode _editMode;
     public event EventHandler<MapSceneTerrainPick>? TerrainPicked;
     public event EventHandler? TerrainPickMissed;
+    public event EventHandler<MapScenePlacementPreviewChanged>? PlacementPreviewChanged;
+    public bool HasScene => _scene is not null;
     public MapSceneCanvas() { ClipToBounds = true; Focusable = true; }
     protected override AutomationPeer OnCreateAutomationPeer() => new ControlAutomationPeer(this);
     public void SetScene(AdtTerrainSceneGeometry terrain, AdtTerrainMaterialSet? materials, IReadOnlyList<MapSceneM2Instance> m2, IReadOnlyList<MapSceneWmoInstance> wmo, int unresolved, string provenance)
@@ -54,30 +70,38 @@ internal sealed class MapSceneCanvas : Control
             if (materialByCell.TryGetValue((cell.CellX, cell.CellY), out var material)) colors = Enumerable.Range(0, cell.VertexCount).Select(index => MaterialColor(material.Composite, index)).ToArray();
             meshes.Add(new(vertices, indices, colors, Matrix4x4.Identity, new SKColor(72, 121, 74), "terrain"));
         }
-        meshes.AddRange(m2.Select(value => new Mesh(value.Geometry.Vertices, value.Geometry.TriangleIndices, null, M2PreviewSceneService.MapObjectTransform(value.Placement.Orientation, value.Placement.Scale, value.Placement.Position), new SKColor(91, 155, 213), "M2")));
-        meshes.AddRange(wmo.Select(value => new Mesh(value.Geometry.Vertices, value.Geometry.TriangleIndices, null, M2PreviewSceneService.MapObjectTransform(value.Placement.Orientation, value.Placement.Scale, value.Placement.Position), new SKColor(178, 142, 91), "WMO")));
+        meshes.AddRange(m2.Select(value => new Mesh(value.Geometry.Vertices, value.Geometry.TriangleIndices, null, M2PreviewSceneService.MapObjectTransform(value.Placement.Orientation, value.Placement.Scale, value.Placement.Position), new SKColor(91, 155, 213), "M2", value.Placement.UniqueId)));
+        meshes.AddRange(wmo.Select(value => new Mesh(value.Geometry.Vertices, value.Geometry.TriangleIndices, null, M2PreviewSceneService.MapObjectTransform(value.Placement.Orientation, value.Placement.Scale, value.Placement.Position), new SKColor(178, 142, 91), "WMO", value.Placement.UniqueId)));
         var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity); var triangles = 0;
         foreach (var mesh in meshes)
         {
             triangles += mesh.Indices.Count / 3; foreach (var vertex in mesh.Vertices) { var world = Vector3.Transform(vertex, mesh.Transform); minimum = Vector3.Min(minimum, world); maximum = Vector3.Max(maximum, world); }
         }
         var terrainMinimum = new Vector3(float.PositiveInfinity); var terrainMaximum = new Vector3(float.NegativeInfinity); foreach (var vertex in terrain.Vertices) { terrainMinimum = Vector3.Min(terrainMinimum, vertex); terrainMaximum = Vector3.Max(terrainMaximum, vertex); }
-        _scene = new(terrain, meshes, minimum, maximum, terrainMinimum, terrainMaximum, m2.Count, wmo.Count, unresolved, provenance, triangles, materials?.Cells.Count ?? 0, materials?.CompleteCells ?? 0); _pick = null; ResetView();
+        _scene = new(terrain, meshes, minimum, maximum, terrainMinimum, terrainMaximum, m2.Count, wmo.Count, unresolved, provenance, triangles, materials?.Cells.Count ?? 0, materials?.CompleteCells ?? 0); _pick = null; _preview = null; ResetView();
 
         static SKColor MaterialColor(RgbaTexture texture, int vertexIndex)
         {
             var local = AdtTerrainBrushService.VertexPosition(vertexIndex); var x = Math.Clamp((int)Math.Round(local.X * (texture.Width - 1)), 0, texture.Width - 1); var y = Math.Clamp((int)Math.Round(local.Y * (texture.Height - 1)), 0, texture.Height - 1); var offset = (y * texture.Width + x) * 4; return new(texture.Pixels[offset], texture.Pixels[offset + 1], texture.Pixels[offset + 2], texture.Pixels[offset + 3]);
         }
     }
-    public void ClearScene() { _scene = null; _pick = null; InvalidateVisual(); }
+    public void ClearScene() { _scene = null; _pick = null; _preview = null; InvalidateVisual(); }
     public void ClearPick() { _pick = null; InvalidateVisual(); }
+    public void SetPlacementPreview(MapScenePlacementPreview preview) { ValidatePreview(preview); _preview = preview; InvalidateVisual(); }
+    public void UpdatePlacementPreviewTransform(Vector3 position, Vector3 orientation, float scale)
+    {
+        if (_preview is null || !Finite(position) || !Finite(orientation) || !float.IsFinite(scale) || scale <= 0) return; _preview = _preview with { Position = position, Orientation = orientation, Scale = scale }; InvalidateVisual();
+    }
+    public void ClearPlacementPreview() { _preview = null; _editStart = null; _editBaseline = null; InvalidateVisual(); }
     public void ResetView() { _yaw = -0.72f; _pitch = 0.72f; _zoom = 1; InvalidateVisual(); }
     public void SetVisibility(bool terrain, bool objects, bool wireframe) { _terrain = terrain; _objects = objects; _wireframe = wireframe; InvalidateVisual(); }
     public void SetPickMode(bool enabled) { _pickMode = enabled; _dragStart = null; InvalidateVisual(); }
+    public void SetEditEnabled(bool enabled) { _editEnabled = enabled; _dragStart = null; _editStart = null; _editBaseline = null; InvalidateVisual(); }
+    public void SetEditMode(MapScenePlacementEditMode mode) { _editMode = mode; _editStart = null; _editBaseline = null; InvalidateVisual(); }
     public override void Render(DrawingContext context)
     {
         base.Render(context); context.FillRectangle(Brush.Parse("#080B10"), Bounds); if (_scene is null) { context.DrawText(new FormattedText("Build a terrain + placement scene from a loaded ADT", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, Typeface.Default, 13, Brush.Parse("#8995A9")), new Point(16, 28)); return; }
-        context.Custom(new DrawOperation(Bounds, _scene, _yaw, _pitch, _zoom, _terrain, _objects, _wireframe, _pickMode, _pick));
+        context.Custom(new DrawOperation(Bounds, _scene, _yaw, _pitch, _zoom, _terrain, _objects, _wireframe, _pickMode, _pick, _editEnabled, _editMode, _preview));
     }
     protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
@@ -87,20 +111,57 @@ internal sealed class MapSceneCanvas : Control
             var point = e.GetPosition(this); var scene = _scene; var picked = scene is null || !_terrain ? null : MapScenePickingService.PickTerrain(scene.TerrainGeometry, scene.TerrainMinimum, scene.TerrainMaximum, _yaw, _pitch, _zoom, (float)Bounds.Width, (float)Bounds.Height, new((float)point.X, (float)point.Y));
             if (picked is null) TerrainPickMissed?.Invoke(this, EventArgs.Empty); else { _pick = picked; TerrainPicked?.Invoke(this, picked); InvalidateVisual(); } e.Handled = true; return;
         }
+        if (_editEnabled && _preview is not null)
+        {
+            var point = e.GetPosition(this); _editStart = point; _editBaseline = _preview; e.Pointer.Capture(this);
+            if (_editMode == MapScenePlacementEditMode.MoveOnTerrain) UpdateMovePreview(point);
+            e.Handled = true; return;
+        }
         _dragStart = e.GetPosition(this); e.Pointer.Capture(this); e.Handled = true;
     }
-    protected override void OnPointerMoved(PointerEventArgs e) { base.OnPointerMoved(e); if (_dragStart is not { } start || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return; var point = e.GetPosition(this); _yaw += (float)(point.X - start.X) * 0.01f; _pitch = Math.Clamp(_pitch + (float)(point.Y - start.Y) * 0.01f, -1.5f, 1.5f); _dragStart = point; InvalidateVisual(); }
-    protected override void OnPointerReleased(PointerReleasedEventArgs e) { base.OnPointerReleased(e); _dragStart = null; e.Pointer.Capture(null); }
+    protected override void OnPointerMoved(PointerEventArgs e)
+    {
+        base.OnPointerMoved(e); if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return; var point = e.GetPosition(this);
+        if (_editEnabled && _editStart is { } editStart && _editBaseline is { } baseline)
+        {
+            if (_editMode == MapScenePlacementEditMode.MoveOnTerrain) UpdateMovePreview(point);
+            else if (_editMode == MapScenePlacementEditMode.RotateZ) UpdatePreview(baseline with { Orientation = MapScenePlacementGizmoService.RotateZ(baseline.Orientation, (float)(point.X - editStart.X)) });
+            else
+            {
+                var scale = MapScenePlacementGizmoService.UniformScale(baseline.Scale, (float)(editStart.Y - point.Y)); UpdatePreview(baseline with { Scale = scale });
+            }
+            e.Handled = true; return;
+        }
+        if (_dragStart is not { } start) return; _yaw += (float)(point.X - start.X) * 0.01f; _pitch = Math.Clamp(_pitch + (float)(point.Y - start.Y) * 0.01f, -1.5f, 1.5f); _dragStart = point; InvalidateVisual();
+    }
+    protected override void OnPointerReleased(PointerReleasedEventArgs e) { base.OnPointerReleased(e); _dragStart = null; _editStart = null; _editBaseline = null; e.Pointer.Capture(null); }
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e) { base.OnPointerWheelChanged(e); _zoom = Math.Clamp(_zoom * (e.Delta.Y > 0 ? 1.12f : 0.89f), 0.08f, 20f); InvalidateVisual(); e.Handled = true; }
 
-    private sealed class DrawOperation(Rect bounds, Scene scene, float yaw, float pitch, float zoom, bool terrain, bool objects, bool wireframe, bool pickMode, MapSceneTerrainPick? pick) : ICustomDrawOperation
+    private void UpdateMovePreview(Point point)
+    {
+        var scene = _scene; var baseline = _preview; if (scene is null || baseline is null || !_terrain) return; var picked = MapScenePickingService.PickTerrain(scene.TerrainGeometry, scene.TerrainMinimum, scene.TerrainMaximum, _yaw, _pitch, _zoom, (float)Bounds.Width, (float)Bounds.Height, new((float)point.X, (float)point.Y)); if (picked is null) return; _pick = picked; UpdatePreview(baseline with { Position = picked.WorldPosition });
+    }
+    private void UpdatePreview(MapScenePlacementPreview preview) { _preview = preview; PlacementPreviewChanged?.Invoke(this, new(preview.Position, preview.Orientation, preview.Scale, _editMode)); InvalidateVisual(); }
+    private static void ValidatePreview(MapScenePlacementPreview preview)
+    {
+        ArgumentNullException.ThrowIfNull(preview); if (preview.Vertices.Count == 0 || preview.TriangleIndices.Count == 0 || preview.TriangleIndices.Count % 3 != 0 || preview.TriangleIndices.Any(index => (uint)index >= (uint)preview.Vertices.Count) || preview.Vertices.Any(value => !Finite(value)) || !Finite(preview.Position) || !Finite(preview.Orientation) || !float.IsFinite(preview.Scale) || preview.Scale <= 0) throw new InvalidDataException("Placement preview requires finite bounded geometry and a positive transform.");
+    }
+    private static bool Finite(Vector3 value) => float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
+
+    private sealed class DrawOperation(Rect bounds, Scene scene, float yaw, float pitch, float zoom, bool terrain, bool objects, bool wireframe, bool pickMode, MapSceneTerrainPick? pick, bool editEnabled, MapScenePlacementEditMode editMode, MapScenePlacementPreview? preview) : ICustomDrawOperation
     {
         private readonly record struct Face(float Depth, float Ax, float Ay, float Bx, float By, float Cx, float Cy, SKColor AColor, SKColor BColor, SKColor CColor);
         public Rect Bounds => bounds; public bool HitTest(Point point) => bounds.Contains(point); public bool Equals(ICustomDrawOperation? other) => false; public void Dispose() { }
         public void Render(ImmediateDrawingContext context)
         {
             var feature = context.TryGetFeature<ISkiaSharpApiLeaseFeature>(); if (feature is null) return; using var lease = feature.Lease(); var canvas = lease.SkCanvas; var width = (float)bounds.Width; var height = (float)bounds.Height; if (width <= 1 || height <= 1) return;
-            var visible = scene.Meshes.Where(mesh => mesh.Kind == "terrain" ? terrain : objects).ToArray(); if (visible.Length == 0) return; var projection = MapScenePickingService.CreateProjection(pickMode ? scene.TerrainMinimum : scene.Minimum, pickMode ? scene.TerrainMaximum : scene.Maximum, yaw, pitch, zoom, width, height); var center = projection.Center; var view = projection.View; var scale = projection.Scale; const int faceBudget = 100_000; var totalTriangles = visible.Sum(mesh => mesh.Indices.Count / 3); var sample = Math.Max(1, (int)Math.Ceiling(totalTriangles / (double)faceBudget)); var faces = new List<Face>(Math.Min(totalTriangles, faceBudget)); var light = Vector3.Normalize(new Vector3(-0.4f, -0.55f, 0.85f));
+            var visible = scene.Meshes.Where(mesh => mesh.Kind == "terrain" ? terrain : objects).ToList();
+            if (preview is not null)
+            {
+                var kind = preview.Kind == AdtPlacementKind.M2 ? "M2" : "WMO"; if (preview.UniqueId is { } uniqueId) visible.RemoveAll(mesh => mesh.Kind == kind && mesh.UniqueId == uniqueId);
+                visible.Add(new(preview.Vertices, preview.TriangleIndices, null, M2PreviewSceneService.MapObjectTransform(preview.Orientation, preview.Scale, preview.Position), new SKColor(255, 194, 61), kind, preview.UniqueId));
+            }
+            if (visible.Count == 0) return; var terrainFrame = pickMode || editEnabled; var projection = MapScenePickingService.CreateProjection(terrainFrame ? scene.TerrainMinimum : scene.Minimum, terrainFrame ? scene.TerrainMaximum : scene.Maximum, yaw, pitch, zoom, width, height); var center = projection.Center; var view = projection.View; var scale = projection.Scale; const int faceBudget = 100_000; var totalTriangles = visible.Sum(mesh => mesh.Indices.Count / 3); var sample = Math.Max(1, (int)Math.Ceiling(totalTriangles / (double)faceBudget)); var faces = new List<Face>(Math.Min(totalTriangles, faceBudget)); var light = Vector3.Normalize(new Vector3(-0.4f, -0.55f, 0.85f));
             foreach (var mesh in visible)
             {
                 var transformed = new Vector3[mesh.Vertices.Count]; for (var index = 0; index < transformed.Length; index++) transformed[index] = Vector3.Transform(Vector3.Transform(mesh.Vertices[index], mesh.Transform) - center, view);
@@ -120,7 +181,12 @@ internal sealed class MapSceneCanvas : Control
                 var projected = MapScenePickingService.Project(pick.WorldPosition, projection).Screen; using var marker = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 2.2f, Color = new SKColor(255, 205, 72) }; using var markerFill = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(255, 205, 72, 70) };
                 canvas.DrawCircle(projected.X, projected.Y, 9, markerFill); canvas.DrawCircle(projected.X, projected.Y, 9, marker); canvas.DrawLine(projected.X - 14, projected.Y, projected.X + 14, projected.Y, marker); canvas.DrawLine(projected.X, projected.Y - 14, projected.X, projected.Y + 14, marker);
             }
-            using var text = new SKPaint { IsAntialias = true, Color = new SKColor(223, 230, 240) }; using var font = new SKFont(SKTypeface.Default, 13); using var hint = new SKFont(SKTypeface.Default, 12); canvas.DrawText($"ADT terrain + {scene.M2:N0} M2 + {scene.Wmo:N0} WMO · {faces.Count:N0}/{scene.SourceTriangles:N0} rendered triangles · provenance {scene.Provenance}", 12, 22, SKTextAlign.Left, font, text); text.Color = scene.Unresolved == 0 ? new SKColor(155, 194, 163) : new SKColor(255, 186, 91); canvas.DrawText(scene.Unresolved == 0 ? "All selected placements resolved" : $"{scene.Unresolved:N0} placement(s) unresolved or outside the selected provenance", 12, 40, SKTextAlign.Left, hint, text); text.Color = scene.MaterialCells == 0 || scene.CompleteMaterialCells < scene.MaterialCells ? new SKColor(255, 186, 91) : new SKColor(155, 194, 163); canvas.DrawText(scene.MaterialCells == 0 ? "Diagnostic terrain color · no material set loaded" : $"MCLY/MCAL terrain materials · {scene.CompleteMaterialCells:N0}/{scene.MaterialCells:N0} cells complete", 12, 57, SKTextAlign.Left, hint, text); text.Color = pickMode ? new SKColor(255, 205, 72) : new SKColor(160, 172, 190); canvas.DrawText(pickMode ? "PICK MODE · click terrain · wheel to zoom" : "Drag to rotate · wheel to zoom", 12, height - 12, SKTextAlign.Left, hint, text);
+            if (preview is not null)
+            {
+                var terrainExtent = scene.TerrainMaximum - scene.TerrainMinimum; var axisLength = Math.Max(8f, Math.Max(terrainExtent.X, terrainExtent.Y) * 0.075f); var origin = MapScenePickingService.Project(preview.Position, projection).Screen; var x = MapScenePickingService.Project(preview.Position + new Vector3(axisLength, 0, 0), projection).Screen; var y = MapScenePickingService.Project(preview.Position + new Vector3(0, axisLength, 0), projection).Screen; var z = MapScenePickingService.Project(preview.Position + new Vector3(0, 0, axisLength), projection).Screen;
+                using var axis = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = editEnabled ? 3f : 2f }; axis.Color = new SKColor(239, 82, 82); canvas.DrawLine(origin.X, origin.Y, x.X, x.Y, axis); axis.Color = new SKColor(90, 214, 112); canvas.DrawLine(origin.X, origin.Y, y.X, y.Y, axis); axis.Color = new SKColor(91, 154, 255); canvas.DrawLine(origin.X, origin.Y, z.X, z.Y, axis); using var centerPaint = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Fill, Color = new SKColor(255, 205, 72) }; canvas.DrawCircle(origin.X, origin.Y, editEnabled ? 6 : 4, centerPaint);
+            }
+            using var text = new SKPaint { IsAntialias = true, Color = new SKColor(223, 230, 240) }; using var font = new SKFont(SKTypeface.Default, 13); using var hint = new SKFont(SKTypeface.Default, 12); canvas.DrawText($"ADT terrain + {scene.M2:N0} M2 + {scene.Wmo:N0} WMO{(preview is null ? "" : " + gold preview")} · {faces.Count:N0}/{scene.SourceTriangles:N0} rendered triangles · provenance {scene.Provenance}", 12, 22, SKTextAlign.Left, font, text); text.Color = scene.Unresolved == 0 ? new SKColor(155, 194, 163) : new SKColor(255, 186, 91); canvas.DrawText(scene.Unresolved == 0 ? "All selected placements resolved" : $"{scene.Unresolved:N0} placement(s) unresolved or outside the selected provenance", 12, 40, SKTextAlign.Left, hint, text); text.Color = scene.MaterialCells == 0 || scene.CompleteMaterialCells < scene.MaterialCells ? new SKColor(255, 186, 91) : new SKColor(155, 194, 163); canvas.DrawText(scene.MaterialCells == 0 ? "Diagnostic terrain color · no material set loaded" : $"MCLY/MCAL terrain materials · {scene.CompleteMaterialCells:N0}/{scene.MaterialCells:N0} cells complete", 12, 57, SKTextAlign.Left, hint, text); text.Color = pickMode || editEnabled ? new SKColor(255, 205, 72) : new SKColor(160, 172, 190); var footer = pickMode ? "PICK MODE · click terrain · wheel to zoom" : editEnabled ? editMode switch { MapScenePlacementEditMode.MoveOnTerrain => "EDIT MOVE · drag the gold preview across exact terrain", MapScenePlacementEditMode.RotateZ => "EDIT ROTATE Z · drag horizontally", _ => "EDIT SCALE · drag vertically" } : "Drag to rotate · wheel to zoom"; canvas.DrawText(footer, 12, height - 12, SKTextAlign.Left, hint, text);
 
             static SKColor Shade(SKColor color, float amount) => new((byte)(color.Red * amount), (byte)(color.Green * amount), (byte)(color.Blue * amount), color.Alpha);
         }

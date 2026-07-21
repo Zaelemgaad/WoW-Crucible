@@ -99,6 +99,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private AdtMultiTilePlacementTransformPlan? _placementPlan;
     private AdtMultiTilePlacementPlan? _placementMultiTilePlan;
     private uint? _pendingLightingId;
+    private bool _updatingScenePreviewFields;
 
     public event EventHandler? BackRequested;
     public event EventHandler<DbcRecordNavigationRequest>? OpenDbcRecordRequested;
@@ -106,7 +107,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     public MapWorkspaceView(DesktopWorkspaceSession session)
     {
         _session = session; _lightingView = new WorldLightingView(session); _lightingView.OpenDbcRecordRequested += (_, request) => OpenDbcRecordRequested?.Invoke(this, request); _wmoLibrary.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
-        AutomationProperties.SetName(_placementX, "Placement X"); AutomationProperties.SetName(_placementY, "Placement Y"); AutomationProperties.SetName(_placementZ, "Placement Z"); AutomationProperties.SetName(_sceneStatus, "Map scene status");
+        AutomationProperties.SetName(_placementX, "Placement X"); AutomationProperties.SetName(_placementY, "Placement Y"); AutomationProperties.SetName(_placementZ, "Placement Z"); AutomationProperties.SetName(_placementRotX, "Placement rotation X"); AutomationProperties.SetName(_placementRotY, "Placement rotation Y"); AutomationProperties.SetName(_placementRotZ, "Placement rotation Z"); AutomationProperties.SetName(_placementScale, "Placement scale"); AutomationProperties.SetName(_wmoReferences, "Map object reference"); AutomationProperties.SetName(_wmoCandidates, "Map object provenance"); AutomationProperties.SetName(_sceneStatus, "Map scene status");
         _sceneStatus.TextWrapping = TextWrapping.NoWrap;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
@@ -114,6 +115,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var openWmo = new Button { Content = "Preview extracted WMO…" }; openWmo.Click += async (_, _) => await PickWmoAsync();
         var chooseWmoLibrary = new Button { Content = "Choose processed library…" }; chooseWmoLibrary.Click += async (_, _) => await PickWmoLibraryAsync();
         var previewReference = new Button { Content = "Preview selected object" }; previewReference.Click += async (_, _) => await PreviewSelectedObjectAsync();
+        var showPlacementInScene = new Button { Content = "Show live placement preview" }; showPlacementInScene.Click += async (_, _) => await ShowPlacementScenePreviewAsync();
         var previewPlacement = new Button { Content = "Preview coordinated transform" }; previewPlacement.Click += async (_, _) => await PreviewPlacementTransformAsync();
         var savePlacement = new Button { Content = "Build multi-tile transform payload…" }; savePlacement.Click += async (_, _) => await SavePlacementTransformAsync();
         var previewPlacementAdd = new Button { Content = "Preview add / clone" }; previewPlacementAdd.Click += async (_, _) => await PreviewPlacementAddAsync();
@@ -123,9 +125,9 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         var buildScene = new Button { Content = "Build terrain + placement scene" }; buildScene.Click += async (_, _) => await BuildMapSceneAsync(buildScene);
         ToolTip.SetTip(buildScene, "One explicit provenance is used for the complete scene. Ambiguous or absent objects stay visibly unresolved; Crucible never mixes patches to make the view look complete.");
         var openPlacementControls = new Button { Content = "Open placement controls" }; openPlacementControls.Click += (_, _) => _visualTabs.SelectedIndex = 2;
-        _wmoReferences.SelectionChanged += async (_, _) => { LoadPlacementFields(); await ResolveSelectedWmoAsync(); };
-        _wmoCandidates.SelectionChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; DescribeSelectedWmoCandidate(); };
-        foreach (var input in PlacementInputs()) input.TextChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; };
+        _wmoReferences.SelectionChanged += async (_, _) => { _mapScene.ClearPlacementPreview(); LoadPlacementFields(); await ResolveSelectedWmoAsync(); };
+        _wmoCandidates.SelectionChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; _mapScene.ClearPlacementPreview(); DescribeSelectedWmoCandidate(); };
+        foreach (var input in PlacementInputs()) input.TextChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; UpdateScenePlacementPreviewFromFields(); };
         _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
         var selectAll = new Button { Content = "Select all present" }; selectAll.Click += (_, _) => _grid.SelectAllPresent();
         var clear = new Button { Content = "Clear selection" }; clear.Click += (_, _) => _grid.ClearSelection();
@@ -142,6 +144,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         _grid.TerrainPointSelected += (_, point) => { _brushCenterX.Text = point.X.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _brushCenterY.Text = point.Y.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture); _alphaPlan = null; UpdateBrushOverlay(); };
         _mapScene.StatusChanged += (_, status) => _sceneStatus.Text = status;
         _mapScene.TerrainPicked += (_, pick) => UseScenePlacementPick(pick);
+        _mapScene.PlacementPreviewChanged += (_, preview) => UseScenePlacementPreviewChange(preview);
         _brushCenterX.TextChanged += (_, _) => BrushInputChanged(); _brushCenterY.TextChanged += (_, _) => BrushInputChanged(); _brushRadius.TextChanged += (_, _) => BrushInputChanged(); _brushStrength.TextChanged += (_, _) => _brushPlan = null; _brushMode.SelectionChanged += (_, _) => _brushPlan = null; _brushFalloff.SelectionChanged += (_, _) => _brushPlan = null; _brushTarget.TextChanged += (_, _) => _brushPlan = null; _brushSeed.TextChanged += (_, _) => _brushPlan = null;
         _heightDelta.TextChanged += (_, _) => _heightPlan = null;
         _textureLayerSlot.TextChanged += (_, _) => InvalidateTexturePreview(); _textureChoice.SelectionChanged += (_, _) => InvalidateTexturePreview();
@@ -170,7 +173,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
                 Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable."), Label("ADT TEXTURE LAYER"), TextureFields(), new WrapPanel { Children = { previewTexture, saveTexture } }, Info("Reassigns an existing MCLY layer slot to one of this ADT's existing MTEX textures."), Label("ADD MTEX + MCLY LAYER"), NewTextureFields(), new WrapPanel { Children = { previewNewTexture, saveNewTexture } }, Info("Appends one client-relative BLP to MTEX and adds a matching MCLY/MCAL layer to every selected cell. Wrath's four-layer limit is enforced. Auto preserves the tile's existing packed-versus-8-bit alpha family; mixed or evidence-free tiles require an explicit encoding."), Label("ADT ALPHA TEXTURE BRUSH"), AlphaFields(), _alphaRestrict, new WrapPanel { Children = { previewAlpha, saveAlpha } }, Info("Uses the click-positioned center and radius above to paint an existing additional layer toward alpha 0–255. Packed, big, and RLE maps preserve their current fixed-width encoding; an RLE stroke that cannot fit is refused instead of shifting MCNK offsets."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
             }
         };
-        var wmoResolver = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(7), Spacing = 6, Children = { _wmoLibrary, new WrapPanel { Children = { chooseWmoLibrary, previewReference, openWmo } }, _wmoReferences, _wmoCandidates, Label("PLACEMENT TRANSFORM & LIFECYCLE"), PlacementFields(), new WrapPanel { Children = { previewPlacement, savePlacement, previewPlacementAdd, savePlacementAdd, previewPlacementDelete, savePlacementDelete } }, Info("Transform edits one existing local record. Add/clone and delete are coordinated map transactions: Crucible duplicates one semantic record/UID into every bounds-intersected ADT or removes every existing UID copy, rebuilds each tile-local name/index/MCRF table, retains every source, and publishes only changed ADTs beneath a tiny MPQ-ready Payload tree with manifest and receipt."), _placementStatus } } };
+        var wmoResolver = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(7), Spacing = 6, Children = { _wmoLibrary, new WrapPanel { Children = { chooseWmoLibrary, previewReference, openWmo } }, _wmoReferences, _wmoCandidates, Label("PLACEMENT TRANSFORM & LIFECYCLE"), PlacementFields(), new WrapPanel { Children = { showPlacementInScene, previewPlacement, savePlacement, previewPlacementAdd, savePlacementAdd, previewPlacementDelete, savePlacementDelete } }, Info("Show live placement preview loads the exact selected provenance into the terrain scene and keeps position, rotation, and scale synchronized with these unsaved fields. Transform edits one existing local record. Add/clone and delete are coordinated map transactions: Crucible duplicates one semantic record/UID into every bounds-intersected ADT or removes every existing UID copy, rebuilds each tile-local name/index/MCRF table, retains every source, and publishes only changed ADTs beneath a tiny MPQ-ready Payload tree with manifest and receipt."), _placementStatus } } };
         var wmoFooter = new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _wmoStatus }; Grid.SetRow(wmoFooter, 2);
         var objectPreviewHost = new Grid { Children = { _wmoPreview, _m2Preview } }; Grid.SetRow(objectPreviewHost, 1);
         var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, objectPreviewHost, wmoFooter } };
@@ -490,11 +493,54 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
 
     private void UseScenePlacementPick(MapSceneTerrainPick pick)
     {
-        _placementX.Text = Format(pick.WorldPosition.X); _placementY.Text = Format(pick.WorldPosition.Y); _placementZ.Text = Format(pick.WorldPosition.Z); _placementPlan = null; _placementMultiTilePlan = null;
+        _updatingScenePreviewFields = true; try { _placementX.Text = Format(pick.WorldPosition.X); _placementY.Text = Format(pick.WorldPosition.Y); _placementZ.Text = Format(pick.WorldPosition.Z); } finally { _updatingScenePreviewFields = false; } UpdateScenePlacementPreviewFromFields(); _placementPlan = null; _placementMultiTilePlan = null;
         var reference = _wmoReferences.SelectedItem as MapObjectReferenceChoice; var action = reference?.M2Placement is not null || reference?.WmoPlacement is not null ? "coordinated transform" : "coordinated add";
         _placementStatus.Text = $"Scene-picked MCNK {pick.CellX},{pick.CellY} · X {pick.WorldPosition.X:0.###} · Y {pick.WorldPosition.Y:0.###} · Z {pick.WorldPosition.Z:0.###}. Open placement controls and preview the {action}; this is an unsaved field update only.";
         _sceneStatus.Text = $"Exact terrain pick copied into placement X / Y / Z · MCNK {pick.CellX},{pick.CellY} · triangle {pick.TriangleIndex:N0} · no ADT or project file changed.";
     }
+
+    private async Task ShowPlacementScenePreviewAsync()
+    {
+        try
+        {
+            if (!_mapScene.HasScene) throw new InvalidOperationException("Build the terrain + placement scene first so the preview has exact terrain and coherent provenance context.");
+            if (_wmoReferences.SelectedItem is not MapObjectReferenceChoice reference || string.IsNullOrWhiteSpace(reference.ClientPath)) throw new InvalidOperationException("Select a path-listed or placed M2/WMO first.");
+            if (_wmoCandidates.SelectedItem is not AssetCandidateChoice candidate) throw new InvalidOperationException("Choose one exact extracted provenance candidate before loading a live placement preview.");
+            if (!TryPlacementTransform(out var position, out var orientation, out var scale)) throw new InvalidOperationException("Enter finite position/rotation values and a WotLK-encodable positive scale before showing the live preview.");
+            _wmoOperation?.Cancel(); _wmoOperation?.Dispose(); _wmoOperation = new CancellationTokenSource(); var token = _wmoOperation.Token; _placementStatus.Text = "Loading exact selected geometry into the terrain scene…"; MapScenePlacementPreview preview;
+            if (reference.IsWmo)
+            {
+                var geometry = await Task.Run(() => WmoPreviewGeometryService.Load(candidate.Location.SourcePath, cancellationToken: token), token); token.ThrowIfCancellationRequested(); preview = new(geometry.Vertices, geometry.TriangleIndices, AdtPlacementKind.Wmo, reference.WmoPlacement?.UniqueId, reference.ClientPath!, position, orientation, scale);
+            }
+            else
+            {
+                var geometry = await Task.Run(() => M2PreviewGeometryService.Load(candidate.Location.SourcePath), token); token.ThrowIfCancellationRequested(); preview = new(geometry.Vertices, geometry.TriangleIndices, AdtPlacementKind.M2, reference.M2Placement?.UniqueId, reference.ClientPath!, position, orientation, scale);
+            }
+            _mapScene.SetPlacementPreview(preview); _visualTabs.SelectedIndex = 1; _sceneStatus.Text = $"LIVE UNSAVED {preview.Kind} PREVIEW · {Path.GetFileName(preview.Label)} · exact provenance {candidate.Location.Provenance} · enable Edit placement preview and choose Move on terrain, Rotate Z, or Uniform scale. No file changed."; _placementStatus.Text = "Gold scene preview is synchronized with these transform fields. Gizmo edits invalidate prior plans and remain unsaved until a coordinated review/build is explicitly completed.";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { _placementStatus.Text = exception.Message; DesktopCrashLogger.Log("ADT live placement preview failed", exception); }
+    }
+
+    private void UseScenePlacementPreviewChange(MapScenePlacementPreviewChanged preview)
+    {
+        _updatingScenePreviewFields = true;
+        try { _placementX.Text = Format(preview.Position.X); _placementY.Text = Format(preview.Position.Y); _placementZ.Text = Format(preview.Position.Z); _placementRotX.Text = Format(preview.Orientation.X); _placementRotY.Text = Format(preview.Orientation.Y); _placementRotZ.Text = Format(preview.Orientation.Z); _placementScale.Text = Format(preview.Scale); }
+        finally { _updatingScenePreviewFields = false; }
+        _placementPlan = null; _placementMultiTilePlan = null; _placementStatus.Text = $"Live scene {preview.Mode} updated the unsaved transform fields. Preview the coordinated {(HasExistingPlacement() ? "transform" : "add")} before building; no ADT or project file changed.";
+    }
+
+    private void UpdateScenePlacementPreviewFromFields()
+    {
+        if (_updatingScenePreviewFields || !TryPlacementTransform(out var position, out var orientation, out var scale)) return; _mapScene.UpdatePlacementPreviewTransform(position, orientation, scale);
+    }
+
+    private bool TryPlacementTransform(out Vector3 position, out Vector3 orientation, out float scale)
+    {
+        position = default; orientation = default; scale = 0; if (!TryNumber(_placementX, out var x) || !TryNumber(_placementY, out var y) || !TryNumber(_placementZ, out var z) || !TryNumber(_placementRotX, out var rx) || !TryNumber(_placementRotY, out var ry) || !TryNumber(_placementRotZ, out var rz) || !TryNumber(_placementScale, out scale) || !MapScenePlacementGizmoService.IsEncodableScale(scale)) return false; position = new(x, y, z); orientation = new(rx, ry, rz); return true;
+    }
+
+    private bool HasExistingPlacement() => _wmoReferences.SelectedItem is MapObjectReferenceChoice { M2Placement: not null } or MapObjectReferenceChoice { WmoPlacement: not null };
 
     private void LoadPlacementFields()
     {
