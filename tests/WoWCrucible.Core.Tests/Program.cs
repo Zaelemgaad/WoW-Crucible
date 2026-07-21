@@ -2026,6 +2026,15 @@ if (Directory.Exists(desktopSourceRoot))
         !mainWindowMarkup.Contains("x:Name=\"NavigationPaneButton\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"InspectorPaneButton\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"RuntimeStrip\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("What do you want to work on?", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("Header=\"START HERE\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("Header=\"CREATE GAME CONTENT\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("Header=\"CLIENT TABLES &amp; PATCHES\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("Header=\"SERVER &amp; DATABASE\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("Header=\"VISUALS &amp; WORLD · ADVANCED\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("x:Name=\"DbcDocumentToolbar\" IsVisible=\"False\"", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("private void ShowHome()", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("RefreshShellContext", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("Grid.Row=\"1\" Grid.RowSpan=\"3\"", StringComparison.Ordinal) ||
         !workspaceSetupSource.Contains("CrucibleWorkspaceLayoutService.Discover", StringComparison.Ordinal) ||
         !workspaceSetupSource.Contains("ConfigureWorkspaceAsync", StringComparison.Ordinal) ||

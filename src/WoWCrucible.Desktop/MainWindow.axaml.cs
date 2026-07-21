@@ -73,7 +73,7 @@ public partial class MainWindow : Window
         DevbugModeToggle.IsChecked = DesktopCrashLogger.IsDevbugEnabled;
         RuntimeStrip.Attach(_workspaceSession);
         RuntimeStrip.WorkspaceRequested += (_, _) => OpenWorkspaceSetup();
-        ApplyShellPaneState();
+        RefreshShellContext();
         _commandRoutes = BuildCommandRoutes();
         var unrouted = CrucibleCommandCatalog.All.Where(command => !_commandRoutes.ContainsKey(command.Id)).Select(command => command.Id).ToArray();
         if (unrouted.Length > 0 || _commandRoutes.Count != CrucibleCommandCatalog.All.Count) throw new InvalidOperationException($"Desktop command routes do not exactly match the shared catalog. Missing: {string.Join(", ", unrouted)}");
@@ -140,7 +140,7 @@ public partial class MainWindow : Window
     {
         var shellVisible = !FeatureWorkspaceHost.IsVisible;
         var navigationVisible = shellVisible && _workspaceSession.Settings.NavigationPaneOpen;
-        var inspectorVisible = shellVisible && _workspaceSession.Settings.InspectorPaneOpen;
+        var inspectorVisible = shellVisible && _workspaceSession.Settings.InspectorPaneOpen && !WelcomePanel.IsVisible;
         NavigationPane.IsVisible = NavigationSplitter.IsVisible = navigationVisible;
         InspectorPane.IsVisible = InspectorSplitter.IsVisible = inspectorVisible;
         RootLayout.ColumnDefinitions[0].Width = navigationVisible ? new GridLength(1.1, GridUnitType.Star) : new GridLength(0);
@@ -149,6 +149,27 @@ public partial class MainWindow : Window
         RootLayout.ColumnDefinitions[4].Width = inspectorVisible ? new GridLength(1.5, GridUnitType.Star) : new GridLength(0);
         NavigationPaneButton.Content = _workspaceSession.Settings.NavigationPaneOpen ? "Hide workspace pane" : "Show workspace pane";
         InspectorPaneButton.Content = _workspaceSession.Settings.InspectorPaneOpen ? "Hide inspector pane" : "Show inspector pane";
+    }
+
+    private void RefreshShellContext()
+    {
+        var editingDbc = DbcHost.IsVisible && Current is not null;
+        DbcQuickActions.IsVisible = editingDbc;
+        DbcDocumentToolbar.IsVisible = editingDbc;
+        ApplyShellPaneState();
+    }
+
+    private void ShowHome()
+    {
+        CloseAllFeatureWorkspaces();
+        DbcHost.IsVisible = false;
+        M2View.IsVisible = false;
+        WelcomePanel.IsVisible = true;
+        InspectorTitle.Text = "Nothing selected";
+        InspectorSummary.Text = "Choose a job from the start page.";
+        InspectorDetail.Text = "Specialized tools are grouped in the workspace pane, and staged DBC tabs remain open.";
+        RefreshShellContext();
+        StatusText.Text = _documents.Count == 0 ? "Ready" : $"Home · {_documents.Count:N0} staged DBC tab(s) remain open";
     }
 
     public Task LoadPathAsync(string path)
@@ -239,6 +260,7 @@ public partial class MainWindow : Window
         DbcHost.IsVisible = true;
         ShowDocumentSummary(document);
         RefreshTabs();
+        RefreshShellContext();
     }
 
     private void RefreshTabs()
@@ -363,6 +385,7 @@ public partial class MainWindow : Window
             InspectorTitle.Text = "Nothing selected";
             InspectorSummary.Text = "Open a table or model to begin.";
             InspectorDetail.Text = "Table metadata and selection details appear here.";
+            RefreshShellContext();
         }
     }
 
@@ -719,6 +742,7 @@ public partial class MainWindow : Window
             var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path));
             WelcomePanel.IsVisible = false; DbcHost.IsVisible = false; M2View.IsVisible = true;
             M2View.SetGeometry(geometry);
+            RefreshShellContext();
             InspectorTitle.Text = Path.GetFileName(path);
             InspectorSummary.Text = $"{geometry.Vertices.Count:N0} vertices · {geometry.TriangleIndices.Count / 3:N0} triangles";
             InspectorDetail.Text = $"Model     {geometry.ModelPath}\nSkin      {geometry.SkinPath}\nMinimum   {geometry.Minimum}\nMaximum   {geometry.Maximum}";
@@ -855,7 +879,13 @@ public partial class MainWindow : Window
         if (_knowledgeWorkspaceView is null) { _knowledgeWorkspaceView = new KnowledgeWorkspaceView(); _knowledgeWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
         OpenFeatureWorkspace(_knowledgeWorkspaceView, "Offline Knowledge & Field Reference"); await _knowledgeWorkspaceView.ActivateAsync(query);
     }
-    private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e) => CloseFeatureWorkspace();
+    private void OpenHomeClick(object? sender, RoutedEventArgs e) => ShowHome();
+    private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e)
+    {
+        CloseAllFeatureWorkspaces();
+        if (Current is not null) ActivateDocument(_activeDocument);
+        else ShowHome();
+    }
     private void OpenLayeredDbcsClick(object? sender, RoutedEventArgs e)
     {
         if (_layeredDbcWorkspaceView is null)
@@ -1164,7 +1194,7 @@ public partial class MainWindow : Window
         FeatureWorkspaceHost.IsVisible = false;
         FeatureWorkspaceHost.Child = null;
         MainHeader.IsVisible = EditorWorkspace.IsVisible = MainStatusBar.IsVisible = true;
-        ApplyShellPaneState();
+        RefreshShellContext();
         Title = "WoW Crucible";
         DesktopCrashLogger.Debug("UI", "feature-workspace-closed");
     }

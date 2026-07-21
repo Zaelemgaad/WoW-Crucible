@@ -23,20 +23,14 @@
                 </WrapPanel>
                 <ScrollViewer Grid.Row="1" Grid.ColumnSpan="2" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                     <WrapPanel Orientation="Horizontal">
+                        <Button Margin="0,0,8,0" Content="Home" Click="OpenHomeClick" />
                         <Button Margin="0,0,8,0" Classes="accent" Content="Open DBC" Click="OpenDbcClick" />
-                        <Button Margin="0,0,8,0" Content="Open M2" Click="OpenM2Click" />
-                        <Button Margin="0,0,8,0" Content="Save" Click="SaveClick" />
-                        <Button Margin="0,0,8,0" Content="Save As" Click="SaveAsClick" />
-                        <Button Margin="0,0,8,0" Content="Export rows" Click="OpenDbcExportClick" />
-                        <Button Margin="0,0,8,0" Content="Import rows" Click="OpenDbcImportClick" />
-                        <Button Margin="0,0,8,0" Content="Close" Click="CloseDocumentClick" />
-                        <Button Margin="0,0,8,0" Content="Logs" Click="OpenLogsClick" />
-                        <Button Margin="0,0,8,0" Content="CLI Guide" Click="OpenCliGuideClick" />
-                        <Button Margin="0,0,8,0" Content="Field Help · F1" Click="OpenKnowledgeClick" />
+                        <WrapPanel x:Name="DbcQuickActions" IsVisible="False">
+                            <Button Margin="0,0,8,0" Content="Save" Click="SaveClick" />
+                            <Button Margin="0,0,8,0" Content="Save As" Click="SaveAsClick" />
+                            <TextBox x:Name="SearchBox" Margin="0,0,8,0" PlaceholderText="Search loaded table…" TextChanged="SearchChanged" />
+                        </WrapPanel>
                         <Button Margin="0,0,8,0" Content="Commands · Ctrl+K" Click="OpenCommandPaletteClick" />
-                        <Button x:Name="NavigationPaneButton" Margin="0,0,8,0" Content="Hide workspace pane" Click="ToggleNavigationPaneClick" />
-                        <Button x:Name="InspectorPaneButton" Margin="0,0,8,0" Content="Hide inspector pane" Click="ToggleInspectorPaneClick" />
-                        <TextBox x:Name="SearchBox" PlaceholderText="Search loaded table…" TextChanged="SearchChanged" />
                     </WrapPanel>
                 </ScrollViewer>
             </Grid>
@@ -46,29 +40,61 @@
             <Grid RowDefinitions="Auto,*,Auto" Margin="12">
                 <TextBlock Text="WORKSPACE" Foreground="#7F8A9F" FontSize="10" FontWeight="Bold" Margin="6,4,0,9" />
                 <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                    <StackPanel Spacing="4">
-                        <Button HorizontalContentAlignment="Left" Click="OpenWorkspaceSetupClick"><TextBlock Text="⌂  Workspace setup" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenEditorWorkspaceClick"><TextBlock Text="▦  DBC tables" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenLayeredDbcsClick"><TextBlock Text="◫  DBC layers &amp; promotion" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenDbdSchemasClick"><TextBlock Text="≣  DBD schemas &amp; audit" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenCacheTablesClick"><TextBlock Text="▥  Client cache tables" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenProjectWorkspaceClick"><TextBlock Text="◆  Projects &amp; shared IDs" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenItemWorkbenchClick"><TextBlock Text="◈  Items, sets &amp; cut-item audit" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenCreatureWorkspaceClick"><TextBlock Text="♟  Creatures &amp; NPCs" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenGameObjectWorkspaceClick"><TextBlock Text="▱  Gameobjects" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenQuestWorkspaceClick"><TextBlock Text="✦  Quests" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenPetWorkspaceClick"><TextBlock Text="♞  Pets &amp; companions" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenBehaviorWorkspaceClick"><TextBlock Text="⌘  Behaviors &amp; dialogue" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenMpqWorkspaceClick"><TextBlock Text="◇  MPQ patches &amp; merge" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenClientWorkspaceClick"><TextBlock Text="▣  Client workshop" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenMapWorkspaceClick"><TextBlock Text="▦  Maps &amp; world" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenTextureWorkspaceClick"><TextBlock Text="▧  Texture lab" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenAssetComparisonClick"><TextBlock Text="⬡  Assets &amp; compare" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenNativeConversionClick"><TextBlock Text="⇄  Modern asset conversion" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenKnowledgeClick"><TextBlock Text="?  Offline knowledge &amp; field reference" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenToolInventoryClick"><TextBlock Text="⌂  Tool inventory" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenServerSqlClick"><TextBlock Text="⚙  Server &amp; SQL" TextWrapping="Wrap" /></Button>
-                        <Button HorizontalContentAlignment="Left" Click="OpenSqlWorkspaceClick"><TextBlock Text="▤  Full SQL database · tables, queries &amp; favorites" TextWrapping="Wrap" /></Button>
+                    <StackPanel Spacing="6">
+                        <Button Classes="accent" HorizontalContentAlignment="Left" Click="OpenHomeClick" ToolTip.Tip="Return to the simple start page without closing staged DBC tabs."><TextBlock Text="⌂  Home" TextWrapping="Wrap" /></Button>
+                        <Expander Header="START HERE" IsExpanded="True">
+                            <StackPanel Spacing="4" Margin="8,4,0,4">
+                                <Button HorizontalContentAlignment="Left" Click="OpenWorkspaceSetupClick" ToolTip.Tip="Remember the client, server, core, definitions, tools, projects, and staging paths once."><TextBlock Text="Workspace setup" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenProjectWorkspaceClick" ToolTip.Tip="Keep one feature's DBC, SQL, MPQ, and allocated IDs together."><TextBlock Text="Projects &amp; shared IDs" TextWrapping="Wrap" /></Button>
+                            </StackPanel>
+                        </Expander>
+                        <Expander Header="CREATE GAME CONTENT">
+                            <StackPanel Spacing="4" Margin="8,4,0,4">
+                                <Button HorizontalContentAlignment="Left" Click="OpenItemWorkbenchClick" ToolTip.Tip="Create, clone, edit, and audit items and item sets."><TextBlock Text="Items &amp; item sets" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenCreatureWorkspaceClick" ToolTip.Tip="Create NPCs and creatures, appearances, spawns, vendors, loot, quests, and trainers."><TextBlock Text="Creatures &amp; NPCs" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenQuestWorkspaceClick" ToolTip.Tip="Edit complete quests, objectives, rewards, text, and giver relationships."><TextBlock Text="Quests" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenGameObjectWorkspaceClick" ToolTip.Tip="Create doors, chests, world objects, displays, spawns, and loot."><TextBlock Text="Gameobjects" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenPetWorkspaceClick" ToolTip.Tip="Work with pets, companions, level curves, families, talents, and abilities."><TextBlock Text="Pets &amp; companions" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenBehaviorWorkspaceClick" ToolTip.Tip="Author gossip, dialogue, conditions, SmartAI, vendors, trainers, and loot."><TextBlock Text="NPC behavior &amp; dialogue" TextWrapping="Wrap" /></Button>
+                            </StackPanel>
+                        </Expander>
+                        <Expander Header="CLIENT TABLES &amp; PATCHES">
+                            <StackPanel Spacing="4" Margin="8,4,0,4">
+                                <Button HorizontalContentAlignment="Left" Click="OpenEditorWorkspaceClick" ToolTip.Tip="Open and edit complete DBC/DB2 records directly."><TextBlock Text="DBC tables" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenLayeredDbcsClick" ToolTip.Tip="Compare base and override tables and promote only reviewed changes."><TextBlock Text="DBC layers &amp; promotion" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenDbdSchemasClick" ToolTip.Tip="Inspect schema definitions and validate complete DBC corpora."><TextBlock Text="Schemas &amp; validation" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenCacheTablesClick" ToolTip.Tip="Inspect WDB/ADB client cache records."><TextBlock Text="Client cache tables" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenMpqWorkspaceClick" ToolTip.Tip="Browse, extract, build, update, validate, and merge small MPQ patches."><TextBlock Text="MPQ patches &amp; merge" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenClientWorkspaceClick" ToolTip.Tip="Index clients, inspect effective archive layers, install patches, and manage releases."><TextBlock Text="Client workshop" TextWrapping="Wrap" /></Button>
+                            </StackPanel>
+                        </Expander>
+                        <Expander Header="SERVER &amp; DATABASE">
+                            <StackPanel Spacing="4" Margin="8,4,0,4">
+                                <Button HorizontalContentAlignment="Left" Click="OpenServerSqlClick" ToolTip.Tip="Detect the installed core, configure SQL, and control SQL/AUTH/WORLD."><TextBlock Text="Connection &amp; server controls" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenSqlWorkspaceClick" ToolTip.Tip="Browse and edit complete live schemas, tables, rows, queries, objects, and favorites."><TextBlock Text="SQL Studio" TextWrapping="Wrap" /></Button>
+                            </StackPanel>
+                        </Expander>
+                        <Expander Header="VISUALS &amp; WORLD · ADVANCED">
+                            <StackPanel Spacing="4" Margin="8,4,0,4">
+                                <Button HorizontalContentAlignment="Left" Click="OpenAssetComparisonClick" ToolTip.Tip="Compare provenance layers and preview compatible M2/SKIN models."><TextBlock Text="Assets, models &amp; compare" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenTextureWorkspaceClick" ToolTip.Tip="Inspect, convert, edit, compose, and trace BLP textures."><TextBlock Text="Texture lab" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenMapWorkspaceClick" ToolTip.Tip="Inspect and edit extracted ADT/WDT/WDL terrain and placements."><TextBlock Text="Maps &amp; world" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenNativeConversionClick" ToolTip.Tip="Review and down-port supported modern model and world-asset profiles."><TextBlock Text="Modern asset conversion" TextWrapping="Wrap" /></Button>
+                            </StackPanel>
+                        </Expander>
+                        <Expander Header="HELP, IMPORT &amp; DIAGNOSTICS">
+                            <StackPanel Spacing="4" Margin="8,4,0,4">
+                                <Button HorizontalContentAlignment="Left" Click="OpenKnowledgeClick"><TextBlock Text="Field help &amp; offline wiki" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenDbcImportClick"><TextBlock Text="Import rows into current DBC" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenDbcExportClick"><TextBlock Text="Export current DBC rows" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="CloseDocumentClick"><TextBlock Text="Close current DBC" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenToolInventoryClick"><TextBlock Text="Legacy-tool coverage" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenCliGuideClick"><TextBlock Text="CLI guide" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenLogsClick"><TextBlock Text="Logs" TextWrapping="Wrap" /></Button>
+                                <Button x:Name="NavigationPaneButton" HorizontalContentAlignment="Left" Content="Hide workspace pane" Click="ToggleNavigationPaneClick" />
+                                <Button x:Name="InspectorPaneButton" HorizontalContentAlignment="Left" Content="Hide inspector pane" Click="ToggleInspectorPaneClick" />
+                            </StackPanel>
+                        </Expander>
                     </StackPanel>
                 </ScrollViewer>
                 <Border Grid.Row="2" Margin="0,8,0,0" Padding="10" CornerRadius="6" Background="#131925" BorderBrush="#273044" BorderThickness="1">
@@ -83,7 +109,7 @@
         <GridSplitter x:Name="NavigationSplitter" Grid.Row="2" Grid.Column="1" ResizeDirection="Columns" Background="#2B3445" />
 
         <Grid x:Name="EditorWorkspace" Grid.Row="2" Grid.Column="2" RowDefinitions="Auto,*" Background="#090C11">
-            <Border BorderBrush="#2B3445" BorderThickness="0,0,0,1" Background="#0E131C">
+            <Border x:Name="DbcDocumentToolbar" IsVisible="False" BorderBrush="#2B3445" BorderThickness="0,0,0,1" Background="#0E131C">
                 <Grid RowDefinitions="Auto,Auto">
                     <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                         <StackPanel x:Name="DocumentTabsPanel" Orientation="Horizontal" VerticalAlignment="Bottom" />
@@ -105,22 +131,74 @@
             </Border>
             <Grid Grid.Row="1">
                 <Grid x:Name="WelcomePanel">
-                    <Border Margin="18" CornerRadius="12" Padding="34" BorderBrush="#2A3447" BorderThickness="1">
-                        <Border.Background>
-                            <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
-                                <GradientStop Color="#182233" Offset="0" />
-                                <GradientStop Color="#0E131C" Offset="1" />
-                            </LinearGradientBrush>
-                        </Border.Background>
-                        <StackPanel Spacing="13">
-                            <TextBlock Text="Crucible, rebuilt for speed." FontSize="28" FontWeight="SemiBold" />
-                            <TextBlock Text="This is the first native Avalonia workspace. Open a WotLK WDBC table to test the custom virtual viewport against a real client or server dataset." Foreground="#A7B0C0" TextWrapping="Wrap" LineHeight="21" />
-                            <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                <Button Classes="accent" Content="Open a DBC" Click="OpenDbcClick" />
-                                <Button Margin="8,0,0,0" Content="Preview an M2" Click="OpenM2Click" />
-                            </WrapPanel>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Margin="18" Spacing="12">
+                            <Border CornerRadius="12" Padding="24" BorderBrush="#2A3447" BorderThickness="1">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
+                                        <GradientStop Color="#182233" Offset="0" />
+                                        <GradientStop Color="#0E131C" Offset="1" />
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="What do you want to work on?" FontSize="26" FontWeight="SemiBold" />
+                                    <TextBlock Text="Start with a guided editor. Raw tables, conversion, and diagnostic tools remain available under the grouped workspace pane when you need them." Foreground="#A7B0C0" TextWrapping="Wrap" LineHeight="20" />
+                                </StackPanel>
+                            </Border>
+                            <Border Padding="18" BorderBrush="#293347" BorderThickness="1" CornerRadius="9">
+                                <Grid ColumnDefinitions="2*,3*" ColumnSpacing="18">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Create or change gameplay" FontSize="18" FontWeight="SemiBold" />
+                                        <TextBlock Text="Friendly editors that coordinate readable fields with complete SQL and client data." TextWrapping="Wrap" Foreground="#9AA5B7" />
+                                    </StackPanel>
+                                    <WrapPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <Button Classes="accent" Content="Items &amp; sets" Click="OpenItemWorkbenchClick" />
+                                        <Button Content="Creatures &amp; NPCs" Click="OpenCreatureWorkspaceClick" />
+                                        <Button Content="Quests" Click="OpenQuestWorkspaceClick" />
+                                    </WrapPanel>
+                                </Grid>
+                            </Border>
+                            <Border Padding="18" BorderBrush="#293347" BorderThickness="1" CornerRadius="9">
+                                <Grid ColumnDefinitions="2*,3*" ColumnSpacing="18">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Edit client data and build a patch" FontSize="18" FontWeight="SemiBold" />
+                                        <TextBlock Text="Use this for raw DBC work, client archives, and the final MPQ sent to players." TextWrapping="Wrap" Foreground="#9AA5B7" />
+                                    </StackPanel>
+                                    <WrapPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <Button Classes="accent" Content="Open DBC" Click="OpenDbcClick" />
+                                        <Button Content="MPQ patches" Click="OpenMpqWorkspaceClick" />
+                                        <Button Content="Client workshop" Click="OpenClientWorkspaceClick" />
+                                    </WrapPanel>
+                                </Grid>
+                            </Border>
+                            <Border Padding="18" BorderBrush="#293347" BorderThickness="1" CornerRadius="9">
+                                <Grid ColumnDefinitions="2*,3*" ColumnSpacing="18">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Manage the server and database" FontSize="18" FontWeight="SemiBold" />
+                                        <TextBlock Text="Check the configured install, control services, browse every live table, or edit exact rows." TextWrapping="Wrap" Foreground="#9AA5B7" />
+                                    </StackPanel>
+                                    <WrapPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <Button Classes="accent" Content="SQL Studio" Click="OpenSqlWorkspaceClick" />
+                                        <Button Content="Connection &amp; controls" Click="OpenServerSqlClick" />
+                                        <Button Content="Workspace setup" Click="OpenWorkspaceSetupClick" />
+                                    </WrapPanel>
+                                </Grid>
+                            </Border>
+                            <Border Padding="18" BorderBrush="#293347" BorderThickness="1" CornerRadius="9">
+                                <Grid ColumnDefinitions="2*,3*" ColumnSpacing="18">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Visual assets and world editing" FontSize="18" FontWeight="SemiBold" />
+                                        <TextBlock Text="Advanced texture, model, comparison, conversion, and extracted-map workflows." TextWrapping="Wrap" Foreground="#9AA5B7" />
+                                    </StackPanel>
+                                    <WrapPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <Button Content="Assets &amp; models" Click="OpenAssetComparisonClick" />
+                                        <Button Content="Textures" Click="OpenTextureWorkspaceClick" />
+                                        <Button Content="Maps &amp; world" Click="OpenMapWorkspaceClick" />
+                                    </WrapPanel>
+                                </Grid>
+                            </Border>
                         </StackPanel>
-                    </Border>
+                    </ScrollViewer>
                 </Grid>
                 <Grid x:Name="DbcHost" IsVisible="False" RowDefinitions="*,Auto" ColumnDefinitions="*,Auto">
                     <local:VirtualDbcView x:Name="DbcView" />
