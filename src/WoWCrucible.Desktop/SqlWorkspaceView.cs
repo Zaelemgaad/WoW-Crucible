@@ -147,9 +147,9 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private IReadOnlyList<SqlRowFavorite> _favoriteCache = [];
     private readonly Dictionary<string, SqlFavoriteVerification> _favoriteChecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly TabControl _tabs;
-    private readonly TextBox _favoriteNotes = new() { PlaceholderText = "Optional note: what you changed or why this row matters" };
-    private readonly TextBox _favoriteDbc = new() { PlaceholderText = "Optional related DBC path" };
-    private readonly TextBox _favoriteMpq = new() { PlaceholderText = "Optional related MPQ path" };
+    private TextBox _favoriteNotes = CreateFavoriteNotesEditor();
+    private TextBox _favoriteDbc = CreateFavoriteDbcEditor();
+    private TextBox _favoriteMpq = CreateFavoriteMpqEditor();
     private readonly Dictionary<string, FieldEditor> _editors = new(StringComparer.OrdinalIgnoreCase);
     private SqlTablePage? _page;
     private SqlRowRecord? _selectedRow;
@@ -632,6 +632,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private void SelectRow()
     {
         _creatingRow = false; _selectedRow = _rows.SelectedItem as SqlRowRecord; _editors.Clear(); _rowEditor.Children.Clear(); _confirmation.IsVisible = false;
+        ResetFavoriteDraftEditors();
         _dependencyList.Children.Clear(); _dependencyGraph.SetGraph(_selectedRow is null || _page is null ? "Select a primary-keyed SQL row" : $"{_page.Table} · {_selectedRow.Display}", []);
         _dependencyStatus.Text = _selectedRow is null ? "Select a SQL row, then analyze its recognized dependencies." : "Ready to analyze exact incoming and outgoing dependency edges.";
         if (_selectedRow is null || _page is null) return;
@@ -656,6 +657,21 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         }
         var save = AccentButton("Review complete row update"); save.Click += (_, _) => PrepareRowUpdate(); _rowEditor.Children.Add(save); AddRelationships();
     }
+
+    private void ResetFavoriteDraftEditors()
+    {
+        // These controls are nested beneath temporary path grids. Clearing _rowEditor
+        // detaches the outer grid, but the TextBoxes remain children of that orphaned
+        // grid and therefore cannot be mounted again. A row selection owns a fresh
+        // favorite draft so no Avalonia control is ever assigned two visual parents.
+        _favoriteNotes = CreateFavoriteNotesEditor();
+        _favoriteDbc = CreateFavoriteDbcEditor();
+        _favoriteMpq = CreateFavoriteMpqEditor();
+    }
+
+    private static TextBox CreateFavoriteNotesEditor() => new() { PlaceholderText = "Optional note: what you changed or why this row matters" };
+    private static TextBox CreateFavoriteDbcEditor() => new() { PlaceholderText = "Optional related DBC path" };
+    private static TextBox CreateFavoriteMpqEditor() => new() { PlaceholderText = "Optional related MPQ path" };
 
     private void BeginCreateRow(SqlRowRecord? source = null)
     {

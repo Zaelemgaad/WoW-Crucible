@@ -2003,6 +2003,9 @@ if (Directory.Exists(desktopSourceRoot))
         !sqlWorkspaceSource.Contains("ActivateFavorites", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related DBC / DB2 path", StringComparison.Ordinal) ||
         !sqlWorkspaceSource.Contains("Optional related MPQ path", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("ResetFavoriteDraftEditors();", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("CreateFavoriteNotesEditor()", StringComparison.Ordinal) ||
+        !sqlWorkspaceSource.Contains("no Avalonia control is ever assigned two visual parents", StringComparison.Ordinal) ||
         !clientWorkspaceSource.Contains("Player release & rollback", StringComparison.Ordinal) ||
         !clientWorkspaceSource.Contains("CreatePublisherKeyAsync", StringComparison.Ordinal) ||
         !clientWorkspaceSource.Contains("SignReleaseBundleAsync", StringComparison.Ordinal) ||
