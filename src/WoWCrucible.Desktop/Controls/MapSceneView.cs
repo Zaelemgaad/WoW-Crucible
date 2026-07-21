@@ -14,14 +14,15 @@ namespace WoWCrucible.Desktop.Controls;
 
 public sealed record MapSceneM2Instance(M2PreviewGeometry Geometry, MapM2Placement Placement, string SourcePath);
 public sealed record MapSceneWmoInstance(WmoPreviewGeometry Geometry, MapWmoPlacement Placement, string SourcePath);
-public enum MapScenePlacementEditMode { MoveOnTerrain, RotateZ, UniformScale }
+public enum MapScenePlacementEditMode { MoveOnTerrain, RotateZ, UniformScale, History }
 public sealed record MapScenePlacementPreview(IReadOnlyList<Vector3> Vertices, IReadOnlyList<int> TriangleIndices, AdtPlacementKind Kind,
     uint? UniqueId, string Label, Vector3 Position, Vector3 Orientation, float Scale);
-public sealed record MapScenePlacementPreviewChanged(Vector3 Position, Vector3 Orientation, float Scale, MapScenePlacementEditMode Mode);
+public sealed record MapScenePlacementPreviewChanged(Vector3 Position, Vector3 Orientation, float Scale, MapScenePlacementEditMode Mode, string? Action = null);
+public sealed record MapScenePlacementHistoryAvailability(bool CanUndo, bool CanRedo);
 
 public sealed class MapSceneView : UserControl
 {
-    private readonly MapSceneCanvas _canvas = new(); private readonly CheckBox _terrain = new() { Content = "Terrain", IsChecked = true }; private readonly CheckBox _objects = new() { Content = "Placed objects", IsChecked = true }; private readonly CheckBox _wireframe = new() { Content = "Wireframe overlay" }; private readonly CheckBox _pick = new() { Content = "Pick placement position" }; private readonly CheckBox _edit = new() { Content = "Edit placement preview" }; private readonly ComboBox _editMode = new() { ItemsSource = new[] { "Move on terrain", "Rotate Z", "Uniform scale" }, SelectedIndex = 0 };
+    private readonly MapSceneCanvas _canvas = new(); private readonly CheckBox _terrain = new() { Content = "Terrain", IsChecked = true }; private readonly CheckBox _objects = new() { Content = "Placed objects", IsChecked = true }; private readonly CheckBox _wireframe = new() { Content = "Wireframe overlay" }; private readonly CheckBox _pick = new() { Content = "Pick placement position" }; private readonly CheckBox _edit = new() { Content = "Edit placement preview" }; private readonly CheckBox _snap = new() { Content = "Use configured snapping" }; private readonly ComboBox _editMode = new() { ItemsSource = new[] { "Move on terrain", "Rotate Z", "Uniform scale" }, SelectedIndex = 0 }; private readonly Button _undo = new() { Content = "Undo gesture", IsEnabled = false }; private readonly Button _redo = new() { Content = "Redo gesture", IsEnabled = false };
     public event EventHandler<MapSceneTerrainPick>? TerrainPicked;
     public event EventHandler<MapScenePlacementPreviewChanged>? PlacementPreviewChanged;
     public event EventHandler<string>? StatusChanged;
@@ -29,16 +30,20 @@ public sealed class MapSceneView : UserControl
     {
         AutomationProperties.SetName(_canvas, "Interactive terrain placement canvas"); AutomationProperties.SetHelpText(_canvas, "Enable Pick placement position, then click a visible terrain triangle to choose exact ADT coordinates.");
         AutomationProperties.SetName(_editMode, "Placement gizmo mode");
+        AutomationProperties.SetName(_snap, "Use configured placement snapping"); AutomationProperties.SetName(_undo, "Undo placement gesture"); AutomationProperties.SetName(_redo, "Redo placement gesture"); ToolTip.SetTip(_snap, "Position, rotation-degree, and scale steps are configured in the same-window placement controls. Zero disables that kind of snap.");
         var reset = new Button { Content = "Reset view" }; reset.Click += (_, _) => _canvas.ResetView();
         var clearPick = new Button { Content = "Clear marker" }; clearPick.Click += (_, _) => { _canvas.ClearPick(); StatusChanged?.Invoke(this, "Placement marker cleared. Enable placement picking and click terrain to choose another exact point."); };
         _terrain.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true); _objects.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true); _wireframe.IsCheckedChanged += (_, _) => _canvas.SetVisibility(_terrain.IsChecked == true, _objects.IsChecked == true, _wireframe.IsChecked == true);
         _pick.IsCheckedChanged += (_, _) => { if (_pick.IsChecked == true && _edit.IsChecked == true) _edit.IsChecked = false; _canvas.SetPickMode(_pick.IsChecked == true); StatusChanged?.Invoke(this, _pick.IsChecked == true ? "PICK MODE · terrain is framed for exact selection. Click one visible triangle; drag rotation is paused until pick mode is disabled." : "View mode · drag to rotate and use the wheel to zoom. The current marker remains visible."); };
         _edit.IsCheckedChanged += (_, _) => { if (_edit.IsChecked == true && _pick.IsChecked == true) _pick.IsChecked = false; _canvas.SetEditEnabled(_edit.IsChecked == true); StatusChanged?.Invoke(this, _edit.IsChecked == true ? "PLACEMENT EDIT · use the selected gizmo mode on the gold preview. Changes update unsaved fields only." : "Placement preview remains visible. Edit mode is off; drag rotates the camera again."); };
         _editMode.SelectionChanged += (_, _) => _canvas.SetEditMode((MapScenePlacementEditMode)Math.Clamp(_editMode.SelectedIndex, 0, 2));
+        _snap.IsCheckedChanged += (_, _) => _canvas.SetSnapEnabled(_snap.IsChecked == true); _undo.Click += (_, _) => _canvas.UndoPlacementPreview(); _redo.Click += (_, _) => _canvas.RedoPlacementPreview();
         _canvas.TerrainPicked += (_, value) => { StatusChanged?.Invoke(this, $"PICKED MCNK {value.CellX},{value.CellY} · X {value.WorldPosition.X:0.###} · Y {value.WorldPosition.Y:0.###} · Z {value.WorldPosition.Z:0.###}"); TerrainPicked?.Invoke(this, value); };
         _canvas.TerrainPickMissed += (_, _) => StatusChanged?.Invoke(this, "No visible terrain triangle exists under that pixel. Rotate or zoom the scene and try again.");
-        _canvas.PlacementPreviewChanged += (_, value) => { StatusChanged?.Invoke(this, value.Mode switch { MapScenePlacementEditMode.MoveOnTerrain => $"PREVIEW MOVED · X {value.Position.X:0.###} · Y {value.Position.Y:0.###} · Z {value.Position.Z:0.###}", MapScenePlacementEditMode.RotateZ => $"PREVIEW ROTATED · Z {value.Orientation.Z:0.###}°", _ => $"PREVIEW SCALED · {value.Scale:0.####}" }); PlacementPreviewChanged?.Invoke(this, value); };
-        var toolbar = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Margin = new Thickness(7), Children = { _terrain, _objects, _wireframe, _pick, _edit, _editMode, clearPick, reset } } };
+        _canvas.PlacementSnapMissed += (_, _) => StatusChanged?.Invoke(this, "The configured position grid lands outside intact terrain or inside a hole at this pointer. The preview was left unchanged; use a finer step or drag elsewhere.");
+        _canvas.PlacementPreviewChanged += (_, value) => { StatusChanged?.Invoke(this, value.Mode switch { MapScenePlacementEditMode.MoveOnTerrain => $"PREVIEW MOVED · X {value.Position.X:0.###} · Y {value.Position.Y:0.###} · Z {value.Position.Z:0.###}", MapScenePlacementEditMode.RotateZ => $"PREVIEW ROTATED · Z {value.Orientation.Z:0.###}°", MapScenePlacementEditMode.UniformScale => $"PREVIEW SCALED · {value.Scale:0.####}", _ => $"PREVIEW HISTORY · {value.Action ?? "state restored"}" }); PlacementPreviewChanged?.Invoke(this, value); };
+        _canvas.HistoryAvailabilityChanged += (_, value) => { _undo.IsEnabled = value.CanUndo; _redo.IsEnabled = value.CanRedo; };
+        var toolbar = new ScrollViewer { HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled, Content = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Margin = new Thickness(7), Children = { _terrain, _objects, _wireframe, _pick, _edit, _editMode, _snap, _undo, _redo, clearPick, reset } } };
         Content = new Grid { RowDefinitions = new("Auto,*"), Children = { toolbar, WithRow(_canvas, 1) } };
     }
     public void SetScene(AdtTerrainSceneGeometry terrain, AdtTerrainMaterialSet? materials, IReadOnlyList<MapSceneM2Instance> m2, IReadOnlyList<MapSceneWmoInstance> wmo, int unresolved, string provenance) => _canvas.SetScene(terrain, materials, m2, wmo, unresolved, provenance);
@@ -46,6 +51,7 @@ public sealed class MapSceneView : UserControl
     public bool HasScene => _canvas.HasScene;
     public void SetPlacementPreview(MapScenePlacementPreview preview) => _canvas.SetPlacementPreview(preview);
     public void UpdatePlacementPreviewTransform(Vector3 position, Vector3 orientation, float scale) => _canvas.UpdatePlacementPreviewTransform(position, orientation, scale);
+    public void SetPlacementSnapSettings(MapScenePlacementSnapSettings settings) => _canvas.SetSnapSettings(settings);
     public void ClearPlacementPreview() => _canvas.ClearPlacementPreview();
     private static T WithRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
 }
@@ -54,10 +60,12 @@ internal sealed class MapSceneCanvas : Control
 {
     private sealed record Mesh(IReadOnlyList<Vector3> Vertices, IReadOnlyList<int> Indices, IReadOnlyList<SKColor>? VertexColors, Matrix4x4 Transform, SKColor Color, string Kind, uint? UniqueId = null);
     private sealed record Scene(AdtTerrainSceneGeometry TerrainGeometry, IReadOnlyList<Mesh> Meshes, Vector3 Minimum, Vector3 Maximum, Vector3 TerrainMinimum, Vector3 TerrainMaximum, int M2, int Wmo, int Unresolved, string Provenance, int SourceTriangles, int MaterialCells, int CompleteMaterialCells);
-    private Scene? _scene; private MapSceneTerrainPick? _pick; private MapScenePlacementPreview? _preview; private float _yaw = -0.72f; private float _pitch = 0.72f; private float _zoom = 1f; private Point? _dragStart; private Point? _editStart; private MapScenePlacementPreview? _editBaseline; private bool _terrain = true; private bool _objects = true; private bool _wireframe; private bool _pickMode; private bool _editEnabled; private MapScenePlacementEditMode _editMode;
+    private readonly MapScenePlacementHistory _history = new(); private Scene? _scene; private MapSceneTerrainPick? _pick; private MapScenePlacementPreview? _preview; private MapScenePlacementSnapSettings _snapSettings = MapScenePlacementSnapSettings.Disabled; private float _yaw = -0.72f; private float _pitch = 0.72f; private float _zoom = 1f; private Point? _dragStart; private Point? _editStart; private MapScenePlacementPreview? _editBaseline; private bool _terrain = true; private bool _objects = true; private bool _wireframe; private bool _pickMode; private bool _editEnabled; private bool _snapEnabled; private MapScenePlacementEditMode _editMode;
     public event EventHandler<MapSceneTerrainPick>? TerrainPicked;
     public event EventHandler? TerrainPickMissed;
+    public event EventHandler? PlacementSnapMissed;
     public event EventHandler<MapScenePlacementPreviewChanged>? PlacementPreviewChanged;
+    public event EventHandler<MapScenePlacementHistoryAvailability>? HistoryAvailabilityChanged;
     public bool HasScene => _scene is not null;
     public MapSceneCanvas() { ClipToBounds = true; Focusable = true; }
     protected override AutomationPeer OnCreateAutomationPeer() => new ControlAutomationPeer(this);
@@ -78,26 +86,30 @@ internal sealed class MapSceneCanvas : Control
             triangles += mesh.Indices.Count / 3; foreach (var vertex in mesh.Vertices) { var world = Vector3.Transform(vertex, mesh.Transform); minimum = Vector3.Min(minimum, world); maximum = Vector3.Max(maximum, world); }
         }
         var terrainMinimum = new Vector3(float.PositiveInfinity); var terrainMaximum = new Vector3(float.NegativeInfinity); foreach (var vertex in terrain.Vertices) { terrainMinimum = Vector3.Min(terrainMinimum, vertex); terrainMaximum = Vector3.Max(terrainMaximum, vertex); }
-        _scene = new(terrain, meshes, minimum, maximum, terrainMinimum, terrainMaximum, m2.Count, wmo.Count, unresolved, provenance, triangles, materials?.Cells.Count ?? 0, materials?.CompleteCells ?? 0); _pick = null; _preview = null; ResetView();
+        _scene = new(terrain, meshes, minimum, maximum, terrainMinimum, terrainMaximum, m2.Count, wmo.Count, unresolved, provenance, triangles, materials?.Cells.Count ?? 0, materials?.CompleteCells ?? 0); _pick = null; _preview = null; NotifyHistory(); ResetView();
 
         static SKColor MaterialColor(RgbaTexture texture, int vertexIndex)
         {
             var local = AdtTerrainBrushService.VertexPosition(vertexIndex); var x = Math.Clamp((int)Math.Round(local.X * (texture.Width - 1)), 0, texture.Width - 1); var y = Math.Clamp((int)Math.Round(local.Y * (texture.Height - 1)), 0, texture.Height - 1); var offset = (y * texture.Width + x) * 4; return new(texture.Pixels[offset], texture.Pixels[offset + 1], texture.Pixels[offset + 2], texture.Pixels[offset + 3]);
         }
     }
-    public void ClearScene() { _scene = null; _pick = null; _preview = null; InvalidateVisual(); }
+    public void ClearScene() { _scene = null; _pick = null; _preview = null; NotifyHistory(); InvalidateVisual(); }
     public void ClearPick() { _pick = null; InvalidateVisual(); }
-    public void SetPlacementPreview(MapScenePlacementPreview preview) { ValidatePreview(preview); _preview = preview; InvalidateVisual(); }
+    public void SetPlacementPreview(MapScenePlacementPreview preview) { ValidatePreview(preview); _preview = preview; _history.Reset(Transform(preview)); NotifyHistory(); InvalidateVisual(); }
     public void UpdatePlacementPreviewTransform(Vector3 position, Vector3 orientation, float scale)
     {
-        if (_preview is null || !Finite(position) || !Finite(orientation) || !float.IsFinite(scale) || scale <= 0) return; _preview = _preview with { Position = position, Orientation = orientation, Scale = scale }; InvalidateVisual();
+        if (_preview is null || !Finite(position) || !Finite(orientation) || !MapScenePlacementGizmoService.IsEncodableScale(scale)) return; _preview = _preview with { Position = position, Orientation = orientation, Scale = scale }; _history.ReplaceCurrent(Transform(_preview)); NotifyHistory(); InvalidateVisual();
     }
-    public void ClearPlacementPreview() { _preview = null; _editStart = null; _editBaseline = null; InvalidateVisual(); }
+    public void SetSnapSettings(MapScenePlacementSnapSettings settings) { _snapSettings = MapScenePlacementGizmoService.ValidateSnapSettings(settings); }
+    public void ClearPlacementPreview() { _preview = null; _editStart = null; _editBaseline = null; NotifyHistory(); InvalidateVisual(); }
     public void ResetView() { _yaw = -0.72f; _pitch = 0.72f; _zoom = 1; InvalidateVisual(); }
     public void SetVisibility(bool terrain, bool objects, bool wireframe) { _terrain = terrain; _objects = objects; _wireframe = wireframe; InvalidateVisual(); }
     public void SetPickMode(bool enabled) { _pickMode = enabled; _dragStart = null; InvalidateVisual(); }
     public void SetEditEnabled(bool enabled) { _editEnabled = enabled; _dragStart = null; _editStart = null; _editBaseline = null; InvalidateVisual(); }
     public void SetEditMode(MapScenePlacementEditMode mode) { _editMode = mode; _editStart = null; _editBaseline = null; InvalidateVisual(); }
+    public void SetSnapEnabled(bool enabled) { _snapEnabled = enabled; InvalidateVisual(); }
+    public void UndoPlacementPreview() { if (_preview is null || !_history.CanUndo) return; ApplyHistory(_history.Undo(), "UNDO"); }
+    public void RedoPlacementPreview() { if (_preview is null || !_history.CanRedo) return; ApplyHistory(_history.Redo(), "REDO"); }
     public override void Render(DrawingContext context)
     {
         base.Render(context); context.FillRectangle(Brush.Parse("#080B10"), Bounds); if (_scene is null) { context.DrawText(new FormattedText("Build a terrain + placement scene from a loaded ADT", System.Globalization.CultureInfo.InvariantCulture, FlowDirection.LeftToRight, Typeface.Default, 13, Brush.Parse("#8995A9")), new Point(16, 28)); return; }
@@ -105,7 +117,7 @@ internal sealed class MapSceneCanvas : Control
     }
     protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
-        base.OnPointerPressed(e); if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+        base.OnPointerPressed(e); if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return; Focus();
         if (_pickMode)
         {
             var point = e.GetPosition(this); var scene = _scene; var picked = scene is null || !_terrain ? null : MapScenePickingService.PickTerrain(scene.TerrainGeometry, scene.TerrainMinimum, scene.TerrainMaximum, _yaw, _pitch, _zoom, (float)Bounds.Width, (float)Bounds.Height, new((float)point.X, (float)point.Y));
@@ -125,26 +137,50 @@ internal sealed class MapSceneCanvas : Control
         if (_editEnabled && _editStart is { } editStart && _editBaseline is { } baseline)
         {
             if (_editMode == MapScenePlacementEditMode.MoveOnTerrain) UpdateMovePreview(point);
-            else if (_editMode == MapScenePlacementEditMode.RotateZ) UpdatePreview(baseline with { Orientation = MapScenePlacementGizmoService.RotateZ(baseline.Orientation, (float)(point.X - editStart.X)) });
+            else if (_editMode == MapScenePlacementEditMode.RotateZ) { var orientation = MapScenePlacementGizmoService.RotateZ(baseline.Orientation, (float)(point.X - editStart.X)); if (_snapEnabled) orientation = MapScenePlacementGizmoService.SnapRotation(orientation, _snapSettings.RotationStep); UpdatePreview(baseline with { Orientation = orientation }); }
             else
             {
-                var scale = MapScenePlacementGizmoService.UniformScale(baseline.Scale, (float)(editStart.Y - point.Y)); UpdatePreview(baseline with { Scale = scale });
+                var scale = MapScenePlacementGizmoService.UniformScale(baseline.Scale, (float)(editStart.Y - point.Y)); if (_snapEnabled) scale = MapScenePlacementGizmoService.SnapScale(scale, _snapSettings.ScaleStep); UpdatePreview(baseline with { Scale = scale });
             }
             e.Handled = true; return;
         }
         if (_dragStart is not { } start) return; _yaw += (float)(point.X - start.X) * 0.01f; _pitch = Math.Clamp(_pitch + (float)(point.Y - start.Y) * 0.01f, -1.5f, 1.5f); _dragStart = point; InvalidateVisual();
     }
-    protected override void OnPointerReleased(PointerReleasedEventArgs e) { base.OnPointerReleased(e); _dragStart = null; _editStart = null; _editBaseline = null; e.Pointer.Capture(null); }
+    protected override void OnPointerReleased(PointerReleasedEventArgs e) { base.OnPointerReleased(e); _dragStart = null; FinishEdit(); e.Pointer.Capture(null); }
+    protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e) { base.OnPointerCaptureLost(e); _dragStart = null; FinishEdit(); }
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e) { base.OnPointerWheelChanged(e); _zoom = Math.Clamp(_zoom * (e.Delta.Y > 0 ? 1.12f : 0.89f), 0.08f, 20f); InvalidateVisual(); e.Handled = true; }
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e); if (!_editEnabled || !e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
+        if (e.Key == Key.Z && e.KeyModifiers.HasFlag(KeyModifiers.Shift)) { RedoPlacementPreview(); e.Handled = true; }
+        else if (e.Key == Key.Z) { UndoPlacementPreview(); e.Handled = true; }
+        else if (e.Key == Key.Y) { RedoPlacementPreview(); e.Handled = true; }
+    }
 
     private void UpdateMovePreview(Point point)
     {
-        var scene = _scene; var baseline = _preview; if (scene is null || baseline is null || !_terrain) return; var picked = MapScenePickingService.PickTerrain(scene.TerrainGeometry, scene.TerrainMinimum, scene.TerrainMaximum, _yaw, _pitch, _zoom, (float)Bounds.Width, (float)Bounds.Height, new((float)point.X, (float)point.Y)); if (picked is null) return; _pick = picked; UpdatePreview(baseline with { Position = picked.WorldPosition });
+        var scene = _scene; var baseline = _preview; if (scene is null || baseline is null || !_terrain) return; var picked = MapScenePickingService.PickTerrain(scene.TerrainGeometry, scene.TerrainMinimum, scene.TerrainMaximum, _yaw, _pitch, _zoom, (float)Bounds.Width, (float)Bounds.Height, new((float)point.X, (float)point.Y)); if (picked is null) return;
+        if (_snapEnabled && _snapSettings.PositionStep > 0)
+        {
+            var snapped = MapScenePlacementGizmoService.SnapTerrain(scene.TerrainGeometry, picked.WorldPosition, _snapSettings.PositionStep); if (snapped is null) { PlacementSnapMissed?.Invoke(this, EventArgs.Empty); return; }
+            picked = picked with { WorldPosition = snapped.WorldPosition, CellX = snapped.CellX, CellY = snapped.CellY, TriangleIndex = snapped.TriangleIndex };
+        }
+        _pick = picked; UpdatePreview(baseline with { Position = picked.WorldPosition });
     }
     private void UpdatePreview(MapScenePlacementPreview preview) { _preview = preview; PlacementPreviewChanged?.Invoke(this, new(preview.Position, preview.Orientation, preview.Scale, _editMode)); InvalidateVisual(); }
+    private void FinishEdit()
+    {
+        if (_editBaseline is not null && _preview is not null) _history.Commit(Transform(_preview)); _editStart = null; _editBaseline = null; NotifyHistory();
+    }
+    private void ApplyHistory(MapScenePlacementTransform state, string action)
+    {
+        if (_preview is null) return; _preview = _preview with { Position = state.Position, Orientation = state.Orientation, Scale = state.Scale }; NotifyHistory(); PlacementPreviewChanged?.Invoke(this, new(state.Position, state.Orientation, state.Scale, MapScenePlacementEditMode.History, action)); InvalidateVisual();
+    }
+    private void NotifyHistory() => HistoryAvailabilityChanged?.Invoke(this, new(_preview is not null && _history.CanUndo, _preview is not null && _history.CanRedo));
+    private static MapScenePlacementTransform Transform(MapScenePlacementPreview preview) => new(preview.Position, preview.Orientation, preview.Scale);
     private static void ValidatePreview(MapScenePlacementPreview preview)
     {
-        ArgumentNullException.ThrowIfNull(preview); if (preview.Vertices.Count == 0 || preview.TriangleIndices.Count == 0 || preview.TriangleIndices.Count % 3 != 0 || preview.TriangleIndices.Any(index => (uint)index >= (uint)preview.Vertices.Count) || preview.Vertices.Any(value => !Finite(value)) || !Finite(preview.Position) || !Finite(preview.Orientation) || !float.IsFinite(preview.Scale) || preview.Scale <= 0) throw new InvalidDataException("Placement preview requires finite bounded geometry and a positive transform.");
+        ArgumentNullException.ThrowIfNull(preview); if (preview.Vertices.Count == 0 || preview.TriangleIndices.Count == 0 || preview.TriangleIndices.Count % 3 != 0 || preview.TriangleIndices.Any(index => (uint)index >= (uint)preview.Vertices.Count) || preview.Vertices.Any(value => !Finite(value)) || !Finite(preview.Position) || !Finite(preview.Orientation) || !MapScenePlacementGizmoService.IsEncodableScale(preview.Scale)) throw new InvalidDataException("Placement preview requires finite bounded geometry and a WotLK-encodable transform.");
     }
     private static bool Finite(Vector3 value) => float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
 

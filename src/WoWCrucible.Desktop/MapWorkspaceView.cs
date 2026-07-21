@@ -59,6 +59,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     private readonly TextBox _placementX = new(); private readonly TextBox _placementY = new(); private readonly TextBox _placementZ = new();
     private readonly TextBox _placementRotX = new(); private readonly TextBox _placementRotY = new(); private readonly TextBox _placementRotZ = new();
     private readonly TextBox _placementScale = new();
+    private readonly TextBox _placementPositionSnap = new() { Text = "0", PlaceholderText = "Position grid step; 0 disables" }; private readonly TextBox _placementRotationSnap = new() { Text = "0", PlaceholderText = "Rotation degree step; 0 disables" }; private readonly TextBox _placementScaleSnap = new() { Text = "0", PlaceholderText = "Scale step; 0 disables" };
     private readonly TextBox _placementUid = new() { PlaceholderText = "Blank scans sibling ADTs and allocates the next UID" };
     private readonly TextBox _placementFlags = new() { Text = "0", PlaceholderText = "Flags (decimal or 0x...)" };
     private readonly TextBox _placementDoodadSet = new() { Text = "0", PlaceholderText = "WMO doodad set" };
@@ -107,7 +108,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     public MapWorkspaceView(DesktopWorkspaceSession session)
     {
         _session = session; _lightingView = new WorldLightingView(session); _lightingView.OpenDbcRecordRequested += (_, request) => OpenDbcRecordRequested?.Invoke(this, request); _wmoLibrary.Text = !string.IsNullOrWhiteSpace(session.Settings.ProcessedAssetLibraryPath) ? session.Settings.ProcessedAssetLibraryPath : Directory.Exists(@"G:\Crucible-Extras-Processed") ? @"G:\Crucible-Extras-Processed" : string.Empty;
-        AutomationProperties.SetName(_placementX, "Placement X"); AutomationProperties.SetName(_placementY, "Placement Y"); AutomationProperties.SetName(_placementZ, "Placement Z"); AutomationProperties.SetName(_placementRotX, "Placement rotation X"); AutomationProperties.SetName(_placementRotY, "Placement rotation Y"); AutomationProperties.SetName(_placementRotZ, "Placement rotation Z"); AutomationProperties.SetName(_placementScale, "Placement scale"); AutomationProperties.SetName(_wmoReferences, "Map object reference"); AutomationProperties.SetName(_wmoCandidates, "Map object provenance"); AutomationProperties.SetName(_sceneStatus, "Map scene status");
+        AutomationProperties.SetName(_placementX, "Placement X"); AutomationProperties.SetName(_placementY, "Placement Y"); AutomationProperties.SetName(_placementZ, "Placement Z"); AutomationProperties.SetName(_placementRotX, "Placement rotation X"); AutomationProperties.SetName(_placementRotY, "Placement rotation Y"); AutomationProperties.SetName(_placementRotZ, "Placement rotation Z"); AutomationProperties.SetName(_placementScale, "Placement scale"); AutomationProperties.SetName(_placementPositionSnap, "Placement position snap step"); AutomationProperties.SetName(_placementRotationSnap, "Placement rotation snap step"); AutomationProperties.SetName(_placementScaleSnap, "Placement scale snap step"); AutomationProperties.SetName(_wmoReferences, "Map object reference"); AutomationProperties.SetName(_wmoCandidates, "Map object provenance"); AutomationProperties.SetName(_sceneStatus, "Map scene status");
         _sceneStatus.TextWrapping = TextWrapping.NoWrap;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = new Button { Content = "Open map file…" }; open.Click += async (_, _) => await PickAsync();
@@ -128,6 +129,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         _wmoReferences.SelectionChanged += async (_, _) => { _mapScene.ClearPlacementPreview(); LoadPlacementFields(); await ResolveSelectedWmoAsync(); };
         _wmoCandidates.SelectionChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; _mapScene.ClearPlacementPreview(); DescribeSelectedWmoCandidate(); };
         foreach (var input in PlacementInputs()) input.TextChanged += (_, _) => { _placementPlan = null; _placementMultiTilePlan = null; UpdateScenePlacementPreviewFromFields(); };
+        foreach (var input in PlacementSnapInputs()) input.TextChanged += (_, _) => UpdateScenePlacementSnapSettings();
         _grid.CellsSelected += (_, cells) => { _heightPlan = null; InvalidateTexturePreview(refreshSelection: false); InvalidateTextureStructurePreview(refreshSelection: false); InvalidateAlphaPreview(refreshSelection: false); _selected.Text = DescribeSelection(cells); };
         var selectAll = new Button { Content = "Select all present" }; selectAll.Click += (_, _) => _grid.SelectAllPresent();
         var clear = new Button { Content = "Clear selection" }; clear.Click += (_, _) => _grid.ClearSelection();
@@ -173,7 +175,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
                 Children = { Label("FILE SUMMARY"), Card(_summary), Label("SELECTED CELL(S)"), Card(_selected), Label("ADT TERRAIN HEIGHT OFFSET"), _heightDelta, new WrapPanel { Children = { selectAll, clear, previewHeight, saveHeight } }, Label("ADT VERTEX BRUSH"), BrushFields(), new WrapPanel { Children = { previewBrush, saveBrush } }, Info("Click the terrain grid to place the brush center. Raise/lower uses signed strength. Flatten and smooth use its absolute value as the maximum movement per stroke. Noise uses it as amplitude; its seed makes the result exactly repeatable."), Label("ADT TEXTURE LAYER"), TextureFields(), new WrapPanel { Children = { previewTexture, saveTexture } }, Info("Reassigns an existing MCLY layer slot to one of this ADT's existing MTEX textures."), Label("ADD MTEX + MCLY LAYER"), NewTextureFields(), new WrapPanel { Children = { previewNewTexture, saveNewTexture } }, Info("Appends one client-relative BLP to MTEX and adds a matching MCLY/MCAL layer to every selected cell. Wrath's four-layer limit is enforced. Auto preserves the tile's existing packed-versus-8-bit alpha family; mixed or evidence-free tiles require an explicit encoding."), Label("ADT ALPHA TEXTURE BRUSH"), AlphaFields(), _alphaRestrict, new WrapPanel { Children = { previewAlpha, saveAlpha } }, Info("Uses the click-positioned center and radius above to paint an existing additional layer toward alpha 0–255. Packed, big, and RLE maps preserve their current fixed-width encoding; an RLE stroke that cannot fit is refused instead of shifting MCNK offsets."), Label("CHUNK TABLE"), _chunks, Label("REFERENCED CLIENT ASSETS"), _dependencies }
             }
         };
-        var wmoResolver = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(7), Spacing = 6, Children = { _wmoLibrary, new WrapPanel { Children = { chooseWmoLibrary, previewReference, openWmo } }, _wmoReferences, _wmoCandidates, Label("PLACEMENT TRANSFORM & LIFECYCLE"), PlacementFields(), new WrapPanel { Children = { showPlacementInScene, previewPlacement, savePlacement, previewPlacementAdd, savePlacementAdd, previewPlacementDelete, savePlacementDelete } }, Info("Show live placement preview loads the exact selected provenance into the terrain scene and keeps position, rotation, and scale synchronized with these unsaved fields. Transform edits one existing local record. Add/clone and delete are coordinated map transactions: Crucible duplicates one semantic record/UID into every bounds-intersected ADT or removes every existing UID copy, rebuilds each tile-local name/index/MCRF table, retains every source, and publishes only changed ADTs beneath a tiny MPQ-ready Payload tree with manifest and receipt."), _placementStatus } } };
+        var wmoResolver = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(7), Spacing = 6, Children = { _wmoLibrary, new WrapPanel { Children = { chooseWmoLibrary, previewReference, openWmo } }, _wmoReferences, _wmoCandidates, Label("PLACEMENT TRANSFORM & LIFECYCLE"), PlacementFields(), new WrapPanel { Children = { showPlacementInScene, previewPlacement, savePlacement, previewPlacementAdd, savePlacementAdd, previewPlacementDelete, savePlacementDelete } }, Info("Show live placement preview loads the exact selected provenance into the terrain scene and keeps position, rotation, and scale synchronized with these unsaved fields. Position snapping rounds horizontal world coordinates and recomputes exact terrain height; rotation and scale snapping use their configured steps. Zero disables each snap independently. One completed drag is one undo step; Ctrl+Z/Ctrl+Y work while the scene editor has focus. Transform edits one existing local record. Add/clone and delete remain coordinated map transactions that retain every source and publish only changed ADTs beneath a tiny MPQ-ready Payload tree with manifest and receipt."), _placementStatus } } };
         var wmoFooter = new Border { Padding = new Thickness(8), Background = Brush.Parse("#101722"), Child = _wmoStatus }; Grid.SetRow(wmoFooter, 2);
         var objectPreviewHost = new Grid { Children = { _wmoPreview, _m2Preview } }; Grid.SetRow(objectPreviewHost, 1);
         var wmoPage = new Grid { RowDefinitions = new("Auto,*,Auto"), Children = { wmoResolver, objectPreviewHost, wmoFooter } };
@@ -196,7 +198,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         root.Children.Add(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading });
         root.Children.Add(_workspaceTabs); Grid.SetRow(_workspaceTabs, 1);
         var footer = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _status }; root.Children.Add(footer); Grid.SetRow(footer, 2);
-        Content = root;
+        Content = root; UpdateScenePlacementSnapSettings();
     }
 
     public void OpenLighting(uint? lightId = null) { _pendingLightingId = lightId; _workspaceTabs.SelectedIndex = 1; if (lightId is { } id) _lightingView.SelectLightId(id); }
@@ -474,12 +476,13 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
 
     private Control PlacementFields()
     {
-        var grid = new Grid { ColumnDefinitions = new("Auto,*,*,*"), RowDefinitions = new("Auto,Auto,Auto,Auto,Auto"), ColumnSpacing = 6, RowSpacing = 5 };
+        var grid = new Grid { ColumnDefinitions = new("Auto,*,*,*"), RowDefinitions = new("Auto,Auto,Auto,Auto,Auto,Auto"), ColumnSpacing = 6, RowSpacing = 5 };
         AddPlacementRow(grid, 0, "Position X / Y / Z", _placementX, _placementY, _placementZ);
         AddPlacementRow(grid, 1, "Rotation X / Y / Z", _placementRotX, _placementRotY, _placementRotZ);
         var scaleLabel = Label("Scale"); Grid.SetRow(scaleLabel, 2); grid.Children.Add(scaleLabel); Grid.SetRow(_placementScale, 2); Grid.SetColumn(_placementScale, 1); Grid.SetColumnSpan(_placementScale, 3); grid.Children.Add(_placementScale);
         AddPlacementRow(grid, 3, "New UID / flags / WMO doodad set", _placementUid, _placementFlags, _placementDoodadSet);
         var nameSetLabel = Label("WMO name set"); Grid.SetRow(nameSetLabel, 4); grid.Children.Add(nameSetLabel); Grid.SetRow(_placementNameSet, 4); Grid.SetColumn(_placementNameSet, 1); Grid.SetColumnSpan(_placementNameSet, 3); grid.Children.Add(_placementNameSet);
+        AddPlacementRow(grid, 5, "Snap position / degrees / scale", _placementPositionSnap, _placementRotationSnap, _placementScaleSnap);
         return grid;
     }
 
@@ -490,6 +493,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
     }
 
     private IEnumerable<TextBox> PlacementInputs() => [_placementX, _placementY, _placementZ, _placementRotX, _placementRotY, _placementRotZ, _placementScale, _placementUid, _placementFlags, _placementDoodadSet, _placementNameSet];
+    private IEnumerable<TextBox> PlacementSnapInputs() => [_placementPositionSnap, _placementRotationSnap, _placementScaleSnap];
 
     private void UseScenePlacementPick(MapSceneTerrainPick pick)
     {
@@ -516,7 +520,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             {
                 var geometry = await Task.Run(() => M2PreviewGeometryService.Load(candidate.Location.SourcePath), token); token.ThrowIfCancellationRequested(); preview = new(geometry.Vertices, geometry.TriangleIndices, AdtPlacementKind.M2, reference.M2Placement?.UniqueId, reference.ClientPath!, position, orientation, scale);
             }
-            _mapScene.SetPlacementPreview(preview); _visualTabs.SelectedIndex = 1; _sceneStatus.Text = $"LIVE UNSAVED {preview.Kind} PREVIEW · {Path.GetFileName(preview.Label)} · exact provenance {candidate.Location.Provenance} · enable Edit placement preview and choose Move on terrain, Rotate Z, or Uniform scale. No file changed."; _placementStatus.Text = "Gold scene preview is synchronized with these transform fields. Gizmo edits invalidate prior plans and remain unsaved until a coordinated review/build is explicitly completed.";
+            _mapScene.SetPlacementSnapSettings(ReadPlacementSnapSettings()); _mapScene.SetPlacementPreview(preview); _visualTabs.SelectedIndex = 1; _sceneStatus.Text = $"LIVE UNSAVED {preview.Kind} PREVIEW · {Path.GetFileName(preview.Label)} · exact provenance {candidate.Location.Provenance} · enable Edit placement preview and choose Move on terrain, Rotate Z, or Uniform scale. Configurable snapping and gesture undo/redo remain unsaved. No file changed."; _placementStatus.Text = "Gold scene preview is synchronized with these transform fields. Gizmo edits invalidate prior plans and remain unsaved until a coordinated review/build is explicitly completed.";
         }
         catch (OperationCanceledException) { }
         catch (Exception exception) { _placementStatus.Text = exception.Message; DesktopCrashLogger.Log("ADT live placement preview failed", exception); }
@@ -527,13 +531,22 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
         _updatingScenePreviewFields = true;
         try { _placementX.Text = Format(preview.Position.X); _placementY.Text = Format(preview.Position.Y); _placementZ.Text = Format(preview.Position.Z); _placementRotX.Text = Format(preview.Orientation.X); _placementRotY.Text = Format(preview.Orientation.Y); _placementRotZ.Text = Format(preview.Orientation.Z); _placementScale.Text = Format(preview.Scale); }
         finally { _updatingScenePreviewFields = false; }
-        _placementPlan = null; _placementMultiTilePlan = null; _placementStatus.Text = $"Live scene {preview.Mode} updated the unsaved transform fields. Preview the coordinated {(HasExistingPlacement() ? "transform" : "add")} before building; no ADT or project file changed.";
+        _placementPlan = null; _placementMultiTilePlan = null; var action = preview.Mode == MapScenePlacementEditMode.History ? preview.Action ?? "history" : preview.Mode.ToString(); _placementStatus.Text = $"Live scene {action} updated the unsaved transform fields. Preview the coordinated {(HasExistingPlacement() ? "transform" : "add")} before building; no ADT or project file changed.";
     }
 
     private void UpdateScenePlacementPreviewFromFields()
     {
         if (_updatingScenePreviewFields || !TryPlacementTransform(out var position, out var orientation, out var scale)) return; _mapScene.UpdatePlacementPreviewTransform(position, orientation, scale);
     }
+
+    private void UpdateScenePlacementSnapSettings()
+    {
+        try { _mapScene.SetPlacementSnapSettings(ReadPlacementSnapSettings()); }
+        catch when (PlacementSnapInputs().Any(input => string.IsNullOrWhiteSpace(input.Text))) { }
+        catch (Exception exception) { _placementStatus.Text = exception.Message; }
+    }
+
+    private MapScenePlacementSnapSettings ReadPlacementSnapSettings() => MapScenePlacementGizmoService.ValidateSnapSettings(new(Number(_placementPositionSnap, "position snap step"), Number(_placementRotationSnap, "rotation snap step"), Number(_placementScaleSnap, "scale snap step")));
 
     private bool TryPlacementTransform(out Vector3 position, out Vector3 orientation, out float scale)
     {
