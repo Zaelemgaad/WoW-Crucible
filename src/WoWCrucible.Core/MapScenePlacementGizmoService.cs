@@ -3,6 +3,8 @@ using System.Numerics;
 namespace WoWCrucible.Core;
 
 public sealed record MapScenePlacementTransform(Vector3 Position, Vector3 Orientation, float Scale);
+public enum MapScenePlacementAxis { X, Y, Z }
+public enum MapScenePlacementAxisSpace { World, LocalModel }
 public sealed record MapScenePlacementSnapSettings(float PositionStep, float RotationStep, float ScaleStep)
 {
     public static MapScenePlacementSnapSettings Disabled { get; } = new(0, 0, 0);
@@ -63,9 +65,33 @@ public static class MapScenePlacementGizmoService
     public const float MaximumScale = ushort.MaxValue / 1024f;
 
     public static Vector3 RotateZ(Vector3 baselineDegrees, float horizontalPixels, float degreesPerPixel = 0.5f)
+        => RotateAxis(baselineDegrees, MapScenePlacementAxis.Z, horizontalPixels, degreesPerPixel);
+
+    public static Vector3 RotateAxis(Vector3 baselineDegrees, MapScenePlacementAxis axis, float horizontalPixels, float degreesPerPixel = 0.5f)
     {
-        if (!Finite(baselineDegrees) || !float.IsFinite(horizontalPixels) || !float.IsFinite(degreesPerPixel) || degreesPerPixel <= 0) throw new ArgumentException("Placement rotation requires finite inputs and a positive sensitivity.");
-        return baselineDegrees with { Z = NormalizeDegrees(baselineDegrees.Z + horizontalPixels * degreesPerPixel) };
+        if (!IsFinite(baselineDegrees) || !Enum.IsDefined(axis) || !float.IsFinite(horizontalPixels) || !float.IsFinite(degreesPerPixel) || degreesPerPixel <= 0) throw new ArgumentException("Placement axis rotation requires finite inputs, a defined axis, and a positive sensitivity.");
+        var baseline = axis switch { MapScenePlacementAxis.X => baselineDegrees.X, MapScenePlacementAxis.Y => baselineDegrees.Y, _ => baselineDegrees.Z }; var value = NormalizeDegrees((float)(((double)baseline + (double)horizontalPixels * degreesPerPixel) % 360d));
+        return axis switch { MapScenePlacementAxis.X => baselineDegrees with { X = value }, MapScenePlacementAxis.Y => baselineDegrees with { Y = value }, _ => baselineDegrees with { Z = value } };
+    }
+
+    public static Vector3 AxisDirection(Vector3 orientationDegrees, MapScenePlacementAxis axis, MapScenePlacementAxisSpace space)
+    {
+        if (!IsFinite(orientationDegrees) || !Enum.IsDefined(axis) || !Enum.IsDefined(space)) throw new ArgumentException("Placement axis direction requires finite orientation and defined axis/space.");
+        var direction = axis switch { MapScenePlacementAxis.X => Vector3.UnitX, MapScenePlacementAxis.Y => Vector3.UnitY, _ => Vector3.UnitZ };
+        if (space == MapScenePlacementAxisSpace.LocalModel) direction = Vector3.TransformNormal(direction, M2PreviewSceneService.MapObjectTransform(orientationDegrees, 1));
+        if (!IsFinite(direction) || Math.Abs(direction.LengthSquared() - 1f) > .001f) throw new InvalidDataException("Placement axis transform did not produce a unit direction."); return Vector3.Normalize(direction);
+    }
+
+    public static Vector3 TranslateAxis(Vector3 baselinePosition, Vector3 orientationDegrees, MapScenePlacementAxis axis, MapScenePlacementAxisSpace space, float distance)
+    {
+        if (!IsFinite(baselinePosition) || !float.IsFinite(distance)) throw new ArgumentException("Placement axis translation requires finite position and distance.");
+        var result = baselinePosition + AxisDirection(orientationDegrees, axis, space) * distance; return IsFinite(result) ? result : throw new InvalidOperationException("Placement axis translation produced a non-finite position.");
+    }
+
+    public static float ProjectedAxisDragDistance(Vector2 pointerDelta, Vector2 projectedUnitAxis)
+    {
+        if (!float.IsFinite(pointerDelta.X) || !float.IsFinite(pointerDelta.Y) || !float.IsFinite(projectedUnitAxis.X) || !float.IsFinite(projectedUnitAxis.Y)) throw new ArgumentException("Projected placement dragging requires finite screen vectors.");
+        var length = projectedUnitAxis.Length(); if (length < .001f) throw new InvalidOperationException("The selected placement axis points into the current camera and cannot be dragged from this view."); return Vector2.Dot(pointerDelta, projectedUnitAxis / length) / length;
     }
 
     public static float UniformScale(float baselineScale, float upwardPixels, float sensitivity = 0.01f)
@@ -82,9 +108,18 @@ public static class MapScenePlacementGizmoService
     }
 
     public static Vector3 SnapRotation(Vector3 orientationDegrees, float step)
+        => SnapRotationAxis(orientationDegrees, MapScenePlacementAxis.Z, step);
+
+    public static Vector3 SnapRotationAxis(Vector3 orientationDegrees, MapScenePlacementAxis axis, float step)
     {
-        if (!IsFinite(orientationDegrees) || !Step(step)) throw new ArgumentException("Placement rotation snapping requires finite orientation and a nonnegative step.");
-        return step == 0 ? orientationDegrees : orientationDegrees with { Z = NormalizeDegrees(Snap(orientationDegrees.Z, step)) };
+        if (!IsFinite(orientationDegrees) || !Enum.IsDefined(axis) || !Step(step)) throw new ArgumentException("Placement rotation snapping requires finite orientation, a defined axis, and a nonnegative step.");
+        if (step == 0) return orientationDegrees; var value = NormalizeDegrees(Snap(NormalizeDegrees(axis switch { MapScenePlacementAxis.X => orientationDegrees.X, MapScenePlacementAxis.Y => orientationDegrees.Y, _ => orientationDegrees.Z }), step));
+        return axis switch { MapScenePlacementAxis.X => orientationDegrees with { X = value }, MapScenePlacementAxis.Y => orientationDegrees with { Y = value }, _ => orientationDegrees with { Z = value } };
+    }
+
+    public static float SnapDistance(float distance, float step)
+    {
+        if (!float.IsFinite(distance) || !Step(step)) throw new ArgumentException("Placement distance snapping requires finite distance and a nonnegative step."); return step == 0 ? distance : Snap(distance, step);
     }
 
     public static float SnapScale(float scale, float step)
@@ -116,7 +151,7 @@ public static class MapScenePlacementGizmoService
 
     private static float Snap(float value, float step)
     {
-        var snapped = MathF.Round(value / step, MidpointRounding.AwayFromZero) * step; if (!float.IsFinite(snapped)) throw new InvalidOperationException("Placement snapping produced a non-finite value."); return snapped;
+        var snapped = Math.Round((double)value / step, MidpointRounding.AwayFromZero) * step; if (!double.IsFinite(snapped) || snapped is > float.MaxValue or < -float.MaxValue) throw new InvalidOperationException("Placement snapping produced a non-finite value."); return (float)snapped;
     }
 
     private static bool Barycentric(float x, float y, Vector3 a, Vector3 b, Vector3 c, out float wa, out float wb, out float wc)
