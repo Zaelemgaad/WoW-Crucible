@@ -17,7 +17,10 @@ internal sealed record SqlGuidedEditRequest(string Table, IReadOnlyDictionary<st
 
 internal sealed class SqlWorkspaceView : UserControl, IDisposable
 {
-    private sealed record TableChoice(DatabaseTableCapability Table) { public override string ToString() => $"{Table.Name}  ·  {Table.Columns.Count} columns"; }
+    private sealed record TableChoice(DatabaseTableCapability Table, long? Rows)
+    {
+        public override string ToString() => Rows is { } rows ? $"{Table.Name}  ·  {rows:N0} rows" : $"{Table.Name}  ·  counting rows…";
+    }
     private sealed record RelationChoice(DatabaseRelationCapability Relation) { public override string ToString() => $"{Relation.FromTable}.{Relation.FromColumn} → {Relation.ToTable}.{Relation.ToColumn} · {(Relation.Declared ? "FK" : "inferred")}"; }
     private sealed record FieldEditor(TextBox Text, CheckBox? Null, ComboBox? InsertMode);
     private sealed record QueryDisplayRow(int Number, IReadOnlyList<string> Columns, IReadOnlyList<object?> Values);
@@ -29,6 +32,8 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly SqlWorkspaceService _service = new();
     private readonly SqlAdministrationService _administration = new();
     private readonly TextBox _tableFilter = new() { PlaceholderText = "Filter tables…" };
+    private readonly ComboBox _tableSort = new() { ItemsSource = new[] { "Table name A–Z", "Rows: most first", "Rows: least first" }, SelectedIndex = 0 };
+    private readonly TextBlock _tableCountStatus = Status("Exact row totals load in the background.");
     private readonly ComboBox _schemas = new() { PlaceholderText = "Database schema" };
     private readonly ListBox _tables = new();
     private readonly TextBox _rowSearch = new() { PlaceholderText = "Search this table by ID, name, or any of the first 24 fields…" };
@@ -37,9 +42,11 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private readonly ComboBox _sortColumn = new() { PlaceholderText = "Default primary-key order" };
     private readonly ComboBox _sortDirection = new() { ItemsSource = new[] { "Ascending", "Descending" }, SelectedIndex = 0 };
     private readonly ComboBox _pageSize = new() { ItemsSource = new[] { 50, 100, 200, 500 }, SelectedItem = 200 };
-    private readonly ComboBox _rowDisplay = new() { ItemsSource = new[] { "Compact rows", "Complete row cards" }, SelectedIndex = 0 };
+    private readonly ComboBox _rowDisplay = new() { ItemsSource = new[] { "Readable row cards", "Compact identities" }, SelectedIndex = 0 };
     private readonly ListBox _rows = new();
     private readonly StackPanel _rowEditor = new() { Spacing = 6 };
+    private readonly Border _rowListPane = new() { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1) };
+    private readonly Border _rowEditPane = new() { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), IsVisible = false };
     private readonly StackPanel _relationshipResults = new() { Spacing = 5 };
     private readonly SqlDependencyGraphView _dependencyGraph = new();
     private readonly StackPanel _dependencyList = new() { Spacing = 5 };
@@ -157,6 +164,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private bool _suppressTableSelection;
     private int _offset;
     private CancellationTokenSource? _operation;
+    private CancellationTokenSource? _tableCountOperation;
     private DatabaseConnectionProfile? _profile;
     private DatabaseCapabilities? _capabilities;
     private bool _suppressSchemaSelection;
@@ -165,6 +173,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private SqlQueryBatch? _queryBatch;
     private IReadOnlyList<SqlDatabaseObjectInfo> _databaseObjectCache = [];
     private SqlDatabaseObjectChangePlan? _databaseObjectChangePlan;
+    private IReadOnlyDictionary<string, long> _tableRowCounts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
 
     public event EventHandler? BackRequested;
     public event EventHandler? ConnectionRequested;
@@ -184,7 +193,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         Grid.SetColumnSpan(heading.Children[^1], 2);
         _tabs = new TabControl { Margin = new Thickness(10), Items = { new TabItem { Header = "Tables & rows", Content = BrowsePage() }, new TabItem { Header = "SQL query", Content = QueryPage() }, new TabItem { Header = "Favorites", Content = FavoritesPage() }, new TabItem { Header = "Dependency graph", Content = DependencyPage() }, new TabItem { Header = "Schema & server", Content = AdministrationPage() } } };
         Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(_tabs, 1), WithRow(_confirmation, 2), WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 6), Child = _status }, 3) } };
-        _tableFilter.TextChanged += (_, _) => PopulateTables(); _tables.SelectionChanged += async (_, _) => await SelectTableAsync();
+        _tableFilter.TextChanged += (_, _) => PopulateTables(); _tableSort.SelectionChanged += (_, _) => PopulateTables(); _tables.SelectionChanged += async (_, _) => await SelectTableAsync();
         _schemas.SelectionChanged += async (_, _) => { if (!_suppressSchemaSelection && _schemas.SelectedItem is string database) await SwitchSchemaAsync(database); };
         _rows.SelectionChanged += (_, _) => SelectRow();
         _rows.DoubleTapped += (_, _) => OpenSelectedDecodedEditor();
@@ -212,7 +221,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         RefreshConnectionStatus(); RefreshFavorites(); RefreshQueryHistory(); PopulateTables(); PopulateRelations();
     }
 
-    public void Activate() { PopulateTables(); if (_tables.SelectedItem is null && _tables.ItemCount > 0) _tables.SelectedIndex = 0; _ = LoadSchemasAsync(); }
+    public void Activate() { PopulateTables(); if (_tables.SelectedItem is null && _tables.ItemCount > 0) _tables.SelectedIndex = 0; _ = LoadSchemasAsync(); _ = LoadTableRowCountsAsync(); }
 
     public void ActivateFavorites()
     {
@@ -259,6 +268,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         var exportCsv = new Button { Content = "Export table CSV" }; exportCsv.Click += async (_, _) => await ExportTableAsync(SqlExportFormat.Csv);
         var exportJson = new Button { Content = "Export table JSONL" }; exportJson.Click += async (_, _) => await ExportTableAsync(SqlExportFormat.JsonLines);
         var importCsv = new Button { Content = "Import CSV…" }; importCsv.Click += async (_, _) => await PrepareImportAsync();
+        var recount = new Button { Content = "Recount exact rows" }; recount.Click += async (_, _) => await LoadTableRowCountsAsync();
         var controls = new StackPanel
         {
             Spacing = 4,
@@ -270,8 +280,22 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
                 new WrapPanel { Children = { previous, next, create, exportCsv, exportJson, importCsv, _pageStatus } }
             }
         };
-        var right = new Grid { RowDefinitions = new("Auto,2*,Auto,*"), Children = { controls, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _rows }, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(new ScrollViewer { Content = _rowEditor }, 3) } };
-        var left = new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(0, 0, 8, 0), Children = { _tableFilter, WithRow(_tables, 1) } };
+        _rowListPane.Child = _rows;
+        _rowEditPane.Child = new ScrollViewer { Content = _rowEditor, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto };
+        var rowWorkspace = new Grid { Children = { _rowListPane, _rowEditPane } };
+        var right = new Grid { RowDefinitions = new("Auto,*"), Children = { controls, WithRow(rowWorkspace, 1) } };
+        var tableTools = new StackPanel
+        {
+            Spacing = 5,
+            Children =
+            {
+                new TextBlock { Text = "LIVE SQL TABLES · exact row totals", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Brush.Parse("#C58A2B") },
+                _tableFilter,
+                new WrapPanel { Children = { _tableSort, recount } },
+                _tableCountStatus
+            }
+        };
+        var left = new Grid { RowDefinitions = new("Auto,*"), Margin = new Thickness(0, 0, 8, 0), Children = { tableTools, WithRow(_tables, 1) } };
         return new ResponsiveSplitGrid(left, right, 1, 3);
     }
 
@@ -572,8 +596,40 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private void PopulateTables()
     {
         var selected = (_tables.SelectedItem as TableChoice)?.Table.Name; var query = _tableFilter.Text?.Trim() ?? string.Empty;
-        var values = (_capabilities?.Tables.Values ?? []).Where(table => query.Length == 0 || table.Name.Contains(query, StringComparison.OrdinalIgnoreCase)).OrderBy(table => table.Name).Select(table => new TableChoice(table)).ToArray();
+        var source = (_capabilities?.Tables.Values ?? []).Where(table => query.Length == 0 || table.Name.Contains(query, StringComparison.OrdinalIgnoreCase));
+        source = _tableSort.SelectedIndex switch
+        {
+            1 => source.OrderByDescending(table => _tableRowCounts.GetValueOrDefault(table.Name, -1)).ThenBy(table => table.Name, StringComparer.OrdinalIgnoreCase),
+            2 => source.OrderBy(table => _tableRowCounts.GetValueOrDefault(table.Name, long.MaxValue)).ThenBy(table => table.Name, StringComparer.OrdinalIgnoreCase),
+            _ => source.OrderBy(table => table.Name, StringComparer.OrdinalIgnoreCase)
+        };
+        var values = source.Select(table => new TableChoice(table, _tableRowCounts.TryGetValue(table.Name, out var rows) ? rows : null)).ToArray();
         _tables.ItemsSource = values; if (selected is not null) _tables.SelectedItem = values.FirstOrDefault(item => item.Table.Name.Equals(selected, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task LoadTableRowCountsAsync()
+    {
+        _tableCountOperation?.Cancel(); _tableCountOperation?.Dispose();
+        if (_profile is null || _capabilities is null)
+        {
+            _tableRowCounts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase); _tableCountStatus.Text = "Connect SQL to count rows."; PopulateTables(); return;
+        }
+        var operation = _tableCountOperation = new CancellationTokenSource(); var profile = _profile; var capabilities = _capabilities;
+        _tableCountStatus.Text = $"Counting exact rows in {capabilities.Tables.Count:N0} table(s) without blocking the UI…";
+        try
+        {
+            var counts = await _service.ReadTableRowCountsAsync(profile, capabilities.Tables.Values, operation.Token);
+            if (!ReferenceEquals(_tableCountOperation, operation) || _profile?.Database != profile.Database) return;
+            _tableRowCounts = counts; PopulateTables();
+            _tableCountStatus.Text = $"{counts.Count:N0} exact table totals · {counts.Values.Sum():N0} rows across {profile.Database}";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception)
+        {
+            if (!ReferenceEquals(_tableCountOperation, operation)) return;
+            _tableCountStatus.Text = $"Exact row count failed: {exception.Message}"; DesktopCrashLogger.Log("SQL table row count failed", exception);
+        }
+        finally { if (ReferenceEquals(_tableCountOperation, operation)) { _tableCountOperation.Dispose(); _tableCountOperation = null; } }
     }
 
     private async Task SelectTableAsync()
@@ -598,7 +654,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             var filterColumn = _filterColumn.SelectedItem as string; var sortColumn = _sortColumn.SelectedItem as string;
             var limit = _pageSize.SelectedItem is int requestedLimit ? requestedLimit : 200;
             _page = await _service.ReadPageAsync(profile, selected.Table, _offset, limit, search, filterColumn, _filterValue.Text, sortColumn, _sortDirection.SelectedIndex == 1, _operation!.Token); _offset = _page.Offset;
-            _rows.ItemsSource = _page.Rows; ApplyRowTemplate();
+            _rows.SelectedItem = null; _rows.ItemsSource = _page.Rows; ApplyRowTemplate(); ShowRowList();
             _pageStatus.Text = _page.TotalRows == 0 ? "No matching rows." : $"{_page.Offset + 1:N0}–{Math.Min(_page.Offset + _page.Rows.Count, _page.TotalRows):N0} of {_page.TotalRows:N0} · {_page.Columns.Count:N0} complete column(s)";
             if (selectFirst && _page.Rows.Count > 0) _rows.SelectedIndex = 0;
         }
@@ -618,14 +674,17 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private void ApplyRowTemplate()
     {
-        var complete = _rowDisplay.SelectedIndex == 1;
+        var complete = _rowDisplay.SelectedIndex == 0;
         _rows.ItemTemplate = new FuncDataTemplate<SqlRowRecord>((row, _) =>
         {
             if (row is null) return new TextBlock();
-            var heading = new TextBlock { Text = RowSummary(row), FontWeight = FontWeight.SemiBold, TextWrapping = complete ? TextWrapping.Wrap : TextWrapping.NoWrap };
+            var name = FriendlyRowName(row); var identity = row.Display;
+            var heading = new TextBlock { Text = name ?? identity, FontWeight = FontWeight.SemiBold, TextWrapping = complete ? TextWrapping.Wrap : TextWrapping.NoWrap };
             if (!complete) return new Border { Padding = new Thickness(4), Child = heading };
-            var fields = new TextBlock { Text = string.Join("  ·  ", row.Values.Select(pair => $"{pair.Key}={CellText(pair.Value)}")), TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
-            return new Border { Padding = new Thickness(6), Child = new StackPanel { Spacing = 3, Children = { heading, fields } } };
+            var preview = row.Values.Where(pair => !row.Key.ContainsKey(pair.Key) && pair.Value is not null && CellText(pair.Value).Length > 0).Take(8).Select(pair => $"{pair.Key}: {CellText(pair.Value)}");
+            var fields = new TextBlock { Text = string.Join("  ·  ", preview), TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
+            var instruction = new TextBlock { Text = $"{identity}  ·  click to edit every field here", TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = Brush.Parse("#C58A2B") };
+            return new Border { Padding = new Thickness(7), Child = new StackPanel { Spacing = 3, Children = { heading, instruction, fields } } };
         });
     }
 
@@ -635,12 +694,12 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         ResetFavoriteDraftEditors();
         _dependencyList.Children.Clear(); _dependencyGraph.SetGraph(_selectedRow is null || _page is null ? "Select a primary-keyed SQL row" : $"{_page.Table} · {_selectedRow.Display}", []);
         _dependencyStatus.Text = _selectedRow is null ? "Select a SQL row, then analyze its recognized dependencies." : "Ready to analyze exact incoming and outgoing dependency edges.";
-        if (_selectedRow is null || _page is null) return;
+        if (_selectedRow is null || _page is null) { ShowRowList(); return; }
         var heading = new StackPanel { Spacing = 6 };
         heading.Children.Add(new TextBlock { Text = $"Complete row editor · {_page.Table} · {_selectedRow.Display}", FontSize = 16, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap });
-        var actions = new WrapPanel(); var favorite = new Button { Content = "★ Favorite" }; favorite.Click += (_, _) => FavoriteSelected(); actions.Children.Add(favorite);
+        var actions = new WrapPanel(); var back = new Button { Content = "← All rows" }; back.Click += (_, _) => ShowRowList(); actions.Children.Add(back); var favorite = new Button { Content = "★ Favorite" }; favorite.Click += (_, _) => FavoriteSelected(); actions.Children.Add(favorite);
         var clone = new Button { Content = "Clone complete row as new identity" }; clone.Click += (_, _) => BeginCreateRow(_selectedRow); actions.Children.Add(clone);
-        if (CanOpenGuidedEditor(_page.Table)) { var guided = AccentButton("Open decoded editor"); guided.Click += (_, _) => OpenSelectedDecodedEditor(); actions.Children.Add(guided); }
+        if (CanOpenGuidedEditor(_page.Table)) { var guided = AccentButton("Open friendly translated editor"); guided.Click += (_, _) => OpenSelectedDecodedEditor(); actions.Children.Add(guided); }
         var delete = new Button { Content = "Delete exactly this row" }; delete.Click += (_, _) => PrepareDelete(); actions.Children.Add(delete); heading.Children.Add(actions);
         var browseDbc = new Button { Content = "DBC/DB2…" }; browseDbc.Click += async (_, _) => await PickFavoritePathAsync(_favoriteDbc, "Select a related client table", "DBC or DB2", "*.dbc", "*.db2");
         var browseMpq = new Button { Content = "MPQ…" }; browseMpq.Click += async (_, _) => await PickFavoritePathAsync(_favoriteMpq, "Select a related MPQ patch", "MPQ", "*.mpq");
@@ -655,7 +714,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             var label = new TextBlock { Text = $"{column.Name}  ·  {column.ColumnType}{(column.Key == "PRI" ? "  ·  PRIMARY KEY" : string.Empty)}", VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
             _rowEditor.Children.Add(new Grid { ColumnDefinitions = new("Auto,*,Auto"), ColumnSpacing = 8, Children = { label, WithColumn(text, 1), WithColumn(nullValue, 2) } }); _editors[column.Name] = new(text, nullValue, null);
         }
-        var save = AccentButton("Review complete row update"); save.Click += (_, _) => PrepareRowUpdate(); _rowEditor.Children.Add(save); AddRelationships();
+        var save = AccentButton("Review complete row update"); save.Click += (_, _) => PrepareRowUpdate(); _rowEditor.Children.Add(save); AddRelationships(); ShowRowEditor();
     }
 
     private void ResetFavoriteDraftEditors()
@@ -677,6 +736,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     {
         if (_page is null || _tables.SelectedItem is not TableChoice) { _status.Text = "Select a table first."; return; }
         _rows.SelectedItem = null; _creatingRow = true; _selectedRow = null; _editors.Clear(); _rowEditor.Children.Clear(); _confirmation.IsVisible = false;
+        var back = new Button { Content = "← All rows", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => ShowRowList(); _rowEditor.Children.Add(back);
         _rowEditor.Children.Add(new TextBlock { Text = source is null ? $"New {_page.Table} row · every schema column is available" : $"Clone complete {_page.Table} row · change the identity before insert", FontSize = 16, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap });
         _rowEditor.Children.Add(new TextBlock { Text = source is null ? "Choose VALUE, NULL, or OMIT independently for every live-schema field. This is INSERT-only: existing keys are never replaced." : $"Every non-generated value was copied from {source.Display}. Change the primary identity; duplicate keys are refused transactionally and never overwrite the source row.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") });
         foreach (var column in _page.Columns)
@@ -690,8 +750,16 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
             var label = new TextBlock { Text = $"{column.Name}  ·  {column.ColumnType}{(required ? "  ·  REQUIRED" : string.Empty)}{(automatic ? "  ·  AUTO" : string.Empty)}", VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
             _rowEditor.Children.Add(new Grid { ColumnDefinitions = new("Auto,*,Auto"), ColumnSpacing = 8, Children = { label, WithColumn(text, 1), WithColumn(mode, 2) } }); _editors[column.Name] = new(text, null, mode);
         }
-        var insert = AccentButton("Review new row insert"); insert.Click += (_, _) => PrepareInsert(); _rowEditor.Children.Add(insert);
+        var insert = AccentButton("Review new row insert"); insert.Click += (_, _) => PrepareInsert(); _rowEditor.Children.Add(insert); ShowRowEditor();
     }
+
+    private void ShowRowList()
+    {
+        _rowEditPane.IsVisible = false; _rowListPane.IsVisible = true;
+        _status.Text = _page is null ? "Select a live SQL table." : $"{_page.Table} · select a row to edit it in this same pane";
+    }
+
+    private void ShowRowEditor() { _rowListPane.IsVisible = false; _rowEditPane.IsVisible = true; }
 
     private void FavoriteSelected()
     {
@@ -1745,10 +1813,11 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         try
         {
             Begin($"Inspecting database schema {database}…"); var profile = _profile with { Database = database }; var capabilities = await new DatabaseCapabilityService().InspectAsync(profile, _operation!.Token);
-            _profile = profile; _capabilities = capabilities; RefreshConnectionStatus(); _page = null; _selectedRow = null; _browseTable = null; _offset = 0; _rows.ItemsSource = null; _rowSearch.Text = string.Empty; _filterColumn.SelectedItem = null; _filterValue.Text = string.Empty; _sortColumn.SelectedItem = null; _rowEditor.Children.Clear(); _relationshipResults.Children.Clear(); _dependencyList.Children.Clear(); _dependencyGraph.SetGraph($"{database} · select a primary-keyed row", []); _confirmation.IsVisible = false;
+            _profile = profile; _capabilities = capabilities; _tableRowCounts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase); RefreshConnectionStatus(); _page = null; _selectedRow = null; _browseTable = null; _offset = 0; _rows.ItemsSource = null; _rowSearch.Text = string.Empty; _filterColumn.SelectedItem = null; _filterValue.Text = string.Empty; _sortColumn.SelectedItem = null; _rowEditor.Children.Clear(); ShowRowList(); _relationshipResults.Children.Clear(); _dependencyList.Children.Clear(); _dependencyGraph.SetGraph($"{database} · select a primary-keyed row", []); _confirmation.IsVisible = false;
             _suppressSchemaSelection = true; try { _schemas.SelectedItem = (_schemas.ItemsSource as IEnumerable<string>)?.FirstOrDefault(value => value.Equals(database, StringComparison.OrdinalIgnoreCase)) ?? database; } finally { _suppressSchemaSelection = false; }
             _suppressTableSelection = true; try { PopulateTables(); _tables.SelectedItem = null; } finally { _suppressTableSelection = false; } PopulateRelations();
             _pageStatus.Text = $"{capabilities.Tables.Count:N0} table(s) in {database} · select a table."; _dependencyStatus.Text = $"Active schema: {database}. Select a row to analyze dependencies."; _status.Text = $"SQL Studio switched locally to {database}; the saved world-server profile remains {_session.DatabaseProfile?.Database ?? "unchanged"}.";
+            _ = LoadTableRowCountsAsync();
         }
         catch (OperationCanceledException) { _status.Text = "Schema switch cancelled."; }
         catch (Exception exception) { Fail($"Could not open schema {database}", exception); }
@@ -1757,15 +1826,19 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
 
     private void SessionChanged(object? sender, EventArgs e)
     {
-        _profile = _session.DatabaseProfile; _capabilities = _session.DatabaseCapabilities; RefreshConnectionStatus(); PopulateTables(); PopulateRelations(); _ = LoadSchemasAsync();
+        _profile = _session.DatabaseProfile; _capabilities = _session.DatabaseCapabilities; _tableRowCounts = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase); RefreshConnectionStatus(); PopulateTables(); PopulateRelations(); _ = LoadSchemasAsync(); _ = LoadTableRowCountsAsync();
     }
     private void RefreshConnectionStatus() => _connectionStatus.Text = _profile is null || _capabilities is null ? "Not connected · browsing is disabled" : $"Connected · {_profile.User}@{_profile.Host}:{_profile.Port}/{_profile.Database} · MySQL {_capabilities.ServerVersion} · {_capabilities.Tables.Count:N0} table(s)";
     private void Begin(string text) { _operation?.Cancel(); _operation?.Dispose(); _operation = new(); _status.Text = text; }
     private void End() { _operation?.Dispose(); _operation = null; }
     private void Fail(string context, Exception exception) { _status.Text = $"{context}: {exception.Message}"; DesktopCrashLogger.Log(context, exception); }
-    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _session.Changed -= SessionChanged; }
+    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); _tableCountOperation?.Cancel(); _tableCountOperation?.Dispose(); _session.Changed -= SessionChanged; }
 
-    private static string RowSummary(SqlRowRecord row) { var name = row.Values.FirstOrDefault(pair => pair.Key.Equals("name", StringComparison.OrdinalIgnoreCase) || pair.Key.Equals("LogTitle", StringComparison.OrdinalIgnoreCase)).Value; return $"{row.Display}{(name is null ? string.Empty : $"  ·  {name}")}"; }
+    private static string? FriendlyRowName(SqlRowRecord row)
+    {
+        var value = row.Values.FirstOrDefault(pair => pair.Key.Equals("name", StringComparison.OrdinalIgnoreCase) || pair.Key.Equals("LogTitle", StringComparison.OrdinalIgnoreCase) || pair.Key.Equals("title", StringComparison.OrdinalIgnoreCase)).Value;
+        return value is null || string.IsNullOrWhiteSpace(Convert.ToString(value, CultureInfo.InvariantCulture)) ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
     private static string RelationshipCount(SqlRelationshipMatch match) => match.MatchingRows < 0 ? "file DBC · SQL mirror empty" : $"{match.MatchingRows:N0} exact row(s)";
     private bool IsSharedWorldSchema() => _profile is not null && _session.DatabaseProfile is not null && _profile.Host.Equals(_session.DatabaseProfile.Host, StringComparison.OrdinalIgnoreCase) && _profile.Port == _session.DatabaseProfile.Port && _profile.Database.Equals(_session.DatabaseProfile.Database, StringComparison.OrdinalIgnoreCase);
     private bool CanOpenGuidedEditor(string table) => IsSharedWorldSchema() &&

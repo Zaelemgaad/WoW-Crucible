@@ -50,11 +50,12 @@ public sealed class ServerLifecycleService : IDisposable
         if (!before.DatabaseRunning) throw new InvalidOperationException("SQL is stopped. Start SQL first so authserver does not enter a failed startup loop.");
         if (workspace.UsesWsl)
         {
-            if (!await WslProcessExistsAsync(workspace, "authserver", cancellationToken)) StartWslProcess(workspace, workspace.WslAuthExecutable, workspace.WslAuthConfigPath);
-            await WaitForWslStateAsync(workspace, "authserver", true, TimeSpan.FromSeconds(15), cancellationToken);
+            await StartWslServerAsync(workspace, "authserver", workspace.WslAuthExecutable, workspace.WslAuthConfigPath, TimeSpan.FromSeconds(20), cancellationToken);
         }
         else { StartLocal(workspace, "authserver"); await Task.Delay(750, cancellationToken); }
-        return new("Start authserver", await GetStatusAsync(workspace, cancellationToken), "Authserver start request completed; SQL and worldserver were left unchanged.");
+        var status = await GetStatusAsync(workspace, cancellationToken);
+        if (!status.AuthServerRunning) throw new InvalidOperationException("authserver exited during startup. Review its Crucible startup log for the exact core error.");
+        return new("Start authserver", status, "Authserver is running; SQL and worldserver were left unchanged.");
     }
 
     public async Task<ServerLifecycleResult> StopAuthAsync(ServerWorkspace workspace, CancellationToken cancellationToken = default)
@@ -89,15 +90,16 @@ public sealed class ServerLifecycleService : IDisposable
         if (!before.DatabaseRunning) throw new InvalidOperationException("SQL is stopped. Start SQL first so worldserver does not enter a failed startup loop.");
         if (workspace.UsesWsl)
         {
-            if (!await WslProcessExistsAsync(workspace, "worldserver", cancellationToken)) StartWslProcess(workspace, workspace.WslWorldExecutable, workspace.WslConfigPath);
-            await WaitForWslStateAsync(workspace, "worldserver", true, TimeSpan.FromSeconds(20), cancellationToken);
+            await StartWslServerAsync(workspace, "worldserver", workspace.WslWorldExecutable, workspace.WslConfigPath, TimeSpan.FromSeconds(30), cancellationToken);
         }
         else
         {
             StartLocal(workspace, "worldserver");
             await Task.Delay(750, cancellationToken);
         }
-        return new("Start worldserver", await GetStatusAsync(workspace, cancellationToken), "Worldserver start request completed; authserver was left unchanged.");
+        var status = await GetStatusAsync(workspace, cancellationToken);
+        if (!status.WorldServerRunning) throw new InvalidOperationException("worldserver exited during startup. Review its Crucible startup log for the exact core error.");
+        return new("Start worldserver", status, "Worldserver is running; authserver was left unchanged.");
     }
 
     public async Task<ServerLifecycleResult> StopWorldAsync(ServerWorkspace workspace, CancellationToken cancellationToken = default)
@@ -257,13 +259,43 @@ public sealed class ServerLifecycleService : IDisposable
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new TimeoutException($"{name} did not exit within 10 seconds."); }
     }
 
-    private static void StartWslProcess(ServerWorkspace workspace, string? executable, string? config)
+    private static async Task StartWslServerAsync(ServerWorkspace workspace, string name, string? executable, string? config,
+        TimeSpan timeout, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(executable) || string.IsNullOrWhiteSpace(config)) throw new InvalidOperationException("The WSL server executable/config paths could not be detected.");
-        var start = new ProcessStartInfo { FileName = "wsl.exe", UseShellExecute = false, CreateNoWindow = true };
-        foreach (var value in new[] { "-d", workspace.WslDistribution!, "-u", "root", "--", executable, "--config", config }) start.ArgumentList.Add(value);
-        Process.Start(start)?.Dispose();
+        if (await WslProcessExistsAsync(workspace, name, cancellationToken)) return;
+        var log = $"/tmp/wow-crucible-{name}-startup.log";
+        // Keep the WSL relay alive briefly after forking. Without this, WSL can tear down a slower-starting
+        // worldserver child as bash exits even though nohup returned success.
+        var launch = $"rm -f {ShellQuote(log)}; nohup {ShellQuote(executable)} --config {ShellQuote(config)} </dev/null >>{ShellQuote(log)} 2>&1 & sleep 2";
+        await RunWslScriptAsync(workspace, launch, cancellationToken);
+        try { await WaitForWslStableStateAsync(workspace, name, TimeSpan.FromSeconds(4), timeout, cancellationToken); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            var tail = await RunWslAsync(workspace, ["tail", "-n", "40", log], cancellationToken, allowNonZero: true);
+            var detail = string.IsNullOrWhiteSpace(tail.Output) ? "No startup output was captured." : tail.Output;
+            throw new InvalidOperationException($"{name} did not remain running. Startup log {log}:\n{detail}", exception);
+        }
     }
+
+    private static async Task WaitForWslStableStateAsync(ServerWorkspace workspace, string name, TimeSpan stableFor,
+        TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var stopwatch = Stopwatch.StartNew(); TimeSpan? stableSince = null;
+        while (stopwatch.Elapsed < timeout)
+        {
+            if (await WslProcessExistsAsync(workspace, name, cancellationToken))
+            {
+                stableSince ??= stopwatch.Elapsed;
+                if (stopwatch.Elapsed - stableSince >= stableFor) return;
+            }
+            else stableSince = null;
+            await Task.Delay(500, cancellationToken);
+        }
+        throw new TimeoutException($"{name} did not remain running for {stableFor.TotalSeconds:0} continuous seconds within {timeout.TotalSeconds:0} seconds.");
+    }
+
+    private static string ShellQuote(string value) => "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
 
     private static async Task<bool> WslProcessExistsAsync(ServerWorkspace workspace, string name, CancellationToken cancellationToken) =>
         (await RunWslAsync(workspace, ["pgrep", "-x", name], cancellationToken, allowNonZero: true)).ExitCode == 0;
@@ -291,6 +323,27 @@ public sealed class ServerLifecycleService : IDisposable
         var output = await outputTask; var error = await errorTask;
         if (!allowNonZero && process.ExitCode != 0) throw new InvalidOperationException($"WSL command failed ({process.ExitCode}): {error.Trim()}");
         return (process.ExitCode, output.Trim(), error.Trim());
+    }
+
+    private static async Task RunWslScriptAsync(ServerWorkspace workspace, string script, CancellationToken cancellationToken)
+    {
+        if (!workspace.UsesWsl || string.IsNullOrWhiteSpace(workspace.WslDistribution)) throw new InvalidOperationException("This server workspace has no WSL distribution.");
+        using var process = new Process { StartInfo = new ProcessStartInfo
+        {
+            FileName = "wsl.exe", UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true
+        } };
+        foreach (var value in new[] { "-d", workspace.WslDistribution, "-u", "root", "--", "bash", "-s" }) process.StartInfo.ArgumentList.Add(value);
+        process.Start();
+        process.StandardInput.NewLine = "\n";
+        await process.StandardInput.WriteLineAsync("set -e".AsMemory(), cancellationToken);
+        await process.StandardInput.WriteLineAsync(script.AsMemory(), cancellationToken);
+        process.StandardInput.Close();
+        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken);
+        var output = await outputTask; var error = await errorTask;
+        if (process.ExitCode != 0) throw new InvalidOperationException($"WSL launch script failed ({process.ExitCode}): {error.Trim()} {output.Trim()}".Trim());
     }
 
     private static async Task<(int ExitCode, string Output, string Error)> RunLocalCommandAsync(string executable, IReadOnlyList<string> arguments, CancellationToken cancellationToken, bool allowNonZero)

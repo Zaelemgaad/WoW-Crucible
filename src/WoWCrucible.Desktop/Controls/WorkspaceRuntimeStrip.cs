@@ -18,6 +18,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
     private readonly Button _auth;
     private readonly Button _world;
     private readonly Button _refresh = new() { Content = "↻" };
+    private readonly TextBlock _message = new() { FontSize = 10, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), VerticalAlignment = VerticalAlignment.Center };
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(5) };
     private DesktopWorkspaceSession? _session;
     private ServerRuntimeStatus? _status;
@@ -56,7 +57,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
                     Orientation = Orientation.Horizontal,
                     Spacing = 5,
                     Margin = new Thickness(8, 2),
-                    Children = { _workspace, Divider(), _sql, _auth, _world, _refresh }
+                    Children = { _workspace, Divider(), _sql, _auth, _world, _refresh, _message }
                 }
             }
         };
@@ -92,6 +93,9 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
                 _ => await _session.Lifecycle.StartWorldAsync(server, _operation.Token)
             };
             _status = result.Status; ShowStatus(result.Status);
+            _message.Text = $"{result.Action} ready";
+            _message.Foreground = new SolidColorBrush(Color.Parse("#54D68B"));
+            ToolTip.SetTip(_message, result.Detail);
             DesktopCrashLogger.Debug("SERVER", "runtime-strip-action", ("action", result.Action), ("detail", result.Detail));
         }
         catch (OperationCanceledException) { }
@@ -99,6 +103,9 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
         {
             DesktopCrashLogger.Log("Runtime strip operation failed", exception);
             ToolTip.SetTip(ComponentButton(component), exception.Message);
+            _message.Text = $"{component.ToString().ToUpperInvariant()} failed · hover for details";
+            _message.Foreground = new SolidColorBrush(Color.Parse("#E15A64"));
+            ToolTip.SetTip(_message, exception.Message);
         }
         finally { SetBusy(false); await RefreshAsync(); }
     }
@@ -112,6 +119,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
             _status = await _session.Lifecycle.GetStatusAsync(server, timeout.Token);
             ShowStatus(_status);
+            if (string.IsNullOrWhiteSpace(_message.Text)) _message.Text = "Click a component to start or stop it";
         }
         catch (Exception exception)
         {

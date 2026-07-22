@@ -28,6 +28,21 @@ public sealed record SqlRowFavorite(string Database, string Table, IReadOnlyDict
 
 public sealed class SqlWorkspaceService
 {
+    public async Task<IReadOnlyDictionary<string, long>> ReadTableRowCountsAsync(DatabaseConnectionProfile profile,
+        IEnumerable<DatabaseTableCapability> tables, CancellationToken cancellationToken = default)
+    {
+        var requested = tables.OrderBy(table => table.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+        var result = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile));
+        await connection.OpenAsync(cancellationToken);
+        foreach (var table in requested)
+        {
+            await using var command = new MySqlCommand($"SELECT COUNT(*) FROM {ItemWritePlan.QuoteIdentifier(table.Name)}", connection) { CommandTimeout = 120 };
+            result[table.Name] = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        }
+        return result;
+    }
+
     public async Task<IReadOnlyList<string>> ListDatabasesAsync(DatabaseConnectionProfile profile, CancellationToken cancellationToken = default)
     {
         await using var connection = new MySqlConnection(DatabaseCapabilityService.BuildConnectionString(profile)); await connection.OpenAsync(cancellationToken);
