@@ -177,7 +177,8 @@ public sealed class DbcSchemaCatalog
         Set(41, "PowerType", DbcValueType.Int32); Set(42, "ManaCost"); Set(43, "ManaCostPerLevel"); Set(44, "ManaPerSecond"); Set(45, "ManaPerSecondPerLevel"); Set(46, "RangeIndex"); Set(47, "Speed", DbcValueType.Float32); Set(48, "ModalNextSpell"); Set(49, "CumulativeAura");
         Array(50, "Totem", 2); Array(52, "Reagent", 8, DbcValueType.Int32); Array(60, "ReagentCount", 8, DbcValueType.Int32);
         Set(68, "EquippedItemClass", DbcValueType.Int32); Set(69, "EquippedItemSubclass", DbcValueType.Int32); Set(70, "EquippedItemInvTypes", DbcValueType.Int32);
-        Array(71, "Effect", 3); Array(74, "EffectDieSides", 3, DbcValueType.Int32); Array(77, "EffectRealPointsPerLevel", 3, DbcValueType.Float32); Array(80, "EffectBasePoints", 3, DbcValueType.Int32); Array(83, "EffectMechanic", 3); Array(86, "ImplicitTargetA", 3); Array(89, "ImplicitTargetB", 3); Array(92, "EffectRadiusIndex", 3); Array(95, "EffectAura", 3); Array(98, "EffectAuraPeriod", 3); Array(101, "EffectMultipleValue", 3, DbcValueType.Float32); Array(104, "EffectChainTargets", 3); Array(107, "EffectItemType", 3); Array(110, "EffectMiscValue", 3, DbcValueType.Int32); Array(113, "EffectMiscValueB", 3, DbcValueType.Int32); Array(116, "EffectTriggerSpell", 3); Array(119, "EffectPointsPerCombo", 3, DbcValueType.Float32); Array(122, "EffectSpellClassMaskA", 3); Array(125, "EffectSpellClassMaskB", 3); Array(128, "EffectSpellClassMaskC", 3);
+        Array(71, "Effect", 3); Array(74, "EffectDieSides", 3, DbcValueType.Int32); Array(77, "EffectRealPointsPerLevel", 3, DbcValueType.Float32); Array(80, "EffectBasePoints", 3, DbcValueType.Int32); Array(83, "EffectMechanic", 3); Array(86, "ImplicitTargetA", 3); Array(89, "ImplicitTargetB", 3); Array(92, "EffectRadiusIndex", 3); Array(95, "EffectAura", 3); Array(98, "EffectAuraPeriod", 3); Array(101, "EffectMultipleValue", 3, DbcValueType.Float32); Array(104, "EffectChainTargets", 3); Array(107, "EffectItemType", 3); Array(110, "EffectMiscValue", 3, DbcValueType.Int32); Array(113, "EffectMiscValueB", 3, DbcValueType.Int32); Array(116, "EffectTriggerSpell", 3); Array(119, "EffectPointsPerCombo", 3, DbcValueType.Float32);
+        SetSpellEffectMaskNames(columns);
         Array(131, "SpellVisualID", 2); Set(133, "SpellIconID"); Set(134, "ActiveIconID"); Set(135, "SpellPriority");
         Localized(136, "Name"); Localized(153, "NameSubtext"); Localized(170, "Description"); Localized(187, "AuraDescription");
         string[] tail = ["ManaCostPct", "StartRecoveryCategory", "StartRecoveryTime", "MaxTargetLevel", "SpellClassSet"];
@@ -198,12 +199,32 @@ public sealed class DbcSchemaCatalog
         // format and real stock files both contain these 14 cells.
         AddSimple(tables, "SkillLineAbility", "ID:int,SkillLine:int,Spell:int,RaceMask:uint,ClassMask:uint,ExcludeRace:uint,ExcludeClass:uint,MinSkillLineRank:int,SupercededBySpell:int,AcquireMethod:int,TrivialSkillLineRankHigh:int,TrivialSkillLineRankLow:int,CharacterPoints[0]:int,CharacterPoints[1]:int");
 
+        // SpellEntry stores three flag96 values, one per effect. The nine physical
+        // cells are therefore A0/B0/C0, A1/B1/C1, A2/B2/C2—not AAA/BBB/CCC.
+        if (tables.TryGetValue("Spell", out var spell) && spell.Columns.Count == 234)
+        {
+            var columns = spell.Columns.ToArray();
+            SetSpellEffectMaskNames(columns);
+            tables["Spell"] = new(columns, spell.KeyStrategy);
+        }
+
         // Stock build-12340 SpellVisualKit has the 37 defined cells plus a final
         // flags cell. Preserve the imported names/types and append that missing cell.
         if (tables.TryGetValue("SpellVisualKit", out var visualKit) && visualKit.Columns.Count == 37)
         {
             var columns = visualKit.Columns.Concat([new DbcColumn(37, 37 * 4, 4, "Flags", DbcValueType.UInt32)]).ToArray();
             tables["SpellVisualKit"] = PhysicalDefinition(columns);
+        }
+    }
+
+    private static void SetSpellEffectMaskNames(DbcColumn[] columns)
+    {
+        for (var effect = 0; effect < 3; effect++)
+        {
+            var start = 122 + effect * 3;
+            columns[start] = columns[start] with { Name = $"EffectSpellClassMaskA[{effect}]" };
+            columns[start + 1] = columns[start + 1] with { Name = $"EffectSpellClassMaskB[{effect}]" };
+            columns[start + 2] = columns[start + 2] with { Name = $"EffectSpellClassMaskC[{effect}]" };
         }
     }
 

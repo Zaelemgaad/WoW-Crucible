@@ -119,6 +119,16 @@ Model visibility is path-aware by default: playable race/sex bodies use mutually
 
 See the complete copy-paste-oriented [CLI reference](docs/CLI-REFERENCE.md) for command groups, options, exit codes, safety behavior, and resumable bulk asset-library processing.
 
+## Tests
+
+The corpus suite is intentionally a real-data executable rather than an empty `dotnet test` target. Run it through the checked-in wrapper so missing arguments and required DBC fixtures are reported before testing:
+
+```powershell
+.\test.ps1 "C:\path\to\WotLK 3.3.5 (12340).xml" "C:\path\to\full-dbc-directory"
+```
+
+`test.cmd` provides the same entry point for Command Prompt. CI can instead set `WOW_CRUCIBLE_TEST_SCHEMA` and `WOW_CRUCIBLE_TEST_DBC`. The runner builds Release first, lists every missing required corpus fixture, and returns a normal usage exit code instead of an unhandled exception.
+
 ```text
 wowcrucible asset inspect modern-model.m2 [building.wmo ...]
 wowcrucible asset m2-material-audit extracted-wrath-assets --workers=8 --format=json

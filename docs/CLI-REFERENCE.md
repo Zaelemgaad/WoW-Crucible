@@ -2,7 +2,7 @@
 
 The CLI executable is `wowcrucible.exe`. Run `wowcrucible --help` for the short command map or `wowcrucible <group> --help` for group-specific syntax. `--help` and `-h` are position-independent after a command group, so even `wowcrucible mpq list --content-only --help` shows MPQ help without opening an archive. `wowcrucible help <group>` is also supported. Paths containing spaces must be quoted.
 
-Add `--devbug` anywhere in a command to keep a detailed portable diagnostic log while preserving normal terminal output. Example: `wowcrucible --devbug mpq list patch-H.MPQ`. Logs are written under `Logs\Debug` beside the executable when that location is writable, and only the newest three CLI Devbug sessions are retained. Normal CLI use creates no routine log.
+Add `--devbug` anywhere in a command to keep a detailed portable diagnostic log while preserving normal terminal output. Example: `wowcrucible --devbug mpq list patch-H.MPQ`. Logs include dedicated parsed command-group and subcommand fields in addition to sanitized arguments. They are written under `Logs\Debug` beside the executable when that location is writable, and only the newest three CLI Devbug sessions are retained. Normal CLI use creates no routine log.
 
 Exit codes are consistent across workflows:
 
@@ -58,6 +58,8 @@ wowcrucible cache server-rollback <receipt.json> <host> <port> <user> <database>
 wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]
 wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]
 ```
+
+When `cache info` encounters a non-stock or currently unsupported WDB header, it still returns review exit code `3` with bounded evidence: source size and SHA-256, the first 32 bytes in hexadecimal and printable ASCII, both raw and reversed four-byte magic interpretations, and the exact stock-parser rejection. JSON emits the same fields structurally. Crucible does not guess the proprietary record layout.
 
 Cache reads are bounded and source files are always read-only. Crucible validates WDB's version-aware 16/20/24-byte header (24 bytes at build 12340), record ID/length framing, declared payload boundaries, and a two-million-record/64-MiB-per-record safety ceiling. For Cataclysm WCH2 ADB it independently validates the 48-byte header, fixed rows, optional range indexes, string-offset block, copy-table extent, and every checked size multiplication. WCH5/WCH7/WCH8 are rejected rather than guessed because those formats require matching DB2 layout metadata. Crucible natively loads WDBX `Definition/Table/Field` XML plus the older `wdbDef` and `adbDef` dialects, including variable WDB ItemCache stats and ADB string offsets. A build-tagged schema must match the cache header. Without a matching schema it still lists exact record IDs/rows, sizes, offsets, and raw bytes instead of predicting types. CSV and streaming JSON Lines exports are atomic and require `--overwrite` when the destination exists.
 

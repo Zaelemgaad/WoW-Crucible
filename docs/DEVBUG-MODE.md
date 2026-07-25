@@ -24,7 +24,7 @@ For any CLI command, put `--devbug` anywhere on the command line. The clearest f
 .\wowcrucible.exe --devbug dbc validate schema.xml dbc-folder --recursive
 ```
 
-The CLI continues printing normally and mirrors its output, errors, sanitized arguments, duration, exit code, and full unexpected exception details into `Logs\Debug\WoWCrucible-CLI-Devbug-*.log`. It does not open another terminal because the CLI already runs inside one. The newest three CLI Devbug sessions are retained independently from desktop sessions. Database password environment-variable values are never read into the log.
+The CLI continues printing normally and mirrors its output, errors, sanitized arguments, parsed command group/subcommand, duration, exit code, and full unexpected exception details into `Logs\Debug\WoWCrucible-CLI-Devbug-*.log`. The dedicated parsed fields make mixed workflow logs filterable without parsing the raw argument string. It does not open another terminal because the CLI already runs inside one. The newest three CLI Devbug sessions are retained independently from desktop sessions. Database password environment-variable values are never read into the log.
 
 Crucible opens a live terminal and writes the same structured events to `Logs\Debug\WoWCrucible-Devbug-<timestamp>-p<process>.log`. Events contain:
 

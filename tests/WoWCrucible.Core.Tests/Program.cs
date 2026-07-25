@@ -8,7 +8,48 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 
 if (args.Length != 2)
-    throw new ArgumentException("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
+{
+    Console.Error.WriteLine("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
+    Console.Error.WriteLine("Run the repository's test.ps1 or test.cmd wrapper so build failures and corpus requirements are reported clearly.");
+    Environment.ExitCode = 2;
+    return;
+}
+
+var requiredSchema = Path.GetFullPath(args[0]);
+var requiredCorpus = Path.GetFullPath(args[1]);
+if (!File.Exists(requiredSchema) || !Directory.Exists(requiredCorpus))
+{
+    Console.Error.WriteLine($"Corpus preflight failed:{(File.Exists(requiredSchema) ? string.Empty : $"\n  missing schema: {requiredSchema}")}{(Directory.Exists(requiredCorpus) ? string.Empty : $"\n  missing DBC directory: {requiredCorpus}")}");
+    Environment.ExitCode = 2;
+    return;
+}
+string[] requiredCorpusFiles =
+[
+    "AnimationData.dbc", "Spell.dbc", "SpellCastTimes.dbc", "SpellDuration.dbc",
+    "Light.dbc", "LightParams.dbc", "LightSkybox.dbc", "LightIntBand.dbc", "LightFloatBand.dbc",
+    "LiquidType.dbc", "GroundEffectTexture.dbc", "GroundEffectDoodad.dbc",
+    "Item.dbc", "ItemDisplayInfo.dbc", "CharSections.dbc", "CharStartOutfit.dbc",
+    "CreatureDisplayInfo.dbc", "CreatureModelData.dbc", "GameObjectDisplayInfo.dbc"
+];
+var missingCorpusFiles = requiredCorpusFiles.Where(name => !File.Exists(Path.Combine(requiredCorpus, name))).ToArray();
+if (missingCorpusFiles.Length > 0)
+{
+    Console.Error.WriteLine($"Corpus preflight failed: {requiredCorpus} is missing {missingCorpusFiles.Length:N0} required fixture(s):");
+    foreach (var name in missingCorpusFiles) Console.Error.WriteLine($"  {name}");
+    Environment.ExitCode = 2;
+    return;
+}
+
+var expectedSpellEffectMasks = new[]
+{
+    "EffectSpellClassMaskA[0]", "EffectSpellClassMaskB[0]", "EffectSpellClassMaskC[0]",
+    "EffectSpellClassMaskA[1]", "EffectSpellClassMaskB[1]", "EffectSpellClassMaskC[1]",
+    "EffectSpellClassMaskA[2]", "EffectSpellClassMaskB[2]", "EffectSpellClassMaskC[2]"
+};
+var builtInSpellMasks = DbcSchemaCatalog.CreateBuiltIn12340().ResolveColumns("Spell", 234).Columns.Skip(122).Take(9).Select(column => column.Name);
+var importedSpellMasks = DbcSchemaCatalog.Load(requiredSchema).ResolveColumns("Spell", 234).Columns.Skip(122).Take(9).Select(column => column.Name);
+if (!builtInSpellMasks.SequenceEqual(expectedSpellEffectMasks) || !importedSpellMasks.SequenceEqual(expectedSpellEffectMasks))
+    throw new InvalidOperationException("Build-12340 Spell effect family masks are not labeled in physical A/B/C order for each effect.");
 
 if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(command => command.Id).Distinct(StringComparer.Ordinal).Count() != CrucibleCommandCatalog.All.Count ||
     CrucibleCommandCatalog.Search("heidi favorites").FirstOrDefault()?.Command.Id != "workspace.sql-favorites" ||
@@ -200,6 +241,21 @@ try
     var adbDefinition = WowCacheDefinitionCatalog.Load(adbDefinitionPath).Resolve(adbPath, WowCacheDefinitionKind.Adb)!; var adb = WowAdbTableService.LoadWch2(adbPath, adbDefinition);
     if (adb.Header.Signature != "WCH2" || adb.Header.Build != 15595 || adb.Header.RecordCount != 2 || adb.Records[0].Id != 100 || adb.Records[0].Values.Single(value => value.Name == "name").DisplayValue != "Sword" || adb.Records[1].Values.Single(value => value.Name == "name").DisplayValue != "Shield" || adb.Records.Any(record => record.DecodeError is not null || record.UnconsumedBytes != 0)) throw new InvalidOperationException("Bounded Cataclysm WCH2 ADB header, fixed rows, or string-offset decoding regressed.");
     var adbCsv = Path.Combine(cacheFixtureRoot, "adb.csv"); WowAdbTableService.Export(adb, adbCsv, "csv", false); if (!File.ReadAllText(adbCsv).Contains("Shield", StringComparison.Ordinal)) throw new InvalidOperationException("Atomic ADB export regressed.");
+    var unsupportedPath = Path.Combine(cacheFixtureRoot, "itemstatcache.wdb");
+    File.WriteAllBytes(unsupportedPath,
+    [
+        0x3C, 0x00, 0x00, 0x00, 0x6F, 0xEB, 0x60, 0x6A, 0x4D, 0x39, 0x00, 0x00, 0x69, 0x00, 0x00, 0x00,
+        0x4D, 0x39, 0x00, 0x00, 0x69, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x1A, 0x00, 0x00, 0x00
+    ]);
+    try { _ = WowCacheTableService.LoadWdb(unsupportedPath); throw new InvalidOperationException("A non-stock cache header was accepted as stock WDB."); }
+    catch (InvalidDataException exception)
+    {
+        var evidence = WowCacheTableService.InspectUnsupported(unsupportedPath, exception.Message);
+        if (evidence.Length != 32 || !evidence.FirstBytesHex.StartsWith("3C 00 00 00 6F EB", StringComparison.Ordinal) ||
+            evidence.FirstFourBytesHex != "3C 00 00 00" || evidence.RawMagicInterpretation != "<\\x00\\x00\\x00" ||
+            evidence.Sha256.Length != 64 || !evidence.Failure.Contains("magic", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Unsupported cache inspection lost bounded header, ASCII, hash, or parser-failure evidence.");
+    }
     var corrupt = File.ReadAllBytes(wdbPath); BitConverter.GetBytes(uint.MaxValue).CopyTo(corrupt, 28); var corruptPath = Path.Combine(cacheFixtureRoot, "corrupt.wdb"); File.WriteAllBytes(corruptPath, corrupt);
     try { _ = WowCacheTableService.LoadWdb(corruptPath); throw new InvalidOperationException("WDB reader accepted an oversized record declaration."); }
     catch (InvalidDataException) { }
@@ -451,6 +507,7 @@ if(spellTooltipCatalog.Records.Count<40000||!spellTooltipCatalog.Records.TryGetV
 var martinDisplay = ItemDisplayInfoService.Resolve(itemDisplayPath, args[0], 7016, 4, 4, 4);
 if (martinDisplay.InventoryIcons.FirstOrDefault() != "INV_Chest_Samurai" || martinDisplay.ModelNames.Any(value => value.Length > 0) ||
     !martinDisplay.Assets.Any(asset => asset.Kind == "wear-texture" && asset.ClientPaths.Any(path => path.EndsWith(@"Item\TextureComponents\ArmUpperTexture\Plate_A_01Silver_Sleeve_AU.blp", StringComparison.OrdinalIgnoreCase)) &&
+        asset.ClientPaths.Any(path => path.EndsWith(@"Plate_A_01Silver_Sleeve_AU_U.blp", StringComparison.OrdinalIgnoreCase)) &&
         asset.ClientPaths.Any(path => path.EndsWith(@"Plate_A_01Silver_Sleeve_AU_F.blp", StringComparison.OrdinalIgnoreCase)) && asset.ClientPaths.Any(path => path.EndsWith(@"Plate_A_01Silver_Sleeve_AU_M.blp", StringComparison.OrdinalIgnoreCase))))
     throw new InvalidOperationException("ItemDisplayInfo resolution did not preserve the real armor icon and wearable texture-slot paths for display 7016.");
 var thunderfuryDisplay = ItemDisplayInfoService.Resolve(itemDisplayPath, null, 30606, 2, 8, 17);
@@ -2967,8 +3024,11 @@ if (appendedVirtualRow != 1100 || generatedOverride.GetRaw(appendedVirtualRow, g
     throw new InvalidOperationException("Appending a generated-key GT row changed its physical Data value.");
 generatedOverride.Save(generatedOverridePath, false);
 var generatedComparison = DbcLayerComparer.CompareFiles(generatedBasePath, generatedOverridePath, generatedSchema.Columns, generatedSchema.KeyStrategy);
-if (generatedComparison.AddedRows != 1 || generatedComparison.ModifiedRows != 1 || generatedComparison.ModifiedCells != 1)
-    throw new InvalidOperationException("Generated-key GT rows were not compared by virtual row index.");
+if (generatedComparison.AddedRows != 1 || generatedComparison.ModifiedRows != 1 || generatedComparison.ModifiedCells != 1 ||
+    !generatedComparison.AddedIds.SequenceEqual([1100u]) || !generatedComparison.ModifiedIds.SequenceEqual([900u]) ||
+    generatedComparison.RemovedIds.Count != 0 || generatedComparison.BaseSha256.Length != 64 || generatedComparison.OverrideSha256.Length != 64 ||
+    generatedComparison.BaseSha256 == generatedComparison.OverrideSha256)
+    throw new InvalidOperationException("Generated-key GT diff did not retain exact added/modified virtual IDs and source/output hashes.");
 var generatedDifferences = DbcPromotionService.GetDifferences(generatedBasePath, generatedOverridePath, generatedSchema.Columns, generatedSchema.KeyStrategy);
 if (!generatedDifferences.Any(difference => difference.Id == 900 && difference.ColumnName == "Data") || !generatedDifferences.Any(difference => difference.Id == 1100 && difference.ColumnIndex == -1))
     throw new InvalidOperationException("Generated-key differences did not report row 900 and appended row 1100 by virtual ID.");
@@ -3398,7 +3458,8 @@ var layers = DbcLayerComparer.CompareDirectories(baseLayer, overrideLayer);
 if (layers.Single(entry => entry.Name == "AnimationData.dbc").Status != DbcLayerStatus.Identical || layers.Single(entry => entry.Name == "SpellCastTimes.dbc").Status != DbcLayerStatus.Overridden || layers.Single(entry => entry.Name == "SpellDuration.dbc").Status != DbcLayerStatus.OverrideOnly)
     throw new InvalidOperationException("Layer classification failed.");
 var layerDetail = DbcLayerComparer.CompareFiles(Path.Combine(baseLayer, "SpellCastTimes.dbc"), Path.Combine(overrideLayer, "SpellCastTimes.dbc"), castColumns, castResolution.KeyStrategy);
-if (layerDetail.ModifiedRows != 1 || layerDetail.ModifiedCells != 1) throw new InvalidOperationException("Detailed layered row comparison failed.");
+if (layerDetail.ModifiedRows != 1 || layerDetail.ModifiedCells != 1 || layerDetail.ModifiedIds.Count != 1 || layerDetail.BaseSha256 == layerDetail.OverrideSha256)
+    throw new InvalidOperationException("Detailed layered row comparison lost changed IDs or source/output hashes.");
 
 var cancelled = new CancellationTokenSource(); cancelled.Cancel();
 try

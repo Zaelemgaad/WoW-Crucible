@@ -48,6 +48,18 @@ sealed class CliDevbugSession : IDisposable
         }
     }
 
+    public void RecordCommand(IReadOnlyList<string> arguments, string? requestedHelpGroup)
+    {
+        var explicitHelp = arguments.Count > 0 && arguments[0].Equals("help", StringComparison.OrdinalIgnoreCase);
+        var group = explicitHelp ? requestedHelpGroup ?? CliHelpRouting.Root
+            : arguments.Count == 0 || arguments[0].StartsWith("-", StringComparison.Ordinal) ? CliHelpRouting.Root
+            : arguments[0].ToLowerInvariant();
+        var subcommand = explicitHelp ? "help"
+            : arguments.Count > 1 && !arguments[1].StartsWith("-", StringComparison.Ordinal) ? arguments[1].ToLowerInvariant()
+            : requestedHelpGroup is not null ? "help" : "-";
+        Record("INFO", "COMMAND", "parsed-command", ("group", group), ("subcommand", subcommand), ("requested_help", requestedHelpGroup is not null));
+    }
+
     public void RecordException(Exception exception) => Record("ERROR", "COMMAND", "unhandled-exception",
         ("type", exception.GetType().FullName), ("message", RedactText(exception.Message)), ("stack", RedactText(exception.ToString())));
 

@@ -77,9 +77,9 @@ public static class ItemDisplayInfoService
         {
             var name = wear[index]; if (string.IsNullOrWhiteSpace(name)) continue;
             var fileName = EnsureExtension(Path.GetFileName(name), ".blp"); var stem = Path.GetFileNameWithoutExtension(fileName); var extension = Path.GetExtension(fileName);
-            var names = stem.EndsWith("_F", StringComparison.OrdinalIgnoreCase) || stem.EndsWith("_M", StringComparison.OrdinalIgnoreCase)
+            var names = stem.EndsWith("_F", StringComparison.OrdinalIgnoreCase) || stem.EndsWith("_M", StringComparison.OrdinalIgnoreCase) || stem.EndsWith("_U", StringComparison.OrdinalIgnoreCase)
                 ? new[] { fileName }
-                : new[] { fileName, stem + "_F" + extension, stem + "_M" + extension };
+                : new[] { fileName, stem + "_U" + extension, stem + "_F" + extension, stem + "_M" + extension };
             var paths = names.Select(file => $"Item\\TextureComponents\\{WearTextureDirectories[index]}\\{file}").ToArray();
             assets.Add(new("wear-texture", index, name, paths, FindExisting(processedAssetLibrary, paths)));
         }

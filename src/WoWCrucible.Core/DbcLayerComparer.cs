@@ -4,7 +4,16 @@ namespace WoWCrucible.Core;
 
 public enum DbcLayerStatus { BaseOnly, OverrideOnly, Identical, Overridden }
 public sealed record DbcLayerEntry(string Name, string? BasePath, string? OverridePath, string EffectivePath, DbcLayerStatus Status, long EffectiveSize);
-public sealed record DbcRowComparison(int AddedRows, int RemovedRows, int ModifiedRows, long ModifiedCells);
+public sealed record DbcRowComparison(
+    int AddedRows,
+    int RemovedRows,
+    int ModifiedRows,
+    long ModifiedCells,
+    IReadOnlyList<uint> AddedIds,
+    IReadOnlyList<uint> RemovedIds,
+    IReadOnlyList<uint> ModifiedIds,
+    string BaseSha256,
+    string OverrideSha256);
 
 public static class DbcLayerComparer
 {
@@ -34,18 +43,20 @@ public static class DbcLayerComparer
         if (columns.Count != baseFile.FieldCount) throw new InvalidDataException("The selected schema does not match this DBC layout.");
         var baseRows = DbcRecordIdentity.IndexRows(baseFile, columns, keyStrategy);
         var overrideRows = DbcRecordIdentity.IndexRows(overrideFile, columns, keyStrategy);
-        var added = overrideRows.Keys.Except(baseRows.Keys).Count();
-        var removed = baseRows.Keys.Except(overrideRows.Keys).Count();
-        var modifiedRows = 0; long modifiedCells = 0;
+        var addedIds = overrideRows.Keys.Except(baseRows.Keys).Order().ToArray();
+        var removedIds = baseRows.Keys.Except(overrideRows.Keys).Order().ToArray();
+        var modifiedIds = new List<uint>(); long modifiedCells = 0;
         foreach (var id in baseRows.Keys.Intersect(overrideRows.Keys))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var changed = 0;
             foreach (var column in columns)
                 if (!ValuesEqual(baseFile, baseRows[id], overrideFile, overrideRows[id], column)) changed++;
-            if (changed > 0) { modifiedRows++; modifiedCells += changed; }
+            if (changed > 0) { modifiedIds.Add(id); modifiedCells += changed; }
         }
-        return new(added, removed, modifiedRows, modifiedCells);
+        modifiedIds.Sort();
+        return new(addedIds.Length, removedIds.Length, modifiedIds.Count, modifiedCells, addedIds, removedIds, modifiedIds,
+            Hash(basePath), Hash(overridePath));
     }
 
     private static bool ValuesEqual(WdbcFile left, int leftRow, WdbcFile right, int rightRow, DbcColumn column)
@@ -60,5 +71,11 @@ public static class DbcLayerComparer
         if (new FileInfo(left).Length != new FileInfo(right).Length) return false;
         using var leftStream = File.OpenRead(left); using var rightStream = File.OpenRead(right);
         return SHA256.HashData(leftStream).SequenceEqual(SHA256.HashData(rightStream));
+    }
+
+    private static string Hash(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream));
     }
 }

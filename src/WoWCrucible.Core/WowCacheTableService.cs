@@ -202,6 +202,17 @@ public sealed record WowCacheTable(
     bool HasTerminator,
     long TrailingBytes);
 
+public sealed record WowCacheUnsupportedEvidence(
+    string SourcePath,
+    long Length,
+    string Sha256,
+    string FirstBytesHex,
+    string FirstBytesAscii,
+    string FirstFourBytesHex,
+    string RawMagicInterpretation,
+    string ReversedMagicInterpretation,
+    string Failure);
+
 public static class WowCacheTableService
 {
     private const int MaximumRecords = 2_000_000;
@@ -237,6 +248,22 @@ public static class WowCacheTableService
         var trailing = stream.Length - stream.Position;
         stream.Position = 0; var sha = Convert.ToHexString(SHA256.HashData(stream));
         return new WowCacheTable(path, sha, header, definition, records, hasTerminator, trailing);
+    }
+
+    public static WowCacheUnsupportedEvidence InspectUnsupported(string path, string failure)
+    {
+        path = Path.GetFullPath(path);
+        if (!File.Exists(path)) throw new FileNotFoundException("Cache file does not exist.", path);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, FileOptions.SequentialScan);
+        var sample = new byte[(int)Math.Min(stream.Length, 32L)];
+        stream.ReadExactly(sample);
+        stream.Position = 0;
+        var sha256 = Convert.ToHexString(SHA256.HashData(stream));
+        var firstFour = sample.Take(4).ToArray();
+        static string Hex(IEnumerable<byte> bytes) => string.Join(' ', bytes.Select(value => value.ToString("X2", CultureInfo.InvariantCulture)));
+        static string Interpret(IEnumerable<byte> bytes) => string.Concat(bytes.Select(value => value is >= 0x20 and <= 0x7E ? ((char)value).ToString() : $"\\x{value:X2}"));
+        return new(path, stream.Length, sha256, Hex(sample), string.Concat(sample.Select(value => value is >= 0x20 and <= 0x7E ? (char)value : '.')),
+            Hex(firstFour), Interpret(firstFour), Interpret(firstFour.Reverse()), failure);
     }
 
     public static void Export(WowCacheTable table, string outputPath, string format, bool overwrite)
