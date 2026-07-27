@@ -12,6 +12,7 @@ using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using WoWCrucible.Core;
+using WoWCrucible.Desktop.Controls;
 
 namespace WoWCrucible.Desktop;
 
@@ -73,6 +74,8 @@ public partial class MainWindow : Window
         DevbugModeToggle.IsChecked = DesktopCrashLogger.IsDevbugEnabled;
         RuntimeStrip.Attach(_workspaceSession);
         RuntimeStrip.WorkspaceRequested += (_, _) => OpenWorkspaceSetup();
+        RuntimeStrip.FeatureBackRequested += (_, _) => CloseFeatureWorkspace();
+        RuntimeStrip.CommandRequested += async (_, command) => await ExecuteRuntimeCommandAsync(command);
         RefreshShellContext();
         _commandRoutes = BuildCommandRoutes();
         var unrouted = CrucibleCommandCatalog.All.Where(command => !_commandRoutes.ContainsKey(command.Id)).Select(command => command.Id).ToArray();
@@ -763,7 +766,6 @@ public partial class MainWindow : Window
         if (_itemWorkbenchView is null)
         {
             _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession);
-            _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace();
             _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace();
             _itemWorkbenchView.SqlFavoritesRequested += (_, _) => OpenSqlFavorites();
             _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqMergeWorkspace();
@@ -1101,7 +1103,7 @@ public partial class MainWindow : Window
     {
         if (request.Table.Equals("item_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.BackRequested += (_, _) => CloseFeatureWorkspace(); _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace(); _itemWorkbenchView.SqlFavoritesRequested += (_, _) => OpenSqlFavorites(); _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqMergeWorkspace(); _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); _itemWorkbenchView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
+            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace(); _itemWorkbenchView.SqlFavoritesRequested += (_, _) => OpenSqlFavorites(); _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqMergeWorkspace(); _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); _itemWorkbenchView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
             _itemWorkbenchView.OpenItemRow(request.Row); OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
         }
         else if (request.Table.Equals("creature_template", StringComparison.OrdinalIgnoreCase))
@@ -1169,6 +1171,8 @@ public partial class MainWindow : Window
         MainHeader.IsVisible = EditorWorkspace.IsVisible = MainStatusBar.IsVisible = false;
         ApplyShellPaneState();
         _featureTitle = title;
+        RuntimeStrip.ShowFeature(title, (workspace as IFeatureWorkspaceToolbar)?.FeatureToolbar);
+        SuppressLegacyFeatureNavigation(workspace);
         Title = $"WoW Crucible — {title}";
         DesktopCrashLogger.Debug("UI", "feature-workspace-opened", ("title", title), ("view", workspace.GetType().Name), ("history_depth", _featureHistory.Count));
     }
@@ -1179,6 +1183,8 @@ public partial class MainWindow : Window
         {
             FeatureWorkspaceHost.Child = previous.Workspace;
             _featureTitle = previous.Title;
+            RuntimeStrip.ShowFeature(previous.Title, (previous.Workspace as IFeatureWorkspaceToolbar)?.FeatureToolbar);
+            SuppressLegacyFeatureNavigation(previous.Workspace);
             Title = $"WoW Crucible — {previous.Title}";
             DesktopCrashLogger.Debug("UI", "feature-workspace-back", ("title", previous.Title), ("view", previous.Workspace.GetType().Name), ("history_depth", _featureHistory.Count));
             return;
@@ -1193,10 +1199,50 @@ public partial class MainWindow : Window
         _assetComparisonView?.Suspend();
         FeatureWorkspaceHost.IsVisible = false;
         FeatureWorkspaceHost.Child = null;
+        RuntimeStrip.HideFeature();
         MainHeader.IsVisible = EditorWorkspace.IsVisible = MainStatusBar.IsVisible = true;
         RefreshShellContext();
         Title = "WoW Crucible";
         DesktopCrashLogger.Debug("UI", "feature-workspace-closed");
+    }
+
+    private static void SuppressLegacyFeatureNavigation(Control workspace)
+    {
+        foreach (var (control, parent, wrapper) in WalkWorkspaceControls(workspace))
+        {
+            if (control is not Button { Content: string label } button || label is not ("← Editor" or "← DBC editor" or "← DBC table" or "← Pets" or "← Back")) continue;
+            button.IsVisible = false;
+            if (parent is null) continue;
+            var title = WalkWorkspaceControls(parent)
+                .Select(entry => entry.Control)
+                .OfType<TextBlock>()
+                .FirstOrDefault(text => text.FontSize >= 16);
+            if (title is not null) title.IsVisible = false;
+            if (WalkWorkspaceControls(parent).Skip(1).All(entry => !entry.Control.IsVisible))
+            {
+                parent.IsVisible = false;
+                if (wrapper is Border or ContentControl) wrapper.IsVisible = false;
+            }
+        }
+    }
+
+    private static IEnumerable<(Control Control, Control? Parent, Control? Wrapper)> WalkWorkspaceControls(Control root)
+    {
+        var stack = new Stack<(Control Control, Control? Parent, Control? Wrapper)>();
+        stack.Push((root, null, null));
+        while (stack.TryPop(out var current))
+        {
+            yield return current;
+            var children = current.Control switch
+            {
+                Panel panel => panel.Children.OfType<Control>(),
+                Border { Child: Control child } => [child],
+                ContentControl { Content: Control child } => [child],
+                _ => []
+            };
+            foreach (var child in children.Reverse())
+                stack.Push((child, current.Control, current.Parent));
+        }
     }
     private async void OpenCliGuideClick(object? sender, RoutedEventArgs e)
     {
@@ -1253,6 +1299,26 @@ public partial class MainWindow : Window
         RefreshCommandPalette();
         Dispatcher.UIThread.Post(() => { CommandPaletteSearch.Focus(); CommandPaletteSearch.SelectAll(); }, DispatcherPriority.Input);
         DesktopCrashLogger.Debug("UI", "command-palette-opened", ("workspace", _featureTitle.Length == 0 ? "DBC tables" : _featureTitle), ("query", CommandPaletteSearch.Text), ("matches", _commandMatches.Count));
+    }
+
+    private async Task ExecuteRuntimeCommandAsync(string command)
+    {
+        try
+        {
+            if (command.Equals("ui.commands", StringComparison.Ordinal))
+            {
+                OpenCommandPalette();
+                return;
+            }
+            if (!_commandRoutes.TryGetValue(command, out var route))
+                throw new InvalidOperationException($"The application menu command '{command}' has no route.");
+            await route();
+        }
+        catch (Exception exception)
+        {
+            DesktopCrashLogger.Log($"Application menu command failed: {command}", exception);
+            await ShowErrorAsync("Could not open that Crucible workspace", exception.Message);
+        }
     }
 
     private void CloseCommandPalette()

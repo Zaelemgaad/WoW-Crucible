@@ -2,16 +2,18 @@ using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using MySqlConnector;
 using WoWCrucible.Core;
+using WoWCrucible.Desktop.Controls;
 
 namespace WoWCrucible.Desktop;
 
-internal sealed class ItemWorkbenchView : UserControl, IDisposable
+internal sealed class ItemWorkbenchView : UserControl, IDisposable, IFeatureWorkspaceToolbar
 {
     private readonly DesktopWorkspaceSession _session;
     private readonly ItemCreatorView _creator;
@@ -22,6 +24,12 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private readonly TextBox _password = new() { PasswordChar = '●', HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBox _database = new() { Text = "acore_world", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock _status = new() { Text = "Ready", Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
+    private readonly Button _connectionToggle = new() { Content = "Database ▾" };
+    private readonly Popup _connectionPopup = new()
+    {
+        IsLightDismissEnabled = true,
+        Placement = PlacementMode.BottomEdgeAlignedRight
+    };
     private readonly TextBox _search = new() { PlaceholderText = "Find items by text · a numeric-only search is an exact ID lookup that bypasses every filter…" };
     private readonly TextBox _exactIds = new() { PlaceholderText = "Exact item ID(s), always bypassing filters: 17 and 17802" };
     private readonly ComboBox _classification = new()
@@ -70,13 +78,13 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private ItemClientSyncPlan? _pendingClientItemPlan;
     private sealed record ClientItemReviewRow(uint Id, string State, string Detail);
 
-    public event EventHandler? BackRequested;
     public event EventHandler? SqlStudioRequested;
     public event EventHandler? SqlFavoritesRequested;
     public event EventHandler? MpqWorkspaceRequested;
     public event EventHandler? ProjectWorkspaceRequested;
     public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
+    public Control? FeatureToolbar { get; }
 
     public ItemWorkbenchView(DesktopWorkspaceSession session)
     {
@@ -150,19 +158,17 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
             Child = new StackPanel { Spacing = 3, Children = { new TextBlock { Text = $"{row.Id:N0} · {row.State}", FontWeight = FontWeight.SemiBold }, new TextBlock { Text = row.Detail, TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7")) } } }
         });
 
-        var root = new Grid { RowDefinitions = new("Auto,Auto,*,Auto") };
-        var back = new Button { Content = "← Editor", HorizontalAlignment = HorizontalAlignment.Left }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
-        var sqlStudio = AccentButton("SQL Studio — every database, table & row"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
-        var sqlFavorites = new Button { Content = "★ Saved SQL row favorites" }; sqlFavorites.Click += async (_, _) => await OpenSqlFavoritesAsync();
-        var mpqMerge = new Button { Content = "Merge MPQ patches — byte-safe" }; mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
+        var root = new Grid { RowDefinitions = new("*,Auto") };
+        var sqlStudio = AccentButton("SQL Studio"); ToolTip.SetTip(sqlStudio, "Browse every database, table, and row"); sqlStudio.Click += async (_, _) => await OpenSqlStudioAsync();
+        var sqlFavorites = new Button { Content = "★ Favorites" }; ToolTip.SetTip(sqlFavorites, "Open saved SQL row favorites"); sqlFavorites.Click += async (_, _) => await OpenSqlFavoritesAsync();
+        var mpqMerge = new Button { Content = "Merge MPQs" }; ToolTip.SetTip(mpqMerge, "Merge MPQ patch batches with byte-safe duplicate handling"); mpqMerge.Click += (_, _) => MpqWorkspaceRequested?.Invoke(this, EventArgs.Empty);
         _openLoadedCompleteRow.Click += (_, _) =>
         {
             if (_loadedSqlRow is null) { _status.Text = "Load an existing item_template row into the decoded editor first."; return; }
             FullSqlEditRequested?.Invoke(this, new("item_template", _loadedSqlRow));
         };
-        var titleActions = new WrapPanel { Children = { sqlStudio, sqlFavorites, mpqMerge } };
-        root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Padding = new Thickness(12,8), Child = new WrapPanel { Children = { back, new TextBlock { Text = "ITEMS & SETS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12,0) }, titleActions } } });
-        var connection = ConnectionBar(); Grid.SetRow(connection, 1); root.Children.Add(connection);
+        ConfigureConnectionPopup();
+        FeatureToolbar = new WrapPanel { Children = { sqlStudio, sqlFavorites, mpqMerge, _connectionToggle, _connectionPopup } };
         var decodedItemPage = new Grid
         {
             RowDefinitions = new("Auto,*"),
@@ -196,9 +202,9 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         _port.ValueChanged += (_, _) => InvalidateAuditIfTargetChanged();
         _acquisitionDbc.TextChanged += (_, _) => InvalidateAuditIfTargetChanged();
         _coreSource.TextChanged += (_, _) => InvalidateAuditIfTargetChanged();
-        Grid.SetRow(_tabs, 2); root.Children.Add(_tabs);
+        root.Children.Add(_tabs);
         var statusBorder = new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,1,0,0), Padding = new Thickness(14,7), Child = _status };
-        Grid.SetRow(statusBorder, 3); root.Children.Add(statusBorder); Content = root;
+        Grid.SetRow(statusBorder, 1); root.Children.Add(statusBorder); Content = root;
     }
 
     public void OpenItemRow(IReadOnlyDictionary<string, object?> row)
@@ -217,14 +223,30 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         else if (CanQueryDatabase() && !_auditLoading) _ = AuditAsync(automatic: true);
     }
 
-    private Control ConnectionBar()
+    private void ConfigureConnectionPopup()
     {
         var connect = AccentButton("Connect & share with SQL Studio"); connect.Click += async (_, _) => await ConnectDatabaseAsync(false);
         var heading = new TextBlock { Text = "LIVE WORLD DATABASE", FontSize = 10, FontWeight = FontWeight.Bold, Foreground = new SolidColorBrush(Color.Parse("#C58A2B")), VerticalAlignment = VerticalAlignment.Center };
         var privacy = new TextBlock { Text = "Password remains in memory only.", Foreground = new SolidColorBrush(Color.Parse("#78859A")), FontSize = 10, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
         connect.HorizontalAlignment = HorizontalAlignment.Stretch;
-        var bar = new StackPanel { Spacing = 7, Margin = new Thickness(12, 8), Children = { heading, ConnectionField("Host", _host), ConnectionField("Port", _port), ConnectionField("User", _user), ConnectionField("Password", _password), ConnectionField("Database", _database), privacy, connect } };
-        return new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Child = bar };
+        var fields = new Grid { ColumnDefinitions = new("Auto,*"), RowDefinitions = new("Auto,Auto,Auto,Auto,Auto"), ColumnSpacing = 7, RowSpacing = 5 };
+        AddConnectionField(fields, 0, "Host", _host);
+        AddConnectionField(fields, 1, "Port", _port);
+        AddConnectionField(fields, 2, "User", _user);
+        AddConnectionField(fields, 3, "Password", _password);
+        AddConnectionField(fields, 4, "Database", _database);
+        _connectionPopup.PlacementTarget = _connectionToggle;
+        _connectionPopup.Child = new Border
+        {
+            Background = new SolidColorBrush(Color.Parse("#111722")),
+            BorderBrush = new SolidColorBrush(Color.Parse("#39465E")),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(12),
+            Child = new StackPanel { Spacing = 7, Children = { heading, fields, privacy, connect } }
+        };
+        _connectionToggle.Click += (_, _) => _connectionPopup.IsOpen = !_connectionPopup.IsOpen;
+        ToolTip.SetTip(_connectionToggle, "Show or hide the shared live world-database connection");
     }
 
     private Control AcquisitionPage()
@@ -697,6 +719,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
         {
             var profile = Profile(); SetBusy($"Verifying {profile.User}@{profile.Host}:{profile.Port}/{profile.Database}…");
             await _session.TestManualDatabaseAsync(profile);
+            _connectionPopup.IsOpen = false;
             _status.Text = $"Connected and shared with every Crucible SQL tool · {profile.Database} on {profile.Host}:{profile.Port}.";
             if (openStudio) SqlStudioRequested?.Invoke(this, EventArgs.Empty);
         }
@@ -733,7 +756,15 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable
     private static Button AccentButton(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
     private static Grid Form(params (string Label, Control Control)[] rows) { var grid = new Grid { ColumnDefinitions = new("Auto,*"), RowDefinitions = new(string.Join(',', Enumerable.Repeat("Auto", rows.Length))) }; for (var index=0; index<rows.Length; index++) { var label = new TextBlock { Text = rows[index].Label, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0,5,12,5) }; Grid.SetRow(label,index); grid.Children.Add(label); rows[index].Control.Margin = new Thickness(0,4); Grid.SetRow(rows[index].Control,index); Grid.SetColumn(rows[index].Control,1); grid.Children.Add(rows[index].Control); } return grid; }
     private static Grid Row(Control first, Control second) { var grid = new Grid { ColumnDefinitions = new("*,Auto") }; grid.Children.Add(first); Grid.SetColumn(second,1); second.Margin = new Thickness(6,0,0,0); grid.Children.Add(second); return grid; }
-    private static Control ConnectionField(string label, Control input) { var field = new Grid { ColumnDefinitions = new("Auto,*"), ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Stretch }; field.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center, FontSize = 11 }); Grid.SetColumn(input, 1); field.Children.Add(input); return field; }
+    private static void AddConnectionField(Grid fields, int row, string label, Control input)
+    {
+        var caption = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center, FontSize = 11 };
+        Grid.SetRow(caption, row);
+        Grid.SetRow(input, row);
+        Grid.SetColumn(input, 1);
+        fields.Children.Add(caption);
+        fields.Children.Add(input);
+    }
     private static void AddPath(Grid grid, int row, string label, Control field, Control button) { var text = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center }; Grid.SetRow(text,row); grid.Children.Add(text); Grid.SetRow(field,row); Grid.SetColumn(field,1); field.Margin = new Thickness(6,3); grid.Children.Add(field); Grid.SetRow(button,row); Grid.SetColumn(button,2); grid.Children.Add(button); }
     private static T WithRow<T>(T control, int row) where T:Control { Grid.SetRow(control,row); return control; }
     private static T WithColumn<T>(T control, int column) where T:Control { Grid.SetColumn(control,column); return control; }

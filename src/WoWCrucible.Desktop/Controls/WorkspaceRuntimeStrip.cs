@@ -11,6 +11,16 @@ namespace WoWCrucible.Desktop.Controls;
 internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
 {
     private readonly Button _workspace = new() { Content = "WORKSPACE · not configured", HorizontalContentAlignment = HorizontalAlignment.Left };
+    private readonly Button _featureBack = new() { Content = "←", IsVisible = false };
+    private readonly TextBlock _featureTitle = new()
+    {
+        IsVisible = false,
+        FontSize = 13,
+        FontWeight = FontWeight.SemiBold,
+        VerticalAlignment = VerticalAlignment.Center
+    };
+    private readonly ContentControl _featureToolbar = new() { IsVisible = false, VerticalAlignment = VerticalAlignment.Center };
+    private readonly Grid _featureContext;
     private readonly TextBlock _sqlLight = Light();
     private readonly TextBlock _authLight = Light();
     private readonly TextBlock _worldLight = Light();
@@ -26,6 +36,8 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
     private bool _refreshing;
 
     public event EventHandler? WorkspaceRequested;
+    public event EventHandler? FeatureBackRequested;
+    public event EventHandler<string>? CommandRequested;
 
     public WorkspaceRuntimeStrip()
     {
@@ -37,30 +49,142 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
         AutomationProperties.SetName(_auth, "Toggle authentication server");
         AutomationProperties.SetName(_world, "Toggle world server");
         AutomationProperties.SetName(_refresh, "Refresh server status");
+        AutomationProperties.SetName(_featureBack, "Return to the previous Crucible workspace");
         _workspace.Click += (_, _) => WorkspaceRequested?.Invoke(this, EventArgs.Empty);
+        _featureBack.Click += (_, _) => FeatureBackRequested?.Invoke(this, EventArgs.Empty);
         _sql.Click += async (_, _) => await ToggleAsync(Component.Sql);
         _auth.Click += async (_, _) => await ToggleAsync(Component.Auth);
         _world.Click += async (_, _) => await ToggleAsync(Component.World);
         _refresh.Click += async (_, _) => await RefreshAsync();
         _timer.Tick += async (_, _) => await RefreshAsync();
+        _featureContext = new Grid
+        {
+            ColumnDefinitions = new("Auto,Auto,*"),
+            ColumnSpacing = 7,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { _featureBack, AtColumn(_featureTitle, 1), AtColumn(_featureToolbar, 2) }
+        };
+        var center = new Grid
+        {
+            ColumnDefinitions = new("*,Auto"),
+            ColumnSpacing = 8,
+            Children =
+            {
+                _featureContext,
+                AtColumn(_message, 1)
+            }
+        };
+        var runtime = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 5,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Children = { _sql, _auth, _world, _refresh }
+        };
+        var context = new Grid
+        {
+            ColumnDefinitions = new("Auto,*,Auto"),
+            ColumnSpacing = 8,
+            Margin = new Thickness(8, 2),
+            Children = { _workspace, AtColumn(center, 1), AtColumn(runtime, 2) }
+        };
         Content = new Border
         {
             Background = new SolidColorBrush(Color.Parse("#090D13")),
             BorderBrush = new SolidColorBrush(Color.Parse("#273044")),
             BorderThickness = new Thickness(0, 0, 0, 1),
-            Child = new ScrollViewer
+            Child = new Grid
             {
-                HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
-                VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
-                Content = new StackPanel
+                RowDefinitions = new("Auto,Auto"),
+                Children =
                 {
-                    Orientation = Orientation.Horizontal,
-                    Spacing = 5,
-                    Margin = new Thickness(8, 2),
-                    Children = { _workspace, Divider(), _sql, _auth, _world, _refresh, _message }
+                    BuildApplicationMenu(),
+                    AtRow(context, 1)
                 }
             }
         };
+    }
+
+    private Menu BuildApplicationMenu()
+    {
+        return new Menu
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            Items =
+            {
+                DomainMenu("CRUCIBLE",
+                    ("Workspace setup", "workspace.setup"),
+                    ("Projects & shared IDs", "workspace.projects"),
+                    ("DBC tables", "workspace.dbc"),
+                    ("All commands…", "ui.commands")),
+                DomainMenu("CREATE",
+                    ("Items & sets", "workspace.items"),
+                    ("Cut / unobtainable items", "workspace.item-acquisition"),
+                    ("Creatures & NPCs", "workspace.creatures"),
+                    ("Quests", "workspace.quests"),
+                    ("Gameobjects", "workspace.gameobjects"),
+                    ("Pets & companions", "workspace.pets"),
+                    ("Behaviors & dialogue", "workspace.behaviors")),
+                DomainMenu("CLIENT",
+                    ("DBC layers & promotion", "workspace.dbc-layers"),
+                    ("Schemas & validation", "workspace.dbd"),
+                    ("Client cache tables", "workspace.cache"),
+                    ("MPQ patches & archives", "workspace.mpq"),
+                    ("Merge MPQ patches", "workspace.mpq-merge"),
+                    ("Client workshop", "workspace.client")),
+                DomainMenu("SERVER",
+                    ("Connection & controls", "workspace.server"),
+                    ("SQL Studio", "workspace.sql"),
+                    ("Saved SQL favorites", "workspace.sql-favorites")),
+                DomainMenu("WORLD & ASSETS",
+                    ("Assets, models & compare", "workspace.assets"),
+                    ("Texture lab", "workspace.textures"),
+                    ("Maps & world", "workspace.maps"),
+                    ("Lighting & skyboxes", "workspace.lighting"),
+                    ("Modern asset conversion", "workspace.conversion")),
+                DomainMenu("HELP",
+                    ("Field help & offline wiki", "workspace.knowledge"),
+                    ("CLI guide", "workspace.cli-guide"),
+                    ("Legacy-tool coverage", "workspace.tools"),
+                    ("Logs", "action.logs"),
+                    ("Toggle Devbug Mode", "action.devbug"))
+            }
+        };
+    }
+
+    private MenuItem DomainMenu(string header, params (string Label, string Command)[] entries)
+    {
+        var menu = new MenuItem { Header = header };
+        foreach (var (label, command) in entries)
+        {
+            if (!command.Equals("ui.commands", StringComparison.Ordinal) &&
+                !CrucibleCommandCatalog.All.Any(candidate => candidate.Id.Equals(command, StringComparison.Ordinal)))
+                throw new InvalidOperationException($"Application menu entry '{label}' references unknown command '{command}'.");
+            var item = new MenuItem { Header = label };
+            item.Click += (_, _) => CommandRequested?.Invoke(this, command);
+            menu.Items.Add(item);
+        }
+        return menu;
+    }
+
+    public void ShowFeature(string title, Control? toolbar)
+    {
+        _featureBack.IsVisible = true;
+        _featureTitle.Text = title;
+        _featureTitle.IsVisible = true;
+        _featureToolbar.Content = toolbar;
+        _featureToolbar.IsVisible = toolbar is not null;
+        _message.IsVisible = false;
+    }
+
+    public void HideFeature()
+    {
+        _featureBack.IsVisible = false;
+        _featureTitle.IsVisible = false;
+        _featureTitle.Text = string.Empty;
+        _featureToolbar.Content = null;
+        _featureToolbar.IsVisible = false;
+        _message.IsVisible = true;
     }
 
     public void Attach(DesktopWorkspaceSession session)
@@ -163,7 +287,16 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
         Content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Children = { light, new TextBlock { Text = label, FontSize = 10, FontWeight = FontWeight.SemiBold } } }
     };
     private static TextBlock Light() => new() { Text = "●", FontSize = 10, VerticalAlignment = VerticalAlignment.Center };
-    private static Border Divider() => new() { BorderBrush = new SolidColorBrush(Color.Parse("#273044")), BorderThickness = new Thickness(1, 0, 0, 0), Margin = new Thickness(3, 2) };
+    private static T AtColumn<T>(T control, int column) where T : Control
+    {
+        Grid.SetColumn(control, column);
+        return control;
+    }
+    private static T AtRow<T>(T control, int row) where T : Control
+    {
+        Grid.SetRow(control, row);
+        return control;
+    }
     private static void Paint(TextBlock light, bool? running) => light.Foreground = new SolidColorBrush(Color.Parse(running switch { true => "#54D68B", false => "#E15A64", null => "#677287" }));
     private enum Component { Sql, Auth, World }
 

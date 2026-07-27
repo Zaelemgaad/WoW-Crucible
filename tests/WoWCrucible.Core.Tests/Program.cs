@@ -2022,6 +2022,14 @@ if (Directory.Exists(desktopSourceRoot))
     var serverLifecycleSource = File.ReadAllText(Path.Combine(repositoryRoot, "src", "WoWCrucible.Core", "ServerLifecycleService.cs"));
     var sqlWorkspaceServiceSource = File.ReadAllText(Path.Combine(repositoryRoot, "src", "WoWCrucible.Core", "SqlWorkspaceService.cs"));
     if (!runtimeStripSource.Contains("failed · hover for details", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("FeatureBackRequested", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(\"CRUCIBLE\"", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(\"CREATE\"", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(\"CLIENT\"", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(\"SERVER\"", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(\"WORLD & ASSETS\"", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("CommandRequested", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("ShowFeature(string title, Control? toolbar)", StringComparison.Ordinal) ||
         !serverLifecycleSource.Contains("RunWslScriptAsync", StringComparison.Ordinal) ||
         !serverLifecycleSource.Contains("WaitForWslStableStateAsync", StringComparison.Ordinal) ||
         !serverLifecycleSource.Contains("wow-crucible-{name}-startup.log", StringComparison.Ordinal) ||
@@ -2060,6 +2068,10 @@ if (Directory.Exists(desktopSourceRoot))
         !mapSceneSource.Contains("SKVertices.CreateCopy", StringComparison.Ordinal))
         throw new InvalidOperationException("Same-window exact-provenance ADT terrain and placed-object scene composition regressed.");
     if (!itemWorkbenchSource.Contains("NO KNOWN ACQUISITION PATH", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("IFeatureWorkspaceToolbar", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("IsLightDismissEnabled = true", StringComparison.Ordinal) ||
+        !itemWorkbenchSource.Contains("ConfigureConnectionPopup", StringComparison.Ordinal) ||
+        itemWorkbenchSource.Contains("var connection = ConnectionBar()", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("Exact item ID(s), always bypassing filters: 17 and 17802", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("_exactIds.TextChanged", StringComparison.Ordinal) ||
         !itemWorkbenchSource.Contains("var pinnedIds = ItemIdQueryParser.Parse(_exactIds.Text)", StringComparison.Ordinal) ||
@@ -2098,6 +2110,7 @@ if (Directory.Exists(desktopSourceRoot))
         !mainWindowSource.Contains("OpenMpqMergeWorkspace", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("_workspaceSession.Dispose()", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("ApplyShellPaneState", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("SuppressLegacyFeatureNavigation", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("RootLayout.ColumnDefinitions[0].Width", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("RootLayout.ColumnDefinitions[4].Width", StringComparison.Ordinal) ||
         !desktopSettingsSource.Contains("NavigationPaneOpen", StringComparison.Ordinal) ||
