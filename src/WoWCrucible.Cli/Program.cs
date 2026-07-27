@@ -344,6 +344,44 @@ static int Knowledge(string[] args)
 static int Asset(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["layer-merge", var layerLibrary, var layerDestination, .. var layerOptions])
+    {
+        var apply = layerOptions.Contains("--apply", StringComparer.OrdinalIgnoreCase);
+        var json = layerOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var definitions = layerOptions.Where(option => option.StartsWith("--layer=", StringComparison.OrdinalIgnoreCase)).Select(option =>
+        {
+            var value = option["--layer=".Length..]; var separator = value.LastIndexOf(':');
+            if (separator <= 0 || !int.TryParse(value[(separator + 1)..], out var precedence)) throw new FormatException("--layer must be provenance:precedence.");
+            return new ProcessedAssetLayer(value[..separator], precedence);
+        }).ToArray();
+        var resolutions = layerOptions.Where(option => option.StartsWith("--resolve=", StringComparison.OrdinalIgnoreCase)).Select(option =>
+        {
+            var value = option["--resolve=".Length..]; var separator = value.LastIndexOf('|');
+            if (separator <= 0 || separator == value.Length - 1) throw new FormatException("--resolve must be logical-client-path|provenance.");
+            return new KeyValuePair<string, string>(value[..separator], value[(separator + 1)..]);
+        }).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+        var unknown = layerOptions.Where(option => !option.Equals("--apply", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--layer=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--resolve=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset layer-merge option: {unknown[0]}");
+        if (definitions.Length == 0) return Fail("asset layer-merge requires at least one --layer=provenance:precedence.");
+        var service = new ProcessedAssetLayerMergeService();
+        var plan = service.Analyze(layerLibrary, layerDestination, definitions, resolutions, cancellationToken);
+        if (!apply)
+        {
+            if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            else PrintLayerPlan(plan);
+            return plan.Complete ? 0 : 3;
+        }
+        var progress = new WoWCrucible.Cli.SynchronousProgress<ProcessedAssetLayerMergeProgress>(value =>
+        {
+            if (value.CompletedFiles == value.TotalFiles || value.CompletedFiles % 1000 == 0)
+                Console.Error.WriteLine($"HD layer merge\t{value.CompletedFiles:N0}/{value.TotalFiles:N0} files\t{value.CompletedBytes / (1024d * 1024 * 1024):0.00}/{value.TotalBytes / (1024d * 1024 * 1024):0.00} GiB\t{value.CurrentPath}");
+        });
+        var result = service.Apply(plan, progress, cancellationToken);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else { PrintLayerPlan(plan); Console.WriteLine($"CONTENT\t{result.ContentRoot}\nCONFLICT_ROOT\t{result.ConflictRoot}\nMANIFEST\t{result.ManifestPath}\nCOPIED\t{result.Files.Count:N0}\nCONFLICT_FILES\t{result.ConflictFiles:N0}"); }
+        return plan.Complete ? 0 : 3;
+    }
     if (args is ["texture-consumers-build", var consumerLibrary, .. var consumerBuildOptions])
     {
         var json = consumerBuildOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
@@ -1575,10 +1613,22 @@ static int Asset(string[] args, CancellationToken cancellationToken)
         var summary = result.Summary;
         Console.WriteLine($"INDEX\t{summary.IndexPath}\nCATALOG\t{summary.CatalogPath}\nCATALOG_ROWS\t{summary.CatalogRows:N0}\nELIGIBLE_ASSETS\t{summary.EligibleAssets:N0}\nINDEXED_ASSETS\t{summary.IndexedAssets:N0}\nUPDATED_ASSETS\t{result.UpdatedAssets:N0}\nUNCHANGED_ASSETS\t{result.UnchangedAssets:N0}\nREMOVED_ASSETS\t{result.RemovedAssets:N0}\nUNSUPPORTED_ASSETS\t{summary.UnsupportedAssets:N0}\nINVALID_ASSETS\t{summary.InvalidAssets:N0}\nMISSING_ASSETS\t{summary.MissingAssets:N0}\nCATALOG_ISSUES\t{summary.CatalogIssues:N0}\nTEXTURE_REFERENCES\t{summary.TextureReferences:N0}\nCOVERAGE_COMPLETE\t{summary.CoverageComplete}\nDURATION_MS\t{result.DurationMilliseconds:0.###}");
     }
+    static void PrintLayerPlan(ProcessedAssetLayerMergePlan plan)
+    {
+        Console.WriteLine($"LIBRARY\t{plan.LibraryRoot}\nDESTINATION\t{plan.DestinationRoot}\nCATALOG_ROWS\t{plan.CatalogRows:N0}\nWINNERS\t{plan.Winners.Count:N0}\nOUTPUT_BYTES\t{plan.OutputBytes:N0}\nOVERRIDDEN\t{plan.OverriddenCandidates:N0}\nEQUAL_DUPLICATES\t{plan.EqualPrecedenceDuplicates:N0}\nCONFLICTS\t{plan.Conflicts.Count:N0}\nMISSING\t{plan.MissingSources.Count:N0}\nCOMPLETE\t{plan.Complete}");
+        foreach (var layer in plan.Layers) Console.WriteLine($"LAYER\t{layer.Precedence}\t{layer.Provenance}");
+        foreach (var group in plan.Winners.GroupBy(value => value.Provenance, StringComparer.OrdinalIgnoreCase).OrderByDescending(group => group.Count()).ThenBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
+            Console.WriteLine($"WINNING_LAYER\t{group.Key}\t{group.Count():N0} files\t{group.Sum(value => value.Bytes):N0} bytes");
+        foreach (var conflict in plan.Conflicts.Take(100)) Console.WriteLine($"CONFLICT\t{conflict.LogicalPath}\tSELECTED={conflict.SelectedProvenance ?? "<unresolved>"}\t{string.Join(" | ", conflict.Candidates.Select(value => $"{value.Provenance}:{value.Bytes}"))}");
+        if (plan.Conflicts.Count > 100) Console.WriteLine($"CONFLICT\t... {plan.Conflicts.Count - 100:N0} additional conflict(s) retained in the plan");
+        foreach (var missing in plan.MissingSources.Take(100)) Console.WriteLine($"MISSING\t{missing}");
+        if (plan.MissingSources.Count > 100) Console.WriteLine($"MISSING\t... {plan.MissingSources.Count - 100:N0} additional missing source(s)");
+    }
 }
 
 static int AssetHelp(int code = 0) => GroupHelp("""
 Usage:
+  wowcrucible asset layer-merge <processed-library> <new-hd-folder> --layer=provenance:precedence [...] [--resolve="logical-path|provenance"] [--apply] [--format=text|json]
   wowcrucible asset texture-consumers-build <processed-library> [--format=text|json]
   wowcrucible asset texture-consumers <processed-library> <texture.blp|client-path> [--refresh] [--dbc=folder] [--schema=file] [--server=installed-server] [--format=text|json]
   wowcrucible asset texture-info <file.blp>

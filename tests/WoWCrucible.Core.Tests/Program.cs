@@ -1734,6 +1734,40 @@ var directCatalogText = File.ReadAllText(firstDirectRun.CatalogPath);
 if (directCatalogText.Contains("asset-library-plan", StringComparison.OrdinalIgnoreCase) || directCatalogText.Contains("asset-library-checkpoint", StringComparison.OrdinalIgnoreCase) || directCatalogText.Contains(".asset-library-operation.lock", StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException("The asset catalog included library control files instead of only processed asset roots.");
 
+var layerMergeLibrary = Path.Combine(assetFixture, "layer-merge-library"); var layerMergeOutput = Path.Combine(assetFixture, "layer-merge-output");
+var layerRows = new List<string> { "category,format,source,relative_path,bytes" };
+void AddLayerFile(string provenance, string logicalPath, string contents)
+{
+    var relative = Path.Combine("Archives", "Content", Path.GetDirectoryName(logicalPath) ?? string.Empty, provenance, Path.GetFileName(logicalPath));
+    var full = Path.Combine(layerMergeLibrary, relative); Directory.CreateDirectory(Path.GetDirectoryName(full)!); File.WriteAllText(full, contents);
+    layerRows.Add($"archive,BLP,{provenance},{relative},{new FileInfo(full).Length}");
+}
+AddLayerFile("F-one", @"Creature\Test\same.blp", "identical"); AddLayerFile("F-two", @"Creature\Test\same.blp", "identical");
+AddLayerFile("F-one", @"Creature\Test\overridden.blp", "old one"); AddLayerFile("F-two", @"Creature\Test\overridden.blp", "old two"); AddLayerFile("Z", @"Creature\Test\overridden.blp", "z winner");
+AddLayerFile("F-one", @"Creature\Test\conflict.blp", "review one"); AddLayerFile("F-two", @"Creature\Test\conflict.blp", "review two");
+AddLayerFile("F-one", @"Creature\Test\top.blp", "f version"); AddLayerFile("Z", @"Creature\Test\top.blp", "z version"); AddLayerFile("A", @"Creature\Test\top.blp", "a winner");
+Directory.CreateDirectory(layerMergeLibrary); File.WriteAllLines(Path.Combine(layerMergeLibrary, "asset-catalog.csv"), layerRows);
+var layerMergeService = new ProcessedAssetLayerMergeService(); ProcessedAssetLayer[] mergeLayers = [new("F-one", 0), new("F-two", 0), new("Z", 10), new("A", 20)];
+var unresolvedLayerMerge = layerMergeService.Analyze(layerMergeLibrary, layerMergeOutput, mergeLayers);
+if (unresolvedLayerMerge.Complete || unresolvedLayerMerge.Conflicts.Count != 1 || unresolvedLayerMerge.Conflicts[0].LogicalPath != @"Creature\Test\conflict.blp" ||
+    unresolvedLayerMerge.Winners.Count != 3 || unresolvedLayerMerge.EqualPrecedenceDuplicates != 1 || unresolvedLayerMerge.MissingSources.Count != 0)
+    throw new InvalidOperationException("Layer merge did not collapse byte-identical files, honor higher precedence, or stop on a differing equal-precedence conflict.");
+try { _ = layerMergeService.Apply(unresolvedLayerMerge); throw new InvalidOperationException("Layer merge published an incomplete plan with an unresolved equal-precedence conflict."); }
+catch (InvalidOperationException exception) when (exception.Message.Contains("incomplete", StringComparison.OrdinalIgnoreCase)) { }
+if (Directory.Exists(layerMergeOutput)) throw new InvalidOperationException("Rejected layer merge created a destination before complete review.");
+var resolvedLayerMerge = layerMergeService.Analyze(layerMergeLibrary, layerMergeOutput, mergeLayers,
+    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [@"Creature\Test\conflict.blp"] = "F-two" });
+var appliedLayerMerge = layerMergeService.Apply(resolvedLayerMerge);
+if (!resolvedLayerMerge.Complete || appliedLayerMerge.Files.Count != 4 || appliedLayerMerge.ConflictFiles != 2 ||
+    File.ReadAllText(Path.Combine(appliedLayerMerge.ContentRoot, "Creature", "Test", "same.blp")) != "identical" ||
+    File.ReadAllText(Path.Combine(appliedLayerMerge.ContentRoot, "Creature", "Test", "overridden.blp")) != "z winner" ||
+    File.ReadAllText(Path.Combine(appliedLayerMerge.ContentRoot, "Creature", "Test", "conflict.blp")) != "review two" ||
+    File.ReadAllText(Path.Combine(appliedLayerMerge.ContentRoot, "Creature", "Test", "top.blp")) != "a winner" ||
+    File.ReadAllText(Path.Combine(appliedLayerMerge.ConflictRoot, "Creature", "Test", "F-one", "conflict.blp")) != "review one" ||
+    File.ReadAllText(Path.Combine(appliedLayerMerge.ConflictRoot, "Creature", "Test", "F-two", "conflict.blp")) != "review two" ||
+    !File.Exists(appliedLayerMerge.ManifestPath))
+    throw new InvalidOperationException("Layer merge lost precedence, a reviewed equal-precedence variant, or its audit manifest.");
+
 var provenanceLibrary = Path.Combine(assetFixture, "provenance-collision"); var sharedProvenancePrefix = new string('p', 60); var rawProvenanceA = sharedProvenancePrefix + "-first"; var rawProvenanceB = sharedProvenancePrefix + "-second";
 var provenanceSourceA = Path.Combine(provenanceLibrary, "Loose", "Content", rawProvenanceA, "Character", "Human", "same.png"); var provenanceSourceB = Path.Combine(provenanceLibrary, "Loose", "Content", rawProvenanceB, "Character", "Human", "same.png");
 Directory.CreateDirectory(Path.GetDirectoryName(provenanceSourceA)!); Directory.CreateDirectory(Path.GetDirectoryName(provenanceSourceB)!); File.WriteAllText(provenanceSourceA, "first"); File.WriteAllText(provenanceSourceB, "second");
@@ -2303,6 +2337,12 @@ if (ItemNumericFieldCatalog.Resolve("ItemLevel").Maximum != ushort.MaxValue ||
     ItemNumericFieldCatalog.Resolve("stat_value1").Maximum != int.MaxValue ||
     ItemNumericFieldCatalog.Resolve("BuyPrice").Maximum != int.MaxValue)
     throw new InvalidOperationException("Item Creator numeric contracts regressed to arbitrary presentation caps.");
+if (ItemSemanticCatalog.TypeName(2, 20) != "Weapon · Fishing Pole" ||
+    ItemSemanticCatalog.TypeName(4, 4) != "Armor · Plate" ||
+    ItemSemanticCatalog.InventoryTypeName(17) != "Two-Hand" ||
+    ItemSemanticCatalog.QualityName(7) != "Heirloom" ||
+    !ItemSemanticCatalog.SubclassName(2, 999).Contains("Unknown", StringComparison.Ordinal))
+    throw new InvalidOperationException("Shared WotLK item semantics did not decode SQL/DBC item identities or retain unknown values explicitly.");
 var unsignedSmallInt = new DatabaseColumnCapability("ItemLevel", "smallint", "smallint unsigned", false, "0", "", "", 1);
 if (!SqlNumericRangeService.TryResolve(unsignedSmallInt, out var unsignedSmallIntRange) || unsignedSmallIntRange.Maximum != ushort.MaxValue)
     throw new InvalidOperationException("Live SQL numeric-width discovery failed for SMALLINT UNSIGNED.");

@@ -174,6 +174,7 @@ wowcrucible asset library-layout <library-folder> [--apply]
 wowcrucible asset library-consolidate <library-folder> [--apply]
 wowcrucible asset library-catalog <library-folder>
 wowcrucible asset library-status <library-folder>
+wowcrucible asset layer-merge <library-folder> <new-output-folder> --layer=<provenance>:<precedence> [...] [--resolve="<logical-path>|<provenance>"]... [--apply] [--format=text|json]
 wowcrucible asset compare-folders <library-folder> [path-filter]
 wowcrucible asset compare-files <library-folder> <logical-directory>
 wowcrucible asset models <library-folder> <logical-directory>
@@ -272,6 +273,7 @@ wowcrucible asset library-consolidate "G:\Crucible-Extras-Processed"
 wowcrucible asset library-consolidate "G:\Crucible-Extras-Processed" --apply
 wowcrucible asset library-catalog "G:\Crucible-Extras-Processed"
 wowcrucible asset library-status "G:\Crucible-Extras-Processed"
+wowcrucible asset layer-merge "G:\Crucible-Extras-Processed" "G:\Crucible-Extras-Processed\HD" --layer=Patch-F-one:0 --layer=Patch-F-two:0 --layer=patch-Z:10 --layer=patch-A:20
 ```
 
 Stopping `library-run` does not discard completed work. Run the same command again to resume past existing extraction/conversion outputs.
@@ -287,6 +289,8 @@ Asset libraries use a content-first comparison layout. For example, `Archives\pa
 Comparison is directory-first because expansions frequently rename equivalent assets. `compare-folders` searches logical content paths and reports PNG/source counts; `compare-files` lists every direct PNG from every provenance folder in the selected path without requiring filenames to match. The Avalonia **Assets & compare** workspace exposes the same model visually with paged, lazy thumbnails and two comparison slots.
 
 `library-catalog` also writes `asset-comparison-index.json`, a compact versioned acceleration sidecar containing PNG, M2, and SKIN directory aggregates. Asset Compare validates it against the Crucible-managed CSV and falls back to the CSV or live filesystem if it is missing, stale, corrupt, unsafe, or unwritable. The sidecar is disposable metadata—not an asset manifest or trust boundary—and failure to write it never turns a successfully committed catalog into a failed library operation. Re-run `library-catalog` after deliberately editing or replacing the CSV outside Crucible.
+
+`layer-merge` builds a reviewed effective asset tree from selected content-first provenance layers. A larger precedence number wins the same logical client path. Sources at the same precedence are collapsed only after both length and streaming byte comparison prove that they are identical; different bytes remain a blocking conflict until an exact `logical-path|provenance` resolution is supplied. A dry run writes nothing. `--apply` rechecks every source length, copies and SHA-256 hashes every winner to unique staging, preserves every differing equal-precedence candidate under `Conflicts\Equal-Precedence`, writes `_meta\layer-merge.json`, and only then atomically publishes the new destination. It never changes or deletes the processed sources and refuses an existing destination.
 
 Launch that visual workspace directly with `WoWCrucible.Desktop-latest.exe "--asset-compare=G:\Crucible-Extras-Processed"`, or choose **Assets & compare** from the main navigation. It replaces the current workspace inside the same application window instead of opening a separate window; **← Editor** returns to the previous workspace. Its directory, cards, and preview columns have draggable splitters, tool groups wrap, and the configuration headers scroll when vertical space is limited so resizing does not strand controls off-screen.
 

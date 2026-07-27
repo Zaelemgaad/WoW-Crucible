@@ -675,18 +675,77 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
     private void ApplyRowTemplate()
     {
         var complete = _rowDisplay.SelectedIndex == 0;
+        var table = _page?.Table;
         _rows.ItemTemplate = new FuncDataTemplate<SqlRowRecord>((row, _) =>
         {
             if (row is null) return new TextBlock();
+            if (table?.Equals("item_template", StringComparison.OrdinalIgnoreCase) == true) return ItemRowCard(row, complete);
             var name = FriendlyRowName(row); var identity = row.Display;
             var heading = new TextBlock { Text = name ?? identity, FontWeight = FontWeight.SemiBold, TextWrapping = complete ? TextWrapping.Wrap : TextWrapping.NoWrap };
             if (!complete) return new Border { Padding = new Thickness(4), Child = heading };
-            var preview = row.Values.Where(pair => !row.Key.ContainsKey(pair.Key) && pair.Value is not null && CellText(pair.Value).Length > 0).Take(8).Select(pair => $"{pair.Key}: {CellText(pair.Value)}");
+            var preview = row.Values.Where(pair => !row.Key.ContainsKey(pair.Key) && !IsFriendlyNameColumn(pair.Key) && pair.Value is not null && CellText(pair.Value).Length > 0).Take(8).Select(pair => $"{pair.Key}: {CellText(pair.Value)}");
             var fields = new TextBlock { Text = string.Join("  ·  ", preview), TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
             var instruction = new TextBlock { Text = $"{identity}  ·  click to edit every field here", TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = Brush.Parse("#C58A2B") };
             return new Border { Padding = new Thickness(7), Child = new StackPanel { Spacing = 3, Children = { heading, instruction, fields } } };
         });
     }
+
+    private static Control ItemRowCard(SqlRowRecord row, bool complete)
+    {
+        var name = FriendlyRowName(row) ?? "Unnamed item"; var quality = RowInt(row, "Quality", "quality");
+        var itemClass = RowInt(row, "class", "Class"); var subclass = RowInt(row, "subclass", "Subclass");
+        var entry = RowText(row, "entry", "Entry", "ID") ?? row.Display; var inventory = RowInt(row, "InventoryType", "inventorytype");
+        var heading = new TextBlock { Text = name, FontWeight = FontWeight.SemiBold, TextWrapping = complete ? TextWrapping.Wrap : TextWrapping.NoWrap, Foreground = ItemQualityBrush(quality) };
+        ToolTip.SetTip(heading, $"{ItemSemanticCatalog.QualityName(quality)} quality");
+        var identity = new TextBlock { Text = $"#{entry}", FontSize = 10, Foreground = Brush.Parse("#8995A9"), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
+        var type = new TextBlock { Text = ItemSemanticCatalog.TypeName(itemClass, subclass), Foreground = Brush.Parse("#C7D0DE"), TextWrapping = complete ? TextWrapping.Wrap : TextWrapping.NoWrap, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0) };
+        if (!complete) return new Border { Padding = new Thickness(5, 3), Child = new WrapPanel { Children = { heading, identity, type } } };
+
+        var facts = new List<string> { ItemSemanticCatalog.TypeName(itemClass, subclass) };
+        if (inventory != 0) facts.Add(ItemSemanticCatalog.InventoryTypeName(inventory));
+        var itemLevel = RowInt(row, "ItemLevel", "itemlevel"); if (itemLevel > 0) facts.Add($"iLvl {itemLevel:N0}");
+        var requiredLevel = RowInt(row, "RequiredLevel", "requiredlevel"); if (requiredLevel > 0) facts.Add($"Requires level {requiredLevel:N0}");
+        var itemSet = RowInt(row, "itemset", "ItemSet"); if (itemSet > 0) facts.Add($"Set #{itemSet:N0}");
+        var detail = new TextBlock { Text = string.Join("  ·  ", facts), TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#AAB4C3") };
+        var instruction = new TextBlock { Text = $"#{entry}  ·  click to inspect or edit the complete SQL row", TextWrapping = TextWrapping.Wrap, FontSize = 10, Foreground = Brush.Parse("#8995A9") };
+        return new Border { Padding = new Thickness(7), Child = new StackPanel { Spacing = 3, Children = { heading, detail, instruction } } };
+    }
+
+    private static int RowInt(SqlRowRecord row, params string[] names)
+    {
+        var value = RowValue(row, names);
+        try { return value is null or DBNull ? 0 : Convert.ToInt32(value, CultureInfo.InvariantCulture); }
+        catch (Exception) when (value is not null) { return 0; }
+    }
+
+    private static string? RowText(SqlRowRecord row, params string[] names)
+    {
+        var value = RowValue(row, names); var text = value is null or DBNull ? null : CellText(value);
+        return string.IsNullOrWhiteSpace(text) ? null : text;
+    }
+
+    private static object? RowValue(SqlRowRecord row, IReadOnlyList<string> names)
+    {
+        foreach (var name in names)
+        {
+            foreach (var pair in row.Values)
+                if (pair.Key.Equals(name, StringComparison.OrdinalIgnoreCase)) return pair.Value;
+            foreach (var pair in row.Key)
+                if (pair.Key.Equals(name, StringComparison.OrdinalIgnoreCase)) return pair.Value;
+        }
+        return null;
+    }
+
+    private static IBrush ItemQualityBrush(int quality) => Brush.Parse(quality switch
+    {
+        0 => "#9D9D9D", 1 => "#F5F7FA", 2 => "#1EFF00", 3 => "#4A9EFF", 4 => "#C066FF",
+        5 => "#FF9B38", 6 => "#E85B52", 7 => "#31D5F4", _ => "#F5F7FA"
+    });
+
+    private static bool IsFriendlyNameColumn(string name) =>
+        name.Equals("name", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("LogTitle", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("title", StringComparison.OrdinalIgnoreCase);
 
     private void SelectRow()
     {
