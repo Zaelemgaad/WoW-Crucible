@@ -9,7 +9,7 @@ public sealed record ItemSpellDraft(int SpellId, int Trigger, int Charges, float
 public sealed record ItemDraft(
     uint Entry, string Name, int Class, int Subclass, uint DisplayId, int Quality, int InventoryType,
     uint ItemLevel, uint RequiredLevel, uint BuyPrice, uint SellPrice, uint Bonding, uint Flags,
-    float Armor, float DamageMin, float DamageMax, uint Delay, uint MaxDurability, string Description,
+    uint Armor, float DamageMin, float DamageMax, uint Delay, uint MaxDurability, string Description,
     IReadOnlyList<ItemStatDraft>? Stats = null, IReadOnlyList<ItemSpellDraft>? Spells = null, uint ItemSetId = 0,
     int DamageType = 0, int SoundOverrideSubclassId = -1, int Material = 0, int SheatheType = 0);
 
@@ -52,7 +52,13 @@ public static class ItemTemplateAdapter
         var names = new List<string> { "entry", "class", "subclass", "SoundOverrideSubclass", "Material", "name", "displayid", "Quality", "InventoryType", "sheath", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description", "itemset" };
         for (var slot = 1; slot <= 10; slot++) { names.Add($"stat_type{slot}"); names.Add($"stat_value{slot}"); }
         for (var slot = 1; slot <= 5; slot++) names.AddRange([$"spellid_{slot}", $"spelltrigger_{slot}", $"spellcharges_{slot}", $"spellppmRate_{slot}", $"spellcooldown_{slot}", $"spellcategory_{slot}", $"spellcategorycooldown_{slot}"]);
-        return new("item_template", names.Select((name, index) => new DatabaseColumnCapability(name, name is "name" or "description" ? "varchar" : "int", name is "name" or "description" ? "varchar(255)" : "int", false, "0", name == "entry" ? "PRI" : string.Empty, string.Empty, index + 1)).ToArray());
+        return new("item_template", names.Select((name, index) =>
+        {
+            var text = name is "name" or "description";
+            var columnType = text ? "varchar(255)" : ItemNumericFieldCatalog.PortableSqlType(name);
+            var dataType = columnType.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+            return new DatabaseColumnCapability(name, dataType, columnType, false, "0", name == "entry" ? "PRI" : string.Empty, string.Empty, index + 1);
+        }).ToArray());
     }
 
     public static ItemWritePlan CreatePlan(ItemDraft draft, DatabaseTableCapability table)
@@ -75,18 +81,19 @@ public static class ItemTemplateAdapter
         foreach (var (name, value, selected) in semanticValues)
         {
             var column = table.Find(name);
-            if (column is null) { omitted.Add(name); if (selected) selectedOmitted.Add(name); } else values[column.Name] = value;
+            if (column is null) { omitted.Add(name); if (selected) selectedOmitted.Add(name); }
+            else { if (value is not string) ItemNumericFieldCatalog.Validate(name, value, column); values[column.Name] = value; }
         }
         // TrinityCore reads only the first StatsCount slots, so validate incomplete choices and compact real stats before assigning slots.
         var requestedStats = (draft.Stats ?? []).Take(10).ToArray();
         for (var index = 0; index < requestedStats.Length; index++)
         {
-            if (requestedStats[index].Type == 0 && requestedStats[index].Value != 0)
-                throw new InvalidDataException($"Stat slot {index + 1} has value {requestedStats[index].Value} but no stat type. Choose a named stat or clear its value.");
-            if (requestedStats[index].Type != 0 && requestedStats[index].Value == 0)
-                throw new InvalidDataException($"Stat slot {index + 1} selects type {requestedStats[index].Type} with a zero value. That stat is invisible in game; enter a nonzero value or choose None.");
+            if (requestedStats[index].Type < 0 && requestedStats[index].Value != 0)
+                throw new InvalidDataException($"Stat slot {index + 1} has value {requestedStats[index].Value} but is marked Unused. Choose Mana or another named stat, or clear its value.");
+            if (requestedStats[index].Type >= 0 && requestedStats[index].Value == 0)
+                throw new InvalidDataException($"Stat slot {index + 1} selects type {requestedStats[index].Type} with a zero value. That stat is invisible in game; enter a nonzero value or choose Unused slot.");
         }
-        var stats = requestedStats.Where(stat => stat.Type != 0 && stat.Value != 0).ToArray();
+        var stats = requestedStats.Where(stat => stat.Type >= 0 && stat.Value != 0).ToArray();
         for (var slot = 1; slot <= 10; slot++)
         {
             var stat = slot <= stats.Length ? stats[slot - 1] : new ItemStatDraft(0, 0);
@@ -104,7 +111,7 @@ public static class ItemTemplateAdapter
             AddIfPresent(table, values, omitted, selectedOmitted, $"spellcategorycooldown_{slot}", spell.CategoryCooldownMs, selected);
         }
         var statCount = table.Find("StatsCount");
-        if (statCount is not null) values[statCount.Name] = stats.Length;
+        if (statCount is not null) { ItemNumericFieldCatalog.Validate("StatsCount", stats.Length, statCount); values[statCount.Name] = stats.Length; }
         foreach (var required in new[] { "entry", "class", "subclass", "name", "displayid", "Quality", "InventoryType" })
             if (table.Find(required) is null) throw new NotSupportedException($"This item_template has no '{required}' column, so the item adapter cannot safely target it.");
         return new(table.Name, values, omitted.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), selectedOmitted.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
@@ -112,7 +119,9 @@ public static class ItemTemplateAdapter
 
     private static void AddIfPresent(DatabaseTableCapability table, Dictionary<string, object> values, List<string> omitted, List<string> selectedOmitted, string name, object value, bool selected)
     {
-        var column = table.Find(name); if (column is null) { omitted.Add(name); if (selected) selectedOmitted.Add(name); } else values[column.Name] = value;
+        var column = table.Find(name);
+        if (column is null) { omitted.Add(name); if (selected) selectedOmitted.Add(name); }
+        else { ItemNumericFieldCatalog.Validate(name, value, column); values[column.Name] = value; }
     }
 }
 

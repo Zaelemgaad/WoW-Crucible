@@ -2278,7 +2278,8 @@ var trinityPlan = ItemTemplateAdapter.CreatePlan(itemDraft, trinityItemTable);
 var portablePlan = ItemTemplateAdapter.CreatePlan(itemDraft, ItemTemplateAdapter.CreatePortableTable());
 var itemSetPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { ItemSetId = 4321 }, ItemTemplateAdapter.CreatePortableTable());
 var decodedClientFieldPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { DamageType = 2, SoundOverrideSubclassId = 7, Material = 6, SheatheType = 4 }, ItemTemplateAdapter.CreatePortableTable());
-var gapStatsPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(0, 0), new(7, 75)] }, trinityItemTable);
+var gapStatsPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(-1, 0), new(7, 75)] }, trinityItemTable);
+var manaStatPlan = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(0, 50), new(-1, 0)] }, trinityItemTable);
 if (!azerothPlan.PreviewSql().Contains("Crucible''s Blade") || trinityPlan.Values["StatsCount"] is not 2 || trinityPlan.Values.ContainsKey("MaxDurability") || trinityPlan.Values["spellid_1"] is not 12345 || portablePlan.OmittedFields.Count != 0 || itemSetPlan.Values["itemset"] is not 4321u ||
     decodedClientFieldPlan.Values["dmg_type1"] is not 2 || decodedClientFieldPlan.Values["SoundOverrideSubclass"] is not 7 || decodedClientFieldPlan.Values["Material"] is not 6 || decodedClientFieldPlan.Values["sheath"] is not 4)
     throw new InvalidOperationException("Capability-aware item mapping or SQL escaping failed.");
@@ -2288,10 +2289,30 @@ try { trinityPlan.EnsureSelectedSemanticsAreRepresented(); throw new InvalidOper
 catch (NotSupportedException exception) when (exception.Message.Contains("MaxDurability", StringComparison.OrdinalIgnoreCase) && exception.Message.Contains("refused", StringComparison.OrdinalIgnoreCase)) { }
 if (gapStatsPlan.Values["StatsCount"] is not 1 || gapStatsPlan.Values["stat_type1"] is not 7 || gapStatsPlan.Values["stat_value1"] is not 75 || gapStatsPlan.Values["stat_type2"] is not 0)
     throw new InvalidOperationException("Trinity item stat slots were not compacted before StatsCount was calculated.");
+if (manaStatPlan.Values["StatsCount"] is not 1 || manaStatPlan.Values["stat_type1"] is not 0 || manaStatPlan.Values["stat_value1"] is not 50)
+    throw new InvalidOperationException("WotLK stat type 0 was confused with an unused editor slot instead of being preserved as Mana.");
 try { _ = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(7, 0)] }, trinityItemTable); throw new InvalidOperationException("A selected zero-value stat was counted even though the client hides it."); }
 catch (InvalidDataException exception) when (exception.Message.Contains("invisible in game", StringComparison.OrdinalIgnoreCase)) { }
-try { _ = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(0, 50)] }, trinityItemTable); throw new InvalidOperationException("A stat value without a selected type was accepted."); }
-catch (InvalidDataException exception) when (exception.Message.Contains("no stat type", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = ItemTemplateAdapter.CreatePlan(itemDraft with { Stats = [new(-1, 50)] }, trinityItemTable); throw new InvalidOperationException("A stat value in an unused editor slot was accepted."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("Unused", StringComparison.OrdinalIgnoreCase)) { }
+if (ItemNumericFieldCatalog.Resolve("ItemLevel").Maximum != ushort.MaxValue ||
+    ItemNumericFieldCatalog.Resolve("delay").Maximum != ushort.MaxValue ||
+    ItemNumericFieldCatalog.Resolve("MaxDurability").Maximum != ushort.MaxValue ||
+    ItemNumericFieldCatalog.Resolve("armor").Maximum != uint.MaxValue ||
+    ItemNumericFieldCatalog.Resolve("stat_value1").Minimum != int.MinValue ||
+    ItemNumericFieldCatalog.Resolve("stat_value1").Maximum != int.MaxValue ||
+    ItemNumericFieldCatalog.Resolve("BuyPrice").Maximum != int.MaxValue)
+    throw new InvalidOperationException("Item Creator numeric contracts regressed to arbitrary presentation caps.");
+var unsignedSmallInt = new DatabaseColumnCapability("ItemLevel", "smallint", "smallint unsigned", false, "0", "", "", 1);
+if (!SqlNumericRangeService.TryResolve(unsignedSmallInt, out var unsignedSmallIntRange) || unsignedSmallIntRange.Maximum != ushort.MaxValue)
+    throw new InvalidOperationException("Live SQL numeric-width discovery failed for SMALLINT UNSIGNED.");
+_ = ItemTemplateAdapter.CreatePlan(itemDraft with { ItemLevel = ushort.MaxValue, BuyPrice = int.MaxValue }, ItemTemplateAdapter.CreatePortableTable());
+try { _ = ItemTemplateAdapter.CreatePlan(itemDraft with { ItemLevel = ushort.MaxValue + 1u }, ItemTemplateAdapter.CreatePortableTable()); throw new InvalidOperationException("ItemLevel overflow passed the save-path contract."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("ItemLevel", StringComparison.OrdinalIgnoreCase) && exception.Message.Contains("overflow", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = ItemTemplateAdapter.CreatePlan(itemDraft with { BuyPrice = (uint)int.MaxValue + 1u }, ItemTemplateAdapter.CreatePortableTable()); throw new InvalidOperationException("BuyPrice runtime overflow passed the save-path contract."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("BuyPrice", StringComparison.OrdinalIgnoreCase) && exception.Message.Contains("overflow", StringComparison.OrdinalIgnoreCase)) { }
+try { _ = ItemTemplateAdapter.CreatePlan(itemDraft with { Spells = [new(12345, 1, short.MaxValue + 1, 0, -1, 0, -1)] }, ItemTemplateAdapter.CreatePortableTable()); throw new InvalidOperationException("Spell charge SMALLINT overflow passed the save-path contract."); }
+catch (InvalidDataException exception) when (exception.Message.Contains("spellcharges_1", StringComparison.OrdinalIgnoreCase) && exception.Message.Contains("overflow", StringComparison.OrdinalIgnoreCase)) { }
 if (ItemCatalogService.IsDirectLootItem(17, 1_072_025) || !ItemCatalogService.IsDirectLootItem(17, 0) ||
     !ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 7) || !ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 22) || ItemCatalogService.IsSmartPlayerItemGrant(57, 17333, 1, 7) ||
     ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 0, 7) || ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 1) || ItemCatalogService.IsSmartPlayerItemGrant(56, 17333, 1, 21) ||

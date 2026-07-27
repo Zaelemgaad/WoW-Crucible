@@ -13,23 +13,23 @@ internal sealed class ItemCreatorForm : Form
     private readonly NumericUpDown _display = Number(0, uint.MaxValue);
     private readonly ComboBox _quality = Choice((0, "Poor"), (1, "Common"), (2, "Uncommon"), (3, "Rare"), (4, "Epic"), (5, "Legendary"), (6, "Artifact"), (7, "Heirloom"));
     private readonly ComboBox _inventory = Choice((0, "Non-equippable"), (1, "Head"), (2, "Neck"), (3, "Shoulder"), (4, "Shirt"), (5, "Chest"), (6, "Waist"), (7, "Legs"), (8, "Feet"), (9, "Wrist"), (10, "Hands"), (11, "Finger"), (12, "Trinket"), (13, "One-hand weapon"), (14, "Shield"), (15, "Ranged"), (16, "Back"), (17, "Two-hand weapon"), (18, "Bag"), (19, "Tabard"), (20, "Robe"), (21, "Main-hand weapon"), (22, "Off-hand weapon"), (23, "Held in off-hand"), (24, "Ammo"), (25, "Thrown"), (26, "Ranged right"), (27, "Quiver"), (28, "Relic"));
-    private readonly NumericUpDown _itemLevel = Number(1, 1000);
+    private readonly NumericUpDown _itemLevel = Number(1, ushort.MaxValue);
     private readonly NumericUpDown _requiredLevel = Number(0, 255);
-    private readonly NumericUpDown _buy = Number(0, uint.MaxValue);
+    private readonly NumericUpDown _buy = Number(0, int.MaxValue);
     private readonly NumericUpDown _sell = Number(0, uint.MaxValue);
     private readonly ComboBox _bonding = Choice((0, "No binding"), (1, "Bind on pickup"), (2, "Bind on equip"), (3, "Bind on use"), (4, "Quest item"));
     private readonly NumericUpDown _flags = Number(0, uint.MaxValue);
-    private readonly NumericUpDown _armor = DecimalNumber(0, 100000);
-    private readonly NumericUpDown _damageMin = DecimalNumber(0, 100000);
-    private readonly NumericUpDown _damageMax = DecimalNumber(0, 100000);
-    private readonly NumericUpDown _delay = Number(0, 10000);
-    private readonly NumericUpDown _durability = Number(0, 100000);
+    private readonly NumericUpDown _armor = Number(0, uint.MaxValue);
+    private readonly NumericUpDown _damageMin = DecimalNumber(0, decimal.MaxValue);
+    private readonly NumericUpDown _damageMax = DecimalNumber(0, decimal.MaxValue);
+    private readonly NumericUpDown _delay = Number(0, ushort.MaxValue);
+    private readonly NumericUpDown _durability = Number(0, ushort.MaxValue);
     private readonly ComboBox[] _statTypes = Enumerable.Range(0, 10).Select(_ => StatChoice()).ToArray();
-    private readonly NumericUpDown[] _statValues = Enumerable.Range(0, 10).Select(_ => Number(-100000, 100000)).ToArray();
+    private readonly NumericUpDown[] _statValues = Enumerable.Range(0, 10).Select(_ => Number(int.MinValue, int.MaxValue)).ToArray();
     private readonly NumericUpDown[] _spellIds = Enumerable.Range(0, 5).Select(_ => Number(0, int.MaxValue)).ToArray();
     private readonly ComboBox[] _spellTriggers = Enumerable.Range(0, 5).Select(_ => SpellTriggerChoice()).ToArray();
     private readonly NumericUpDown[] _spellCharges = Enumerable.Range(0, 5).Select(_ => Number(short.MinValue, short.MaxValue)).ToArray();
-    private readonly NumericUpDown[] _spellPpm = Enumerable.Range(0, 5).Select(_ => DecimalNumber(0, 1000)).ToArray();
+    private readonly NumericUpDown[] _spellPpm = Enumerable.Range(0, 5).Select(_ => DecimalNumber(0, decimal.MaxValue)).ToArray();
     private readonly NumericUpDown[] _spellCooldowns = Enumerable.Range(0, 5).Select(_ => Number(-1, int.MaxValue, -1)).ToArray();
     private readonly NumericUpDown[] _spellCategories = Enumerable.Range(0, 5).Select(_ => Number(0, ushort.MaxValue)).ToArray();
     private readonly NumericUpDown[] _spellCategoryCooldowns = Enumerable.Range(0, 5).Select(_ => Number(-1, int.MaxValue, -1)).ToArray();
@@ -77,7 +77,7 @@ internal sealed class ItemCreatorForm : Form
     private ItemDraft Draft() => new(
         (uint)_entry.Value, _name.Text, Selected(_class), Selected(_subclass), (uint)_display.Value, Selected(_quality), Selected(_inventory),
         (uint)_itemLevel.Value, (uint)_requiredLevel.Value, (uint)_buy.Value, (uint)_sell.Value, (uint)Selected(_bonding), (uint)_flags.Value,
-        (float)_armor.Value, (float)_damageMin.Value, (float)_damageMax.Value, (uint)_delay.Value, (uint)_durability.Value, _description.Text,
+        (uint)_armor.Value, (float)_damageMin.Value, (float)_damageMax.Value, (uint)_delay.Value, (uint)_durability.Value, _description.Text,
         _statTypes.Select((type, index) => new ItemStatDraft(Selected(type), (int)_statValues[index].Value)).ToArray(),
         _spellIds.Select((id, index) => new ItemSpellDraft((int)id.Value, Selected(_spellTriggers[index]), (int)_spellCharges[index].Value, (float)_spellPpm[index].Value, (int)_spellCooldowns[index].Value, (int)_spellCategories[index].Value, (int)_spellCategoryCooldowns[index].Value)).ToArray());
 
@@ -176,7 +176,7 @@ internal sealed class ItemCreatorForm : Form
     private static NumericUpDown Number(decimal min, decimal max, decimal value = 0) => new() { Minimum = min, Maximum = max, Value = Math.Clamp(value, min, max), Dock = DockStyle.Fill, ThousandsSeparator = true };
     private static NumericUpDown DecimalNumber(decimal min, decimal max) => new() { Minimum = min, Maximum = max, DecimalPlaces = 2, Dock = DockStyle.Fill, ThousandsSeparator = true };
     private static ComboBox Choice(params (int Value, string Name)[] values) { var combo = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList, DisplayMember = "Name", ValueMember = "Value" }; combo.DataSource = values.Select(value => new NamedValue(value.Value, value.Name)).ToList(); return combo; }
-    private static ComboBox StatChoice() => Choice((0, "Mana (unused when value is 0)"), (1, "Health"), (3, "Agility"), (4, "Strength"), (5, "Intellect"), (6, "Spirit"), (7, "Stamina"), (12, "Defense rating"), (13, "Dodge rating"), (14, "Parry rating"), (15, "Block rating"), (16, "Melee hit rating"), (17, "Ranged hit rating"), (18, "Spell hit rating"), (19, "Melee critical rating"), (20, "Ranged critical rating"), (21, "Spell critical rating"), (22, "Melee hit avoidance"), (23, "Ranged hit avoidance"), (24, "Spell hit avoidance"), (25, "Melee critical avoidance"), (26, "Ranged critical avoidance"), (27, "Spell critical avoidance"), (28, "Melee haste rating"), (29, "Ranged haste rating"), (30, "Spell haste rating"), (31, "Hit rating"), (32, "Critical strike rating"), (33, "Hit avoidance rating"), (34, "Critical avoidance rating"), (35, "Resilience rating"), (36, "Haste rating"), (37, "Expertise rating"), (38, "Attack power"), (39, "Ranged attack power"), (40, "Feral attack power (legacy)"), (41, "Spell healing (legacy)"), (42, "Spell damage (legacy)"), (43, "Mana regeneration"), (44, "Armor penetration rating"), (45, "Spell power"), (46, "Health regeneration"), (47, "Spell penetration"), (48, "Block value"));
+    private static ComboBox StatChoice() => Choice((-1, "Unused slot"), (0, "Mana"), (1, "Health"), (3, "Agility"), (4, "Strength"), (5, "Intellect"), (6, "Spirit"), (7, "Stamina"), (12, "Defense rating"), (13, "Dodge rating"), (14, "Parry rating"), (15, "Block rating"), (16, "Melee hit rating"), (17, "Ranged hit rating"), (18, "Spell hit rating"), (19, "Melee critical rating"), (20, "Ranged critical rating"), (21, "Spell critical rating"), (22, "Melee hit avoidance"), (23, "Ranged hit avoidance"), (24, "Spell hit avoidance"), (25, "Melee critical avoidance"), (26, "Ranged critical avoidance"), (27, "Spell critical avoidance"), (28, "Melee haste rating"), (29, "Ranged haste rating"), (30, "Spell haste rating"), (31, "Hit rating"), (32, "Critical strike rating"), (33, "Hit avoidance rating"), (34, "Critical avoidance rating"), (35, "Resilience rating"), (36, "Haste rating"), (37, "Expertise rating"), (38, "Attack power"), (39, "Ranged attack power"), (40, "Feral attack power (legacy)"), (41, "Spell healing (legacy)"), (42, "Spell damage (legacy)"), (43, "Mana regeneration"), (44, "Armor penetration rating"), (45, "Spell power"), (46, "Health regeneration"), (47, "Spell penetration"), (48, "Block value"));
     private static ComboBox SpellTriggerChoice() => Choice((0, "Use"), (1, "Equip"), (2, "Chance on hit"), (4, "Soulstone"), (5, "Use (no delay)"), (6, "Learn spell"));
     private static int Selected(ComboBox combo) => combo.SelectedValue is int value ? value : 0;
     private static string SelectedName(ComboBox combo) => combo.SelectedItem is NamedValue value ? value.Name : string.Empty;
