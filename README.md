@@ -214,6 +214,7 @@ wowcrucible asset library-import extracted-archive asset-library provenance-name
 wowcrucible asset library-consolidate asset-library [--apply]
 wowcrucible asset library-catalog asset-library
 wowcrucible asset layer-merge asset-library new-output-folder --layer=source-a:0 --layer=source-b:10 [--resolve="logical\path.blp|source-a"] [--apply]
+wowcrucible asset layer-prune-previews published-layer-folder [--apply]
 wowcrucible mpq list patch.MPQ [filter] [--content-only] [--format=json] [--listfile=paths.txt]
 wowcrucible mpq tree patch.MPQ [internal-folder] [--format=text|json] [--listfile=paths.txt]
 wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]

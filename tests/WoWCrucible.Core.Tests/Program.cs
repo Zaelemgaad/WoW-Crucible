@@ -1767,6 +1767,19 @@ if (!resolvedLayerMerge.Complete || appliedLayerMerge.Files.Count != 4 || applie
     File.ReadAllText(Path.Combine(appliedLayerMerge.ConflictRoot, "Creature", "Test", "F-two", "conflict.blp")) != "review two" ||
     !File.Exists(appliedLayerMerge.ManifestPath))
     throw new InvalidOperationException("Layer merge lost precedence, a reviewed equal-precedence variant, or its audit manifest.");
+var previewPruneService = new ProcessedAssetPreviewPruneService();
+var previewPrunePlan = previewPruneService.Analyze(layerMergeOutput);
+if (previewPrunePlan.PreviewFiles != 0 || previewPrunePlan.RemainingFiles != 4)
+    throw new InvalidOperationException("Processed asset preview prune dry run miscounted the published fixture.");
+File.WriteAllText(Path.Combine(appliedLayerMerge.ContentRoot, "Creature", "Test", "preview.PNG"), "preview");
+previewPrunePlan = previewPruneService.Analyze(layerMergeOutput);
+if (previewPrunePlan.PreviewFiles != 1 || previewPrunePlan.PreviewBytes != 7 || previewPrunePlan.RemainingFiles != 4)
+    throw new InvalidOperationException("Processed asset preview prune did not recognize a case-insensitive PNG sidecar.");
+var previewPruneReceipt = previewPruneService.Apply(previewPrunePlan);
+if (previewPruneReceipt.State != "complete" || previewPruneReceipt.RemovedFiles.Count != 1 ||
+    File.Exists(Path.Combine(appliedLayerMerge.ContentRoot, "Creature", "Test", "preview.PNG")) ||
+    !File.Exists(Path.Combine(layerMergeOutput, "_meta", "preview-prune.json")))
+    throw new InvalidOperationException("Processed asset preview prune did not remove only the preview and publish its receipt.");
 
 var provenanceLibrary = Path.Combine(assetFixture, "provenance-collision"); var sharedProvenancePrefix = new string('p', 60); var rawProvenanceA = sharedProvenancePrefix + "-first"; var rawProvenanceB = sharedProvenancePrefix + "-second";
 var provenanceSourceA = Path.Combine(provenanceLibrary, "Loose", "Content", rawProvenanceA, "Character", "Human", "same.png"); var provenanceSourceB = Path.Combine(provenanceLibrary, "Loose", "Content", rawProvenanceB, "Character", "Human", "same.png");

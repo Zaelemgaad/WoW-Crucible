@@ -344,6 +344,35 @@ static int Knowledge(string[] args)
 static int Asset(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["layer-prune-previews", var pruneLayerRoot, .. var pruneOptions])
+    {
+        var apply = pruneOptions.Contains("--apply", StringComparer.OrdinalIgnoreCase);
+        var json = pruneOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = pruneOptions.Where(option => !option.Equals("--apply", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset layer-prune-previews option: {unknown[0]}");
+        var service = new ProcessedAssetPreviewPruneService();
+        var plan = service.Analyze(pruneLayerRoot, cancellationToken);
+        if (!apply)
+        {
+            if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            else PrintPreviewPrunePlan(plan);
+            return 0;
+        }
+        var progress = new WoWCrucible.Cli.SynchronousProgress<ProcessedAssetPreviewPruneProgress>(value =>
+        {
+            if (value.CompletedFiles == value.TotalFiles || value.CompletedFiles % 5000 == 0)
+                Console.Error.WriteLine($"Preview prune\t{value.CompletedFiles:N0}/{value.TotalFiles:N0} files\t{value.FreedBytes / (1024d * 1024 * 1024):0.00}/{value.TotalBytes / (1024d * 1024 * 1024):0.00} GiB\t{value.CurrentPath}");
+        });
+        var receipt = service.Apply(plan, progress, cancellationToken);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(receipt, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+        {
+            PrintPreviewPrunePlan(plan);
+            Console.WriteLine($"REMOVED\t{receipt.RemovedFiles.Count:N0}\nRECEIPT\t{Path.Combine(plan.LayerRoot, "_meta", "preview-prune.json")}");
+        }
+        return 0;
+    }
     if (args is ["layer-merge", var layerLibrary, var layerDestination, .. var layerOptions])
     {
         var apply = layerOptions.Contains("--apply", StringComparer.OrdinalIgnoreCase);
@@ -1624,11 +1653,19 @@ static int Asset(string[] args, CancellationToken cancellationToken)
         foreach (var missing in plan.MissingSources.Take(100)) Console.WriteLine($"MISSING\t{missing}");
         if (plan.MissingSources.Count > 100) Console.WriteLine($"MISSING\t... {plan.MissingSources.Count - 100:N0} additional missing source(s)");
     }
+    static void PrintPreviewPrunePlan(ProcessedAssetPreviewPrunePlan plan)
+    {
+        Console.WriteLine($"LAYER\t{plan.LayerRoot}");
+        Console.WriteLine($"REMOVE_PNG\t{plan.PreviewFiles:N0}\t{plan.PreviewBytes / (1024d * 1024 * 1024):0.00} GiB");
+        Console.WriteLine($"KEEP\t{plan.RemainingFiles:N0}\t{plan.RemainingBytes / (1024d * 1024 * 1024):0.00} GiB");
+        Console.WriteLine($"MANIFEST_SHA256\t{plan.LayerManifestSha256}");
+    }
 }
 
 static int AssetHelp(int code = 0) => GroupHelp("""
 Usage:
   wowcrucible asset layer-merge <processed-library> <new-hd-folder> --layer=provenance:precedence [...] [--resolve="logical-path|provenance"] [--apply] [--format=text|json]
+  wowcrucible asset layer-prune-previews <published-layer-folder> [--apply] [--format=text|json]
   wowcrucible asset texture-consumers-build <processed-library> [--format=text|json]
   wowcrucible asset texture-consumers <processed-library> <texture.blp|client-path> [--refresh] [--dbc=folder] [--schema=file] [--server=installed-server] [--format=text|json]
   wowcrucible asset texture-info <file.blp>
