@@ -21,6 +21,7 @@ internal sealed class PetAbilityGraphView : UserControl, IDisposable
     private readonly ListBox _edges = new();
     private readonly TextBlock _detail = Status("Select a graph node or evidence edge to inspect it.");
     private readonly TextBlock _summary = Status("Connect Server & SQL, then load a creature's real client/server ability relationships.");
+    private readonly TextBlock _findings = Status("Load a graph to inspect every structural finding.");
     private readonly TextBlock _status = Status("No graph loaded.");
     private readonly PetAbilityGraphOverview _overview = new();
     private readonly Button _load = AccentButton("Load evidenced graph");
@@ -76,7 +77,7 @@ internal sealed class PetAbilityGraphView : UserControl, IDisposable
             new TabItem { Header = "Ability map", Content = overview },
             new TabItem { Header = "All nodes", Content = nodeTab },
             new TabItem { Header = "All evidence edges", Content = _edges },
-            new TabItem { Header = "Findings", Content = new ScrollViewer { Content = _summary } }
+            new TabItem { Header = "Findings", Content = new ScrollViewer { Content = _findings } }
         } };
         Content = new Grid { RowDefinitions = new("Auto,Auto,*"), Children =
         {
@@ -108,7 +109,8 @@ internal sealed class PetAbilityGraphView : UserControl, IDisposable
             RefreshNodes();
             RefreshEdges();
             var counts = _graph.Nodes.GroupBy(node => node.Kind).OrderBy(group => group.Key).Select(group => $"{group.Key}: {group.Count():N0}");
-            _summary.Text = $"{_graph.CreatureName} [{_graph.CreatureEntry}] · family {(_graph.FamilyId == 0 ? "none" : $"{_graph.FamilyName} [{_graph.FamilyId}]")} · pet talent type {_graph.PetTalentType}\n{string.Join(" · ", counts)}\n\n{string.Join("\n", _graph.Findings)}";
+            _summary.Text = $"{_graph.CreatureName} [{_graph.CreatureEntry}] · family {(_graph.FamilyId == 0 ? "none" : $"{_graph.FamilyName} [{_graph.FamilyId}]")} · pet talent type {_graph.PetTalentType}\n{string.Join(" · ", counts)}";
+            _findings.Text = _graph.Findings.Count == 0 ? "No structural findings." : string.Join("\n", _graph.Findings);
             _status.Text = $"Loaded {_graph.Nodes.Count:N0} nodes · {_graph.Edges.Count:N0} evidence edges";
             _detail.Text = "Select any node to show its direct relationship neighborhood, or select an evidence edge for its exact SQL/DBC source.";
         }

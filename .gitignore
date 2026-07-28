@@ -4,6 +4,7 @@
 dist/
 publish/
 artifacts/
+.local/
 
 # IDE and user settings
 .vs/

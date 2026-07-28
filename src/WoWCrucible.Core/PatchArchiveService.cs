@@ -363,9 +363,16 @@ public sealed class PatchArchiveService
 
     private static bool ExtractNative(IntPtr archive, ExtractionItem item, string temporary)
     {
-        if (!item.LookupPath.Equals(item.InternalPath, StringComparison.Ordinal))
-            return Native.SFileExtractFile(archive, item.LookupPath, temporary, 0);
-        return WithLocale(item.Entry.Locale, () => Native.SFileExtractFile(archive, item.InternalPath, temporary, 0));
+        // A real listfile name is the most reliable identity and preserves locale selection.
+        // StormLib's synthetic File######## alias is only a fallback for anonymous physical
+        // entries; preferring it caused valid named entries to fail on some freshly-created
+        // and third-party archives even though ordinary MPQ editors extracted them normally.
+        if (WithLocale(item.Entry.Locale, () => Native.SFileExtractFile(archive, item.InternalPath, temporary, 0)))
+            return true;
+        if (item.LookupPath.Equals(item.InternalPath, StringComparison.Ordinal))
+            return false;
+        try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+        return Native.SFileExtractFile(archive, item.LookupPath, temporary, 0);
     }
 
     internal IReadOnlyList<(MpqFileEntry Entry, string FilePath)> ExtractFlat(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, CancellationToken cancellationToken = default)

@@ -202,6 +202,16 @@
                 </Grid>
                 <Grid x:Name="DbcHost" IsVisible="False" RowDefinitions="*,Auto" ColumnDefinitions="*,Auto">
                     <local:VirtualDbcView x:Name="DbcView" />
+                    <TextBox x:Name="DbcInlineEditor"
+                             IsVisible="False"
+                             HorizontalAlignment="Left"
+                             VerticalAlignment="Top"
+                             Padding="7,1"
+                             FontFamily="Inter"
+                             FontSize="11"
+                             Background="#0A0F17"
+                             BorderBrush="#E0A33C"
+                             BorderThickness="2" />
                     <ScrollBar x:Name="VerticalDbcScroll" Grid.Column="1" Orientation="Vertical" SmallChange="25" LargeChange="500" ValueChanged="DbcScrollChanged" />
                     <ScrollBar x:Name="HorizontalDbcScroll" Grid.Row="1" Orientation="Horizontal" SmallChange="156" LargeChange="624" ValueChanged="DbcScrollChanged" />
                 </Grid>

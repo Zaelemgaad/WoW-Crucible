@@ -28,6 +28,8 @@ public partial class MainWindow : Window
     private DbcSchemaCatalog? _schemaCatalog;
     private string _schemaSource = "Built-in 12340 definitions";
     private bool _syncingScrollbars;
+    private Controls.DbcSelectionEventArgs? _dbcEditingSelection;
+    private bool _dbcEditorClosing;
     private readonly DesktopWorkspaceSession _workspaceSession = new(DesktopSettings.Load());
     private AssetComparisonView? _assetComparisonView;
     private NativeConversionWorkspaceView? _nativeConversionWorkspaceView;
@@ -85,7 +87,12 @@ public partial class MainWindow : Window
         CommandPaletteResults.DoubleTapped += async (_, _) => await ExecuteSelectedCommandAsync();
         DesktopCrashLogger.Debug("UI", "main-window-created", ("devbug", DesktopCrashLogger.IsDevbugEnabled), ("build", buildIdentity.FullVersion), ("base_directory", AppContext.BaseDirectory));
         DbcView.SelectionChanged += (_, selection) => ShowSelection(selection);
-        DbcView.CellEditRequested += async (_, selection) => await EditCellAsync(selection);
+        DbcView.CellEditRequested += (_, request) => BeginInlineCellEdit(request);
+        DbcInlineEditor.KeyDown += DbcInlineEditorKeyDown;
+        DbcInlineEditor.LostFocus += (_, _) =>
+        {
+            if (DbcInlineEditor.IsVisible && !_dbcEditorClosing) _ = CommitInlineCellEdit(null);
+        };
         DbcView.RenderMeasured += (_, measurement) =>
         {
             var now = Stopwatch.GetTimestamp();
@@ -253,11 +260,12 @@ public partial class MainWindow : Window
     private void ActivateDocument(int index)
     {
         if (index < 0 || index >= _documents.Count) return;
+        CancelInlineCellEdit();
         _activeDocument = index;
         var document = _documents[index];
         DesktopCrashLogger.Debug("DBC", "document-activated", ("path", document.FullPath), ("tab", index), ("dirty", document.File.IsDirty));
         SearchBox.Text = string.Empty;
-        DbcView.SetDocument(document.File, document.Schema.Columns, document.File.LogicalTableName, DecodedToggle.IsChecked == true);
+        DbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, document.File.LogicalTableName, DecodedToggle.IsChecked == true);
         WelcomePanel.IsVisible = false;
         M2View.IsVisible = false;
         DbcHost.IsVisible = true;
@@ -313,7 +321,7 @@ public partial class MainWindow : Window
         view.BackRequested += (_, _) => { view.Dispose(); if (ReferenceEquals(_dbcImportWorkspaceView, view)) _dbcImportWorkspaceView = null; CloseFeatureWorkspace(); };
         view.Applied += (_, result) =>
         {
-            DbcView.SetDocument(document.File, document.Schema.Columns, Path.GetFileNameWithoutExtension(document.File.SourcePath), DecodedToggle.IsChecked == true);
+            DbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, Path.GetFileNameWithoutExtension(document.File.SourcePath), DecodedToggle.IsChecked == true);
             ShowDocumentSummary(document); RefreshTabs();
             StatusText.Text = $"Structured import staged · {result.UpdatedRows:N0} updated row(s) · {result.AppendedRows:N0} appended · {result.ChangedCells:N0} cells · save still required";
         };
@@ -397,42 +405,119 @@ public partial class MainWindow : Window
         var document = Current;
         if (document is null) return;
         var semantic = DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(document.File.SourcePath), selection.Column.Index, document.File, selection.Row);
+        string recordId;
+        try { recordId = document.Schema.KeyStrategy.Kind == DbcRecordKeyKind.NoStableKey ? "Unavailable (schema has no stable key)" : DbcRecordIdentity.GetKey(document.File, selection.Row, document.Schema.Columns, document.Schema.KeyStrategy).ToString("N0", CultureInfo.InvariantCulture); }
+        catch (Exception exception) { recordId = $"Invalid ({exception.Message})"; }
         InspectorTitle.Text = semantic?.Label ?? selection.Column.Name;
         InspectorSummary.Text = selection.Value.Length == 0 ? "(empty)" : selection.Value;
-        var choices = semantic is null ? string.Empty : $"\nKnown     {semantic.Options.Count:N0} {semantic.Kind.ToString().ToLowerInvariant()} option(s)\nEdit      Double-click the cell";
-        InspectorDetail.Text = $"Row       {selection.Row + 1:N0}\nColumn    {selection.ColumnIndex:N0}\nField     {selection.Column.Name}\nType      {selection.Column.Type}\nOffset    {selection.Column.Offset:N0} bytes\nSize      {selection.Column.Size:N0} bytes{choices}";
+        var choices = semantic is null ? string.Empty : $"\nKnown     {semantic.Options.Count:N0} {semantic.Kind.ToString().ToLowerInvariant()} option(s)";
+        InspectorDetail.Text = $"Row       {selection.Row + 1:N0}\nRecord ID {recordId}\nColumn    {selection.ColumnIndex:N0}\nField     {selection.Column.Name}\nType      {selection.Column.Type}\nOffset    {selection.Column.Offset:N0} bytes\nSize      {selection.Column.Size:N0} bytes{choices}\nEdit      Double-click or Enter/F2 · Tab/Shift+Tab moves across fields";
         _knowledgeContext = $"{Path.GetFileNameWithoutExtension(document.File.SourcePath)} {selection.Column.Name}";
     }
 
-    private async Task EditCellAsync(Controls.DbcSelectionEventArgs selection)
+    private void CommitCellEdit(Controls.DbcCellEditCommitEventArgs edit)
     {
         var document = Current;
-        if (document is null) return;
-        var before = document.File.GetRaw(selection.Row, selection.Column);
-        var editor = new CellEditorView(document.File, selection.Row, selection.Column);
-        var completion = new TaskCompletionSource<string?>();
-        editor.Completed += (_, value) => CompleteInlineDialog(completion, value);
-        ShowInlineDialog(editor);
-        var value = await completion.Task;
-        if (value is null) return;
+        if (document is null) { edit.Error = "No DBC document is active."; return; }
+        var before = document.File.GetRaw(edit.Row, edit.Column);
         try
         {
-            var semantic = DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(document.File.SourcePath), selection.Column.Index, document.File, selection.Row);
-            if (semantic is null) document.File.SetDisplayValue(selection.Row, selection.Column, value);
-            else document.File.SetRaw(selection.Row, selection.Column, semantic.Parse(value));
-            var after = document.File.GetRaw(selection.Row, selection.Column);
-            document.History.Record(selection.Row, selection.Column, before, after);
-            DbcView.RefreshDocument(selection.Row);
+            var semantic = DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(document.File.SourcePath), edit.Column.Index, document.File, edit.Row);
+            if (semantic is null) document.File.SetDisplayValue(edit.Row, edit.Column, edit.Value);
+            else document.File.SetRaw(edit.Row, edit.Column, semantic.Parse(edit.Value));
+            var after = document.File.GetRaw(edit.Row, edit.Column);
+            document.History.Record(edit.Row, edit.Column, before, after);
+            edit.Accepted = true;
+            DbcView.RefreshDocument();
             RefreshTabs();
-            ShowSelection(selection with { Value = Convert.ToString(document.File.GetDisplayValue(selection.Row, selection.Column), CultureInfo.InvariantCulture) ?? string.Empty });
-            StatusText.Text = before == after ? "Value was unchanged" : $"Modified {selection.Column.Name} · Ctrl+Z to undo";
-            DesktopCrashLogger.Debug("DBC", "cell-edit", ("path", document.FullPath), ("row", selection.Row), ("column", selection.Column.Name), ("before_raw", before), ("after_raw", after), ("changed", before != after));
+            var display = semantic?.Format(after) ?? Convert.ToString(document.File.GetDisplayValue(edit.Row, edit.Column), CultureInfo.InvariantCulture) ?? string.Empty;
+            ShowSelection(new(edit.Row, edit.ColumnIndex, edit.Column, display));
+            StatusText.Text = before == after ? "Value was unchanged · Tab continues across the row" : $"Modified {edit.Column.Name} · Ctrl+Z to undo · Tab continues across the row";
+            DesktopCrashLogger.Debug("DBC", "inline-cell-edit", ("path", document.FullPath), ("row", edit.Row), ("column", edit.Column.Name), ("before_raw", before), ("after_raw", after), ("changed", before != after));
         }
         catch (Exception exception)
         {
             DesktopCrashLogger.Log("DBC cell edit rejected", exception);
-            await ShowErrorAsync("Invalid cell value", exception.Message);
+            edit.Error = exception.Message;
+            StatusText.Text = $"Invalid {edit.Column.Name}: {exception.Message}";
         }
+    }
+
+    private void BeginInlineCellEdit(Controls.DbcCellEditRequestEventArgs request)
+    {
+        _dbcEditingSelection = request.Selection;
+        DbcInlineEditor.Text = request.Selection.Value;
+        DbcInlineEditor.Margin = new Thickness(request.Bounds.X, request.Bounds.Y, 0, 0);
+        DbcInlineEditor.Width = request.Bounds.Width;
+        DbcInlineEditor.Height = request.Bounds.Height;
+        DbcInlineEditor.IsVisible = true;
+        ToolTip.SetTip(DbcInlineEditor, "Tab applies and moves right · Shift+Tab moves left · Enter moves down · Esc cancels");
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!DbcInlineEditor.IsVisible) return;
+            DbcInlineEditor.Focus();
+            DbcInlineEditor.SelectAll();
+        }, DispatcherPriority.Input);
+    }
+
+    private void DbcInlineEditorKeyDown(object? sender, KeyEventArgs e)
+    {
+        Controls.DbcCellMove? move = e.Key switch
+        {
+            Key.Tab when e.KeyModifiers.HasFlag(KeyModifiers.Shift) => Controls.DbcCellMove.PreviousColumn,
+            Key.Tab => Controls.DbcCellMove.NextColumn,
+            Key.Enter when e.KeyModifiers.HasFlag(KeyModifiers.Shift) => Controls.DbcCellMove.PreviousRow,
+            Key.Enter => Controls.DbcCellMove.NextRow,
+            _ => null
+        };
+        if (e.Key == Key.Escape)
+        {
+            CancelInlineCellEdit();
+            DbcView.Focus();
+            e.Handled = true;
+        }
+        else if (move is not null)
+        {
+            _ = CommitInlineCellEdit(move);
+            e.Handled = true;
+        }
+    }
+
+    private bool CommitInlineCellEdit(Controls.DbcCellMove? move)
+    {
+        if (!DbcInlineEditor.IsVisible || _dbcEditingSelection is null) return true;
+        var selection = _dbcEditingSelection;
+        var edit = new Controls.DbcCellEditCommitEventArgs(selection.Row, selection.ColumnIndex, selection.Column, DbcInlineEditor.Text ?? string.Empty);
+        _dbcEditorClosing = true;
+        try
+        {
+            CommitCellEdit(edit);
+            if (!edit.Accepted)
+            {
+                ToolTip.SetTip(DbcInlineEditor, edit.Error ?? "The value was rejected.");
+                DbcInlineEditor.Focus();
+                DbcInlineEditor.SelectAll();
+                return false;
+            }
+            DbcInlineEditor.IsVisible = false;
+            _dbcEditingSelection = null;
+            if (move is not null)
+            {
+                DbcView.MoveSelection(move.Value);
+                DbcView.BeginSelectedEdit();
+            }
+            else DbcView.Focus();
+            return true;
+        }
+        finally { _dbcEditorClosing = false; }
+    }
+
+    private void CancelInlineCellEdit()
+    {
+        _dbcEditorClosing = true;
+        DbcInlineEditor.IsVisible = false;
+        _dbcEditingSelection = null;
+        _dbcEditorClosing = false;
     }
 
     private void UndoClick(object? sender, RoutedEventArgs e) => Undo();
