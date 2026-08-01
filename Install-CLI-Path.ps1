@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $cliDirectory = Join-Path $PSScriptRoot 'dist'
-if (-not (Test-Path (Join-Path $cliDirectory 'wowcrucible.exe'))) {
+if (-not (Test-Path (Join-Path $cliDirectory 'wowcrucible.exe')) -or -not (Test-Path (Join-Path $cliDirectory 'wowcruc.exe'))) {
     throw "wowcrucible.exe was not found in $cliDirectory"
 }
 
@@ -12,4 +12,4 @@ if ($parts -notcontains $cliDirectory) {
 } else {
     Write-Host 'WoW Crucible CLI is already on your user PATH.'
 }
-Write-Host 'Open a new PowerShell or Command Prompt, then run: wowcrucible --help'
+Write-Host 'Open a new PowerShell or Command Prompt, then run: wowcruc --help (wowcrucible also remains available)'

@@ -1,8 +1,17 @@
 using System.Diagnostics;
+using System.Globalization;
 using WoWCrucible.Core;
 
 var devbugRequested = args.Any(argument => argument.Equals("--devbug", StringComparison.OrdinalIgnoreCase));
 var commandArguments = args.Where(argument => !argument.Equals("--devbug", StringComparison.OrdinalIgnoreCase)).ToArray();
+var commandResolution = CliCommandAbbreviationService.Resolve(commandArguments);
+if (!commandResolution.Success)
+{
+    Console.Error.WriteLine(commandResolution.Message);
+    foreach (var choice in commandResolution.Choices) Console.Error.WriteLine($"  {choice}");
+    return 2;
+}
+commandArguments = commandResolution.Arguments.ToArray();
 using var devbug = CliDevbugSession.TryStart(devbugRequested, args);
 using var cancellation = new CancellationTokenSource();
 ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
@@ -59,7 +68,7 @@ static int RoutedHelp(string group) => group switch
     CliHelpRouting.Root => Help(),
     "workspace" => WorkspaceHelp(),
     "asset" => AssetHelp(),
-    "project" => ProjectHelp(),
+    "project" => ProjectExtendedHelp(),
     "tools" => ToolingHelp(),
     "knowledge" => KnowledgeHelp(),
     "cache" => CacheHelp(),
@@ -344,6 +353,49 @@ static int Knowledge(string[] args)
 static int Asset(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return AssetHelp();
+    if (args is ["layer-stack-index", var stackIndexPath, var stackSourceRoot, .. var stackOptions])
+    {
+        var json = stackOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var layers = stackOptions.Where(option => option.StartsWith("--layer=", StringComparison.OrdinalIgnoreCase)).Select(option =>
+        {
+            var parts = option["--layer=".Length..].Split('|', 4);
+            if (parts.Length != 4 || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var order))
+                throw new FormatException("--layer must be stack|order|name|root-folder.");
+            return new LooseLayerDefinition(parts[0], order, parts[2], parts[3]);
+        }).ToArray();
+        var exclusions = stackOptions.Where(option => option.StartsWith("--exclude=", StringComparison.OrdinalIgnoreCase)).Select(option => option["--exclude=".Length..]).ToArray();
+        var unknown = stackOptions.Where(option => !option.StartsWith("--layer=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--exclude=", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset layer-stack-index option: {unknown[0]}");
+        if (layers.Length == 0) return Fail("asset layer-stack-index requires at least one --layer=stack|order|name|root-folder.");
+        var progress = new WoWCrucible.Cli.SynchronousProgress<LooseLayerIndexProgress>(value =>
+        {
+            if (value.ScannedFiles % 4096 == 0 || value.CurrentPath == "Complete") Console.Error.WriteLine($"Layer index\t{value.ScannedFiles:N0} scanned\t{value.HashedFiles:N0} hashed\t{value.ReusedHashes:N0} reused\t{value.CurrentPath}");
+        });
+        var summary = new LooseLayerStackIndexService().Build(stackIndexPath, stackSourceRoot, layers, exclusions, progress, cancellationToken);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(summary, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else Console.WriteLine($"INDEX\t{summary.IndexPath}\nSOURCE_FILES\t{summary.SourceFiles:N0}\nLAYER_FILES\t{summary.LayerFiles:N0}\nSTACKS\t{summary.Stacks:N0}\nEXACT_EFFECTIVE\t{summary.ExactEffective:N0}\nDIFFERENT_EFFECTIVE\t{summary.DifferentEffective:N0}\nABSENT\t{summary.Absent:N0}\nSTRUCTURED_DBC_REVIEW\t{summary.StructuredTables:N0}\nHASHED\t{summary.HashedFiles:N0}\nREUSED\t{summary.ReusedHashes:N0}");
+        return summary.DifferentEffective == 0 && summary.Absent == 0 && summary.StructuredTables == 0 ? 0 : 3;
+    }
+    if (args is ["layer-stack-query", var queryIndexPath, .. var queryOptions])
+    {
+        var json = queryOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var search = Option(queryOptions, "--search="); var kindText = Option(queryOptions, "--kind=");
+        LooseLayerComparisonKind? kind = null;
+        if (kindText is not null)
+        {
+            var normalizedKind = kindText.Replace("_", string.Empty).Replace("-", string.Empty);
+            var matches = Enum.GetValues<LooseLayerComparisonKind>().Where(value => value.ToString().Equals(normalizedKind, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (matches.Length != 1) throw new FormatException($"Unknown layer comparison kind: {kindText}");
+            kind = matches[0];
+        }
+        var limitText = Option(queryOptions, "--limit=") ?? "1000"; if (!int.TryParse(limitText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var limit)) return Fail("--limit must be an integer.");
+        var unknown = queryOptions.Where(option => !option.StartsWith("--search=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--kind=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--limit=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset layer-stack-query option: {unknown[0]}");
+        var rows = new LooseLayerStackIndexService().Query(queryIndexPath, search, kind, limit);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(rows, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else foreach (var row in rows) Console.WriteLine($"{row.Kind}\t{row.Stack}\t{row.LogicalPath}\t{row.FamilyKey}\t{row.Suppliers.Count:N0} supplier(s)");
+        Console.Error.WriteLine($"Layer-stack query returned {rows.Count:N0} row(s)."); return rows.Count == 0 ? 3 : 0;
+    }
     if (args is ["layer-prune-previews", var pruneLayerRoot, .. var pruneOptions])
     {
         var apply = pruneOptions.Contains("--apply", StringComparer.OrdinalIgnoreCase);
@@ -1011,13 +1063,31 @@ static int Asset(string[] args, CancellationToken cancellationToken)
     if (args is ["texture-validate", var validatePath, .. var validateOptions])
     {
         var recursive = validateOptions.Contains("--recursive", StringComparer.OrdinalIgnoreCase);
-        var unknown = validateOptions.Where(option => !option.Equals("--recursive", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var summaryOnly = validateOptions.Contains("--summary-only", StringComparer.OrdinalIgnoreCase);
+        var json = validateOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var failOn = (Option(validateOptions, "--fail-on=") ?? "warning").ToLowerInvariant();
+        if (failOn is not ("invalid" or "warning")) return Fail("--fail-on must be invalid or warning.");
+        var unknown = validateOptions.Where(option => !option.Equals("--recursive", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--summary-only", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) &&
+            !option.StartsWith("--fail-on=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown asset texture-validate option: {unknown[0]}");
-        var summary = BlpTextureService.ValidateEach(validatePath, recursive, result => Console.WriteLine(result.Valid
-            ? $"{(result.Info!.Warnings.Count == 0 ? "PASS" : "WARN")}\t{result.Info.Width}x{result.Info.Height}\t{result.Info.Encoding}\t{result.Info.MipLevels.Count}\t{result.Path}{(result.Info.Warnings.Count == 0 ? string.Empty : $"\t{string.Join(" | ", result.Info.Warnings)}") }"
-            : $"FAIL\t{result.Error}\t{result.Path}"));
-        Console.Error.WriteLine($"Validated {summary.Total:N0} BLP texture(s): {summary.Total - summary.Failures:N0} decodable, {summary.Warnings:N0} with warning(s), {summary.Failures:N0} invalid.");
-        return summary.Failures == 0 && summary.Warnings == 0 ? 0 : 3;
+        var results = json && !summaryOnly ? new List<BlpValidationResult>() : null;
+        var summary = BlpTextureService.ValidateEach(validatePath, recursive, result =>
+        {
+            results?.Add(result);
+            if (summaryOnly || json) return;
+            Console.WriteLine(result.Valid
+                ? $"{(result.Info!.Warnings.Count == 0 ? "PASS" : "WARN")}\t{result.Info.Width}x{result.Info.Height}\t{result.Info.Encoding}\t{result.Info.MipLevels.Count}\t{result.Path}{(result.Info.Warnings.Count == 0 ? string.Empty : $"\t{string.Join(" | ", result.Info.Warnings)}") }"
+                : $"FAIL\t{result.Error}\t{result.Path}");
+        });
+        if (json)
+            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Summary = summary, Results = results }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else
+            Console.Error.WriteLine($"Validated {summary.Total:N0} BLP texture(s): {summary.Total - summary.Failures:N0} decodable, {summary.Warnings:N0} with warning(s), {summary.Failures:N0} invalid.");
+        var failed = summary.Failures > 0 || failOn == "warning" && summary.Warnings > 0;
+        return failed ? 3 : 0;
     }
     if (args is ["library-plan", var sourceRoot, var libraryRoot, .. var planOptions])
     {
@@ -1664,6 +1734,8 @@ static int Asset(string[] args, CancellationToken cancellationToken)
 
 static int AssetHelp(int code = 0) => GroupHelp("""
 Usage:
+  wowcrucible asset layer-stack-index <index.sqlite> <source-content-root> --layer="stack|order|name|root" [...] [--exclude=client-glob] [--format=text|json]
+  wowcrucible asset layer-stack-query <index.sqlite> [--search=text] [--kind=classification] [--limit=N] [--format=text|json]
   wowcrucible asset layer-merge <processed-library> <new-hd-folder> --layer=provenance:precedence [...] [--resolve="logical-path|provenance"] [--apply] [--format=text|json]
   wowcrucible asset layer-prune-previews <published-layer-folder> [--apply] [--format=text|json]
   wowcrucible asset texture-consumers-build <processed-library> [--format=text|json]
@@ -1675,7 +1747,7 @@ Usage:
   wowcrucible asset texture-mask <source.blp|image> <mask.blp|image> <output.png|blp> [--source-mip=N] [--mask-mip=N] [--mask=alpha|luminance|red|green|blue] [--invert-mask] [--strength=0..1] [--scale=R:G:B:A] [--offset=R:G:B:A] [--codec=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--report=text|json] [--overwrite]
   wowcrucible asset texture-brush <input.blp|image> <output.png|blp> (--point=x:y [...]|--fill|--invert-alpha) [--mip=N] [--radius=N] [--opacity=0..1] [--color=R:G:B:A] [--tool=color-alpha|rgb|alpha|erase-alpha] [--falloff=smooth|linear|hard] [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
   wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=auto|dxt1|dxt1a|dxt3|dxt5] [--quality=fast|balanced|best] [--no-mips] [--overwrite]
-  wowcrucible asset texture-validate <file-or-folder> [--recursive]
+  wowcrucible asset texture-validate <file-or-folder> [--recursive] [--summary-only] [--format=text|json] [--fail-on=invalid|warning]
   wowcrucible asset inspect <model.m2|building.wmo>...
   wowcrucible asset m2-material-audit <wrath-m2-skin-root|file.skin> [--workers=N] [--examples=N] [--format=text|json]
   wowcrucible asset m2-downport-plan <modern.m2> [--skin=file.skin] [--listfile=id-path.csv] [--format=text|json]
@@ -1726,7 +1798,7 @@ Full guide: docs/CLI-REFERENCE.md
 
 static async Task<int> Project(string[] args, CancellationToken cancellationToken)
 {
-    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ProjectHelp();
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ProjectExtendedHelp();
     if (args is ["create", var root, var name, .. var createOptions])
     {
         var target = Option(createOptions, "--target=") ?? TargetProfileCatalog.DefaultProfileId; var library = Option(createOptions, "--asset-library=");
@@ -1735,9 +1807,26 @@ static async Task<int> Project(string[] args, CancellationToken cancellationToke
     }
     if (args is ["status", var projectRoot])
     {
-        var project = CrucibleContentProjectService.Load(projectRoot); var registry = CrucibleContentProjectService.LoadRegistry(projectRoot);
-        Console.WriteLine($"Name\t{project.Name}\nTarget\t{project.TargetProfile}\nAssetLibrary\t{project.AssetLibrary ?? "not linked"}\nReservations\t{registry.Reservations.Count}\nReservedIDs\t{registry.Reservations.Sum(reservation => reservation.Values.Count)}");
+        var project = CrucibleContentProjectService.Load(projectRoot); var registry = CrucibleContentProjectService.LoadRegistry(projectRoot); ArtifactOwnershipService.Initialize(Path.GetFullPath(projectRoot), project.ProjectId); var ownership = ArtifactOwnershipService.Load(projectRoot);
+        Console.WriteLine($"Name\t{project.Name}\nProjectID\t{project.ProjectId}\nTarget\t{project.TargetProfile}\nAssetLibrary\t{project.AssetLibrary ?? "not linked"}\nReservations\t{registry.Reservations.Count}\nReservedIDs\t{registry.Reservations.Sum(reservation => reservation.Values.Count)}\nOwnedArtifacts\t{ownership.Artifacts.Count}\nOwnedBytes\t{ownership.Artifacts.Sum(artifact => artifact.Bytes)}");
         foreach (var group in registry.Reservations.GroupBy(reservation => reservation.Domain)) Console.WriteLine($"DOMAIN\t{group.Key}\t{group.Sum(reservation => reservation.Values.Count)}"); return 0;
+    }
+    if (args is ["run-create", var runProject, var runOperation, .. var runOptions])
+    {
+        var json = runOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var unknown = runOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown project run-create option: {unknown[0]}");
+        var run = ArtifactOwnershipService.CreateRun(runProject, runOperation); if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(run, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })); else Console.WriteLine($"RUN\t{run.RootPath}\nDELIVERABLE\t{run.DeliverablePath}\nCACHE\t{run.CachePath}\nSCRATCH\t{run.ScratchPath}\nDIAGNOSTICS\t{run.DiagnosticsPath}\nBACKUP\t{run.BackupPath}\nRECEIPT\t{run.ReceiptPath}"); return 0;
+    }
+    if (args is ["artifact-register", var artifactProject, var artifactOperation, var categoryText, .. var artifactOptions] && Enum.TryParse<ArtifactLifecycleCategory>(categoryText, true, out var category))
+    {
+        var required = artifactOptions.Contains("--required", StringComparer.OrdinalIgnoreCase); var expiryText = Option(artifactOptions, "--expires="); DateTimeOffset? expiry = expiryText is null ? null : DateTimeOffset.TryParse(expiryText, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsedExpiry) ? parsedExpiry.ToUniversalTime() : throw new FormatException("--expires must be an ISO-8601 timestamp.");
+        var paths = artifactOptions.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray(); var unknown = artifactOptions.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--required", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--expires=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown project artifact-register option: {unknown[0]}"); if (paths.Length == 0) return Fail("project artifact-register requires one or more generated file paths.");
+        var manifest = ArtifactOwnershipService.RegisterFiles(artifactProject, artifactOperation, category, paths, required, expiry); Console.Error.WriteLine($"Registered {paths.Length:N0} exact {category} artifact(s). Ownership manifest now tracks {manifest.Artifacts.Count:N0} file(s)."); return 0;
+    }
+    if (args is ["cleanup", var cleanupProject, .. var cleanupOptions])
+    {
+        var apply = cleanupOptions.Contains("--apply", StringComparer.OrdinalIgnoreCase); var json = cleanupOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var unknown = cleanupOptions.Where(option => !option.Equals("--apply", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown project cleanup option: {unknown[0]}");
+        var plan = ArtifactOwnershipService.PlanCleanup(cleanupProject); if (!apply) { if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } })); else { foreach (var entry in plan.Entries) Console.WriteLine($"{entry.Category}\t{entry.Bytes}\t{entry.RelativePath}"); Console.Error.WriteLine($"Cleanup preview: {plan.Entries.Count:N0} exact manifest-owned file(s), {plan.ReclaimableBytes / (1024d * 1024 * 1024):0.###} GiB reclaimable. Add --apply to revalidate every path/hash and remove them."); } return 0; }
+        var result = ArtifactOwnershipService.ApplyCleanup(plan); if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions { WriteIndented = true })); else Console.Error.WriteLine($"Cleanup removed {result.RemovedFiles:N0} exact manifest-owned file(s) and reclaimed {result.ReclaimedBytes / (1024d * 1024 * 1024):0.###} GiB."); return 0;
     }
     if (args is ["reserve-ids", var reserveRoot, var domainText, var countText, .. var reserveOptions] && Enum.TryParse<ContentIdDomain>(domainText, true, out var domain) && int.TryParse(countText, out var count))
     {
@@ -1856,6 +1945,12 @@ static async Task<int> Project(string[] args, CancellationToken cancellationToke
 }
 
 static int ProjectHelp(int code = 0) => GroupHelp($"Usage:\n  wowcrucible project create <folder> <name> [--target={TargetProfileCatalog.DefaultProfileId}] [--asset-library=folder]\n  wowcrucible project status <project-folder>\n  wowcrucible project reserve-ids <project-folder> <domain> <count> [--start=N] [--occupied=ids.txt] [--purpose=text]\n  wowcrucible project occupancy <domain> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--format=text|json]\n  wowcrucible project reserve-live <project-folder> <domain> <count> <host> <port> <user> <database> --dbc=folder --schema=schema.xml [--start=N] [--purpose=text]\n  wowcrucible project class-plan <project> <dbc-folder> <schema.xml> <source-class> <target-class> <target-name> <file-token> <host> <port> <user> <database> [--power=N] [--output=plan.json] [--overwrite] [--format=text|json]\n  wowcrucible project class-build <plan.json> <new-output-folder> <host> <port> <user> <database> [--build]\n  wowcrucible project race-plan <project> <dbc-folder> <schema.xml> <source-race> <target-race> <target-name> <client-prefix> <file-token> <host> <port> <user> <database> [--male-display=N] [--female-display=N] [--display-source=dbc-folder] [--appearance-race=N] [--assets=processed-library] [--provenance=name] [--output=plan.json] [--overwrite] [--format=text|json]\n  wowcrucible project race-build <plan.json> <new-output-folder> <host> <port> <user> <database> [--build]\n\nLive commands read passwords from WOW_CRUCIBLE_DB_PASSWORD by default. Class/race planning is read-only; both build commands are dry runs unless --build is explicit. Without --display-source, race display overrides must already exist in the authoritative DBC folder. With --display-source, both male/female IDs identify source-layer rows; their complete dependent chains are semantically deduplicated or collision-remapped together before ChrRaces is bound to the resulting target IDs. --appearance-race additionally replaces baseline customization cloning with that source race's exact CharSections, hair geoset/texture, facial-hair, and barber surface. Physical IDs are semantically reused or collision-remapped; the generated-key facial-hair table stays append-only. --assets adds a strict exact-provenance model and CharSections texture closure; --provenance resolves different-byte library collisions and requires --assets. Builds revalidate every bound source/target DBC, project reservation, SQL schema, selected SQL row, and packaged asset hash before producing a new DBC/SQL/manifest/MPQ bundle. Neither path mutates the live database, server, or client. Mount and Spell deliberately share the same registry namespace.\n\nID domains: Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, GameObjectDisplayInfo, Race, Class, Faction, Mount, Quest, Custom", code);
+
+static int ProjectExtendedHelp(int code = 0)
+{
+    Console.WriteLine("Owned artifact workflow:\n  wowcrucible project run-create <project-folder> <operation-id> [--format=text|json]\n  wowcrucible project artifact-register <project-folder> <operation-id> <Deliverable|Cache|Scratch|Diagnostics|PreimageBackup|Receipt> <generated-files...> [--required] [--expires=ISO-8601]\n  wowcrucible project cleanup <project-folder> [--apply] [--format=text|json]\n");
+    return ProjectHelp(code);
+}
 
 static int Client(string[] args)
 {
@@ -3558,23 +3653,23 @@ static int Mpq(string[] args)
             }
         case "put" when args.Length >= 4:
             {
-                var options = args[4..]; var locale = MpqLocale.Parse(Option(options, "--locale=")); var create = options.Any(option => option.Equals("--create", StringComparison.OrdinalIgnoreCase));
-                var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.StartsWith("--locale=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--create", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown put option: {unknown[0]}");
+                var options = args[4..]; var locale = MpqLocale.Parse(Option(options, "--locale=")); var create = options.Any(option => option.Equals("--create", StringComparison.OrdinalIgnoreCase)); var updateListFile = Option(options, "--listfile=");
+                var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.StartsWith("--locale=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--create", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown put option: {unknown[0]}");
                 if (!File.Exists(args[2])) return Fail($"Source file does not exist: {args[2]}");
                 if (create && File.Exists(args[1])) return Fail("--create refuses to replace an existing archive. Omit --create to transaction-safely update the small patch.");
                 var entry = new PatchEntry(args[2], args[3], locale); PrintCompatibility([entry], null);
-                if (create) service.Create(args[1], [entry]); else service.Update(args[1], [entry]);
-                Console.Error.WriteLine($"{(create ? "Created" : "Updated")} {Path.GetFullPath(args[1])}: {PatchInputMapper.NormalizeArchivePath(args[3])} · {MpqLocale.Format(locale)}."); return 0;
+                if (create) service.Create(args[1], [entry]); else service.Update(args[1], [entry], updateListFile);
+                Console.Error.WriteLine($"{(create ? "Created" : "Updated")} {Path.GetFullPath(args[1])}: {PatchInputMapper.NormalizeArchivePath(args[3])} · {MpqLocale.Format(locale)}. Recovery listfile: {PatchArchiveService.GetRecoveryListFilePath(args[1])}"); return 0;
             }
         case "create" when args.Length >= 3:
             {
                 var options = args[2..]; var locale = MpqLocale.Parse(Option(options, "--locale=")); var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.StartsWith("--locale=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown create option: {unknown[0]}"); var inputs = options.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray(); if (inputs.Length == 0) return Fail("Add at least one file or folder.");
-                var createEntries = PatchInputMapper.Map(inputs).Select(entry => entry with { Locale = locale }).ToArray(); PrintCompatibility(createEntries, null); service.Create(args[1], createEntries); return 0;
+                var createEntries = PatchInputMapper.Map(inputs).Select(entry => entry with { Locale = locale }).ToArray(); PrintCompatibility(createEntries, null); service.Create(args[1], createEntries); Console.Error.WriteLine($"Recovery listfile: {PatchArchiveService.GetRecoveryListFilePath(args[1])}"); return 0;
             }
         case "update" when args.Length >= 3:
             {
-                var options = args[2..]; var locale = MpqLocale.Parse(Option(options, "--locale=")); var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.StartsWith("--locale=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown update option: {unknown[0]}"); var inputs = options.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray(); if (inputs.Length == 0) return Fail("Add at least one file or folder.");
-                var updateEntries = PatchInputMapper.Map(inputs).Select(entry => entry with { Locale = locale }).ToArray(); PrintCompatibility(updateEntries, null); service.Update(args[1], updateEntries); return 0;
+                var options = args[2..]; var locale = MpqLocale.Parse(Option(options, "--locale=")); var updateListFile = Option(options, "--listfile="); var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.StartsWith("--locale=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown update option: {unknown[0]}"); var inputs = options.Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray(); if (inputs.Length == 0) return Fail("Add at least one file or folder.");
+                var updateEntries = PatchInputMapper.Map(inputs).Select(entry => entry with { Locale = locale }).ToArray(); PrintCompatibility(updateEntries, null); service.Update(args[1], updateEntries, updateListFile); Console.Error.WriteLine($"Recovery listfile: {PatchArchiveService.GetRecoveryListFilePath(args[1])}"); return 0;
             }
         default:
             return MpqHelp(2);
@@ -3583,7 +3678,7 @@ static int Mpq(string[] args)
 
 static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--locale=neutral|enUS|0x0409] [--allow=glob] [--deny=glob] [--require=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
 static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc|file.db2>\n  wowcrucible dbc dbd-info <file.dbd> <build> [--format=text|json]\n  wowcrucible dbc schema-audit <definitions-root|-> <table-folder> <build> [--xml=schema.xml] [--roundtrip] [--only-problems] [--format=text|json]\n  wowcrucible dbc lighting <dbc-folder> [--map=N] [--light=N] [--slot=1..8] [--time=0..2880] [--format=text|json]\n  wowcrucible dbc lighting-band-set <LightIntBand.dbc|LightFloatBand.dbc> <band-id> <output.dbc> --key=time:value [...] [--plan=file.json] [--overwrite] [--in-place] [--format=text|json]\n  wowcrucible dbc rows <file.dbc|file.db2> <schema.xml|file.dbd|definitions-folder> <id>...\n  wowcrucible dbc export <file.dbc|file.db2> <schema> <output.csv|json|jsonl> [--format=csv|json|jsonl] [--columns=A,B|--column=Name] [--ids=1,2|--id=N] [--raw-string-offsets] [--overwrite]\n  wowcrucible dbc import <file.dbc|file.db2> <schema> <input.csv|json|jsonl> [--format=csv|json|jsonl] [--append] [--raw-string-offsets] [--output=changed.dbc|db2] [--overwrite] [--report=text|json]\n  wowcrucible dbc stage-create <file.dbc> <schema> <project> [--replace]\n  wowcrucible dbc stage-info <workspace.sqlite> [--format=text|json]\n  wowcrucible dbc stage-query <workspace.sqlite> <select.sql> [--bind=name=value] [--limit=500] [--format=text|json]\n  wowcrucible dbc stage-mutate <workspace.sqlite> <update-or-insert.sql> [--bind=name=value] [--apply] [--format=text|json]\n  wowcrucible dbc stage-diff <workspace.sqlite> [--format=text|json]\n  wowcrucible dbc stage-apply <workspace.sqlite> <source.dbc> <schema> <output.dbc> [--apply] [--overwrite] [--format=text|json]\n  wowcrucible dbc find <file.dbc|file.db2> <schema> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base> <override> <schema> [--summary]\n  wowcrucible dbc promote apply <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc promote additions <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc clone-remap where <base> <source> <schema> <column> <value>... --manifest=map.json --output=merged.dbc|db2 [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source> <parent-merged> <parent-schema> <parent-map.json> <foreign-column> <child-base> <child-source> <child-schema> --child-map=map.json --child-output=child --parent-output=parent\n  wowcrucible dbc copy-row <base> <source> <schema> <source-id> <target-id> <output> [--set=Column=Value]...\n  wowcrucible dbc set-row <input> <schema> <id> <output> --set=Column=Value [...]\n  wowcrucible dbc spell-tooltip <Spell.dbc> <spell-id>... [--format=text|json]\n  wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [--assets=processed-library]\n  wowcrucible dbc item-equipped <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> <base-skin> <output.png> --inventory=N --assets=processed-library [--source=name]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]\n\nSchema audit accepts an exact build-specific WDBX XML layout, a matching WoWDBDefs DBD layout, or both; pass - when no DBD corpus is selected. One exact provider is sufficient and the other remains visible coverage evidence. --roundtrip writes every full WDBC/WDB2 to isolated temporary storage and requires byte-identical SHA-256 output. `dbc lighting` validates the exact five-table build-12340 Light graph and samples its 18 color plus 6 float time bands without changing any DBC. `lighting-band-set` creates a complete hash/preimage-bound key edit, writes only the explicit output, and requires `--in-place` before replacing its loaded source; every replacement keeps `.bak` and a receipt. PTCH update-layer deltas are identified explicitly and require effective-chain reconstruction before table editing. Staging workspaces are project-local SQLite files with immutable baselines, named schema columns, dry-run mutations, and source/schema hash binding. DBC remains authoritative: publication always passes through Crucible's stale-safe structured importer and writes only an explicit output. For WDB2, <schema> may be the matching XML, .dbd file, or WoWDBDefs definitions folder. WDB5/WDB6/WDC are not yet supported.", code);
-static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...> [--locale=neutral|enUS|0x0409]\n  wowcrucible mpq update <archive.mpq> <files/folders...> [--locale=neutral|enUS|0x0409]\n  wowcrucible mpq put <archive.mpq> <source-file> <archive-path> [--locale=neutral|enUS|0x0409] [--create]\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]\n\nPath + locale is the physical MPQ identity. Extraction preserves same-path locales with explicit suffixes by default; merge deduplicates/conflicts only within the same identity.", code);
+static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]\n  wowcrucible mpq create <archive.mpq> <files/folders...> [--locale=neutral|enUS|0x0409]\n  wowcrucible mpq update <archive.mpq> <files/folders...> [--locale=neutral|enUS|0x0409] [--listfile=original.txt]\n  wowcrucible mpq put <archive.mpq> <source-file> <archive-path> [--locale=neutral|enUS|0x0409] [--listfile=original.txt] [--create]\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]\n\nEvery create, update, put, and merge keeps an embedded `(listfile)` and an external `<archive>.listfile.txt` recovery sidecar. Updates refuse unresolved existing paths rather than publishing an incomplete recovery file. Path + locale is the physical MPQ identity. Extraction preserves same-path locales with explicit suffixes by default; merge deduplicates/conflicts only within the same identity.", code);
 static int CascHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible casc list <storage-folder> [filter] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc tree <storage-folder> [folder] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc extract <storage-folder> <destination> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible casc extract-folder <storage-folder> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n\nCASC operations are read-only and local-only. Crucible never mutates the storage and never downloads missing CDN payloads implicitly.", code);
 static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools commands [search words...] [--format=text|json]\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n\nThe command catalog is shared with the desktop Ctrl+K palette, so scripts and the UI use the same searchable vocabulary. A command search with no matches returns exit code 3.\n\nWithout an inventory path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage.", code);
 static int CacheHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible cache info <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--format=text|json]\n  wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]\n  wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]\n  wowcrucible cache server-plan <file.wdb> <host> <port> <user> <database> [--definitions=WDB.xml] [--ids=1,2] [--output=plan.json] [--sql=preview.sql] [--overwrite]\n  wowcrucible cache server-apply <plan.json> <host> <port> <user> <database> <receipt.json> [--apply] [--overwrite]\n  wowcrucible cache server-rollback <receipt.json> <host> <port> <user> <database> [--apply]\n\nWDB and Cataclysm WCH2 ADB reads are bounded and read-only. Version-aware headers and record framing are always inspected; when no matching schema is available, Crucible reports raw record metadata instead of guessing field types. Unsupported cache info still reports bounded size, SHA-256, first-byte hex/ASCII, and failed magic evidence with review exit code 3. Selected WDBX or Adb_Wdb_Parser schema XML is parsed as data by Crucible's own provider. Later WCH5/WCH7/WCH8 ADB is rejected rather than guessed because it requires matching DB2 layout metadata. Export is atomic and never overwrites without --overwrite. server-plan binds selected decoded WDB rows to exact live modern-core preimages and never invents missing rows or obsolete ArcEmu targets. Apply and rollback are dry-run unless --apply is explicit; apply rechecks source/schema/preimages under row locks and writes a receipt before commit, while rollback refuses later-edited fields. Database passwords come from WOW_CRUCIBLE_DB_PASSWORD by default.", code);

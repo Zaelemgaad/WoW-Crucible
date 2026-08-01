@@ -49,6 +49,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
     private readonly TextBox _raceOutput = new() { PlaceholderText = "New/empty bundle output folder…" };
     private readonly TextBlock _raceStatus = Status("Choose a genuinely unoccupied reserved Race ID, then create a read-only dependency plan.");
     private readonly ListBox _raceDetails = new();
+    private readonly ArtifactOwnershipView _artifactOwnershipView;
     private IReadOnlyList<TargetProfile> _profiles = [];
     private ContentIdOccupancyReport? _report;
     private PlayableClassClonePlan? _classPlan;
@@ -60,7 +61,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
 
     public ProjectWorkspaceView(DesktopWorkspaceSession session)
     {
-        _session = session; _session.Changed += SessionChanged;
+        _session = session; _session.Changed += SessionChanged; _artifactOwnershipView = new ArtifactOwnershipView(session);
         _profiles = TargetProfileCatalog.Load(); _target.ItemsSource = _profiles; _target.SelectedItem = TargetProfileCatalog.Find(_profiles, TargetProfileCatalog.DefaultProfileId);
         _domain.ItemsSource = ContentIdDomainCatalog.All; _domain.SelectedItem = ContentIdDomainCatalog.Get(ContentIdDomain.Item);
         _dbc.Text = session.Settings.CoreDbcPath; _schema.Text = session.Settings.SchemaDefinitionPath; _root.Text = session.Settings.ActiveProjectPath;
@@ -155,7 +156,8 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         {
             new TabItem { Header = "ID reservations", Content = body },
             new TabItem { Header = "Playable class bundle", Content = classBody },
-            new TabItem { Header = "Playable race bundle", Content = raceBody }
+            new TabItem { Header = "Playable race bundle", Content = raceBody },
+            new TabItem { Header = "Owned files & cleanup", Content = _artifactOwnershipView }
         } };
         Content = new Grid { RowDefinitions = new("Auto,*"), Children = { heading, WithRow(tabs, 1) } };
         ShowPolicy(); TryLoadConfiguredProject();
@@ -166,6 +168,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         if (string.IsNullOrWhiteSpace(_dbc.Text)) _dbc.Text = _session.Settings.CoreDbcPath;
         if (string.IsNullOrWhiteSpace(_schema.Text)) _schema.Text = _session.Settings.SchemaDefinitionPath;
         if (!string.IsNullOrWhiteSpace(_session.Settings.ActiveProjectPath) && !string.Equals(_root.Text, _session.Settings.ActiveProjectPath, StringComparison.OrdinalIgnoreCase)) _root.Text = _session.Settings.ActiveProjectPath;
+        _artifactOwnershipView.SetProject(_root.Text);
         TryLoadConfiguredProject();
     }
 
@@ -388,7 +391,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
 
     private ContentIdDomainPolicy SelectedPolicy() => _domain.SelectedItem as ContentIdDomainPolicy ?? ContentIdDomainCatalog.Get(ContentIdDomain.Item);
     private IReadOnlyList<uint>? ReadManual() => string.IsNullOrWhiteSpace(_manualIds.Text) ? null : CrucibleContentProjectService.ReadOccupiedIds(_manualIds.Text);
-    private void SetActive(string root) { root = Path.GetFullPath(root); _root.Text = root; _session.Settings.ActiveProjectPath = root; _session.Settings.Save(); }
+    private void SetActive(string root) { root = Path.GetFullPath(root); _root.Text = root; _artifactOwnershipView.SetProject(root); _session.Settings.ActiveProjectPath = root; _session.Settings.Save(); }
     private void InvalidateReport() { _report = null; _sources.ItemsSource = Array.Empty<ContentIdOccupancySource>(); _status.Text = "Occupancy inputs changed · scan again before reserving."; }
     private void InvalidateClassPlan() { _classPlan = null; _classDetails.ItemsSource = Array.Empty<string>(); _classStatus.Text = "Class inputs changed · create a fresh dependency plan before building."; }
     private void InvalidateRacePlan() { _racePlan = null; _raceDetails.ItemsSource = Array.Empty<string>(); _raceStatus.Text = "Race inputs changed · create a fresh dependency plan before building."; }

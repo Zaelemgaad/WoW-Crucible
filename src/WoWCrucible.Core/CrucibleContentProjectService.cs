@@ -5,7 +5,7 @@ namespace WoWCrucible.Core;
 public enum ContentIdDomain { Item, ItemSet, Spell, CreatureTemplate, CreatureModelData, CreatureDisplayInfo, CreatureDisplayInfoExtra, GameObject, GameObjectDisplayInfo, Race, Class, Faction, Mount, Quest, Custom }
 public sealed record ContentIdReservation(string Id, ContentIdDomain Domain, IReadOnlyList<uint> Values, string Purpose, DateTimeOffset CreatedUtc);
 public sealed record ContentIdRegistry(int FormatVersion, DateTimeOffset UpdatedUtc, IReadOnlyList<ContentIdReservation> Reservations);
-public sealed record CrucibleContentProject(int FormatVersion, string Name, string TargetProfile, DateTimeOffset CreatedUtc, DateTimeOffset UpdatedUtc, string IdRegistryFile, string? AssetLibrary);
+public sealed record CrucibleContentProject(int FormatVersion, string Name, string TargetProfile, DateTimeOffset CreatedUtc, DateTimeOffset UpdatedUtc, string IdRegistryFile, string? AssetLibrary, string ProjectId = "");
 
 public static class CrucibleContentProjectService
 {
@@ -15,15 +15,17 @@ public static class CrucibleContentProjectService
     {
         rootPath = Path.GetFullPath(rootPath); Directory.CreateDirectory(rootPath); var projectPath = Path.Combine(rootPath, "project.crucible.json");
         if (File.Exists(projectPath)) throw new IOException($"A Crucible content project already exists at {projectPath}");
-        foreach (var directory in new[] { "Assets", "DBC", "SQL", "Manifests", "Reports", "Staging" }) Directory.CreateDirectory(Path.Combine(rootPath, directory));
-        var now = DateTimeOffset.UtcNow; var project = new CrucibleContentProject(1, name.Trim(), targetProfile.Trim(), now, now, "ids.crucible.json", string.IsNullOrWhiteSpace(assetLibrary) ? null : Path.GetFullPath(assetLibrary));
-        WriteAtomic(projectPath, project); WriteAtomic(Path.Combine(rootPath, project.IdRegistryFile), new ContentIdRegistry(1, now, [])); return project;
+        foreach (var directory in new[] { "Assets", "DBC", "SQL", "Manifests", "Reports", "Staging", "Runs", "Deliverables", "Cache", "Diagnostics", "Backups", "Receipts" }) Directory.CreateDirectory(Path.Combine(rootPath, directory));
+        var now = DateTimeOffset.UtcNow; var project = new CrucibleContentProject(1, name.Trim(), targetProfile.Trim(), now, now, "ids.crucible.json", string.IsNullOrWhiteSpace(assetLibrary) ? null : Path.GetFullPath(assetLibrary), Guid.NewGuid().ToString("N"));
+        WriteAtomic(projectPath, project); WriteAtomic(Path.Combine(rootPath, project.IdRegistryFile), new ContentIdRegistry(1, now, [])); ArtifactOwnershipService.Initialize(rootPath, project.ProjectId); return project;
     }
 
     public static CrucibleContentProject Load(string projectOrRoot)
     {
         var path = ResolveProjectPath(projectOrRoot); var project = JsonSerializer.Deserialize<CrucibleContentProject>(File.ReadAllText(path), JsonOptions) ?? throw new InvalidDataException("The content project is empty.");
-        if (project.FormatVersion != 1) throw new InvalidDataException($"Unsupported content project format: {project.FormatVersion}"); return project;
+        if (project.FormatVersion != 1) throw new InvalidDataException($"Unsupported content project format: {project.FormatVersion}");
+        if (string.IsNullOrWhiteSpace(project.ProjectId)) project = project with { ProjectId = LegacyProjectId(project) };
+        return project;
     }
 
     public static ContentIdRegistry LoadRegistry(string projectOrRoot)
@@ -66,4 +68,5 @@ public static class CrucibleContentProjectService
 
     private static string ResolveProjectPath(string path) { path = Path.GetFullPath(path); return Directory.Exists(path) ? Path.Combine(path, "project.crucible.json") : path; }
     private static void WriteAtomic<T>(string path, T value) { Directory.CreateDirectory(Path.GetDirectoryName(path)!); var temporary = path + ".tmp"; File.WriteAllText(temporary, JsonSerializer.Serialize(value, JsonOptions)); File.Move(temporary, path, true); }
+    private static string LegacyProjectId(CrucibleContentProject project) => "legacy-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes($"{project.Name}\n{project.CreatedUtc:O}")))[..24].ToLowerInvariant();
 }

@@ -146,7 +146,13 @@ public static class PlayableRaceCustomizationPromotionService
                 planned.Add((pair.Value, targetKey)); rows.Add(new(table, pair.Key, targetKey, action));
                 if (table.Equals("CharSections", StringComparison.OrdinalIgnoreCase)) foreach (var textureColumn in resolution.Columns.Where(column => column.Name.StartsWith("TextureName[", StringComparison.OrdinalIgnoreCase)))
                 {
-                    var path = Convert.ToString(source.GetDisplayValue(pair.Value, textureColumn))?.Trim(); if (!string.IsNullOrWhiteSpace(path)) requiredTextures.Add(PatchInputMapper.NormalizeArchivePath(path));
+                    var path = Convert.ToString(source.GetDisplayValue(pair.Value, textureColumn))?.Trim();
+                    if (!string.IsNullOrWhiteSpace(path))
+                    {
+                        var normalized = PatchInputMapper.NormalizeArchivePath(path); var runtime = CharacterCustomizationRuntimePathPolicy.Assess(normalized);
+                        if (!runtime.Safe) blockers.Add($"CharSections runtime texture path is {runtime.Utf8Bytes:N0} UTF-8 bytes, above the proven Ascension ceiling of {runtime.MaximumUtf8Bytes:N0}: {runtime.ClientPath}");
+                        requiredTextures.Add(normalized);
+                    }
                 }
             }
             tables.Add(new(table, raceName, resolution.KeyStrategy.Kind, selected.Length, rows));

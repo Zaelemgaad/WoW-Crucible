@@ -51,6 +51,53 @@ var importedSpellMasks = DbcSchemaCatalog.Load(requiredSchema).ResolveColumns("S
 if (!builtInSpellMasks.SequenceEqual(expectedSpellEffectMasks) || !importedSpellMasks.SequenceEqual(expectedSpellEffectMasks))
     throw new InvalidOperationException("Build-12340 Spell effect family masks are not labeled in physical A/B/C order for each effect.");
 
+var noncanonicalStringRoot = Path.Combine(Path.GetTempPath(), $"crucible-noncanonical-strings-{Guid.NewGuid():N}");
+Directory.CreateDirectory(noncanonicalStringRoot);
+try
+{
+    var source = Path.Combine(noncanonicalStringRoot, "CharSections.dbc");
+    var livePath = "Character\\Human\\Male\\HumanMaleSkin00_00.blp";
+    var strings = System.Text.Encoding.UTF8.GetBytes(livePath + "\0\0");
+    var emptyOffset = checked((uint)System.Text.Encoding.UTF8.GetByteCount(livePath));
+    using (var stream = File.Create(source))
+    using (var writer = new BinaryWriter(stream))
+    {
+        writer.Write(System.Text.Encoding.ASCII.GetBytes("WDBC")); writer.Write(1); writer.Write(2); writer.Write(8); writer.Write(strings.Length);
+        writer.Write(0u); writer.Write(emptyOffset); writer.Write(strings);
+    }
+    var pathColumn = new DbcColumn(0, 0, 4, "TextureName[0]", DbcValueType.StringOffset);
+    var emptyColumn = new DbcColumn(1, 4, 4, "TextureName[1]", DbcValueType.StringOffset);
+    var table = WdbcFile.Load(source);
+    if ((string)table.GetDisplayValue(0, pathColumn) != livePath || (string)table.GetDisplayValue(0, emptyColumn) != string.Empty || table.GetRaw(0, emptyColumn) == 0)
+        throw new InvalidOperationException("The noncanonical WDBC empty-string fixture did not load with its real later NUL offset.");
+    table.SetDisplayValue(0, emptyColumn, string.Empty);
+    var appended = table.CloneRow(0); table.SetDisplayValue(appended, emptyColumn, string.Empty);
+    var output = Path.Combine(noncanonicalStringRoot, "output.dbc"); table.Save(output, false); var reopened = WdbcFile.Load(output);
+    if (reopened.GetRaw(0, emptyColumn) == 0 || reopened.GetRaw(appended, emptyColumn) == 0 ||
+        (string)reopened.GetDisplayValue(0, emptyColumn) != string.Empty || (string)reopened.GetDisplayValue(appended, emptyColumn) != string.Empty ||
+        (string)reopened.GetDisplayValue(0, pathColumn) != livePath)
+        throw new InvalidOperationException("WDBC mutation canonicalized a semantic empty string to live offset zero.");
+}
+finally { Directory.Delete(noncanonicalStringRoot, true); }
+
+var mpqPathPreflightRoot = Path.Combine(Path.GetTempPath(), $"crucible-mpq-path-{Guid.NewGuid():N}");
+Directory.CreateDirectory(mpqPathPreflightRoot);
+try
+{
+    const string leaf = "source.blp";
+    var directoryLength = 260 - mpqPathPreflightRoot.Length - 2 - leaf.Length;
+    if (directoryLength < 1) throw new InvalidOperationException("MPQ source-path fixture root is unexpectedly long.");
+    var longDirectory = Path.Combine(mpqPathPreflightRoot, new string('x', directoryLength)); Directory.CreateDirectory(longDirectory);
+    var longSource = Path.Combine(longDirectory, leaf); File.WriteAllBytes(longSource, [1, 2, 3]);
+    if (longSource.Length != 260) throw new InvalidOperationException($"MPQ source-path fixture expected 260 characters but resolved to {longSource.Length}.");
+    var entry = new PatchEntry(longSource, "Character\\Fixture\\source.blp"); var preflight = PatchArchiveService.PreflightSources([entry]);
+    if (preflight.Safe || preflight.LongestNativeCharacters != 260 || preflight.UnsafeEntries.Single().SourcePath != longSource)
+        throw new InvalidOperationException("MPQ native source-path preflight did not expose the exact MAX_PATH blocker.");
+    try { new PatchArchiveService().Create(Path.Combine(mpqPathPreflightRoot, "blocked.mpq"), [entry]); throw new InvalidOperationException("MPQ creation reached StormLib with a 260-character source path."); }
+    catch (PathTooLongException exception) when (exception.Message.Contains("short same-volume staging", StringComparison.OrdinalIgnoreCase)) { }
+}
+finally { Directory.Delete(mpqPathPreflightRoot, true); }
+
 if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(command => command.Id).Distinct(StringComparer.Ordinal).Count() != CrucibleCommandCatalog.All.Count ||
     CrucibleCommandCatalog.Search("heidi favorites").FirstOrDefault()?.Command.Id != "workspace.sql-favorites" ||
     CrucibleCommandCatalog.Search("foreign key constraint").FirstOrDefault()?.Command.Id != "workspace.sql" ||
@@ -79,6 +126,104 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("cross row lookup exact map").FirstOrDefault()?.Command.Id != "workspace.server" ||
     CrucibleCommandCatalog.Search("words-that-match-nothing").Count != 0)
     throw new InvalidOperationException("Shared desktop/CLI command catalog uniqueness, aliases, multi-term filtering, or ranking regressed.");
+
+var shortTextureCommand = CliCommandAbbreviationService.Resolve(["as", "li", "v", "t", "--summary-only"]);
+var shortCorpusCommand = CliCommandAbbreviationService.Resolve(["cl", "corp", "output.txt", "index-a"]);
+var splitMapCommand = CliCommandAbbreviationService.Resolve(["as", "adt", "height", "plan", "map.adt", "2", "all", "plan.json"]);
+var ambiguousGroupCommand = CliCommandAbbreviationService.Resolve(["d"]);
+var ambiguousAssetCommand = CliCommandAbbreviationService.Resolve(["as", "t"]);
+if (!shortTextureCommand.Success || !shortTextureCommand.Arguments.SequenceEqual(new[] { "asset", "texture-validate", "texture-library", "--summary-only" }) ||
+    !shortCorpusCommand.Success || !shortCorpusCommand.Arguments.SequenceEqual(new[] { "client", "corpus", "output.txt", "index-a" }) ||
+    !splitMapCommand.Success || !splitMapCommand.Arguments.SequenceEqual(new[] { "asset", "adt-height-plan", "map.adt", "2", "all", "plan.json" }) ||
+    ambiguousGroupCommand.Success || !ambiguousGroupCommand.Choices.SequenceEqual(new[] { "db", "dbc" }) ||
+    ambiguousAssetCommand.Success || !ambiguousAssetCommand.Choices.Any(choice => choice == "asset texture-validate"))
+    throw new InvalidOperationException("CLI unambiguous prefix, split-hyphen, short executable vocabulary, or ambiguity reporting regressed.");
+
+var fieldNoteServiceRoot = Path.Combine(Path.GetTempPath(), $"crucible-field-note-services-{Guid.NewGuid():N}");
+Directory.CreateDirectory(fieldNoteServiceRoot);
+try
+{
+    static string FixtureFile(string root, string relative, params byte[] bytes)
+    {
+        var path = Path.Combine(root, relative); Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllBytes(path, bytes); return path;
+    }
+
+    var sourceRoot = Path.Combine(fieldNoteServiceRoot, "source");
+    var lowRoot = Path.Combine(fieldNoteServiceRoot, "low");
+    var highRoot = Path.Combine(fieldNoteServiceRoot, "high");
+    FixtureFile(sourceRoot, @"wrapper\Content\Character\Human\exact.blp", 1);
+    FixtureFile(sourceRoot, @"wrapper\Content\Character\Human\different.blp", 2);
+    FixtureFile(sourceRoot, @"wrapper\Content\Character\Human\alternate.blp", 3);
+    FixtureFile(sourceRoot, @"wrapper\Content\Character\Human\absent.blp", 4);
+    FixtureFile(sourceRoot, @"wrapper\Content\DBFilesClient\Fixture.dbc", 5);
+    FixtureFile(lowRoot, @"extract-a\Content\Character\Human\exact.blp", 1);
+    FixtureFile(lowRoot, @"extract-a\Content\Character\Human\different.blp", 8);
+    FixtureFile(lowRoot, @"extract-a\Content\Character\Human\alternate.blp", 3);
+    FixtureFile(lowRoot, @"extract-a\Content\DBFilesClient\Fixture.dbc", 5);
+    FixtureFile(highRoot, @"extract-z\Content\Character\Human\exact.blp", 1);
+    FixtureFile(highRoot, @"extract-z\Content\Character\Human\different.blp", 9);
+    FixtureFile(highRoot, @"extract-z\Content\Character\Human\alternate.blp", 7);
+    FixtureFile(highRoot, @"extract-z\Content\DBFilesClient\Fixture.dbc", 6);
+    var layerIndex = Path.Combine(fieldNoteServiceRoot, "index", "layers.sqlite");
+    var layerService = new LooseLayerStackIndexService();
+    var firstLayerBuild = layerService.Build(layerIndex, sourceRoot, [new("Ascension", 10, "Patch A", lowRoot), new("Ascension", 20, "Patch Z", highRoot)]);
+    var indexedRows = layerService.Query(layerIndex, limit: 100);
+    if (firstLayerBuild.SourceFiles != 5 || firstLayerBuild.Stacks != 1 || indexedRows.Count != 5 ||
+        indexedRows.Single(row => row.LogicalPath.EndsWith("exact.blp", StringComparison.OrdinalIgnoreCase)).Kind != LooseLayerComparisonKind.ExactEffective ||
+        indexedRows.Single(row => row.LogicalPath.EndsWith("different.blp", StringComparison.OrdinalIgnoreCase)).Kind != LooseLayerComparisonKind.DifferentEffective ||
+        indexedRows.Single(row => row.LogicalPath.EndsWith("alternate.blp", StringComparison.OrdinalIgnoreCase)).Kind != LooseLayerComparisonKind.DifferentEffectiveWithExactAlternate ||
+        indexedRows.Single(row => row.LogicalPath.EndsWith("absent.blp", StringComparison.OrdinalIgnoreCase)).Kind != LooseLayerComparisonKind.AbsentFromStack ||
+        indexedRows.Single(row => row.LogicalPath.EndsWith("Fixture.dbc", StringComparison.OrdinalIgnoreCase)).Kind != LooseLayerComparisonKind.StructuredTableReview ||
+        indexedRows.Any(row => row.LogicalPath.Contains("wrapper", StringComparison.OrdinalIgnoreCase) || row.LogicalPath.Contains("extract-", StringComparison.OrdinalIgnoreCase)) ||
+        indexedRows.Single(row => row.LogicalPath.EndsWith("alternate.blp", StringComparison.OrdinalIgnoreCase)).Suppliers.Count != 2 ||
+        !indexedRows.Single(row => row.LogicalPath.EndsWith("alternate.blp", StringComparison.OrdinalIgnoreCase)).Suppliers[^1].Effective)
+        throw new InvalidOperationException("Loose layer-stack path normalization, effective winner, supplier, or comparison classification regressed.");
+    var resumedIndex = layerService.Build(layerIndex, sourceRoot, [new("Ascension", 10, "Patch A", lowRoot), new("Ascension", 20, "Patch Z", highRoot)]);
+    if (resumedIndex.HashedFiles != 0 || resumedIndex.ReusedHashes != firstLayerBuild.SourceFiles + firstLayerBuild.LayerFiles)
+        throw new InvalidOperationException("Loose layer-stack checkpoint did not reuse every unchanged file hash.");
+
+    var duplicateRoot = Path.Combine(fieldNoteServiceRoot, "duplicates");
+    FixtureFile(duplicateRoot, @"one\Content\Character\Human\same.blp", 1);
+    FixtureFile(duplicateRoot, @"two\Content\Character\Human\same.blp", 2);
+    try
+    {
+        layerService.Build(Path.Combine(fieldNoteServiceRoot, "duplicate.sqlite"), duplicateRoot, [new("Ascension", 1, "Patch A", lowRoot)]);
+        throw new InvalidOperationException("Loose layer-stack indexing silently selected one of two normalized source identities.");
+    }
+    catch (InvalidDataException exception) when (exception.Message.Contains("multiple physical files", StringComparison.OrdinalIgnoreCase)) { }
+
+    var projectRoot = Path.Combine(fieldNoteServiceRoot, "project");
+    var project = CrucibleContentProjectService.Create(projectRoot, "Ownership fixture");
+    var run = ArtifactOwnershipService.CreateRun(projectRoot, "field-note-test");
+    var scratch = FixtureFile(run.ScratchPath, "scratch.bin", 1, 2);
+    var cache = FixtureFile(run.CachePath, "cache.bin", 3, 4);
+    var diagnostics = FixtureFile(run.DiagnosticsPath, "diagnostic.log", 5);
+    var deliverable = FixtureFile(run.DeliverablePath, "patch.mpq", 6);
+    var backup = FixtureFile(run.BackupPath, "server.dbc.bak", 7);
+    ArtifactOwnershipService.RegisterFiles(projectRoot, run.OperationId, ArtifactLifecycleCategory.Scratch, [scratch]);
+    ArtifactOwnershipService.RegisterFiles(projectRoot, run.OperationId, ArtifactLifecycleCategory.Cache, [cache]);
+    ArtifactOwnershipService.RegisterFiles(projectRoot, run.OperationId, ArtifactLifecycleCategory.Diagnostics, [diagnostics], expiresUtc: DateTimeOffset.UtcNow.AddMinutes(-1));
+    ArtifactOwnershipService.RegisterFiles(projectRoot, run.OperationId, ArtifactLifecycleCategory.Deliverable, [deliverable], requiredByPublishedDeliverable: true);
+    ArtifactOwnershipService.RegisterFiles(projectRoot, run.OperationId, ArtifactLifecycleCategory.PreimageBackup, [backup], requiredByPublishedDeliverable: true);
+    var cleanup = ArtifactOwnershipService.PlanCleanup(projectRoot);
+    if (cleanup.Entries.Count != 3 || cleanup.Entries.Any(entry => entry.AbsolutePath == deliverable || entry.AbsolutePath == backup) || cleanup.ProjectId != project.ProjectId)
+        throw new InvalidOperationException("Artifact cleanup included protected output or omitted manifest-owned disposable output.");
+    File.WriteAllBytes(scratch, [9, 9, 9]);
+    try { ArtifactOwnershipService.ApplyCleanup(cleanup); throw new InvalidOperationException("Artifact cleanup accepted a changed target after preview."); }
+    catch (InvalidDataException exception) when (exception.Message.Contains("changed after preview", StringComparison.OrdinalIgnoreCase)) { }
+    if (!File.Exists(cache) || !File.Exists(diagnostics)) throw new InvalidOperationException("Artifact cleanup partially deleted files before completing stale-plan preflight.");
+    File.WriteAllBytes(scratch, [1, 2]);
+    var cleanupResult = ArtifactOwnershipService.ApplyCleanup(cleanup);
+    if (cleanupResult.RemovedFiles != 3 || File.Exists(scratch) || File.Exists(cache) || File.Exists(diagnostics) || !File.Exists(deliverable) || !File.Exists(backup))
+        throw new InvalidOperationException("Artifact cleanup did not delete exactly the previewed disposable set while retaining deliverables and backups.");
+
+    var safeRuntimePath = CharacterCustomizationRuntimePathPolicy.Assess(new string('x', 124));
+    var unsafeRuntimePath = CharacterCustomizationRuntimePathPolicy.Assess(new string('x', 125));
+    var multibyteRuntimePath = CharacterCustomizationRuntimePathPolicy.Assess(new string('é', 63));
+    if (!safeRuntimePath.Safe || unsafeRuntimePath.Safe || multibyteRuntimePath.Utf8Bytes != 126 || multibyteRuntimePath.Safe)
+        throw new InvalidOperationException("Character customization runtime path policy stopped measuring the proven UTF-8 byte ceiling.");
+}
+finally { Directory.Delete(fieldNoteServiceRoot, true); }
 
 if (!PlayableBundleSqlService.IsRecognizedIdentityTable(PlayableBundleIdentityKind.Class, "player_class_stats") ||
     !PlayableBundleSqlService.IsRecognizedIdentityTable(PlayableBundleIdentityKind.Class, "chrclasses_dbc") ||
@@ -3499,6 +3644,12 @@ var secondPatchEntry = PatchInputMapper.Map([files.First(path => Path.GetFileNam
 patchService.Update(mpqOutput, secondPatchEntry);
 if (!patchService.Contains(mpqOutput, "DBFilesClient\\AnimationData.dbc") || !patchService.Contains(mpqOutput, "DBFilesClient\\SpellCastTimes.dbc"))
     throw new InvalidOperationException("Updating an MPQ did not preserve its existing files.");
+var recoveryListFile = PatchArchiveService.GetRecoveryListFilePath(mpqOutput);
+var recoveryPaths = File.Exists(recoveryListFile) ? File.ReadAllLines(recoveryListFile) : [];
+if (!recoveryPaths.Contains("(listfile)", StringComparer.OrdinalIgnoreCase) ||
+    !recoveryPaths.Contains("DBFilesClient\\AnimationData.dbc", StringComparer.OrdinalIgnoreCase) ||
+    !recoveryPaths.Contains("DBFilesClient\\SpellCastTimes.dbc", StringComparer.OrdinalIgnoreCase))
+    throw new InvalidOperationException("MPQ create/update did not retain a complete external recovery listfile.");
 var listed = patchService.ListFiles(mpqOutput);
 if (!listed.Any(entry => entry.ArchivePath.Equals("DBFilesClient\\AnimationData.dbc", StringComparison.OrdinalIgnoreCase)))
     throw new InvalidOperationException("MPQ file enumeration did not find a known file.");
@@ -3547,6 +3698,8 @@ if (!File.ReadAllBytes(Path.Combine(legacyExtractRoot, "DBFilesClient", "Animati
 Directory.Delete(legacyExtractRoot, true);
 File.Delete(mpqOutput);
 File.Delete(mpqOutput + ".bak");
+File.Delete(recoveryListFile);
+File.Delete(recoveryListFile + ".bak");
 
 var layerRoot = Path.Combine(Path.GetTempPath(), $"wow-crucible-layers-{Guid.NewGuid():N}");
 var baseLayer = Path.Combine(layerRoot, "base"); var overrideLayer = Path.Combine(layerRoot, "override"); Directory.CreateDirectory(baseLayer); Directory.CreateDirectory(overrideLayer);

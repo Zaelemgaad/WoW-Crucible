@@ -210,6 +210,10 @@ wowcrucible server client-plan "C:\path\to\installed-server" extracted-effective
 wowcrucible asset texture-decode texture.blp texture.png [--mip=0]
 wowcrucible asset texture-encode texture.png texture.blp [--format=auto] [--quality=best]
 wowcrucible asset texture-validate texture-library --recursive
+wowcruc as tex val texture-library --recursive
+wowcruc as li v t --summary-only
+wowcrucible asset layer-stack-index overlap.sqlite source-content --layer="Ascension|10|Patch A|extracted-a" --layer="Ascension|20|Patch Z|extracted-z"
+wowcrucible asset layer-stack-query overlap.sqlite --kind=different-effective
 wowcrucible asset library-import extracted-archive asset-library provenance-name [--workers=6]
 wowcrucible asset library-consolidate asset-library [--apply]
 wowcrucible asset library-catalog asset-library
@@ -220,8 +224,8 @@ wowcrucible mpq tree patch.MPQ [internal-folder] [--format=text|json] [--listfil
 wowcrucible mpq extract patch.MPQ output-folder [path-glob-or-text] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]
 wowcrucible mpq extract-folder patch.MPQ internal-folder output-folder [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt]
 wowcrucible mpq create patch-W.MPQ file-or-folder [...] [--locale=neutral|enUS|0x0409]
-wowcrucible mpq update patch-W.MPQ file-or-folder [...] [--locale=neutral|enUS|0x0409]
-wowcrucible mpq put patch-W.MPQ localized.lua Interface\FrameXML\Localized.lua --locale=deDE
+wowcrucible mpq update patch-W.MPQ file-or-folder [...] [--locale=neutral|enUS|0x0409] [--listfile=original.txt]
+wowcrucible mpq put patch-W.MPQ localized.lua Interface\FrameXML\Localized.lua --locale=deDE [--listfile=original.txt]
 wowcrucible mpq merge patch-merged.MPQ patch-A.MPQ patch-B.MPQ [...] --conflicts=block
 wowcrucible casc list client-root [filter] [--local-only] [--format=json] [--listfile=paths.txt]
 wowcrucible casc tree client-root [internal-folder] [--local-only] [--format=json] [--listfile=paths.txt]
@@ -235,7 +239,7 @@ wowcrucible manifest build classless.json output-folder
 
 An MPQ browser can only display names known to an internal or external `(listfile)`. Crucible automatically retries a usable embedded listfile before declaring entries anonymous. Client indexing preserves every still-hash-only entry under its synthetic StormLib name, reports the unresolved count, and can retry name recovery from a corpus built across multiple clients. `--resolved-only` prevents synthetic names from being mistaken for reusable folder paths; `--anonymous-only` quarantines those unresolved payloads for signature/content inspection.
 
-Standalone MPQ listing and extraction also accept `--listfile=paths.txt`; unresolved `File000...` placeholders are reported as a naming limitation, not archive incompatibility.
+Standalone MPQ listing and extraction also accept `--listfile=paths.txt`; unresolved `File000...` placeholders are reported as a naming limitation, not archive incompatibility. Every Crucible create, update, put, manifest build, and merge requests an embedded `(listfile)` and writes an independent `<archive>.listfile.txt` recovery sidecar. Updates preserve all resolved old paths plus new paths and refuse to proceed while an existing payload is still hash-only, so Crucible never presents an incomplete recovery list as authoritative.
 - Maps standalone DBCs to `DBFilesClient\\<name>.dbc`.
 - Synchronizes a saved DBC into a selected server `data\\dbc` directory with backup.
 

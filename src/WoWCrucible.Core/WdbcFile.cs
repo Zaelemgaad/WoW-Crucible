@@ -305,7 +305,20 @@ public sealed class WdbcFile
 
     private uint GetOrAddString(string value)
     {
-        if (value.Length == 0) return 0;
+        if (value.Length == 0)
+        {
+            // Offset zero is only an empty string when the first byte is NUL. Some
+            // real custom WDBC files start their string block with live text and use
+            // a later terminator byte for semantic empty values. Reusing raw zero in
+            // those files silently turns an empty field into the first client path.
+            var emptyOffset = Array.IndexOf(_strings, (byte)0);
+            if (emptyOffset >= 0) return checked((uint)emptyOffset);
+            var appended = checked((uint)_strings.Length);
+            Array.Resize(ref _strings, checked(_strings.Length + 1));
+            _strings[^1] = 0;
+            _stringOffsets = null;
+            return appended;
+        }
         EnsureStringIndex();
         if (_stringOffsets!.TryGetValue(value, out var existing)) return existing;
 

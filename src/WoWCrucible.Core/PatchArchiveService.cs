@@ -6,6 +6,13 @@ using System.Text.RegularExpressions;
 namespace WoWCrucible.Core;
 
 public sealed record PatchEntry(string SourcePath, string ArchivePath, uint Locale = 0);
+public sealed record MpqSourcePathPreflightEntry(string SourcePath, string ArchivePath, int NativeCharacters, bool Safe);
+public sealed record MpqSourcePathPreflight(int MaximumNativeCharacters, int LongestNativeCharacters,
+    IReadOnlyList<MpqSourcePathPreflightEntry> Entries)
+{
+    public bool Safe => Entries.All(entry => entry.Safe);
+    public IReadOnlyList<MpqSourcePathPreflightEntry> UnsafeEntries => Entries.Where(entry => !entry.Safe).ToArray();
+}
 public sealed record MpqFileEntry(string ArchivePath, long Size, long CompressedSize, uint Flags, uint Locale, uint BlockIndex = uint.MaxValue)
 {
     public bool IsMetadata => MpqPathClassifier.IsMetadata(ArchivePath);
@@ -141,6 +148,9 @@ public static class PatchInputMapper
 
 public sealed class PatchArchiveService
 {
+    // StormLib's legacy Windows file-opening path rejects an otherwise valid source
+    // when its absolute path reaches MAX_PATH (260 including the terminator).
+    public const int MaximumNativeSourcePathCharacters = 259;
     public const long MaximumSafeUpdateBytes = 2L * 1024 * 1024 * 1024;
     public const int MaximumExtractionWorkers = 16;
     public static int RecommendedExtractionWorkers => Math.Clamp(Environment.ProcessorCount / 2, 1, 4);
@@ -155,17 +165,24 @@ public sealed class PatchArchiveService
     private static readonly object LocaleOperationLock = new();
     private sealed record ExtractionItem(MpqFileEntry Entry, string InternalPath, string OutputPath, string Destination, string LookupPath);
 
+    public static string GetRecoveryListFilePath(string archivePath) => Path.GetFullPath(archivePath) + ".listfile.txt";
+
     public void Create(string outputPath, IEnumerable<PatchEntry> sourceEntries)
     {
         var entries = ValidateEntries(sourceEntries);
+        RequireSafeSourcePaths(entries);
 
         outputPath = Path.GetFullPath(outputPath);
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
         var tempPath = outputPath + ".tmp";
+        var listFilePath = GetRecoveryListFilePath(outputPath);
+        var temporaryListFile = listFilePath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        var hadOutput = File.Exists(outputPath);
         File.Delete(tempPath);
         IntPtr archive = IntPtr.Zero;
         try
         {
+            WriteRecoveryListFile(temporaryListFile, entries.Select(entry => entry.ArchivePath));
             if (!Native.SFileCreateArchive(tempPath, CreateListFile | CreateArchiveV2, (uint)Math.Max(16, entries.Length + 8), out archive))
                 ThrowNative("create the MPQ archive");
             foreach (var entry in entries)
@@ -175,13 +192,25 @@ public sealed class PatchArchiveService
             }
             if (!Native.SFileCloseArchive(archive)) ThrowNative("finalize the MPQ archive");
             archive = IntPtr.Zero;
-            if (File.Exists(outputPath)) File.Copy(outputPath, outputPath + ".bak", true);
+            if (hadOutput) File.Copy(outputPath, outputPath + ".bak", true);
             File.Move(tempPath, outputPath, true);
+            try
+            {
+                if (File.Exists(listFilePath)) File.Copy(listFilePath, listFilePath + ".bak", true);
+                File.Move(temporaryListFile, listFilePath, true);
+            }
+            catch
+            {
+                if (hadOutput && File.Exists(outputPath + ".bak")) File.Copy(outputPath + ".bak", outputPath, true);
+                else File.Delete(outputPath);
+                throw;
+            }
         }
         finally
         {
             if (archive != IntPtr.Zero) Native.SFileCloseArchive(archive);
             File.Delete(tempPath);
+            File.Delete(temporaryListFile);
         }
     }
 
@@ -218,6 +247,20 @@ public sealed class PatchArchiveService
                     }
                 }
                 catch (Exception) { /* Embedded metadata recovery is best-effort; retain the complete anonymous physical index. */ }
+            }
+            if (externalListFile is null && mask == "*" && result.Any(entry => ClientArchiveIndexService.IsAnonymous(entry.ArchivePath)))
+            {
+                var recoveryListFile = GetRecoveryListFilePath(archivePath);
+                if (File.Exists(recoveryListFile))
+                {
+                    try
+                    {
+                        var recovered = EnumerateFiles(archive, mask, recoveryListFile);
+                        if (recovered.Count(entry => ClientArchiveIndexService.IsAnonymous(entry.ArchivePath)) < result.Count(entry => ClientArchiveIndexService.IsAnonymous(entry.ArchivePath)) && HasSamePhysicalEntries(result, recovered))
+                            result = recovered;
+                    }
+                    catch (Exception) { /* A stale/damaged recovery sidecar can never replace the physical archive index. */ }
+                }
             }
             return result.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
         }
@@ -413,14 +456,26 @@ public sealed class PatchArchiveService
         }
     }
 
-    public void Update(string archivePath, IEnumerable<PatchEntry> sourceEntries)
+    public void Update(string archivePath, IEnumerable<PatchEntry> sourceEntries, string? externalListFile = null)
     {
         archivePath = Path.GetFullPath(archivePath);
         if (!File.Exists(archivePath)) throw new FileNotFoundException("The MPQ patch does not exist.", archivePath);
         if (new FileInfo(archivePath).Length > MaximumSafeUpdateBytes)
             throw new InvalidOperationException($"Refusing to copy-update this {new FileInfo(archivePath).Length / (1024d * 1024 * 1024):0.##} GB archive. Build a small manifest-driven patch MPQ instead; large source layers must remain immutable.");
         var entries = ValidateEntries(sourceEntries);
+        RequireSafeSourcePaths(entries);
+        externalListFile = string.IsNullOrWhiteSpace(externalListFile) ? null : Path.GetFullPath(externalListFile);
+        if (externalListFile is not null && !File.Exists(externalListFile)) throw new FileNotFoundException("The external MPQ listfile was not found.", externalListFile);
+        var recoveryListFile = GetRecoveryListFilePath(archivePath);
+        var lookupListFile = externalListFile ?? (File.Exists(recoveryListFile) ? recoveryListFile : null);
+        var existing = ListFiles(archivePath, "*", lookupListFile);
+        var anonymous = existing.FirstOrDefault(entry => !entry.IsMetadata && ClientArchiveIndexService.IsAnonymous(entry.ArchivePath));
+        if (anonymous is not null)
+            throw new InvalidDataException($"The existing MPQ still has unresolved hash-only paths such as '{anonymous.ArchivePath}'. Supply its original listfile with --listfile before updating; Crucible will not publish an incomplete recovery listfile.");
+        var retainedPaths = existing.Where(entry => !entry.IsMetadata).Select(entry => entry.ArchivePath).Concat(entries.Select(entry => entry.ArchivePath));
         var tempPath = archivePath + ".tmp";
+        var temporaryListFile = recoveryListFile + $".{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        WriteRecoveryListFile(temporaryListFile, retainedPaths);
         File.Copy(archivePath, tempPath, true);
         IntPtr archive = IntPtr.Zero;
         try
@@ -433,12 +488,31 @@ public sealed class PatchArchiveService
             archive = IntPtr.Zero;
             File.Copy(archivePath, archivePath + ".bak", true);
             File.Move(tempPath, archivePath, true);
+            try
+            {
+                if (File.Exists(recoveryListFile)) File.Copy(recoveryListFile, recoveryListFile + ".bak", true);
+                File.Move(temporaryListFile, recoveryListFile, true);
+            }
+            catch
+            {
+                File.Copy(archivePath + ".bak", archivePath, true);
+                throw;
+            }
         }
         finally
         {
             if (archive != IntPtr.Zero) Native.SFileCloseArchive(archive);
             File.Delete(tempPath);
+            File.Delete(temporaryListFile);
         }
+    }
+
+    private static void WriteRecoveryListFile(string path, IEnumerable<string> archivePaths)
+    {
+        var lines = archivePaths.Select(PatchInputMapper.NormalizeArchivePath).Append("(listfile)")
+            .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray();
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        File.WriteAllLines(path, lines, new System.Text.UTF8Encoding(false));
     }
 
     private static PatchEntry[] ValidateEntries(IEnumerable<PatchEntry> sourceEntries)
@@ -449,6 +523,32 @@ public sealed class PatchArchiveService
         var duplicate = entries.GroupBy(entry => MpqLocale.Identity(entry.ArchivePath, entry.Locale), StringComparer.Ordinal).FirstOrDefault(group => group.Count() > 1);
         if (duplicate is not null) { var entry = duplicate.First(); throw new InvalidOperationException($"Duplicate MPQ identity: {entry.ArchivePath} · {MpqLocale.Format(entry.Locale)}"); }
         return entries;
+    }
+
+    public static MpqSourcePathPreflight PreflightSources(IEnumerable<PatchEntry> sourceEntries)
+    {
+        var entries = ValidateEntries(sourceEntries);
+        return AssessSourcePaths(entries);
+    }
+
+    private static MpqSourcePathPreflight AssessSourcePaths(IReadOnlyList<PatchEntry> entries)
+    {
+        var assessed = entries.Select(entry => new MpqSourcePathPreflightEntry(
+            entry.SourcePath, entry.ArchivePath, entry.SourcePath.Length,
+            entry.SourcePath.Length <= MaximumNativeSourcePathCharacters)).ToArray();
+        return new(MaximumNativeSourcePathCharacters,
+            assessed.Length == 0 ? 0 : assessed.Max(entry => entry.NativeCharacters), assessed);
+    }
+
+    private static void RequireSafeSourcePaths(IReadOnlyList<PatchEntry> entries)
+    {
+        var preflight = AssessSourcePaths(entries);
+        if (preflight.Safe) return;
+        var longest = preflight.UnsafeEntries.OrderByDescending(entry => entry.NativeCharacters).First();
+        throw new PathTooLongException(
+            $"StormLib cannot safely open MPQ source paths longer than {MaximumNativeSourcePathCharacters:N0} characters. " +
+            $"Longest planned source is {longest.NativeCharacters:N0} characters: {longest.SourcePath}. " +
+            "Use a short same-volume staging directory; the logical archive path does not need to change.");
     }
 
     private static T WithLocale<T>(uint locale, Func<T> operation)

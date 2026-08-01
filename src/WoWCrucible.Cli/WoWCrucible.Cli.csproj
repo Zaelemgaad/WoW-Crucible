@@ -13,4 +13,10 @@
     <None Include="../../third_party/StormLib/win-x64/StormLib.dll" Link="StormLib.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="../../third_party/CascLib/win-x64/CascLib.dll" Link="CascLib.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <Target Name="CreateShortCommandAliasAfterBuild" AfterTargets="Build" Condition="Exists('$(TargetDir)$(AssemblyName).exe')">
+    <Copy SourceFiles="$(TargetDir)$(AssemblyName).exe" DestinationFiles="$(TargetDir)wowcruc.exe" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="CreateShortCommandAliasAfterPublish" AfterTargets="Publish" Condition="Exists('$(PublishDir)$(AssemblyName).exe')">
+    <Copy SourceFiles="$(PublishDir)$(AssemblyName).exe" DestinationFiles="$(PublishDir)wowcruc.exe" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

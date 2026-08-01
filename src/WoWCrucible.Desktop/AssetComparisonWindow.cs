@@ -81,6 +81,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private readonly Bitmap?[] _comparisonBitmaps = new Bitmap?[2];
     private readonly List<Bitmap> _thumbnailBitmaps = [];
     private readonly DesktopWorkspaceSession _session;
+    private readonly LayerStackIndexView _layerStackIndexView;
     private AssetComparisonIndex? _index; private IReadOnlyList<AssetComparisonEntry> _folderEntries = []; private IReadOnlyList<AssetComparisonEntry> _filteredEntries = [];
     private IReadOnlyDictionary<string, AssetComparisonDuplicateGroup> _duplicateByPath = new Dictionary<string, AssetComparisonDuplicateGroup>(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, int> _manualGeosetVariants = [];
@@ -94,7 +95,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
 
     public AssetComparisonView(DesktopWorkspaceSession session, string? libraryRoot = null)
     {
-        _session = session;
+        _session = session; _layerStackIndexView = new LayerStackIndexView(session);
         if (!string.IsNullOrWhiteSpace(libraryRoot)) _library.Text = libraryRoot;
         Focusable = true;
         _directories.ItemTemplate = new FuncDataTemplate<AssetComparisonDirectory>((item, _) => item is null ? new Grid() : new Grid
@@ -124,7 +125,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _creatureAppearancePicker.SelectionChanged += async (_, _) => { if (!_suppressCreatureAppearanceSelection) await RunUiActionAsync("creature-appearance-change", LoadSelectedModelAsync); };
         _modelSearch.TextChanged += (_, _) => FilterModels(); _modelFilter.SelectionChanged += (_, _) => FilterModels();
         for (var index = 0; index < 2; index++) { var slot = index; _slotButtons[index].Click += (_, _) => SetActiveSlot(slot); }
-        KeyDown += async (_, e) => await RunUiActionAsync("decision-shortcut", () => HandleDecisionKeyAsync(e)); SetActiveSlot(0); Content = BuildLayout();
+        KeyDown += async (_, e) => await RunUiActionAsync("decision-shortcut", () => HandleDecisionKeyAsync(e)); SetActiveSlot(0); Content = new TabControl { ItemsSource = new[] { new TabItem { Header = "Compare & definitive set", Content = BuildLayout() }, new TabItem { Header = "Layer-stack overlap", Content = _layerStackIndexView } } };
     }
 
     public void Activate(string? libraryRoot = null)
@@ -1031,6 +1032,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         foreach (var bitmap in _comparisonBitmaps) bitmap?.Dispose();
         _thumbnailBitmaps.Clear();
         _modelView.Dispose();
+        _layerStackIndexView.Dispose();
     }
     private async Task RunUiActionAsync(string action, Func<Task> work)
     {
