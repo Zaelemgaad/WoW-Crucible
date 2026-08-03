@@ -20,7 +20,7 @@ internal sealed class DesktopWorkspaceSession : IDisposable
     public DesktopWorkspaceSession(DesktopSettings settings)
     {
         Settings = settings;
-        CrucibleBackupService.Configure(settings.BackupRootPath, settings.BackupsEnabled, Math.Clamp(settings.BackupRetentionPerSource, 1, 100), (long)Math.Clamp(settings.BackupStorageLimitGiB, 1, 1024) * 1024 * 1024 * 1024);
+        CrucibleBackupService.Configure(settings.BackupRootPath, settings.BackupChoiceRemembered && settings.BackupsEnabled, Math.Clamp(settings.BackupRetentionPerSource, 1, 100), (long)Math.Clamp(settings.BackupStorageLimitGiB, 1, 1024) * 1024 * 1024 * 1024);
     }
 
     public async Task ConfigureWorkspaceAsync(CrucibleWorkspaceLayout layout, CancellationToken cancellationToken = default)

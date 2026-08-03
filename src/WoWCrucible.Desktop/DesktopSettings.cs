@@ -12,7 +12,7 @@ internal sealed class DesktopSettings
     public string WorkspaceName { get; set; } = string.Empty;
     public List<string> SavedWorkspaceRoots { get; set; } = [];
     public List<CrucibleWorkspaceLayout> SavedWorkspaces { get; set; } = [];
-    public bool BackupsEnabled { get; set; } = true;
+    public bool BackupsEnabled { get; set; }
     public bool BackupChoiceRemembered { get; set; }
     public int BackupRetentionPerSource { get; set; } = 3;
     public int BackupStorageLimitGiB { get; set; } = 10;
