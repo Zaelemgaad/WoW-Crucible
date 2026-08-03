@@ -35,12 +35,18 @@ internal sealed class WorkspaceSetupView : UserControl
     private IReadOnlyList<string> _findings = [];
     private CrucibleWorkspaceLayout? _discovered;
     private CrucibleWorkspaceDiscovery? _discovery;
+    private bool _loadingBackupSettings;
+    private bool _backupSettingsTouched;
 
     public event EventHandler? BackRequested;
 
     public WorkspaceSetupView(DesktopWorkspaceSession session)
     {
         _session = session;
+        _backupsEnabled.IsCheckedChanged += (_, _) => { if (!_loadingBackupSettings) _backupSettingsTouched = true; };
+        _backupRetention.ValueChanged += (_, _) => { if (!_loadingBackupSettings) _backupSettingsTouched = true; };
+        _backupStorageLimit.ValueChanged += (_, _) => { if (!_loadingBackupSettings) _backupSettingsTouched = true; };
+        _backupRoot.TextChanged += (_, _) => { if (!_loadingBackupSettings) _backupSettingsTouched = true; };
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         foreach (var key in new[] { "server", "core", "client", "data", "wow", "dbc", "schema", "dbd", "assets", "projects", "staging", "tools", "noggit", "maps" }) _paths[key] = new TextBox();
         var browseRoot = new Button { Content = "Choose workspace folder…" }; browseRoot.Click += async (_, _) => await BrowseRootAsync();
@@ -136,10 +142,13 @@ internal sealed class WorkspaceSetupView : UserControl
         Put("dbc", _session.Settings.CoreDbcPath); Put("schema", _session.Settings.SchemaDefinitionPath); Put("dbd", _session.Settings.DbdDefinitionsPath);
         Put("assets", _session.Settings.ProcessedAssetLibraryPath); Put("projects", _session.Settings.WorkspaceProjectsPath); Put("staging", _session.Settings.WorkspaceStagingPath);
         Put("tools", _session.Settings.ToolsPath); Put("noggit", _session.Settings.NoggitExecutablePath); Put("maps", _session.Settings.MapSourcePath);
+        _loadingBackupSettings = true;
         _backupsEnabled.IsChecked = _session.Settings.BackupsEnabled;
         _backupRetention.Value = Math.Clamp(_session.Settings.BackupRetentionPerSource, 1, 100);
         _backupStorageLimit.Value = Math.Clamp(_session.Settings.BackupStorageLimitGiB, 1, 1024);
         _backupRoot.Text = _session.Settings.BackupRootPath;
+        _loadingBackupSettings = false;
+        _backupSettingsTouched = false;
         _summary.Text = string.IsNullOrWhiteSpace(_root.Text)
             ? "Nothing selected yet. Choose the folder containing the project."
             : "Saved workspace loaded. Choose the same folder again only if you want Crucible to rescan it.";
@@ -208,12 +217,15 @@ internal sealed class WorkspaceSetupView : UserControl
         {
             if (_discovered is null || !_discovered.RootPath.Equals(Path.GetFullPath(_root.Text ?? string.Empty), StringComparison.OrdinalIgnoreCase)) await DiscoverAsync();
             var layout = ReadLayout();
-            _session.Settings.BackupsEnabled = _backupsEnabled.IsChecked == true;
-            _session.Settings.BackupChoiceRemembered = true;
-            _session.Settings.BackupRetentionPerSource = (int)(_backupRetention.Value ?? 3);
-            _session.Settings.BackupStorageLimitGiB = (int)(_backupStorageLimit.Value ?? 10);
-            _session.Settings.BackupRootPath = _backupRoot.Text?.Trim() ?? string.Empty;
-            CrucibleBackupService.Configure(_session.Settings.BackupRootPath, _session.Settings.BackupsEnabled, _session.Settings.BackupRetentionPerSource, (long)_session.Settings.BackupStorageLimitGiB * 1024 * 1024 * 1024);
+            if (_backupSettingsTouched || _session.Settings.BackupChoiceRemembered)
+            {
+                _session.Settings.BackupsEnabled = _backupsEnabled.IsChecked == true;
+                _session.Settings.BackupChoiceRemembered = true;
+                _session.Settings.BackupRetentionPerSource = (int)(_backupRetention.Value ?? 3);
+                _session.Settings.BackupStorageLimitGiB = (int)(_backupStorageLimit.Value ?? 10);
+                _session.Settings.BackupRootPath = _backupRoot.Text?.Trim() ?? string.Empty;
+                CrucibleBackupService.Configure(_session.Settings.BackupRootPath, _session.Settings.BackupsEnabled, _session.Settings.BackupRetentionPerSource, (long)_session.Settings.BackupStorageLimitGiB * 1024 * 1024 * 1024);
+            }
             _status.Text = "Saving the workspace and detecting its live server configuration…";
             await _session.ConfigureWorkspaceAsync(layout);
             RefreshSavedWorkspaces();
