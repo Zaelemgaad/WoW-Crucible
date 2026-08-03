@@ -51,9 +51,19 @@ public sealed class VirtualDbcView : Control
     private int _selectedDisplayRow = -1;
     private int _selectedColumn = -1;
     private bool _selectedPinned;
+    private int _rangeAnchorDisplayRow = -1;
+    private int _rangeEndDisplayRow = -1;
+    private int _rangeAnchorOrder = -1;
+    private int _rangeEndOrder = -1;
+    private bool _selectingRange;
+    private bool _pendingRangeDrag;
+    private bool _selectingWholeRows;
+    private Point _pressPoint;
+    private PointerPressedEventArgs? _dragPress;
 
     public event EventHandler<DbcSelectionEventArgs>? SelectionChanged;
     public event EventHandler<DbcCellEditRequestEventArgs>? CellEditRequested;
+    public event EventHandler<DbcRangeDragRequestEventArgs>? RangeDragRequested;
     public event EventHandler<ViewportPerformanceEventArgs>? RenderMeasured;
 
     public WdbcFile? File => _file;
@@ -88,6 +98,7 @@ public sealed class VirtualDbcView : Control
         _selectedDisplayRow = -1;
         _selectedColumn = -1;
         _selectedPinned = false;
+        ClearRangeSelection();
         _displayCache.Clear();
         InvalidateVisual();
     }
@@ -120,6 +131,7 @@ public sealed class VirtualDbcView : Control
         if (_selectedDisplayRow < 0) { _filteredRows = null; _selectedDisplayRow = sourceRow; }
         _selectedColumn = _columns.Count == 0 ? -1 : Math.Clamp(column, 0, _columns.Count - 1);
         _selectedPinned = _selectedColumn == _idColumnIndex;
+        SetSingleCellRange(_selectedDisplayRow, _selectedColumn);
         _verticalOffset = Math.Max(0, _selectedDisplayRow * RowHeight - Math.Max(0, Bounds.Height - HeaderHeight) * 0.45);
         EnsureSelectionVisible(); ClampOffsets(); InvalidateVisual();
         if (_selectedColumn >= 0) SelectionChanged?.Invoke(this, new(sourceRow, _selectedColumn, _columns[_selectedColumn], CachedValue(sourceRow, _selectedColumn)));
@@ -130,6 +142,7 @@ public sealed class VirtualDbcView : Control
         _filteredRows = rows;
         _verticalOffset = 0;
         _selectedDisplayRow = -1;
+        ClearRangeSelection();
         _displayCache.Clear();
         InvalidateVisual();
     }
@@ -178,10 +191,11 @@ public sealed class VirtualDbcView : Control
             var displayRow = firstDisplayRow + visibleRow;
             var sourceRow = _filteredRows is null ? displayRow : _filteredRows[displayRow];
             var y = HeaderHeight - partialY + visibleRow * RowHeight;
-            var background = displayRow == _selectedDisplayRow ? SelectionBrush : (sourceRow & 1) == 0 ? RowBrush : AlternateRowBrush;
+            var wholeRowSelected = IsRangeCellSelected(displayRow, _columns.Count == 0 ? -1 : VisualColumnOrder()[0]) && SelectedColumnIndices().Count == _columns.Count;
+            var background = wholeRowSelected ? SelectionBrush : (sourceRow & 1) == 0 ? RowBrush : AlternateRowBrush;
             context.FillRectangle(background, new Rect(0, y, Bounds.Width, RowHeight));
             DrawText(context, (sourceRow + 1).ToString("N0", CultureInfo.InvariantCulture), 8, y + 6, MutedTextBrush, RegularTypeface, 10);
-            if (displayRow == _selectedDisplayRow && _selectedPinned)
+            if (IsRangeCellSelected(displayRow, _idColumnIndex))
                 context.FillRectangle(SelectionCellBrush, new Rect(RowNumberWidth, y, PinnedKeyWidth, RowHeight));
             DrawText(context, RecordKey(sourceRow), RowNumberWidth + 8, y + 5, _keyStrategy.Kind == DbcRecordKeyKind.NoStableKey ? MutedTextBrush : TextBrush, RegularTypeface, 11);
             if (displayRow == _selectedDisplayRow && _selectedPinned)
@@ -191,7 +205,7 @@ public sealed class VirtualDbcView : Control
             {
                 var columnIndex = _scrollColumnIndices[firstColumn + visibleColumn];
                 var x = FrozenWidth - partialX + visibleColumn * DefaultColumnWidth;
-                if (displayRow == _selectedDisplayRow && !_selectedPinned && columnIndex == _selectedColumn)
+                if (IsRangeCellSelected(displayRow, columnIndex))
                     context.FillRectangle(SelectionCellBrush, new Rect(x, y, DefaultColumnWidth, RowHeight));
                 var value = CachedValue(sourceRow, columnIndex);
                 DrawText(context, Trim(value, 25), x + 8, y + 5, TextBrush, RegularTypeface, 11);
@@ -223,30 +237,75 @@ public sealed class VirtualDbcView : Control
         if (_file is null) return;
         Focus();
         var position = e.GetPosition(this);
-        if (position.Y < HeaderHeight || position.X < RowNumberWidth) return;
-        var displayRow = (int)((position.Y - HeaderHeight + _verticalOffset) / RowHeight);
-        if (displayRow < 0 || displayRow >= VisibleRowCount) return;
-        var pinned = position.X < FrozenWidth;
-        int column;
-        if (pinned)
+        if (!TryHit(position, out var displayRow, out var column, out var pinned, out var rowHeader)) return;
+        var order = VisualColumnOrder();
+        var orderIndex = rowHeader ? 0 : Array.IndexOf(order, column);
+        if (orderIndex < 0) return;
+
+        if (!e.KeyModifiers.HasFlag(KeyModifiers.Shift) && SelectionContains(displayRow, rowHeader ? order[0] : column))
         {
-            if (_idColumnIndex < 0) return;
-            column = _idColumnIndex;
+            _pendingRangeDrag = true;
+            _pressPoint = position;
+            _dragPress = e;
+            e.Pointer.Capture(this);
+            e.Handled = true;
+            return;
         }
-        else
+
+        if (!e.KeyModifiers.HasFlag(KeyModifiers.Shift) || _rangeAnchorDisplayRow < 0)
         {
-            var scrollColumn = (int)((position.X - FrozenWidth + _horizontalOffset) / DefaultColumnWidth);
-            if (scrollColumn < 0 || scrollColumn >= _scrollColumnIndices.Count) return;
-            column = _scrollColumnIndices[scrollColumn];
+            _rangeAnchorDisplayRow = displayRow;
+            _rangeAnchorOrder = rowHeader ? 0 : orderIndex;
         }
+        _rangeEndDisplayRow = displayRow;
+        _rangeEndOrder = rowHeader ? order.Length - 1 : orderIndex;
+        _selectingWholeRows = rowHeader;
+        _selectingRange = true;
+        _pressPoint = position;
+        _dragPress = e;
+        e.Pointer.Capture(this);
         _selectedDisplayRow = displayRow;
-        _selectedColumn = column;
-        _selectedPinned = pinned;
+        _selectedColumn = rowHeader ? order[^1] : column;
+        _selectedPinned = !rowHeader && pinned;
         var sourceRow = _filteredRows is null ? displayRow : _filteredRows[displayRow];
-        SelectionChanged?.Invoke(this, new(sourceRow, column, _columns[column], CachedValue(sourceRow, column)));
-        if (e.ClickCount >= 2) RequestEdit(sourceRow, column, pinned);
+        SelectionChanged?.Invoke(this, new(sourceRow, _selectedColumn, _columns[_selectedColumn], CachedValue(sourceRow, _selectedColumn)));
+        if (!rowHeader && e.ClickCount >= 2) RequestEdit(sourceRow, column, pinned);
         InvalidateVisual();
         e.Handled = true;
+    }
+
+    protected override void OnPointerMoved(PointerEventArgs e)
+    {
+        base.OnPointerMoved(e);
+        if (_file is null) return;
+        var position = e.GetPosition(this);
+        if (_pendingRangeDrag && _dragPress is not null && Math.Abs(position.X - _pressPoint.X) + Math.Abs(position.Y - _pressPoint.Y) >= 6)
+        {
+            _pendingRangeDrag = false;
+            e.Pointer.Capture(null);
+            var selection = GetRangeSelection();
+            if (selection is not null) RangeDragRequested?.Invoke(this, new(_dragPress, selection));
+            e.Handled = true;
+            return;
+        }
+        if (!_selectingRange || !TryHit(position, out var displayRow, out var column, out _, out _)) return;
+        var order = VisualColumnOrder();
+        _rangeEndDisplayRow = displayRow;
+        _rangeEndOrder = _selectingWholeRows ? order.Length - 1 : Array.IndexOf(order, column);
+        _selectedDisplayRow = displayRow;
+        _selectedColumn = _selectingWholeRows ? order[^1] : column;
+        _selectedPinned = _selectedColumn == _idColumnIndex;
+        InvalidateVisual();
+        e.Handled = true;
+    }
+
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    {
+        base.OnPointerReleased(e);
+        _selectingRange = false;
+        _pendingRangeDrag = false;
+        _dragPress = null;
+        e.Pointer.Capture(null);
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
@@ -295,6 +354,22 @@ public sealed class VirtualDbcView : Control
         RequestEdit(SelectedSourceRow, _selectedColumn, _selectedPinned);
     }
 
+    public DbcRangeSelection? GetRangeSelection()
+    {
+        if (_file is null || _rangeAnchorDisplayRow < 0 || _rangeEndDisplayRow < 0) return null;
+        var firstRow = Math.Min(_rangeAnchorDisplayRow, _rangeEndDisplayRow);
+        var lastRow = Math.Max(_rangeAnchorDisplayRow, _rangeEndDisplayRow);
+        var rows = Enumerable.Range(firstRow, lastRow - firstRow + 1)
+            .Select(displayRow => _filteredRows is null ? displayRow : _filteredRows[displayRow]).ToArray();
+        return new(rows, SelectedColumnIndices());
+    }
+
+    public int SourceRowAt(Point position)
+    {
+        if (!TryHit(position, out var displayRow, out _, out _, out _)) return Math.Max(0, SelectedSourceRow);
+        return _filteredRows is null ? displayRow : _filteredRows[displayRow];
+    }
+
     private void RequestEdit(int sourceRow, int column, bool pinned)
     {
         if (_file is null || sourceRow < 0 || sourceRow >= _file.RowCount || column < 0 || column >= _columns.Count) return;
@@ -335,6 +410,7 @@ public sealed class VirtualDbcView : Control
         }
         _selectedColumn = order[orderIndex];
         _selectedPinned = _selectedColumn == _idColumnIndex;
+        SetSingleCellRange(_selectedDisplayRow, _selectedColumn);
         EnsureSelectionVisible();
         var sourceRow = SelectedSourceRow;
         SelectionChanged?.Invoke(this, new(sourceRow, _selectedColumn, _columns[_selectedColumn], CachedValue(sourceRow, _selectedColumn)));
@@ -360,6 +436,68 @@ public sealed class VirtualDbcView : Control
             }
         }
         ClampOffsets();
+    }
+
+    private bool TryHit(Point position, out int displayRow, out int column, out bool pinned, out bool rowHeader)
+    {
+        displayRow = -1; column = -1; pinned = false; rowHeader = false;
+        if (position.Y < HeaderHeight) return false;
+        displayRow = (int)((position.Y - HeaderHeight + _verticalOffset) / RowHeight);
+        if (displayRow < 0 || displayRow >= VisibleRowCount) return false;
+        if (position.X < RowNumberWidth)
+        {
+            var order = VisualColumnOrder();
+            if (order.Length == 0) return false;
+            column = order[0]; rowHeader = true; return true;
+        }
+        pinned = position.X < FrozenWidth;
+        if (pinned)
+        {
+            if (_idColumnIndex < 0) return false;
+            column = _idColumnIndex; return true;
+        }
+        var scrollColumn = (int)((position.X - FrozenWidth + _horizontalOffset) / DefaultColumnWidth);
+        if (scrollColumn < 0 || scrollColumn >= _scrollColumnIndices.Count) return false;
+        column = _scrollColumnIndices[scrollColumn]; return true;
+    }
+
+    private int[] VisualColumnOrder() => _idColumnIndex >= 0
+        ? new[] { _idColumnIndex }.Concat(_scrollColumnIndices).ToArray()
+        : _scrollColumnIndices.ToArray();
+
+    private IReadOnlyList<int> SelectedColumnIndices()
+    {
+        var order = VisualColumnOrder();
+        if (order.Length == 0 || _rangeAnchorOrder < 0 || _rangeEndOrder < 0) return [];
+        var first = Math.Clamp(Math.Min(_rangeAnchorOrder, _rangeEndOrder), 0, order.Length - 1);
+        var last = Math.Clamp(Math.Max(_rangeAnchorOrder, _rangeEndOrder), 0, order.Length - 1);
+        return order[first..(last + 1)];
+    }
+
+    private bool SelectionContains(int displayRow, int column)
+    {
+        if (_rangeAnchorDisplayRow < 0 || _rangeEndDisplayRow < 0) return false;
+        if (displayRow < Math.Min(_rangeAnchorDisplayRow, _rangeEndDisplayRow) || displayRow > Math.Max(_rangeAnchorDisplayRow, _rangeEndDisplayRow)) return false;
+        return SelectedColumnIndices().Contains(column);
+    }
+
+    private bool IsRangeCellSelected(int displayRow, int column) => column >= 0 && SelectionContains(displayRow, column);
+
+    private void SetSingleCellRange(int displayRow, int column)
+    {
+        var order = VisualColumnOrder();
+        var orderIndex = Array.IndexOf(order, column);
+        _rangeAnchorDisplayRow = _rangeEndDisplayRow = displayRow;
+        _rangeAnchorOrder = _rangeEndOrder = orderIndex;
+        _selectingWholeRows = false;
+    }
+
+    private void ClearRangeSelection()
+    {
+        _rangeAnchorDisplayRow = _rangeEndDisplayRow = -1;
+        _rangeAnchorOrder = _rangeEndOrder = -1;
+        _selectingRange = _pendingRangeDrag = _selectingWholeRows = false;
+        _dragPress = null;
     }
 
     private Rect CellBounds(int sourceRow, int column, bool pinned)
@@ -430,6 +568,8 @@ public sealed class VirtualDbcView : Control
 
 public sealed record DbcSelectionEventArgs(int Row, int ColumnIndex, DbcColumn Column, string Value);
 public sealed record DbcCellEditRequestEventArgs(DbcSelectionEventArgs Selection, Rect Bounds);
+public sealed record DbcRangeSelection(IReadOnlyList<int> SourceRows, IReadOnlyList<int> ColumnIndices);
+public sealed record DbcRangeDragRequestEventArgs(PointerPressedEventArgs Trigger, DbcRangeSelection Selection);
 public enum DbcCellMove { NextColumn, PreviousColumn, NextRow, PreviousRow }
 public sealed class DbcCellEditCommitEventArgs(int row, int columnIndex, DbcColumn column, string value)
 {

@@ -300,11 +300,11 @@ public sealed class MainForm : Form
                 _status.Text = "The open DBC is already in that core data directory.";
                 return;
             }
-            if (File.Exists(destination)) File.Copy(destination, destination + ".bak", true);
+            var backup = File.Exists(destination) ? CrucibleBackupService.Create(destination, "CoreDbcSync") : null;
             var temp = destination + ".tmp";
             File.Copy(_file.SourcePath, temp, true);
             File.Move(temp, destination, true);
-            _status.Text = $"Synchronized to {destination}";
+            _status.Text = backup is null ? $"Synchronized to {destination} · no retained backup" : $"Synchronized to {destination} · backup {backup}";
         }
         catch (Exception ex) { ShowError(ex); }
     }
@@ -443,7 +443,7 @@ public sealed class MainForm : Form
                 Text = $"WoW Crucible — {Path.GetFileName(path)} · {_documents.Count:N0} open";
             }
             else _file.Save(path);
-            _status.Text = $"Saved {path} (backup: {path}.bak)";
+            _status.Text = _file.LastBackupPath is null ? $"Saved {path} · no retained backup" : $"Saved {path} · backup {_file.LastBackupPath}";
         }
         catch (Exception ex) { ShowError(ex); }
     }

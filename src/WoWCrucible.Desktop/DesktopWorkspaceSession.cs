@@ -17,7 +17,11 @@ internal sealed class DesktopWorkspaceSession : IDisposable
     public string? LastError { get; private set; }
     public event EventHandler? Changed;
 
-    public DesktopWorkspaceSession(DesktopSettings settings) => Settings = settings;
+    public DesktopWorkspaceSession(DesktopSettings settings)
+    {
+        Settings = settings;
+        CrucibleBackupService.Configure(settings.BackupRootPath, settings.BackupsEnabled, Math.Clamp(settings.BackupRetentionPerSource, 1, 100), (long)Math.Clamp(settings.BackupStorageLimitGiB, 1, 1024) * 1024 * 1024 * 1024);
+    }
 
     public async Task ConfigureWorkspaceAsync(CrucibleWorkspaceLayout layout, CancellationToken cancellationToken = default)
     {
@@ -25,24 +29,35 @@ internal sealed class DesktopWorkspaceSession : IDisposable
         WorkspaceLayout = layout;
         Settings.WorkspaceRootPath = layout.RootPath;
         Settings.WorkspaceName = layout.Name;
-        SetIfPresent(value => Settings.ServerRootPath = value, layout.ServerRootPath);
-        SetIfPresent(value => Settings.CoreSourcePath = value, layout.CoreSourcePath);
-        SetIfPresent(value => Settings.ClientDataPath = value, layout.ClientDataPath);
-        SetIfPresent(value => Settings.ClientExecutablePath = value, layout.ClientExecutablePath);
-        SetIfPresent(value => Settings.CoreDbcPath = value, layout.CoreDbcPath);
-        SetIfPresent(value => Settings.SchemaDefinitionPath = value, layout.SchemaDefinitionPath);
-        SetIfPresent(value => Settings.DbdDefinitionsPath = value, layout.DbdDefinitionsPath);
-        SetIfPresent(value => Settings.ProcessedAssetLibraryPath = value, layout.ProcessedAssetLibraryPath);
-        SetIfPresent(value => Settings.WorkspaceProjectsPath = value, layout.ProjectsPath);
-        SetIfPresent(value => Settings.WorkspaceStagingPath = value, layout.StagingPath);
-        SetIfPresent(value => Settings.ToolsPath = value, layout.ToolsPath);
-        SetIfPresent(value => Settings.NoggitExecutablePath = value, layout.NoggitExecutablePath);
-        SetIfPresent(value => Settings.MapSourcePath = value, layout.MapSourcePath);
+        Settings.ServerRootPath = layout.ServerRootPath;
+        Settings.CoreSourcePath = layout.CoreSourcePath;
+        Settings.ClientDataPath = layout.ClientDataPath;
+        Settings.ClientExecutablePath = layout.ClientExecutablePath;
+        Settings.CoreDbcPath = layout.CoreDbcPath;
+        Settings.SchemaDefinitionPath = layout.SchemaDefinitionPath;
+        Settings.DbdDefinitionsPath = layout.DbdDefinitionsPath;
+        Settings.ProcessedAssetLibraryPath = layout.ProcessedAssetLibraryPath;
+        Settings.WorkspaceProjectsPath = layout.ProjectsPath;
+        Settings.WorkspaceStagingPath = layout.StagingPath;
+        Settings.ToolsPath = layout.ToolsPath;
+        Settings.NoggitExecutablePath = layout.NoggitExecutablePath;
+        Settings.MapSourcePath = layout.MapSourcePath;
+        Settings.SavedWorkspaceRoots ??= [];
+        Settings.SavedWorkspaces ??= [];
+        Settings.SavedWorkspaceRoots = Settings.SavedWorkspaceRoots.Append(Path.GetFullPath(layout.RootPath)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToList();
+        Settings.SavedWorkspaces.RemoveAll(profile => profile.RootPath.Equals(layout.RootPath, StringComparison.OrdinalIgnoreCase) && profile.Name.Equals(layout.Name, StringComparison.OrdinalIgnoreCase));
+        Settings.SavedWorkspaces.Add(layout);
+        Settings.SavedWorkspaces = Settings.SavedWorkspaces.OrderBy(profile => profile.Name, StringComparer.OrdinalIgnoreCase).ThenBy(profile => profile.RootPath, StringComparer.OrdinalIgnoreCase).ToList();
+        if (!string.IsNullOrWhiteSpace(Settings.ActiveProjectPath) && !Path.GetFullPath(Settings.ActiveProjectPath).StartsWith(Path.GetFullPath(layout.RootPath) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) Settings.ActiveProjectPath = string.Empty;
         Settings.Save();
 
         if (!string.IsNullOrWhiteSpace(layout.ServerRootPath) && Directory.Exists(layout.ServerRootPath))
             await DetectServerAndConnectAsync(layout.ServerRootPath, cancellationToken);
-        else Changed?.Invoke(this, EventArgs.Empty);
+        else
+        {
+            DisposeDatabaseTransport(); Server = null; DatabaseProfile = null; DatabaseCapabilities = null;
+            Changed?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     public async Task DetectServerAndConnectAsync(string rootPath, CancellationToken cancellationToken = default)
@@ -125,8 +140,4 @@ internal sealed class DesktopWorkspaceSession : IDisposable
     private static bool SameDatabaseEndpoint(DatabaseConnectionProfile left, DatabaseConnectionProfile right)
         => left.Host.Equals(right.Host, StringComparison.OrdinalIgnoreCase) && left.Port == right.Port;
 
-    private static void SetIfPresent(Action<string> setter, string value)
-    {
-        if (!string.IsNullOrWhiteSpace(value)) setter(value);
-    }
 }

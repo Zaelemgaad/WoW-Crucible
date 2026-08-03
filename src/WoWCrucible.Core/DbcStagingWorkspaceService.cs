@@ -105,7 +105,7 @@ public static class DbcStagingWorkspaceService
             Execute(connection, transaction, $"CREATE TRIGGER working_track_insert AFTER INSERT ON working BEGIN INSERT OR IGNORE INTO dirty_rows({Q(StageIdColumn)}) VALUES(NEW.{Q(StageIdColumn)}); END");
             Execute(connection, transaction, $"CREATE TRIGGER working_track_update AFTER UPDATE ON working BEGIN INSERT OR IGNORE INTO dirty_rows({Q(StageIdColumn)}) VALUES(NEW.{Q(StageIdColumn)}); END");
             transaction.Commit(); connection.Close(); connection.Dispose();
-            if (replace && File.Exists(path)) File.Copy(path, path + ".bak", true);
+            if (replace && File.Exists(path)) CrucibleBackupService.Create(path, "DbcStaging");
             File.Move(temporary, path, replace);
             return new(path, table, Path.GetFullPath(file.SourcePath), file.ComputeContentSha256(), fingerprint, schema.MatchKind, schema.KeyStrategy, file.RowCount, file.FieldCount, created);
         }

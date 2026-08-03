@@ -91,7 +91,21 @@ static int Workspace(string[] args)
     var unknown = args[2..].Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase)).ToArray();
     if (unknown.Length > 0) return Fail($"Unknown workspace option: {unknown[0]}");
     CrucibleWorkspaceLayout layout;
-    if (operation == "show") layout = CrucibleWorkspaceLayoutService.Load(root);
+    if (operation == "show")
+    {
+        if (File.Exists(root)) layout = CrucibleWorkspaceLayoutService.LoadProfile(root);
+        else
+        {
+            var matches = CrucibleWorkspaceLayoutService.LoadAllProfiles().Where(profile => profile.RootPath.Equals(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase)).ToArray();
+            layout = matches.Length switch
+            {
+                1 => matches[0],
+                0 when File.Exists(CrucibleWorkspaceLayout.ManifestPath(root)) => CrucibleWorkspaceLayoutService.Load(root),
+                0 => throw new FileNotFoundException("No app-local Crucible workspace profile uses that root."),
+                _ => throw new InvalidOperationException($"That library root has {matches.Length:N0} saved server/client pairings. Pass the exact profile JSON from Crucible's Config\\Workspaces folder.")
+            };
+        }
+    }
     else if (operation is "discover" or "init")
     {
         layout = CrucibleWorkspaceLayoutService.Discover(root);
@@ -104,11 +118,11 @@ static int Workspace(string[] args)
         Console.WriteLine($"Name\t{layout.Name}\nRoot\t{layout.RootPath}\nServer\t{layout.ServerRootPath}\nCoreSource\t{layout.CoreSourcePath}\nClient\t{layout.ClientRootPath}\nClientData\t{layout.ClientDataPath}\nClientExecutable\t{layout.ClientExecutablePath}\nServerDBC\t{layout.CoreDbcPath}\nSchema\t{layout.SchemaDefinitionPath}\nWoWDBDefs\t{layout.DbdDefinitionsPath}\nProjects\t{layout.ProjectsPath}\nStaging\t{layout.StagingPath}\nTools\t{layout.ToolsPath}\nNoggit\t{layout.NoggitExecutablePath}\nMaps\t{layout.MapSourcePath}");
         foreach (var finding in layout.Findings) Console.WriteLine($"FINDING\t{finding}");
     }
-    if (operation == "init") Console.Error.WriteLine($"Saved portable workspace manifest: {CrucibleWorkspaceLayout.ManifestPath(layout.RootPath)}");
+    if (operation == "init") Console.Error.WriteLine($"Saved app-local workspace profile: {CrucibleWorkspaceLayoutService.ProfilePath(layout)}");
     return 0;
 }
 
-static int WorkspaceHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible workspace discover <top-level-folder> [--format=json]\n  wowcrucible workspace init <top-level-folder> [--format=json]\n  wowcrucible workspace show <top-level-folder> [--format=json]\n\ndiscover is read-only. init writes .crucible/workspace.json with relative paths whenever possible. Credentials and passwords are never stored in the workspace manifest.", code);
+static int WorkspaceHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible workspace discover <top-level-folder> [--format=json]\n  wowcrucible workspace init <top-level-folder> [--format=json]\n  wowcrucible workspace show <top-level-folder|profile.json> [--format=json]\n\ndiscover is read-only. init writes an app-local profile under Config\\Workspaces beside the executable and never writes configuration into the selected server/client tree. Credentials and passwords are never stored in workspace profiles.", code);
 
 static async Task<int> Cache(string[] args, CancellationToken cancellationToken)
 {
@@ -3373,7 +3387,7 @@ static int Dbc(string[] args)
             var fullOutput = Path.GetFullPath(output);
             if (fullOutput.Equals(Path.GetFullPath(importDataPath), StringComparison.OrdinalIgnoreCase) || fullOutput.Equals(Path.GetFullPath(importSchemaPath), StringComparison.OrdinalIgnoreCase))
                 throw new IOException("DBC import output cannot replace its structured input or schema definition.");
-            if (File.Exists(fullOutput) && !overwrite) throw new IOException($"Import output already exists: {fullOutput}. Use --overwrite explicitly to replace it with a .bak backup.");
+            if (File.Exists(fullOutput) && !overwrite) throw new IOException($"Import output already exists: {fullOutput}. Use --overwrite explicitly; retained safety copies follow Crucible's visible backup policy.");
         }
         var plan = DbcRowImportService.Preview(importFile, resolution, importDataPath, new(format, append, rawStrings));
         if (jsonReport) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Table = table, plan.InputPath, plan.InputSha256, plan.SourceContentSha256, plan.Format, plan.InputRows, plan.UpdatedRows, plan.AppendedRows, plan.ChangedCells, plan.HasChanges, plan.Warnings, plan.Changes }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
@@ -3386,7 +3400,7 @@ static int Dbc(string[] args)
         }
         if (output is null) { Console.Error.WriteLine($"Dry-run import preview only. No client table changed; add --output=changed{Path.GetExtension(importPath)} to apply this exact plan to a new/explicitly overwritten output."); return 0; }
         var result = DbcRowImportService.Apply(importFile, plan); output = Path.GetFullPath(output); Directory.CreateDirectory(Path.GetDirectoryName(output)!); importFile.Save(output, overwrite);
-        Console.Error.WriteLine($"Applied structured import atomically: {result.UpdatedRows:N0} updated row(s), {result.AppendedRows:N0} appended row(s), {result.ChangedCells:N0} changed cell(s), {result.ResultRows:N0} result rows. Output: {output}{(overwrite ? $" · previous output backed up to {output}.bak" : string.Empty)}"); return 0;
+        Console.Error.WriteLine($"Applied structured import atomically: {result.UpdatedRows:N0} updated row(s), {result.AppendedRows:N0} appended row(s), {result.ChangedCells:N0} changed cell(s), {result.ResultRows:N0} result rows. Output: {output}{(overwrite ? " · retained safety copy follows Crucible's configured backup policy" : string.Empty)}"); return 0;
     }
     if (args is ["find", var findPath, var findSchemaPath, var findColumnName, .. var findValues] && findValues.Length > 0)
     {

@@ -241,7 +241,10 @@ public static class BulkAssetLibraryService
                 var archiveStaging = Path.Combine(stagingRoot, archive.Identity); var extractionErrors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
-                    service.Extract(archive.SourcePath, archiveStaging, batch.Select(item => item.Entry), cancellationToken: cancellationToken, overwriteExisting: true,
+                    // Artifact repair is a correctness/recovery path. Some StormLib builds intermittently
+                    // fail named extraction when two handles read a freshly-created archive concurrently;
+                    // serialize this tiny invalid-only batch while normal bulk extraction remains parallel.
+                    service.Extract(archive.SourcePath, archiveStaging, batch.Select(item => item.Entry), workers: 1, cancellationToken: cancellationToken, overwriteExisting: true,
                         extractionFailure: (entry, exception) => extractionErrors[PatchInputMapper.NormalizeArchivePath(entry.ArchivePath)] = exception.Message);
                 }
                 catch (Exception exception)

@@ -17,6 +17,8 @@ if (args.Length != 2)
 
 var requiredSchema = Path.GetFullPath(args[0]);
 var requiredCorpus = Path.GetFullPath(args[1]);
+var testBackupRoot = Path.Combine(Path.GetTempPath(), $"wow-crucible-backups-{Guid.NewGuid():N}");
+CrucibleBackupService.Configure(testBackupRoot, enabled: true, retentionPerSource: 3);
 if (!File.Exists(requiredSchema) || !Directory.Exists(requiredCorpus))
 {
     Console.Error.WriteLine($"Corpus preflight failed:{(File.Exists(requiredSchema) ? string.Empty : $"\n  missing schema: {requiredSchema}")}{(Directory.Exists(requiredCorpus) ? string.Empty : $"\n  missing DBC directory: {requiredCorpus}")}");
@@ -39,6 +41,24 @@ if (missingCorpusFiles.Length > 0)
     Environment.ExitCode = 2;
     return;
 }
+
+var backupFixtureSource = Path.Combine(Path.GetTempPath(), $"wow-crucible-backup-source-{Guid.NewGuid():N}.dbc");
+File.WriteAllBytes(backupFixtureSource, [1, 2, 3, 4]);
+var backupOne = CrucibleBackupService.Create(backupFixtureSource, "PolicyTest");
+var backupTwo = CrucibleBackupService.Create(backupFixtureSource, "PolicyTest");
+var backupThree = CrucibleBackupService.Create(backupFixtureSource, "PolicyTest");
+var retainedBackupFolder = Path.GetDirectoryName(backupThree!)!;
+if (backupOne is null || backupTwo is null || backupThree is null || Directory.EnumerateFiles(retainedBackupFolder, "*.bak").Count() != 3)
+    throw new InvalidOperationException("Bounded app backup creation did not retain the configured three source versions.");
+CrucibleBackupService.Configure(testBackupRoot, enabled: false, retentionPerSource: 3);
+if (CrucibleBackupService.Create(backupFixtureSource, "PolicyTest") is not null)
+    throw new InvalidOperationException("Disabled backups still emitted a retained safety copy.");
+CrucibleBackupService.Configure(testBackupRoot, enabled: true, retentionPerSource: 2);
+_ = CrucibleBackupService.Create(backupFixtureSource, "PolicyTest");
+if (Directory.EnumerateFiles(retainedBackupFolder, "*.bak").Count() != 2)
+    throw new InvalidOperationException("Per-source backup retention did not prune older copies.");
+File.Delete(backupFixtureSource);
+CrucibleBackupService.Configure(testBackupRoot, enabled: true, retentionPerSource: 3);
 
 var expectedSpellEffectMasks = new[]
 {
@@ -554,8 +574,8 @@ SheatheType<32>
 
     var roundTripDb2 = Path.Combine(wdb2FixtureRoot, "Item-roundtrip.db2");
     itemTable.SaveAs(roundTripDb2, false);
-    if (!File.ReadAllBytes(roundTripDb2).SequenceEqual(itemBytes) || !File.Exists(roundTripDb2 + ".crucible-table.json") ||
-        !File.ReadAllText(roundTripDb2 + ".crucible-table.json").Contains("\"Container\": \"Wdb2\"", StringComparison.Ordinal))
+    if (!File.ReadAllBytes(roundTripDb2).SequenceEqual(itemBytes) || File.Exists(roundTripDb2 + ".crucible-table.json") || !File.Exists(WdbcFile.IdentityPath(roundTripDb2)) ||
+        !File.ReadAllText(WdbcFile.IdentityPath(roundTripDb2)).Contains("\"Container\": \"Wdb2\"", StringComparison.Ordinal))
         throw new InvalidOperationException("An unchanged renamed WDB2 did not round-trip byte-for-byte with its logical table identity.");
     var renamedTable = WdbcFile.Load(roundTripDb2);
     if (renamedTable.LogicalTableName != "Item" || renamedTable.Db2Metadata?.Build != 15595)
@@ -636,6 +656,8 @@ SheatheType<32>
 finally
 {
     if (Directory.Exists(wdb2FixtureRoot)) Directory.Delete(wdb2FixtureRoot, true);
+    if (Directory.Exists(CruciblePaths.TableIdentityDirectory))
+        foreach (var identity in Directory.EnumerateFiles(CruciblePaths.TableIdentityDirectory, "*.json").Where(path => new[] { "Item-roundtrip-", "Item-edited-", "Complex-roundtrip-" }.Any(prefix => Path.GetFileName(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))) File.Delete(identity);
 }
 var workspaceRoot=Directory.GetParent(Directory.GetCurrentDirectory())?.FullName;var localDbdRoot=workspaceRoot is null?string.Empty:Path.Combine(workspaceRoot,"Tools","WoWDBDefs","definitions");
 if(Directory.Exists(localDbdRoot))
@@ -2251,7 +2273,7 @@ if (Directory.Exists(desktopSourceRoot))
         !mainWindowSource.Contains("CommitInlineCellEdit", StringComparison.Ordinal) ||
         mainWindowSource.Contains("new CellEditorView", StringComparison.Ordinal))
         throw new InvalidOperationException("Pinned DBC record IDs, in-grid keyboard editing, or single-owner pet findings controls regressed.");
-    if (!lightingWorkspaceSource.Contains("Edit time band", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Environment preview", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Author selected color curve", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Author selected float curve", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Path.ChangeExtension(dbcPath, \".m2\")", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Optional preview-only texture layer", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("requestedTextureProvenance", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("ClientAssetDependencyService.Analyze(_assetIndex, choice.Location, overrides, token)", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("M2PreviewView", StringComparison.Ordinal) || !lightingEnvironmentSource.Contains("WorldLightingEnvironmentSample", StringComparison.Ordinal) || !lightingEnvironmentSource.Contains("LinearGradientBrush", StringComparison.Ordinal) || !lightingEditorSource.Contains("new ResponsiveSplitGrid", StringComparison.Ordinal) || !lightingEditorSource.Contains("Apply to loaded DBC · keep .bak", StringComparison.Ordinal) || !lightingEditorSource.Contains("WorldLightingBandEditPlan", StringComparison.Ordinal) || !lightingEditorSource.Contains("_baselines", StringComparison.Ordinal) || !appSource.Contains("--lighting", StringComparison.Ordinal) || !mainWindowSource.Contains("OpenLightingWorkspace", StringComparison.Ordinal))
+    if (!lightingWorkspaceSource.Contains("Edit time band", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Environment preview", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Author selected color curve", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Author selected float curve", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Path.ChangeExtension(dbcPath, \".m2\")", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("Optional preview-only texture layer", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("requestedTextureProvenance", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("ClientAssetDependencyService.Analyze(_assetIndex, choice.Location, overrides, token)", StringComparison.Ordinal) || !lightingWorkspaceSource.Contains("M2PreviewView", StringComparison.Ordinal) || !lightingEnvironmentSource.Contains("WorldLightingEnvironmentSample", StringComparison.Ordinal) || !lightingEnvironmentSource.Contains("LinearGradientBrush", StringComparison.Ordinal) || !lightingEditorSource.Contains("new ResponsiveSplitGrid", StringComparison.Ordinal) || !lightingEditorSource.Contains("Apply to loaded DBC · backup policy", StringComparison.Ordinal) || !lightingEditorSource.Contains("WorldLightingBandEditPlan", StringComparison.Ordinal) || !lightingEditorSource.Contains("_baselines", StringComparison.Ordinal) || !appSource.Contains("--lighting", StringComparison.Ordinal) || !mainWindowSource.Contains("OpenLightingWorkspace", StringComparison.Ordinal))
         throw new InvalidOperationException("Same-window responsive world-light curve authoring or retained source-preimage wiring regressed.");
     if (!textureWorkspaceSource.Contains("Edit RGBA pixels", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("Save edited BLP2", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("TexturePixelEditService.ApplyStroke", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("128 MiB undo budget", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("The loaded source is immutable", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("Compression proof", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("TextureComparisonService.AnalyzeEncoding", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("Alpha boundary changes", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("new ResponsiveSplitGrid(preview, difference", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("Compose layers", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("TextureLayerCompositionService.Compose", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("Use result in RGBA editor", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("Run compression proof on result", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("new ResponsiveSplitGrid(stack, preview", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("Mask & channels", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("TextureMaskTransformService.Apply", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("EXACT SELECTED MASK CHANNEL", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("new ResponsiveSplitGrid(mask, result", StringComparison.Ordinal) || !textureWorkspaceSource.Contains("new ResponsiveFieldGrid", StringComparison.Ordinal) || !textureCanvasSource.Contains("PointerWheelChanged", StringComparison.Ordinal) || !textureCanvasSource.Contains("IsMiddleButtonPressed", StringComparison.Ordinal) || !textureCanvasSource.Contains("TexturePixelEditService.RenderChannels", StringComparison.Ordinal))
         throw new InvalidOperationException("Responsive native RGBA/channel editing, immutable-source safety, visual compression proof, ordered composition, or mask-driven channel transformation regressed.");
@@ -2337,7 +2359,7 @@ if (Directory.Exists(desktopSourceRoot))
         !mainWindowMarkup.Contains("Grid.Row=\"1\" Grid.RowSpan=\"3\"", StringComparison.Ordinal) ||
         !workspaceSetupSource.Contains("CrucibleWorkspaceLayoutService.Discover", StringComparison.Ordinal) ||
         !workspaceSetupSource.Contains("ConfigureWorkspaceAsync", StringComparison.Ordinal) ||
-        !workspaceSetupSource.Contains("Remember this workspace", StringComparison.Ordinal) ||
+        !workspaceSetupSource.Contains("Use this workspace", StringComparison.Ordinal) ||
         !runtimeStripSource.Contains("StartDatabaseAsync", StringComparison.Ordinal) ||
         !runtimeStripSource.Contains("StartAuthAsync", StringComparison.Ordinal) ||
         !runtimeStripSource.Contains("StartWorldAsync", StringComparison.Ordinal) ||
@@ -2393,6 +2415,7 @@ if (dependencyHash.Equals(addedIncomingHash, StringComparison.Ordinal) || depend
     throw new InvalidOperationException("SQL object dependency fingerprints did not bind relevant incoming/outgoing edge changes.");
 
 var workspaceFixture = Path.Combine(Path.GetTempPath(), $"crucible-workspace-{Guid.NewGuid():N}");
+string? workspaceProfilePath = null;
 try
 {
     Directory.CreateDirectory(Path.Combine(workspaceFixture, "Server", "etc"));
@@ -2423,13 +2446,27 @@ try
         !discoveredWorkspace.MapSourcePath.EndsWith("Maps", StringComparison.OrdinalIgnoreCase))
         throw new InvalidOperationException("One-root workspace discovery did not identify the synthetic server/core/client/schema/tool layout.");
     CrucibleWorkspaceLayoutService.Save(discoveredWorkspace);
-    var manifestText = File.ReadAllText(CrucibleWorkspaceLayout.ManifestPath(workspaceFixture));
-    var loadedWorkspace = CrucibleWorkspaceLayoutService.Load(workspaceFixture);
-    if (manifestText.Contains(workspaceFixture, StringComparison.OrdinalIgnoreCase) || manifestText.Contains("fixture_password", StringComparison.Ordinal) ||
+    var profilePath = workspaceProfilePath = CrucibleWorkspaceLayoutService.ProfilePath(discoveredWorkspace);
+    var manifestText = File.ReadAllText(profilePath);
+    var loadedWorkspace = CrucibleWorkspaceLayoutService.LoadProfile(profilePath);
+    if (!Path.GetFullPath(profilePath).StartsWith(Path.GetFullPath(CruciblePaths.WorkspaceProfilesDirectory), StringComparison.OrdinalIgnoreCase) ||
+        File.Exists(CrucibleWorkspaceLayout.ManifestPath(workspaceFixture)) || manifestText.Contains("fixture_password", StringComparison.Ordinal) ||
         loadedWorkspace.ServerRootPath != discoveredWorkspace.ServerRootPath || loadedWorkspace.ClientExecutablePath != discoveredWorkspace.ClientExecutablePath)
-        throw new InvalidOperationException("Portable workspace manifest paths or credential exclusion regressed.");
+        throw new InvalidOperationException("App-local workspace profile storage or credential exclusion regressed.");
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Server Two", "etc"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "Client Two", "Data"));
+    File.WriteAllText(Path.Combine(workspaceFixture, "Server Two", "etc", "worldserver.conf"), "WorldDatabaseInfo = \"localhost;3306;other;other;other_world\"");
+    File.WriteAllBytes(Path.Combine(workspaceFixture, "Client Two", "Wow.exe"), [0]);
+    var ambiguousWorkspace = CrucibleWorkspaceLayoutService.Discover(workspaceFixture);
+    if (!string.IsNullOrEmpty(ambiguousWorkspace.ServerRootPath) || !string.IsNullOrEmpty(ambiguousWorkspace.ClientRootPath) ||
+        !ambiguousWorkspace.Findings.Any(finding => finding.Contains("AMBIGUOUS", StringComparison.Ordinal)))
+        throw new InvalidOperationException("Workspace discovery silently guessed a server/client pairing when multiple installs were present.");
 }
-finally { if (Directory.Exists(workspaceFixture)) Directory.Delete(workspaceFixture, true); }
+finally
+{
+    if (Directory.Exists(workspaceFixture)) Directory.Delete(workspaceFixture, true);
+    if (workspaceProfilePath is not null && File.Exists(workspaceProfilePath)) File.Delete(workspaceProfilePath);
+}
 
 var serverFixture = Path.Combine(Path.GetTempPath(), $"crucible-server-{Guid.NewGuid():N}");
 Directory.CreateDirectory(Path.Combine(serverFixture, "etc")); Directory.CreateDirectory(Path.Combine(serverFixture, "data", "dbc"));
@@ -3781,6 +3818,38 @@ DbcRowMutationService.SetRow(copiedRowPath, setRowPath, castColumns, castResolut
 if (WdbcFile.Load(setRowPath).GetRaw(copiedRows[9_000_000], castColumns[1]) != 456)
     throw new InvalidOperationException("Selected row mutation failed.");
 
+var rangeSource = WdbcFile.Load(castTimesSource); var rangeTarget = WdbcFile.Load(castTimesSource);
+var rangeSourceId = rangeSource.GetRaw(0, castColumns[0]); var rangeOriginalValue = rangeTarget.GetRaw(0, castColumns[1]);
+rangeSource.SetRaw(0, castColumns[1], rangeOriginalValue + 17);
+var conflictingWholeRow = DbcRangeTransferService.Transfer(rangeSource, castColumns, castResolution.KeyStrategy, [0], Enumerable.Range(0, castColumns.Count).ToArray(), rangeTarget, castColumns, castResolution.KeyStrategy);
+var remappedRangeId = conflictingWholeRow.RemappedIds.GetValueOrDefault(rangeSourceId);
+var rangeTargetRows = DbcRecordIdentity.IndexRows(rangeTarget, castColumns, castResolution.KeyStrategy);
+if (conflictingWholeRow.AddedRows != 1 || remappedRangeId == 0 || remappedRangeId == rangeSourceId || rangeTarget.RowCount != WdbcFile.Load(castTimesSource).RowCount + 1 ||
+    rangeTarget.GetRaw(rangeTargetRows[rangeSourceId], castColumns[1]) != rangeOriginalValue || rangeTarget.GetRaw(rangeTargetRows[remappedRangeId], castColumns[1]) != rangeOriginalValue + 17)
+    throw new InvalidOperationException("Whole-row drag transfer did not allocate a fresh ID for genuinely different same-ID content.");
+
+var identicalRangeSource = WdbcFile.Load(castTimesSource); var identicalRangeTarget = WdbcFile.Load(castTimesSource);
+var identicalRange = DbcRangeTransferService.Transfer(identicalRangeSource, castColumns, castResolution.KeyStrategy, [0], Enumerable.Range(0, castColumns.Count).ToArray(), identicalRangeTarget, castColumns, castResolution.KeyStrategy);
+if (identicalRange.HasChanges || identicalRange.RemappedIds.Count != 0 || identicalRangeTarget.RowCount != identicalRangeSource.RowCount)
+    throw new InvalidOperationException("Whole-row drag transfer duplicated identical same-ID content.");
+
+var overlayRangeSource = WdbcFile.Load(castTimesSource); var overlayRangeTarget = WdbcFile.Load(castTimesSource);
+var overlayId = overlayRangeSource.GetRaw(1, castColumns[0]); var overlayValue = overlayRangeSource.GetRaw(1, castColumns[1]) + 23;
+overlayRangeSource.SetRaw(1, castColumns[1], overlayValue);
+var overlayRange = DbcRangeTransferService.Transfer(overlayRangeSource, castColumns, castResolution.KeyStrategy, [1], [1], overlayRangeTarget, castColumns, castResolution.KeyStrategy);
+var overlayRows = DbcRecordIdentity.IndexRows(overlayRangeTarget, castColumns, castResolution.KeyStrategy);
+if (overlayRange.AddedRows != 0 || overlayRange.UpdatedRows != 1 || overlayRange.RemappedIds.Count != 0 || overlayRangeTarget.GetRaw(overlayRows[overlayId], castColumns[1]) != overlayValue)
+    throw new InvalidOperationException("Partial-column drag transfer did not overlay the existing matching ID.");
+
+var partialAddSource = WdbcFile.Load(castTimesSource); var partialAddTarget = WdbcFile.Load(castTimesSource);
+var partialAddRow = partialAddSource.CloneRow(0, castColumns[0]); var partialAddId = partialAddSource.GetRaw(partialAddRow, castColumns[0]);
+partialAddSource.SetRaw(partialAddRow, castColumns[1], 7654);
+var partialAdd = DbcRangeTransferService.Transfer(partialAddSource, castColumns, castResolution.KeyStrategy, [partialAddRow], [1], partialAddTarget, castColumns, castResolution.KeyStrategy);
+var partialAddRows = DbcRecordIdentity.IndexRows(partialAddTarget, castColumns, castResolution.KeyStrategy); var partialAddTargetRow = partialAddRows[partialAddId];
+if (partialAdd.AddedRows != 1 || partialAdd.RemappedIds.Count != 0 || partialAddTarget.GetRaw(partialAddTargetRow, castColumns[0]) != partialAddId ||
+    partialAddTarget.GetRaw(partialAddTargetRow, castColumns[1]) != 7654 || partialAddTarget.GetRaw(partialAddTargetRow, castColumns[2]) != 0)
+    throw new InvalidOperationException("Partial-column drag transfer did not append a missing ID while leaving omitted fields at defaults.");
+
 var semanticBasePath = Path.Combine(layerRoot, "AnimationData.semantic-base.dbc");
 var semanticOverridePath = Path.Combine(layerRoot, "AnimationData.semantic-override.dbc");
 var semanticBase = WdbcFile.Load(animationPath); semanticBase.SetDisplayValue(0, nameColumn, "Crucible_Same_Text"); semanticBase.Save(semanticBasePath, false);
@@ -4439,6 +4508,7 @@ if (corruptSnapshotInspection.Valid || !corruptSnapshotInspection.Findings.Any(f
     throw new InvalidOperationException("Legacy SQL snapshot validation did not reject a tampered aggregate row count.");
 Directory.Delete(layerRoot, true);
 
+if (Directory.Exists(testBackupRoot)) Directory.Delete(testBackupRoot, true);
 Console.WriteLine($"PASS: loaded {loaded:N0} WDBC files, cloned 100 real spells in {spellBulkCloneMilliseconds:N0} ms, verified persistence, layered comparison, manifest build, and MPQ workflows.");
 
 static string WriteGraphAsset(string contentRoot,string provenance,string clientPath,byte[] bytes)

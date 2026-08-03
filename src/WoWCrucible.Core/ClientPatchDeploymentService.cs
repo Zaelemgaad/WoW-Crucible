@@ -43,10 +43,7 @@ public static class ClientPatchDeploymentService
                 throw new IOException("The copied patch failed SHA-256 verification; the installed client was not changed.");
 
             if (File.Exists(targetPath))
-            {
-                backupPath = targetPath + ".bak";
-                File.Copy(targetPath, backupPath, true);
-            }
+                backupPath = CrucibleBackupService.Create(targetPath, "ClientPatches");
             File.Move(temporaryPath, targetPath, true);
             var cache = InvalidateCache(clientRoot);
             return new(sourcePatch, targetPath, backupPath, sourceHash, cache);

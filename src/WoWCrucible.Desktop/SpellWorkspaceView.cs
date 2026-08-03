@@ -372,7 +372,7 @@ internal sealed class SpellWorkspaceView : UserControl
             _apply(changed);
             foreach (var binding in _bindings) binding.OriginalText = binding.Input.Text ?? string.Empty;
             RefreshHeading();
-            _status.Text = $"Applied {changed.Length:N0} field change(s) to the staged Spell.dbc. Save writes atomically and keeps a .bak.";
+            _status.Text = $"Applied {changed.Length:N0} field change(s) to the staged Spell.dbc. Save is atomic and follows the visible backup policy.";
         }
         catch (Exception exception)
         {

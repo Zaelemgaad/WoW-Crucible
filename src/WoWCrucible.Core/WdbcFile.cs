@@ -49,6 +49,7 @@ public sealed class WdbcFile
     public int PhysicalHeaderSize => ContainerKind == ClientTableContainerKind.Wdb2 ? 48 + (Db2Metadata?.IndexMap.Count ?? 0) * 6 : HeaderSize;
     public bool AllowsStructuralMutation => Db2Metadata is null || !Db2Metadata.HasIndexMap && Db2Metadata.CopyTableSize == 0;
     public string LogicalTableName { get; }
+    public string? LastBackupPath { get; private set; }
 
     public WdbcFile CloneInMemory()
     {
@@ -362,8 +363,7 @@ public sealed class WdbcFile
     public void Save(string path, bool createBackup = true)
     {
         var fullPath = Path.GetFullPath(path);
-        if (createBackup && File.Exists(fullPath))
-            File.Copy(fullPath, fullPath + ".bak", true);
+        LastBackupPath = createBackup ? CrucibleBackupService.Create(fullPath, "ClientTables") : null;
 
         var temp = fullPath + ".tmp";
         using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
@@ -464,7 +464,13 @@ public sealed class WdbcFile
 
     private static string ReadIdentity(string path, Wdb2Metadata metadata)
     {
-        var sidecar = IdentityPath(path); if (!File.Exists(sidecar)) return Path.GetFileNameWithoutExtension(path);
+        var sidecar = IdentityPath(path);
+        if (!File.Exists(sidecar))
+        {
+            var legacy = Path.GetFullPath(path) + ".crucible-table.json";
+            if (!File.Exists(legacy)) return Path.GetFileNameWithoutExtension(path);
+            sidecar = legacy;
+        }
         try
         {
             var identity = JsonSerializer.Deserialize<ClientTableIdentity>(File.ReadAllText(sidecar), IdentityJsonOptions) ?? throw new InvalidDataException("The identity sidecar is empty.");
@@ -481,7 +487,7 @@ public sealed class WdbcFile
     private void WriteIdentity(string path)
     {
         if (ContainerKind != ClientTableContainerKind.Wdb2 || Db2Metadata is not { } metadata || Path.GetFileNameWithoutExtension(path).Equals(LogicalTableName, StringComparison.OrdinalIgnoreCase)) return;
-        var sidecar = IdentityPath(path); var temporary = sidecar + $".crucible-{Guid.NewGuid():N}.tmp";
+        var sidecar = IdentityPath(path); Directory.CreateDirectory(Path.GetDirectoryName(sidecar)!); var temporary = sidecar + $".crucible-{Guid.NewGuid():N}.tmp";
         try
         {
             File.WriteAllText(temporary, JsonSerializer.Serialize(new ClientTableIdentity(LogicalTableName, ContainerKind, metadata.Build, metadata.TableHash), IdentityJsonOptions));
@@ -496,5 +502,11 @@ public sealed class WdbcFile
         Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
     };
 
-    public static string IdentityPath(string tablePath) => Path.GetFullPath(tablePath) + ".crucible-table.json";
+    public static string IdentityPath(string tablePath)
+    {
+        var full = Path.GetFullPath(tablePath);
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(full.ToUpperInvariant())))[..16].ToLowerInvariant();
+        var safeName = new string(Path.GetFileNameWithoutExtension(full).Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '_' : character).ToArray());
+        return Path.Combine(CruciblePaths.TableIdentityDirectory, $"{safeName}-{hash}.json");
+    }
 }

@@ -11,7 +11,7 @@ Devbug Mode is Crucible's opt-in, high-detail development telemetry. It diagnose
 
 ## Devbug Mode
 
-Enable **DEVBUG ON** in the desktop header. The choice persists in `Settings\desktop.json`. For one diagnostic launch without changing the saved choice, use:
+Enable **DEVBUG ON** in the desktop header. The choice persists in `Config\desktop.json`. For one diagnostic launch without changing the saved choice, use:
 
 ```powershell
 WoWCrucible.Desktop-latest.exe --devbug
@@ -44,17 +44,20 @@ Crucible-owned persistent files use organized folders beside the executable:
 
 ```text
 WoWCrucible.Desktop-latest.exe
-Settings\
+Config\
   desktop.json
   settings.json
+  Workspaces\
+  TableIdentities\
 Profiles\
+Backups\
 Logs\
   Crashes\
   Debug\
 docs\
 ```
 
-Folders are created only when needed. If Windows denies writes beside the executable, Crucible falls back to `%LOCALAPPDATA%\WoWCrucible`; every Devbug session header reports the effective data root and whether portable mode is active.
+Folders are created only when needed. Crucible does not silently fall back to AppData or write configuration into the selected workspace: if the executable folder is not writable, saving fails clearly so the location can be corrected.
 
 The self-contained single-file executable embeds managed dependencies. Windows and .NET may extract native runtime components to an OS-managed temporary location while the program runs; those temporary runtime mechanics are not Crucible-owned persistent data.
 

@@ -178,6 +178,7 @@ public sealed class PatchArchiveService
         var listFilePath = GetRecoveryListFilePath(outputPath);
         var temporaryListFile = listFilePath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
         var hadOutput = File.Exists(outputPath);
+        string? rollbackSnapshot = null;
         File.Delete(tempPath);
         IntPtr archive = IntPtr.Zero;
         try
@@ -192,16 +193,20 @@ public sealed class PatchArchiveService
             }
             if (!Native.SFileCloseArchive(archive)) ThrowNative("finalize the MPQ archive");
             archive = IntPtr.Zero;
-            if (hadOutput) File.Copy(outputPath, outputPath + ".bak", true);
+            if (hadOutput)
+            {
+                rollbackSnapshot = CrucibleBackupService.CreateTransactionSnapshot(outputPath);
+                CrucibleBackupService.Create(outputPath, "MPQ");
+            }
             File.Move(tempPath, outputPath, true);
             try
             {
-                if (File.Exists(listFilePath)) File.Copy(listFilePath, listFilePath + ".bak", true);
+                if (File.Exists(listFilePath)) CrucibleBackupService.Create(listFilePath, "MPQ-Listfiles");
                 File.Move(temporaryListFile, listFilePath, true);
             }
             catch
             {
-                if (hadOutput && File.Exists(outputPath + ".bak")) File.Copy(outputPath + ".bak", outputPath, true);
+                if (rollbackSnapshot is not null && File.Exists(rollbackSnapshot)) File.Copy(rollbackSnapshot, outputPath, true);
                 else File.Delete(outputPath);
                 throw;
             }
@@ -211,6 +216,7 @@ public sealed class PatchArchiveService
             if (archive != IntPtr.Zero) Native.SFileCloseArchive(archive);
             File.Delete(tempPath);
             File.Delete(temporaryListFile);
+            if (rollbackSnapshot is not null) File.Delete(rollbackSnapshot);
         }
     }
 
@@ -412,10 +418,36 @@ public sealed class PatchArchiveService
         // and third-party archives even though ordinary MPQ editors extracted them normally.
         if (WithLocale(item.Entry.Locale, () => Native.SFileExtractFile(archive, item.InternalPath, temporary, 0)))
             return true;
+        if (WithLocale(item.Entry.Locale, () => ExtractByStreaming(archive, item.InternalPath, temporary)))
+            return true;
         if (item.LookupPath.Equals(item.InternalPath, StringComparison.Ordinal))
             return false;
         try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
-        return Native.SFileExtractFile(archive, item.LookupPath, temporary, 0);
+        return WithLocale(item.Entry.Locale, () => Native.SFileExtractFile(archive, item.LookupPath, temporary, 0)) ||
+               WithLocale(item.Entry.Locale, () => ExtractByStreaming(archive, item.LookupPath, temporary));
+    }
+
+    private static bool ExtractByStreaming(IntPtr archive, string internalPath, string destination)
+    {
+        if (!Native.SFileOpenFileEx(archive, internalPath, 0, out var file)) return false;
+        try
+        {
+            var low = Native.SFileGetFileSize(file, out var high);
+            if (low == uint.MaxValue && Marshal.GetLastWin32Error() != 0) return false;
+            var remaining = ((long)high << 32) | low;
+            using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
+            var buffer = new byte[1 << 20];
+            while (remaining > 0)
+            {
+                var requested = (uint)Math.Min(buffer.Length, remaining);
+                if (!Native.SFileReadFile(file, buffer, requested, out var read, IntPtr.Zero) || read == 0) return false;
+                output.Write(buffer, 0, checked((int)read));
+                remaining -= read;
+            }
+            output.Flush(true);
+            return true;
+        }
+        finally { Native.SFileCloseFile(file); }
     }
 
     internal IReadOnlyList<(MpqFileEntry Entry, string FilePath)> ExtractFlat(string archivePath, string destinationRoot, IEnumerable<MpqFileEntry> files, CancellationToken cancellationToken = default)
@@ -475,6 +507,7 @@ public sealed class PatchArchiveService
         var retainedPaths = existing.Where(entry => !entry.IsMetadata).Select(entry => entry.ArchivePath).Concat(entries.Select(entry => entry.ArchivePath));
         var tempPath = archivePath + ".tmp";
         var temporaryListFile = recoveryListFile + $".{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        string? rollbackSnapshot = null;
         WriteRecoveryListFile(temporaryListFile, retainedPaths);
         File.Copy(archivePath, tempPath, true);
         IntPtr archive = IntPtr.Zero;
@@ -486,16 +519,17 @@ public sealed class PatchArchiveService
                     ThrowNative($"add '{entry.ArchivePath}'");
             if (!Native.SFileCloseArchive(archive)) ThrowNative("finalize the updated MPQ archive");
             archive = IntPtr.Zero;
-            File.Copy(archivePath, archivePath + ".bak", true);
+            rollbackSnapshot = CrucibleBackupService.CreateTransactionSnapshot(archivePath);
+            CrucibleBackupService.Create(archivePath, "MPQ");
             File.Move(tempPath, archivePath, true);
             try
             {
-                if (File.Exists(recoveryListFile)) File.Copy(recoveryListFile, recoveryListFile + ".bak", true);
+                if (File.Exists(recoveryListFile)) CrucibleBackupService.Create(recoveryListFile, "MPQ-Listfiles");
                 File.Move(temporaryListFile, recoveryListFile, true);
             }
             catch
             {
-                File.Copy(archivePath + ".bak", archivePath, true);
+                if (rollbackSnapshot is not null && File.Exists(rollbackSnapshot)) File.Copy(rollbackSnapshot, archivePath, true);
                 throw;
             }
         }
@@ -504,6 +538,7 @@ public sealed class PatchArchiveService
             if (archive != IntPtr.Zero) Native.SFileCloseArchive(archive);
             File.Delete(tempPath);
             File.Delete(temporaryListFile);
+            if (rollbackSnapshot is not null) File.Delete(rollbackSnapshot);
         }
     }
 
@@ -628,6 +663,21 @@ public sealed class PatchArchiveService
         [DllImport("StormLib.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.I1)]
         internal static extern bool SFileExtractFile(IntPtr archive, [MarshalAs(UnmanagedType.LPStr)] string internalPath, string destinationPath, uint searchScope);
+
+        [DllImport("StormLib.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static extern bool SFileOpenFileEx(IntPtr archive, string internalPath, uint searchScope, out IntPtr file);
+
+        [DllImport("StormLib.dll", SetLastError = true)]
+        internal static extern uint SFileGetFileSize(IntPtr file, out uint fileSizeHigh);
+
+        [DllImport("StormLib.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static extern bool SFileReadFile(IntPtr file, byte[] buffer, uint bytesToRead, out uint bytesRead, IntPtr overlapped);
+
+        [DllImport("StormLib.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static extern bool SFileCloseFile(IntPtr file);
 
         [DllImport("StormLib.dll", SetLastError = true)]
         internal static extern uint SFileSetLocale(uint locale);

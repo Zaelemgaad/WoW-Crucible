@@ -10,6 +10,13 @@ internal sealed class DesktopSettings
     public bool InspectorPaneOpen { get; set; } = true;
     public string WorkspaceRootPath { get; set; } = string.Empty;
     public string WorkspaceName { get; set; } = string.Empty;
+    public List<string> SavedWorkspaceRoots { get; set; } = [];
+    public List<CrucibleWorkspaceLayout> SavedWorkspaces { get; set; } = [];
+    public bool BackupsEnabled { get; set; } = true;
+    public bool BackupChoiceRemembered { get; set; }
+    public int BackupRetentionPerSource { get; set; } = 3;
+    public int BackupStorageLimitGiB { get; set; } = 10;
+    public string BackupRootPath { get; set; } = string.Empty;
     public string WorkspaceStagingPath { get; set; } = string.Empty;
     public string WorkspaceProjectsPath { get; set; } = string.Empty;
     public string ToolsPath { get; set; } = string.Empty;
@@ -40,9 +47,10 @@ internal sealed class DesktopSettings
     {
         try
         {
-            var desktopSettingsExist = File.Exists(CruciblePaths.DesktopSettingsFile);
+            var desktopSettingsReadPath = File.Exists(CruciblePaths.DesktopSettingsFile) ? CruciblePaths.DesktopSettingsFile : CruciblePaths.LegacyPortableDesktopSettingsFile;
+            var desktopSettingsExist = File.Exists(desktopSettingsReadPath);
             var settings = desktopSettingsExist
-                ? JsonSerializer.Deserialize<DesktopSettings>(File.ReadAllText(CruciblePaths.DesktopSettingsFile)) ?? new()
+                ? JsonSerializer.Deserialize<DesktopSettings>(File.ReadAllText(desktopSettingsReadPath)) ?? new()
                 : new();
             if (File.Exists(CruciblePaths.SettingsFileForRead))
             {

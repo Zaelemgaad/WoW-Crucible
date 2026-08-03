@@ -16,10 +16,10 @@ Exit codes are consistent across workflows:
 ```text
 wowcrucible workspace discover <top-level-folder> [--format=json]
 wowcrucible workspace init <top-level-folder> [--format=json]
-wowcrucible workspace show <top-level-folder> [--format=json]
+wowcrucible workspace show <top-level-folder|profile.json> [--format=json]
 ```
 
-`discover` is read-only and locates a paired `Wow.exe` plus `Data`, installed server, source core, server DBC folder, WotLK 12340 schema, WoWDBDefs, projects, staging, tools, optional Noggit, and an extracted `World\Maps` root. `init` saves those results as `.crucible\workspace.json`; paths within the root are relative so the complete workspace can move between drives. Database passwords are never part of the manifest. `show` reloads the saved paths. The desktop **Workspace setup** page exposes the same discovery with a manual override and Browse action for every path. Its compact SQL/AUTH/WORLD strip remains visible on every feature page and controls each component independently.
+`discover` is read-only and locates installed clients, servers, source core, server DBC folder, WotLK 12340 schema, WoWDBDefs, tools, optional Noggit, and an extracted `World\Maps` root. Discovery refuses to pair installs silently when a library contains multiple servers or clients. `init` stores an app-local profile under `Config\Workspaces` beside the executable and writes nothing into the selected library. Database passwords are never part of a profile. `show` accepts an unambiguous saved root or the exact profile JSON when that root has multiple named pairings. The desktop **Workspace setup** page exposes the same workflow with explicit server/client selection plus optional advanced overrides. Its compact SQL/AUTH/WORLD strip remains visible on every feature page and controls each component independently.
 
 ## Searchable desktop/CLI command catalog
 

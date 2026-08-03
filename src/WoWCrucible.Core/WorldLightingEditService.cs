@@ -74,21 +74,30 @@ public static class WorldLightingEditService
     public static WorldLightingBandEditResult Apply(WorldLightingBandEditPlan plan, string outputPath, bool overwrite = false, bool allowSourceReplacement = false)
     {
         ValidatePlan(plan, verifySource: true); outputPath = Path.GetFullPath(outputPath); var replacesSource = outputPath.Equals(plan.InputPath, StringComparison.OrdinalIgnoreCase);
-        if (replacesSource && !allowSourceReplacement) throw new InvalidOperationException("Crucible will not replace the loaded lighting DBC unless source replacement is explicitly enabled. Write a separate staged DBC or use the guarded in-place action that keeps a .bak.");
+        if (replacesSource && !allowSourceReplacement) throw new InvalidOperationException("Crucible will not replace the loaded lighting DBC unless source replacement is explicitly enabled. Write a separate staged DBC or use the guarded in-place action governed by the configured backup policy.");
         if (replacesSource && !overwrite) throw new InvalidOperationException("Replacing the loaded lighting DBC requires explicit overwrite authority in addition to source-replacement authority.");
         if (!replacesSource && File.Exists(outputPath) && !overwrite) throw new IOException($"Lighting output already exists: {outputPath}");
         var file = LoadExact(plan.InputPath, plan.Kind); VerifyPreimage(file, plan); ApplyToFile(file, plan);
-        var keepBackup = replacesSource || overwrite && File.Exists(outputPath); var backup = keepBackup ? outputPath + ".bak" : null;
+        var keepBackup = replacesSource || overwrite && File.Exists(outputPath);
+        var rollback = keepBackup && File.Exists(outputPath) ? CrucibleBackupService.CreateTransactionSnapshot(outputPath) : null;
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? throw new InvalidOperationException("Lighting output has no parent directory."));
-        file.Save(outputPath, createBackup: keepBackup);
-        try { VerifyOutput(outputPath, plan, file.RowCount); }
+        string? backup = null;
+        try
+        {
+            file.Save(outputPath, createBackup: keepBackup);
+            backup = file.LastBackupPath;
+            VerifyOutput(outputPath, plan, file.RowCount);
+        }
         catch
         {
-            if (backup is not null && File.Exists(backup)) File.Copy(backup, outputPath, true);
+            if (rollback is not null && File.Exists(rollback)) File.Copy(rollback, outputPath, true);
             else if (!replacesSource && File.Exists(outputPath)) File.Delete(outputPath);
             throw;
         }
-        var hash = Sha256(outputPath); var receiptPath = outputPath + ".crucible-light-band.json";
+        finally { if (rollback is not null) File.Delete(rollback); }
+        var hash = Sha256(outputPath);
+        Directory.CreateDirectory(Path.Combine(CruciblePaths.ReceiptDirectory, "Lighting"));
+        var receiptPath = Path.Combine(CruciblePaths.ReceiptDirectory, "Lighting", $"{Path.GetFileNameWithoutExtension(outputPath)}-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.json");
         var receipt = new { FormatVersion, AppliedUtc = DateTimeOffset.UtcNow, plan.InputPath, plan.InputSha256, OutputPath = outputPath, OutputSha256 = hash, plan.Kind, plan.BandId, plan.RowIndex, plan.OriginalFields, plan.Keys, ReplacedSource = replacesSource, BackupPath = backup };
         AtomicWrite(receiptPath, JsonSerializer.SerializeToUtf8Bytes(receipt, JsonOptions), overwrite: true);
         return new(outputPath, hash, receiptPath, plan.Kind, plan.BandId, plan.Keys.Count, replacesSource, backup);

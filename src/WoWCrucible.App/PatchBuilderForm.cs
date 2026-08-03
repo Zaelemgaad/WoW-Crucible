@@ -224,7 +224,7 @@ public sealed class PatchBuilderForm : Form
                 : cache.Existed ? $"Deleted the client Cache folder ({cache.DeletedFiles:N0} file(s), {cache.DeletedBytes:N0} bytes)."
                 : "The client Cache folder was already absent.";
             _hint.Text = $"{(_existingPatch is null ? "Created" : "Updated")} {outputPath} with {entries.Length:N0} added/replaced file(s). {cacheText}";
-            MessageBox.Show(this, $"Patch {(_existingPatch is null ? "created" : "updated")} successfully:\n{outputPath}\n\n{cacheText}\n\nA .bak copy preserves the previous archive.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, $"Patch {(_existingPatch is null ? "created" : "updated")} successfully:\n{outputPath}\n\n{cacheText}\n\nIf safety backups are enabled, the previous archive is in Crucible's configured Backups folder.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { Cursor = Cursors.Default; }

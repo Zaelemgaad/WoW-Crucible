@@ -32,7 +32,7 @@ internal sealed class WorldLightingBandEditorView : UserControl
     private readonly Border _swatch = new() { BorderBrush = Brush.Parse("#596579"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(3), Child = new TextBlock { Text = "COLOR", Padding = new Thickness(8, 4), HorizontalAlignment = HorizontalAlignment.Center } };
     private readonly StackPanel _colorFields;
     private readonly StackPanel _floatFields;
-    private readonly CheckBox _replaceStaged = new() { Content = "Replace an existing staged output and retain its .bak" };
+    private readonly CheckBox _replaceStaged = new() { Content = "Replace an existing staged output (uses backup policy)" };
     private readonly TextBlock _status = Info("Changes remain a draft until you choose a write action.");
     private readonly WorldLightBandCurveControl _curve = new();
     private readonly Dictionary<string, List<WorldLightBandDraftKey>> _drafts = new(StringComparer.OrdinalIgnoreCase);
@@ -63,7 +63,7 @@ internal sealed class WorldLightingBandEditorView : UserControl
         var remove = new Button { Content = "Remove selected key" }; remove.Click += (_, _) => RemoveSelected();
         var reset = new Button { Content = "Reset band draft" }; reset.Click += (_, _) => ResetDraft();
         var stage = new Button { Content = "Write staged DBC…" }; stage.Click += async (_, _) => await WriteStagedAsync();
-        var apply = new Button { Content = "Apply to loaded DBC · keep .bak", Background = Brush.Parse("#5F331F"), Foreground = Brush.Parse("#FFD7B0") }; apply.Click += async (_, _) => await ApplySourceAsync();
+        var apply = new Button { Content = "Apply to loaded DBC · backup policy", Background = Brush.Parse("#5F331F"), Foreground = Brush.Parse("#FFD7B0") }; apply.Click += async (_, _) => await ApplySourceAsync();
 
         _colorFields = new StackPanel { Spacing = 5, Children = { Label("RGB HEX"), _hex, _swatch } };
         _floatFields = new StackPanel { Spacing = 5, IsVisible = false, Children = { Label("FLOAT VALUE"), _floatValue } };
@@ -188,7 +188,7 @@ internal sealed class WorldLightingBandEditorView : UserControl
     {
         try
         {
-            var plan = BuildPlan(); _status.Text = $"Applying band {plan.BandId:N0} atomically and retaining the source as .bak…"; var result = await Task.Run(() => WorldLightingEditService.Apply(plan, plan.InputPath, overwrite: true, allowSourceReplacement: true)); _drafts.Remove(_draftIdentity!); _status.Text = $"Applied {result.Keys:N0} key(s) · backup {result.BackupPath} · reloading complete graph…"; SourceApplied?.Invoke(this, result);
+            var plan = BuildPlan(); _status.Text = $"Applying band {plan.BandId:N0} atomically using the configured backup policy…"; var result = await Task.Run(() => WorldLightingEditService.Apply(plan, plan.InputPath, overwrite: true, allowSourceReplacement: true)); _drafts.Remove(_draftIdentity!); _status.Text = result.BackupPath is null ? $"Applied {result.Keys:N0} key(s) · no retained backup · reloading complete graph…" : $"Applied {result.Keys:N0} key(s) · backup {result.BackupPath} · reloading complete graph…"; SourceApplied?.Invoke(this, result);
         }
         catch (Exception exception) { _status.Text = exception.Message; DesktopCrashLogger.Log("World lighting source band write failed", exception); }
     }
