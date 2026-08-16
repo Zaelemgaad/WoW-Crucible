@@ -202,6 +202,50 @@ try
     if (resumedIndex.HashedFiles != 0 || resumedIndex.ReusedHashes != firstLayerBuild.SourceFiles + firstLayerBuild.LayerFiles)
         throw new InvalidOperationException("Loose layer-stack checkpoint did not reuse every unchanged file hash.");
 
+    var extractedAscension = Path.Combine(fieldNoteServiceRoot, "extracted-ascension");
+    var extractedHd = Path.Combine(fieldNoteServiceRoot, "extracted-hd");
+    FixtureFile(extractedAscension, @"Data\patch-A.MPQ\Content\Character\Human\cross-exact.blp", 1);
+    FixtureFile(extractedAscension, @"Data\patch-A.MPQ\Content\Character\Human\cross-conflict.blp", 2);
+    FixtureFile(extractedAscension, @"Data\patch-A.MPQ\Content\Character\Human\ascension-only.blp", 3);
+    FixtureFile(extractedAscension, @"Data\patch-A.MPQ\Content\Character\Human\within-exact.blp", 4);
+    FixtureFile(extractedAscension, @"Data\patch-B.MPQ\Content\Character\Human\within-exact.blp", 4);
+    FixtureFile(extractedAscension, @"Data\patch-A.MPQ\Content\Character\Human\within-conflict.blp", 5);
+    FixtureFile(extractedAscension, @"Data\patch-B.MPQ\Content\Character\Human\within-conflict.blp", 6);
+    FixtureFile(extractedAscension, @"Data\patch-A.MPQ\Content\DBFilesClient\Fixture.dbc", 7);
+    FixtureFile(extractedAscension, @"outside-archive\Content\Character\Human\ignored.blp", 8);
+    FixtureFile(extractedHd, @"Data\patch-HD.MPQ\Character\Human\cross-exact.blp", 1);
+    FixtureFile(extractedHd, @"Data\patch-HD.MPQ\Character\Human\cross-conflict.blp", 9);
+    FixtureFile(extractedHd, @"Data\patch-HD.MPQ\Character\Human\hd-only.blp", 10);
+    FixtureFile(extractedHd, @"Data\patch-HD.MPQ\DBFilesClient\Fixture.dbc", 7);
+    FixtureFile(extractedHd, @"Data\patch-HD.MPQ\Custom\fixture.wmo", 11);
+    FixtureFile(extractedHd, @"Data\patch-HD.MPQ\TEST\fixture.blp", 12);
+    var extractedOverlapIndex = Path.Combine(fieldNoteServiceRoot, "index", "extracted-overlap.sqlite");
+    var extractedOverlapService = new ExtractedArchiveOverlapIndexService();
+    var extractedOverlap = extractedOverlapService.Build(extractedOverlapIndex,
+        [new("Ascension", extractedAscension), new("HD", extractedHd)]);
+    var overlapRows = extractedOverlapService.Query(extractedOverlapIndex, limit: 100);
+    if (extractedOverlap.Stacks != 2 || extractedOverlap.Archives != 3 || extractedOverlap.Files != 14 || extractedOverlap.IgnoredFiles != 1 ||
+        extractedOverlap.HashedFiles != 10 || extractedOverlap.LogicalPaths != 9 || overlapRows.Count != 9 ||
+        overlapRows.Single(row => row.LogicalPath.EndsWith("cross-exact.blp", StringComparison.OrdinalIgnoreCase)).Kind != ExtractedArchiveOverlapKind.CrossStackExact ||
+        overlapRows.Single(row => row.LogicalPath.EndsWith("cross-conflict.blp", StringComparison.OrdinalIgnoreCase)).Kind != ExtractedArchiveOverlapKind.CrossStackConflict ||
+        overlapRows.Single(row => row.LogicalPath.EndsWith("within-exact.blp", StringComparison.OrdinalIgnoreCase)).Kind != ExtractedArchiveOverlapKind.WithinStackExact ||
+        overlapRows.Single(row => row.LogicalPath.EndsWith("within-conflict.blp", StringComparison.OrdinalIgnoreCase)).Kind != ExtractedArchiveOverlapKind.WithinStackConflict ||
+        overlapRows.Single(row => row.LogicalPath.EndsWith("Fixture.dbc", StringComparison.OrdinalIgnoreCase)).Kind != ExtractedArchiveOverlapKind.StructuredTableReview ||
+        overlapRows.Count(row => row.Kind == ExtractedArchiveOverlapKind.Unique) != 4 ||
+        overlapRows.Single(row => row.LogicalPath.EndsWith("cross-exact.blp", StringComparison.OrdinalIgnoreCase)).Suppliers.Count != 2)
+        throw new InvalidOperationException("Extracted archive overlap ownership, lazy hashing, or classification regressed.");
+    var resumedOverlap = extractedOverlapService.Build(extractedOverlapIndex,
+        [new("Ascension", extractedAscension), new("HD", extractedHd)]);
+    if (resumedOverlap.HashedFiles != 0 || resumedOverlap.ReusedHashes != 10)
+        throw new InvalidOperationException("Extracted archive overlap checkpoint did not reuse every required unchanged hash.");
+    try
+    {
+        _ = extractedOverlapService.Build(extractedOverlapIndex,
+            [new("Ascension", extractedAscension), new("Nested", Path.Combine(extractedAscension, "Data"))]);
+        throw new InvalidOperationException("Extracted archive overlap indexing accepted overlapping stack roots.");
+    }
+    catch (InvalidDataException exception) when (exception.Message.Contains("contain one another", StringComparison.OrdinalIgnoreCase)) { }
+
     var duplicateRoot = Path.Combine(fieldNoteServiceRoot, "duplicates");
     FixtureFile(duplicateRoot, @"one\Content\Character\Human\same.blp", 1);
     FixtureFile(duplicateRoot, @"two\Content\Character\Human\same.blp", 2);

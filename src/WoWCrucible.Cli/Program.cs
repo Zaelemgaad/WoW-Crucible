@@ -410,6 +410,48 @@ static int Asset(string[] args, CancellationToken cancellationToken)
         else foreach (var row in rows) Console.WriteLine($"{row.Kind}\t{row.Stack}\t{row.LogicalPath}\t{row.FamilyKey}\t{row.Suppliers.Count:N0} supplier(s)");
         Console.Error.WriteLine($"Layer-stack query returned {rows.Count:N0} row(s)."); return rows.Count == 0 ? 3 : 0;
     }
+    if (args is ["extracted-overlap-index", var overlapIndexPath, .. var overlapOptions])
+    {
+        var json = overlapOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var stacks = overlapOptions.Where(option => option.StartsWith("--stack=", StringComparison.OrdinalIgnoreCase)).Select(option =>
+        {
+            var parts = option["--stack=".Length..].Split('|', 2);
+            if (parts.Length != 2) throw new FormatException("--stack must be name|extracted-root-folder.");
+            return new ExtractedArchiveStack(parts[0], parts[1]);
+        }).ToArray();
+        var exclusions = overlapOptions.Where(option => option.StartsWith("--exclude=", StringComparison.OrdinalIgnoreCase)).Select(option => option["--exclude=".Length..]).ToArray();
+        var unknown = overlapOptions.Where(option => !option.StartsWith("--stack=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--exclude=", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset extracted-overlap-index option: {unknown[0]}");
+        if (stacks.Length == 0) return Fail("asset extracted-overlap-index requires at least one --stack=name|extracted-root-folder.");
+        var progress = new WoWCrucible.Cli.SynchronousProgress<ExtractedArchiveOverlapProgress>(value =>
+        {
+            if (value.ScannedFiles % 4096 == 0 || value.CurrentPath == "Complete") Console.Error.WriteLine($"Extracted overlap\t{value.ScannedFiles:N0} scanned\t{value.HashedFiles:N0} hashed\t{value.ReusedHashes:N0} reused\t{value.CurrentPath}");
+        });
+        var summary = new ExtractedArchiveOverlapIndexService().Build(overlapIndexPath, stacks, exclusions, progress, cancellationToken);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(summary, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        else Console.WriteLine($"INDEX\t{summary.IndexPath}\nSTACKS\t{summary.Stacks:N0}\nARCHIVES\t{summary.Archives:N0}\nFILES\t{summary.Files:N0}\nLOGICAL_PATHS\t{summary.LogicalPaths:N0}\nUNIQUE\t{summary.UniquePaths:N0}\nWITHIN_STACK_EXACT\t{summary.WithinStackExact:N0}\nWITHIN_STACK_CONFLICT\t{summary.WithinStackConflicts:N0}\nCROSS_STACK_EXACT\t{summary.CrossStackExact:N0}\nCROSS_STACK_CONFLICT\t{summary.CrossStackConflicts:N0}\nSTRUCTURED_DBC_REVIEW\t{summary.StructuredTables:N0}\nHASHED\t{summary.HashedFiles:N0}\nREUSED\t{summary.ReusedHashes:N0}\nIGNORED\t{summary.IgnoredFiles:N0}");
+        return 0;
+    }
+    if (args is ["extracted-overlap-query", var overlapQueryIndexPath, .. var overlapQueryOptions])
+    {
+        var json = overlapQueryOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var search = Option(overlapQueryOptions, "--search="); var kindText = Option(overlapQueryOptions, "--kind=");
+        ExtractedArchiveOverlapKind? kind = null;
+        if (kindText is not null)
+        {
+            var normalizedKind = kindText.Replace("_", string.Empty).Replace("-", string.Empty);
+            var matches = Enum.GetValues<ExtractedArchiveOverlapKind>().Where(value => value.ToString().Equals(normalizedKind, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (matches.Length != 1) throw new FormatException($"Unknown extracted overlap kind: {kindText}");
+            kind = matches[0];
+        }
+        var limitText = Option(overlapQueryOptions, "--limit=") ?? "1000"; if (!int.TryParse(limitText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var limit)) return Fail("--limit must be an integer.");
+        var unknown = overlapQueryOptions.Where(option => !option.StartsWith("--search=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--kind=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--limit=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown asset extracted-overlap-query option: {unknown[0]}");
+        var rows = new ExtractedArchiveOverlapIndexService().Query(overlapQueryIndexPath, search, kind, limit);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(rows, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else foreach (var row in rows) Console.WriteLine($"{row.Kind}\t{row.LogicalPath}\t{row.StackCount:N0} stack(s)\t{row.SupplierCount:N0} supplier(s)\t{row.DistinctContentCount:N0} content version(s)");
+        Console.Error.WriteLine($"Extracted-overlap query returned {rows.Count:N0} row(s)."); return rows.Count == 0 ? 3 : 0;
+    }
     if (args is ["layer-prune-previews", var pruneLayerRoot, .. var pruneOptions])
     {
         var apply = pruneOptions.Contains("--apply", StringComparer.OrdinalIgnoreCase);
@@ -1750,6 +1792,8 @@ static int AssetHelp(int code = 0) => GroupHelp("""
 Usage:
   wowcrucible asset layer-stack-index <index.sqlite> <source-content-root> --layer="stack|order|name|root" [...] [--exclude=client-glob] [--format=text|json]
   wowcrucible asset layer-stack-query <index.sqlite> [--search=text] [--kind=classification] [--limit=N] [--format=text|json]
+  wowcrucible asset extracted-overlap-index <index.sqlite> --stack="name|extracted-root" [...] [--exclude=client-glob] [--format=text|json]
+  wowcrucible asset extracted-overlap-query <index.sqlite> [--search=text] [--kind=classification] [--limit=N] [--format=text|json]
   wowcrucible asset layer-merge <processed-library> <new-hd-folder> --layer=provenance:precedence [...] [--resolve="logical-path|provenance"] [--apply] [--format=text|json]
   wowcrucible asset layer-prune-previews <published-layer-folder> [--apply] [--format=text|json]
   wowcrucible asset texture-consumers-build <processed-library> [--format=text|json]

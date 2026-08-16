@@ -140,6 +140,8 @@ wowcrucible asset texture-encode <image.png|jpg|bmp|tga> <output.blp> [--format=
 wowcrucible asset texture-validate <file-or-folder> [--recursive]
 wowcrucible asset layer-stack-index <index.sqlite> <source-content-root> --layer="stack|order|name|root" [...] [--exclude=client-glob] [--format=text|json]
 wowcrucible asset layer-stack-query <index.sqlite> [--search=text] [--kind=classification] [--limit=N] [--format=text|json]
+wowcrucible asset extracted-overlap-index <index.sqlite> --stack="name|extracted-root" [...] [--exclude=client-glob] [--format=text|json]
+wowcrucible asset extracted-overlap-query <index.sqlite> [--search=text] [--kind=classification] [--limit=N] [--format=text|json]
 wowcrucible asset npc-chr-plan <file.chr> <texture> <target-dbc-folder> <schema.xml> <host> <port> <user> <database> <plan.json> [--display-start=N] [--extra-start=N] [--sound=N] [--scale=1] [--alpha=255] [--password-env=NAME] [--format=text|json] [--overwrite]
 wowcrucible asset npc-chr-apply <plan.json> <new-or-empty-output-folder> [--format=text|json]
 wowcrucible asset item-client-plan <Item.dbc> <ItemDisplayInfo.dbc> <schema.xml> <host> <port> <user> <database> <plan.json> [--password-env=NAME] [--format=text|json] [--overwrite]
@@ -189,6 +191,8 @@ wowcrucible asset definitive-stage <library-folder> <output-folder>
 ```
 
 `layer-stack-index` compares one loose source tree against any number of explicitly named and ordered patch stacks. It normalizes identity from the first recognized client root, never by a global filename, and stores source hashes, every supplier, effective winners, model-family keys, exclusions, and classifications in a resumable SQLite checkpoint. Unchanged files reuse their prior size/write-time-bound SHA-256; duplicate physical files normalizing to one identity block instead of being chosen silently. DBC and DB2 files always remain `StructuredTableReview`. `layer-stack-query` filters the persisted result without rescanning. The desktop exposes the same provider under **Assets & compare → Layer-stack overlap**; results remain in the project/index unless the user explicitly requests CLI JSON.
+
+`extracted-overlap-index` is the pre-merge companion for archive-per-folder extraction trees. Each `--stack` root may contain arbitrarily nested folders, but an archive boundary must be a directory ending in `.MPQ` or `.MPQ.disabled`; files outside such a boundary or outside a recognized client content root are ignored explicitly. The SQLite checkpoint retains stack, archive, physical path, normalized client path, size, and content identity. Unique paths are not hashed; only paths supplied more than once require SHA-256, and unchanged hashes are reused on the next run. Results distinguish unique paths, exact or conflicting duplicates inside one stack, exact or conflicting paths across stacks, and DBC/DB2 tables that require record-aware review. This command does not guess archive load order or merge any files.
 
 The desktop **Terrain + placement scene** adds a visual coordinate authoring route on top of these repeatable CLI operations. Enable **Pick placement position** to frame terrain independently of distant placed-object bounds, then click visible terrain to intersect the exact rendered MCVT triangle; Crucible retains a marker and copies the reconstructed world X/Y/Z into the same-window placement fields. This is intentionally a field update only. Review the coordinated add or transform and explicitly build its multi-tile payload before any output is written.
 
