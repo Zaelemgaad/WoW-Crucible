@@ -21,7 +21,7 @@ public static class CharSectionsDeathKnightPaletteCompatibilityService
     private const uint HdTextureFlag = 0x10;
 
     private readonly record struct Surface(uint RaceId, uint SexId, uint ColorIndex);
-    private readonly record struct Selector(uint RaceId, uint SexId, uint Section, uint Flags, uint Variation, uint Color);
+    private readonly record struct Selector(uint RaceId, uint SexId, uint Section, uint Variation, uint Color);
 
     public static CharSectionsDeathKnightPaletteCompatibilityResult Expose(
         string inputPath,
@@ -50,7 +50,8 @@ public static class CharSectionsDeathKnightPaletteCompatibilityService
             .Where(row =>
                 selectedRaceSet.Contains(source.GetRaw(row, columns[1])) &&
                 source.GetRaw(row, columns[3]) == 0 &&
-                (source.GetRaw(row, columns[7]) & DeathKnightFlag) != 0)
+                (source.GetRaw(row, columns[7]) & DeathKnightFlag) != 0 &&
+                (source.GetRaw(row, columns[7]) & PlayableFlag) == 0)
             .Select(row => new Surface(
                 source.GetRaw(row, columns[1]),
                 source.GetRaw(row, columns[2]),
@@ -64,7 +65,9 @@ public static class CharSectionsDeathKnightPaletteCompatibilityService
         var surfaceSet = paletteSurfaces.ToHashSet();
         var candidates = Enumerable.Range(0, source.RowCount)
             .Where(row =>
+                source.GetRaw(row, columns[3]) is 0 or 1 or 4 &&
                 (source.GetRaw(row, columns[7]) & DeathKnightFlag) != 0 &&
+                (source.GetRaw(row, columns[7]) & PlayableFlag) == 0 &&
                 surfaceSet.Contains(new(
                     source.GetRaw(row, columns[1]),
                     source.GetRaw(row, columns[2]),
@@ -73,6 +76,7 @@ public static class CharSectionsDeathKnightPaletteCompatibilityService
 
         var target = source.CloneInMemory();
         var selectors = Enumerable.Range(0, target.RowCount)
+            .Where(row => (target.GetRaw(row, columns[7]) & PlayableFlag) != 0)
             .Select(row => ReadSelector(target, row))
             .ToHashSet();
         var nextId = target.NextId(columns[0]);
@@ -87,7 +91,6 @@ public static class CharSectionsDeathKnightPaletteCompatibilityService
                 source.GetRaw(sourceRow, columns[1]),
                 source.GetRaw(sourceRow, columns[2]),
                 section,
-                normalFlags,
                 source.GetRaw(sourceRow, columns[8]),
                 source.GetRaw(sourceRow, columns[9]));
             if (!selectors.Add(selector))
@@ -111,16 +114,16 @@ public static class CharSectionsDeathKnightPaletteCompatibilityService
             throw new InvalidDataException(
                 $"Compatible CharSections row count is {written.RowCount:N0}; expected {source.RowCount + appended:N0}.");
 
-        var writtenSelectors = Enumerable.Range(0, written.RowCount).Select(row => ReadSelector(written, row)).ToHashSet();
+        var writtenSelectors = Enumerable.Range(0, written.RowCount)
+            .Where(row => (written.GetRaw(row, columns[7]) & PlayableFlag) != 0)
+            .Select(row => ReadSelector(written, row)).ToHashSet();
         foreach (var sourceRow in candidates)
         {
             var section = source.GetRaw(sourceRow, columns[3]);
-            var normalFlags = section == 1 ? PlayableFlag : PlayableFlag | HdTextureFlag;
             var expected = new Selector(
                 source.GetRaw(sourceRow, columns[1]),
                 source.GetRaw(sourceRow, columns[2]),
                 section,
-                normalFlags,
                 source.GetRaw(sourceRow, columns[8]),
                 source.GetRaw(sourceRow, columns[9]));
             if (!writtenSelectors.Contains(expected))
@@ -149,11 +152,10 @@ public static class CharSectionsDeathKnightPaletteCompatibilityService
             file.GetRaw(row, columns[1]),
             file.GetRaw(row, columns[2]),
             file.GetRaw(row, columns[3]),
-            file.GetRaw(row, columns[7]),
             file.GetRaw(row, columns[8]),
             file.GetRaw(row, columns[9]));
     }
 
     private static string Describe(Selector value) =>
-        $"race={value.RaceId}, sex={value.SexId}, section={value.Section}, flags={value.Flags}, variation={value.Variation}, color={value.Color}";
+        $"race={value.RaceId}, sex={value.SexId}, section={value.Section}, variation={value.Variation}, color={value.Color}";
 }

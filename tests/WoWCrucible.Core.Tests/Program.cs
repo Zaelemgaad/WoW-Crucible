@@ -1300,16 +1300,17 @@ BitConverter.GetBytes((uint)2).CopyTo(eyeSkin, 36);
 eyeSkin[240] = 16; BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 242); BitConverter.GetBytes((ushort)1).CopyTo(eyeSkin, 244); BitConverter.GetBytes((ushort)1).CopyTo(eyeSkin, 246); BitConverter.GetBytes((short)-1).CopyTo(eyeSkin, 248); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 250); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 252); BitConverter.GetBytes((ushort)1).CopyTo(eyeSkin, 254); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 256); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 258); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 260); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 262);
 File.WriteAllBytes(eyeInputSkin, eyeSkin);
 var eyeModelSourceBytes = File.ReadAllBytes(eyeInputModel); var eyeSkinSourceBytes = File.ReadAllBytes(eyeInputSkin);
-const string fixtureNormalEyes = @"Character\NightElf\Male\NightElfMaleEyeGlow.blp"; const string fixtureDeathKnightEyes = @"Character\NightElf\Male\deathKnightEyeGlow.blp";
-var eyeBinding = M2CharacterEyeBindingService.Apply(eyeInputModel, eyeInputSkin, eyeOutputModel, eyeOutputSkin, fixtureNormalEyes, fixtureDeathKnightEyes);
+const string fixtureDeathKnightEyes = @"Character\NightElf\Male\deathKnightEyeGlow.blp";
+var eyeBinding = M2CharacterEyeBindingService.Apply(eyeInputModel, eyeInputSkin, eyeOutputModel, eyeOutputSkin, fixtureDeathKnightEyes);
 var eyeGeometry = M2PreviewGeometryService.Load(eyeOutputModel, eyeOutputSkin, M2PreviewVisibilityMode.AllGeosets);
 var normalEyeMaterial = eyeGeometry.MaterialUnits.Single(material => eyeGeometry.Submeshes[material.SubmeshIndex].GeosetId == 1702);
 var deathKnightEyeMaterial = eyeGeometry.MaterialUnits.Single(material => eyeGeometry.Submeshes[material.SubmeshIndex].GeosetId == 1703);
-if (eyeBinding.NormalEyeMaterials != 1 || eyeBinding.DeathKnightEyeMaterials != 1 || eyeBinding.OriginalTextureDefinitions != 1 || eyeBinding.ResultTextureDefinitions != 3 ||
-    eyeBinding.OriginalTextureLookups != 2 || eyeBinding.ResultTextureLookups != 5 || normalEyeMaterial.TextureStages.Count != 2 || normalEyeMaterial.TextureStages[1].TextureDefinitionIndex != 0 ||
-    eyeGeometry.TextureSlots[normalEyeMaterial.TextureDefinitionIndex].EmbeddedPath != fixtureNormalEyes || eyeGeometry.TextureSlots[deathKnightEyeMaterial.TextureDefinitionIndex].EmbeddedPath != fixtureDeathKnightEyes ||
+if (eyeBinding.NormalEyeMaterials != 1 || eyeBinding.DeathKnightEyeMaterials != 1 || eyeBinding.OriginalTextureDefinitions != 1 || eyeBinding.ResultTextureDefinitions != 2 ||
+    eyeBinding.OriginalTextureLookups != 2 || eyeBinding.ResultTextureLookups != 3 || normalEyeMaterial.TextureStages.Count != 2 || normalEyeMaterial.TextureStages[1].TextureDefinitionIndex != 0 ||
+    eyeGeometry.TextureSlots[normalEyeMaterial.TextureDefinitionIndex].EmbeddedPath != embeddedFixturePath || eyeGeometry.TextureSlots[deathKnightEyeMaterial.TextureDefinitionIndex].EmbeddedPath != fixtureDeathKnightEyes ||
+    !eyeSkinSourceBytes.AsSpan(216, 24).SequenceEqual(File.ReadAllBytes(eyeOutputSkin).AsSpan(216, 24)) ||
     !File.ReadAllBytes(eyeInputModel).SequenceEqual(eyeModelSourceBytes) || !File.ReadAllBytes(eyeInputSkin).SequenceEqual(eyeSkinSourceBytes))
-    throw new InvalidOperationException("Character eye binding did not preserve geometry/source files, retain secondary stages, or bind normal and Death Knight eye geosets to distinct explicit textures.");
+    throw new InvalidOperationException("Character eye binding did not preserve the native normal-eye material, retain secondary stages, or bind only the Death Knight eye geoset explicitly.");
 var materialAuditFixture = Path.Combine(assetFixture, "material-audit"); Directory.CreateDirectory(materialAuditFixture);
 File.WriteAllBytes(Path.Combine(materialAuditFixture, "supported.m2"), geometryBytes); var supportedAuditSkin = geometrySkin.ToArray(); BitConverter.GetBytes((ushort)0x8004).CopyTo(supportedAuditSkin, 218); File.WriteAllBytes(Path.Combine(materialAuditFixture, "supported00.skin"), supportedAuditSkin);
 File.WriteAllBytes(Path.Combine(materialAuditFixture, "unsupported.m2"), geometryBytes); var unsupportedAuditSkin = geometrySkin.ToArray(); BitConverter.GetBytes((ushort)0x8008).CopyTo(unsupportedAuditSkin, 218); File.WriteAllBytes(Path.Combine(materialAuditFixture, "unsupported00.skin"), unsupportedAuditSkin);
@@ -1584,13 +1585,15 @@ try
     WriteRawWdbc(paletteInput, 10,
     [
         [1, 4, 0, 0, 0, 0, 0, 17, 0, 0],
-        [2, 4, 0, 0, 0, 0, 0, 5, 0, 9],
-        [3, 4, 0, 1, 0, 0, 0, 5, 0, 9],
-        [4, 4, 0, 4, 0, 0, 0, 5, 0, 9],
-        [5, 4, 0, 4, 0, 0, 0, 17, 0, 9],
-        [6, 11, 1, 0, 0, 0, 0, 5, 0, 12],
-        [7, 11, 1, 1, 0, 0, 0, 5, 0, 12],
-        [8, 10, 0, 0, 0, 0, 0, 5, 0, 7]
+        [2, 4, 0, 0, 0, 0, 0, 4, 0, 9],
+        [3, 4, 0, 1, 0, 0, 0, 4, 0, 9],
+        [4, 4, 0, 4, 0, 0, 0, 20, 0, 9],
+        [5, 4, 0, 3, 0, 0, 0, 4, 0, 9],
+        [6, 4, 0, 1, 0, 0, 0, 1, 0, 9],
+        [7, 11, 1, 0, 0, 0, 0, 4, 0, 12],
+        [8, 11, 1, 1, 0, 0, 0, 4, 0, 12],
+        [9, 10, 0, 0, 0, 0, 0, 4, 0, 7],
+        [10, 4, 0, 0, 0, 0, 0, 5, 0, 10]
     ]);
     var paletteSourceBytes = File.ReadAllBytes(paletteInput);
     var paletteCompatibility = CharSectionsDeathKnightPaletteCompatibilityService.Expose(paletteInput, paletteOutput, [4, 11]);
@@ -1607,10 +1610,11 @@ try
     bool Has(uint race, uint sex, uint section, uint flags, uint variation, uint color) => Enumerable.Range(0, palette.RowCount).Any(row =>
         palette.GetRaw(row, paletteColumns[1]) == race && palette.GetRaw(row, paletteColumns[2]) == sex && palette.GetRaw(row, paletteColumns[3]) == section &&
         palette.GetRaw(row, paletteColumns[7]) == flags && palette.GetRaw(row, paletteColumns[8]) == variation && palette.GetRaw(row, paletteColumns[9]) == color);
-    if (paletteCompatibility.DeathKnightPaletteSurfaces != 2 || paletteCompatibility.CandidateRows != 5 || paletteCompatibility.ExistingNormalRows != 1 || paletteCompatibility.AppendedRows != 4 || paletteCompatibility.ResultRows != 12 ||
-        paletteSecondPass.AppendedRows != 0 || paletteSecondPass.ExistingNormalRows != 5 || paletteSecondPass.ResultRows != 12 ||
-        !Has(4, 0, 0, 5, 0, 9) || !Has(4, 0, 0, 17, 0, 9) || !Has(4, 0, 1, 1, 0, 9) || !Has(4, 0, 4, 17, 0, 9) ||
-        !Has(11, 1, 0, 5, 0, 12) || !Has(11, 1, 0, 17, 0, 12) || !Has(11, 1, 1, 1, 0, 12) || Has(10, 0, 0, 17, 0, 7) ||
+    if (paletteCompatibility.DeathKnightPaletteSurfaces != 2 || paletteCompatibility.CandidateRows != 5 || paletteCompatibility.ExistingNormalRows != 1 || paletteCompatibility.AppendedRows != 4 || paletteCompatibility.ResultRows != 14 ||
+        paletteSecondPass.AppendedRows != 0 || paletteSecondPass.ExistingNormalRows != 5 || paletteSecondPass.ResultRows != 14 ||
+        !Has(4, 0, 0, 4, 0, 9) || !Has(4, 0, 0, 17, 0, 9) || !Has(4, 0, 1, 1, 0, 9) || !Has(4, 0, 4, 17, 0, 9) ||
+        !Has(4, 0, 3, 4, 0, 9) || Has(4, 0, 3, 17, 0, 9) || !Has(11, 1, 0, 4, 0, 12) || !Has(11, 1, 0, 17, 0, 12) ||
+        !Has(11, 1, 1, 1, 0, 12) || Has(10, 0, 0, 17, 0, 7) || Has(4, 0, 0, 17, 0, 10) ||
         !File.ReadAllBytes(paletteInput).SequenceEqual(paletteSourceBytes))
         throw new InvalidOperationException("Death Knight palette exposure did not preserve DK rows, append only missing normal selectors for requested palette surfaces, or remain idempotent.");
 }

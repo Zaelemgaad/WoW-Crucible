@@ -9,7 +9,6 @@ public sealed record M2CharacterEyeBindingResult(
     string InputSkinPath,
     string OutputModelPath,
     string OutputSkinPath,
-    string NormalEyeTexture,
     string DeathKnightEyeTexture,
     int OriginalTextureDefinitions,
     int ResultTextureDefinitions,
@@ -17,7 +16,6 @@ public sealed record M2CharacterEyeBindingResult(
     int ResultTextureLookups,
     int NormalEyeMaterials,
     int DeathKnightEyeMaterials,
-    int NormalEyeTextureDefinition,
     int DeathKnightEyeTextureDefinition,
     string OutputModelSha256,
     string OutputSkinSha256);
@@ -45,7 +43,6 @@ public static class M2CharacterEyeBindingService
         string inputSkinPath,
         string outputModelPath,
         string outputSkinPath,
-        string normalEyeTexture,
         string deathKnightEyeTexture,
         bool overwrite = false)
     {
@@ -62,10 +59,7 @@ public static class M2CharacterEyeBindingService
         if (!overwrite && (File.Exists(outputModel) || File.Exists(outputSkin)))
             throw new IOException("An eye-binding output already exists. Use --overwrite explicitly.");
 
-        normalEyeTexture = NormalizeTexturePath(normalEyeTexture, nameof(normalEyeTexture));
         deathKnightEyeTexture = NormalizeTexturePath(deathKnightEyeTexture, nameof(deathKnightEyeTexture));
-        if (normalEyeTexture.Equals(deathKnightEyeTexture, StringComparison.OrdinalIgnoreCase))
-            throw new ArgumentException("Normal and Death Knight eye textures must be different.");
 
         var sourceModel = File.ReadAllBytes(inputModel);
         var sourceSkin = File.ReadAllBytes(inputSkin);
@@ -75,7 +69,6 @@ public static class M2CharacterEyeBindingService
         var definitions = ReadTextureDefinitions(sourceModel);
         var originalDefinitionCount = definitions.Count;
         var model = sourceModel.ToList();
-        var normalDefinition = FindOrAppendDefinition(model, definitions, normalEyeTexture);
         var deathKnightDefinition = FindOrAppendDefinition(model, definitions, deathKnightEyeTexture);
 
         Align(model, 16);
@@ -94,7 +87,6 @@ public static class M2CharacterEyeBindingService
         var (normalMaterials, deathKnightMaterials) = PatchMaterials(
             patchedSkin,
             textureLookups,
-            normalDefinition,
             deathKnightDefinition);
 
         Align(model, 2);
@@ -117,7 +109,7 @@ public static class M2CharacterEyeBindingService
         {
             WriteThrough(temporaryModel, patchedModel);
             WriteThrough(temporarySkin, patchedSkin);
-            VerifyBindings(temporaryModel, temporarySkin, normalEyeTexture, deathKnightEyeTexture);
+            VerifyBindings(temporaryModel, temporarySkin, deathKnightEyeTexture);
             File.Move(temporaryModel, outputModel, overwrite);
             File.Move(temporarySkin, outputSkin, overwrite);
         }
@@ -132,7 +124,6 @@ public static class M2CharacterEyeBindingService
             inputSkin,
             outputModel,
             outputSkin,
-            normalEyeTexture,
             deathKnightEyeTexture,
             originalDefinitionCount,
             definitions.Count,
@@ -140,7 +131,6 @@ public static class M2CharacterEyeBindingService
             textureLookups.Count,
             normalMaterials,
             deathKnightMaterials,
-            normalDefinition,
             deathKnightDefinition,
             Sha256(outputModel),
             Sha256(outputSkin));
@@ -207,7 +197,6 @@ public static class M2CharacterEyeBindingService
     private static (int Normal, int DeathKnight) PatchMaterials(
         byte[] skin,
         List<ushort> lookups,
-        int normalDefinition,
         int deathKnightDefinition)
     {
         var submeshCount = CheckedCount(ReadUInt32(skin, SubmeshCountOffset), 131_072, "SKIN submesh");
@@ -240,8 +229,14 @@ public static class M2CharacterEyeBindingService
                 throw new InvalidDataException(
                     $"Eye material {index:N0} references lookup range {originalStart:N0}+{stageCount:N0}, but only {lookups.Count:N0} entries exist.");
 
+            if (geoset == NormalEyeGeoset)
+            {
+                normal++;
+                continue;
+            }
+
             var sequence = lookups.Skip(originalStart).Take(stageCount).ToArray();
-            sequence[0] = checked((ushort)(geoset == NormalEyeGeoset ? normalDefinition : deathKnightDefinition));
+            sequence[0] = checked((ushort)deathKnightDefinition);
             var key = string.Join(',', sequence);
             if (!sequenceLookup.TryGetValue(key, out var newStart))
             {
@@ -249,7 +244,7 @@ public static class M2CharacterEyeBindingService
                 sequenceLookup.Add(key, newStart);
             }
             WriteUInt16(skin, item + 16, newStart);
-            if (geoset == NormalEyeGeoset) normal++; else deathKnight++;
+            deathKnight++;
         }
 
         if (normal == 0 || deathKnight == 0)
@@ -279,10 +274,9 @@ public static class M2CharacterEyeBindingService
         return result;
     }
 
-    private static void VerifyBindings(string modelPath, string skinPath, string normalPath, string deathKnightPath)
+    private static void VerifyBindings(string modelPath, string skinPath, string deathKnightPath)
     {
         var geometry = M2PreviewGeometryService.Load(modelPath, skinPath, M2PreviewVisibilityMode.AllGeosets);
-        Verify(NormalEyeGeoset, normalPath);
         Verify(DeathKnightEyeGeoset, deathKnightPath);
 
         void Verify(ushort geoset, string expectedPath)

@@ -1723,25 +1723,22 @@ static int Asset(string[] args, CancellationToken cancellationToken)
     }
     if (args is ["character-eye-bind", var eyeInputModel, var eyeInputSkin, var eyeOutputModel, var eyeOutputSkin, .. var eyeOptions])
     {
-        var normal = Option(eyeOptions, "--normal=");
         var deathKnight = Option(eyeOptions, "--death-knight=");
         var overwrite = eyeOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase);
         var json = eyeOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
         var unknown = eyeOptions.Where(option =>
-            !option.StartsWith("--normal=", StringComparison.OrdinalIgnoreCase) &&
             !option.StartsWith("--death-knight=", StringComparison.OrdinalIgnoreCase) &&
             !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) &&
             !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) &&
             !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown character-eye-bind option: {unknown[0]}");
-        if (normal is null || deathKnight is null)
-            return Fail("character-eye-bind requires --normal=Character\\...\\eyes.blp and --death-knight=Character\\...\\deathKnightEyeGlow.blp.");
+        if (deathKnight is null)
+            return Fail("character-eye-bind requires --death-knight=Character\\...\\deathKnightEyeGlow.blp.");
         var result = M2CharacterEyeBindingService.Apply(
             eyeInputModel,
             eyeInputSkin,
             eyeOutputModel,
             eyeOutputSkin,
-            normal,
             deathKnight,
             overwrite);
         if (json)
@@ -1858,7 +1855,7 @@ Usage:
   wowcrucible asset creature-appearance-patch-manifest <patch-plan.json> <manifest.json> [--mpq=patch-name.MPQ] [--overwrite]
   wowcrucible asset creature-appearances <model-client-path> [--dbc=folder] [--schema=file] [--library=folder --provenance=name] [--format=text|json]
   wowcrucible asset preview-info <wrath-model.m2> [--skin=file.skin] [--dbc=folder] [--hair=N] [--facial-hair=N] [--animation=sequence-index] [--time=milliseconds] [--base-body|--naked|--groups=group:variant,...|--all-geosets]
-  wowcrucible asset character-eye-bind <input.m2> <input00.skin> <output.m2> <output00.skin> --normal=Character\...\eyes.blp --death-knight=Character\...\deathKnightEyeGlow.blp [--overwrite] [--format=text|json]
+  wowcrucible asset character-eye-bind <input.m2> <input00.skin> <output.m2> <output00.skin> --death-knight=Character\...\deathKnightEyeGlow.blp [--overwrite] [--format=text|json]
   wowcrucible asset model-export <wrath-model.m2> <output.obj> [--skin=file.skin] [--animation=sequence-index --time=milliseconds] [--texture=slot:file.blp]... [--base-body|--naked|--groups=group:variant,...|--all-geosets] [--overwrite]
   wowcrucible asset wmo-preview-info <root-or-group.wmo> [--groups] [--content-root=folder] [--format=text|json]
   wowcrucible asset path-candidates <processed-library> <client-path> [--preferred=provenance] [--format=text|json]
