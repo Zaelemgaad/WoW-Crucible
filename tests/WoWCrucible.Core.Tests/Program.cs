@@ -1290,6 +1290,26 @@ BitConverter.GetBytes((ushort)2).CopyTo(geometrySkin, 120); BitConverter.GetByte
 BitConverter.GetBytes((ushort)702).CopyTo(geometrySkin, 168); BitConverter.GetBytes((ushort)3).CopyTo(geometrySkin, 174); BitConverter.GetBytes((ushort)6).CopyTo(geometrySkin, 176); BitConverter.GetBytes((ushort)3).CopyTo(geometrySkin, 178);
 geometrySkin[216] = 16; BitConverter.GetBytes((ushort)0).CopyTo(geometrySkin, 220); BitConverter.GetBytes((ushort)0).CopyTo(geometrySkin, 222); BitConverter.GetBytes((short)-1).CopyTo(geometrySkin, 224); BitConverter.GetBytes((ushort)2).CopyTo(geometrySkin, 230); BitConverter.GetBytes((ushort)0).CopyTo(geometrySkin, 232);
 File.WriteAllBytes(Path.Combine(assetFixture, "geometry00.skin"), geometrySkin);
+var eyeBindingRoot = Path.Combine(assetFixture, "eye-binding"); Directory.CreateDirectory(eyeBindingRoot);
+var eyeInputModel = Path.Combine(eyeBindingRoot, "fixture.m2"); var eyeInputSkin = Path.Combine(eyeBindingRoot, "fixture00.skin");
+var eyeOutputModel = Path.Combine(eyeBindingRoot, "fixture-patched.m2"); var eyeOutputSkin = Path.Combine(eyeBindingRoot, "fixture-patched00.skin");
+File.WriteAllBytes(eyeInputModel, geometryBytes);
+var eyeSkin = new byte[264]; geometrySkin.CopyTo(eyeSkin, 0);
+BitConverter.GetBytes((ushort)1702).CopyTo(eyeSkin, 72); BitConverter.GetBytes((ushort)1703).CopyTo(eyeSkin, 120);
+BitConverter.GetBytes((uint)2).CopyTo(eyeSkin, 36);
+eyeSkin[240] = 16; BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 242); BitConverter.GetBytes((ushort)1).CopyTo(eyeSkin, 244); BitConverter.GetBytes((ushort)1).CopyTo(eyeSkin, 246); BitConverter.GetBytes((short)-1).CopyTo(eyeSkin, 248); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 250); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 252); BitConverter.GetBytes((ushort)1).CopyTo(eyeSkin, 254); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 256); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 258); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 260); BitConverter.GetBytes((ushort)0).CopyTo(eyeSkin, 262);
+File.WriteAllBytes(eyeInputSkin, eyeSkin);
+var eyeModelSourceBytes = File.ReadAllBytes(eyeInputModel); var eyeSkinSourceBytes = File.ReadAllBytes(eyeInputSkin);
+const string fixtureNormalEyes = @"Character\NightElf\Male\NightElfMaleEyeGlow.blp"; const string fixtureDeathKnightEyes = @"Character\NightElf\Male\deathKnightEyeGlow.blp";
+var eyeBinding = M2CharacterEyeBindingService.Apply(eyeInputModel, eyeInputSkin, eyeOutputModel, eyeOutputSkin, fixtureNormalEyes, fixtureDeathKnightEyes);
+var eyeGeometry = M2PreviewGeometryService.Load(eyeOutputModel, eyeOutputSkin, M2PreviewVisibilityMode.AllGeosets);
+var normalEyeMaterial = eyeGeometry.MaterialUnits.Single(material => eyeGeometry.Submeshes[material.SubmeshIndex].GeosetId == 1702);
+var deathKnightEyeMaterial = eyeGeometry.MaterialUnits.Single(material => eyeGeometry.Submeshes[material.SubmeshIndex].GeosetId == 1703);
+if (eyeBinding.NormalEyeMaterials != 1 || eyeBinding.DeathKnightEyeMaterials != 1 || eyeBinding.OriginalTextureDefinitions != 1 || eyeBinding.ResultTextureDefinitions != 3 ||
+    eyeBinding.OriginalTextureLookups != 2 || eyeBinding.ResultTextureLookups != 5 || normalEyeMaterial.TextureStages.Count != 2 || normalEyeMaterial.TextureStages[1].TextureDefinitionIndex != 0 ||
+    eyeGeometry.TextureSlots[normalEyeMaterial.TextureDefinitionIndex].EmbeddedPath != fixtureNormalEyes || eyeGeometry.TextureSlots[deathKnightEyeMaterial.TextureDefinitionIndex].EmbeddedPath != fixtureDeathKnightEyes ||
+    !File.ReadAllBytes(eyeInputModel).SequenceEqual(eyeModelSourceBytes) || !File.ReadAllBytes(eyeInputSkin).SequenceEqual(eyeSkinSourceBytes))
+    throw new InvalidOperationException("Character eye binding did not preserve geometry/source files, retain secondary stages, or bind normal and Death Knight eye geosets to distinct explicit textures.");
 var materialAuditFixture = Path.Combine(assetFixture, "material-audit"); Directory.CreateDirectory(materialAuditFixture);
 File.WriteAllBytes(Path.Combine(materialAuditFixture, "supported.m2"), geometryBytes); var supportedAuditSkin = geometrySkin.ToArray(); BitConverter.GetBytes((ushort)0x8004).CopyTo(supportedAuditSkin, 218); File.WriteAllBytes(Path.Combine(materialAuditFixture, "supported00.skin"), supportedAuditSkin);
 File.WriteAllBytes(Path.Combine(materialAuditFixture, "unsupported.m2"), geometryBytes); var unsupportedAuditSkin = geometrySkin.ToArray(); BitConverter.GetBytes((ushort)0x8008).CopyTo(unsupportedAuditSkin, 218); File.WriteAllBytes(Path.Combine(materialAuditFixture, "unsupported00.skin"), unsupportedAuditSkin);
@@ -1554,6 +1574,47 @@ try
         throw new InvalidOperationException("HD CharSections promotion did not preserve ordinary selector flags, overlay same-ID textures, deduplicate an alternate physical ID, and append one genuinely missing selector.");
 }
 finally { Directory.Delete(hdCompatibilityRoot, true); }
+var deathKnightPaletteRoot = Path.Combine(Path.GetTempPath(), $"crucible-charsections-dk-palettes-{Guid.NewGuid():N}");
+Directory.CreateDirectory(deathKnightPaletteRoot);
+try
+{
+    var paletteInput = Path.Combine(deathKnightPaletteRoot, "CharSections-source.dbc");
+    var paletteOutput = Path.Combine(deathKnightPaletteRoot, "CharSections-compatible.dbc");
+    var paletteSecondOutput = Path.Combine(deathKnightPaletteRoot, "CharSections-idempotent.dbc");
+    WriteRawWdbc(paletteInput, 10,
+    [
+        [1, 4, 0, 0, 0, 0, 0, 17, 0, 0],
+        [2, 4, 0, 0, 0, 0, 0, 5, 0, 9],
+        [3, 4, 0, 1, 0, 0, 0, 5, 0, 9],
+        [4, 4, 0, 4, 0, 0, 0, 5, 0, 9],
+        [5, 4, 0, 4, 0, 0, 0, 17, 0, 9],
+        [6, 11, 1, 0, 0, 0, 0, 5, 0, 12],
+        [7, 11, 1, 1, 0, 0, 0, 5, 0, 12],
+        [8, 10, 0, 0, 0, 0, 0, 5, 0, 7]
+    ]);
+    var paletteSourceBytes = File.ReadAllBytes(paletteInput);
+    var paletteCompatibility = CharSectionsDeathKnightPaletteCompatibilityService.Expose(paletteInput, paletteOutput, [4, 11]);
+    var paletteSecondPass = CharSectionsDeathKnightPaletteCompatibilityService.Expose(paletteOutput, paletteSecondOutput, [4, 11]);
+    var palette = WdbcFile.Load(paletteOutput);
+    var paletteColumns = new[]
+    {
+        new DbcColumn(0, 0, 4, "ID", DbcValueType.UInt32, true), new DbcColumn(1, 4, 4, "RaceID", DbcValueType.UInt32),
+        new DbcColumn(2, 8, 4, "SexID", DbcValueType.UInt32), new DbcColumn(3, 12, 4, "BaseSection", DbcValueType.UInt32),
+        new DbcColumn(4, 16, 4, "TextureName[0]", DbcValueType.StringOffset), new DbcColumn(5, 20, 4, "TextureName[1]", DbcValueType.StringOffset),
+        new DbcColumn(6, 24, 4, "TextureName[2]", DbcValueType.StringOffset), new DbcColumn(7, 28, 4, "Flags", DbcValueType.UInt32),
+        new DbcColumn(8, 32, 4, "VariationIndex", DbcValueType.UInt32), new DbcColumn(9, 36, 4, "ColorIndex", DbcValueType.UInt32)
+    };
+    bool Has(uint race, uint sex, uint section, uint flags, uint variation, uint color) => Enumerable.Range(0, palette.RowCount).Any(row =>
+        palette.GetRaw(row, paletteColumns[1]) == race && palette.GetRaw(row, paletteColumns[2]) == sex && palette.GetRaw(row, paletteColumns[3]) == section &&
+        palette.GetRaw(row, paletteColumns[7]) == flags && palette.GetRaw(row, paletteColumns[8]) == variation && palette.GetRaw(row, paletteColumns[9]) == color);
+    if (paletteCompatibility.DeathKnightPaletteSurfaces != 2 || paletteCompatibility.CandidateRows != 5 || paletteCompatibility.ExistingNormalRows != 1 || paletteCompatibility.AppendedRows != 4 || paletteCompatibility.ResultRows != 12 ||
+        paletteSecondPass.AppendedRows != 0 || paletteSecondPass.ExistingNormalRows != 5 || paletteSecondPass.ResultRows != 12 ||
+        !Has(4, 0, 0, 5, 0, 9) || !Has(4, 0, 0, 17, 0, 9) || !Has(4, 0, 1, 1, 0, 9) || !Has(4, 0, 4, 17, 0, 9) ||
+        !Has(11, 1, 0, 5, 0, 12) || !Has(11, 1, 0, 17, 0, 12) || !Has(11, 1, 1, 1, 0, 12) || Has(10, 0, 0, 17, 0, 7) ||
+        !File.ReadAllBytes(paletteInput).SequenceEqual(paletteSourceBytes))
+        throw new InvalidOperationException("Death Knight palette exposure did not preserve DK rows, append only missing normal selectors for requested palette surfaces, or remain idempotent.");
+}
+finally { Directory.Delete(deathKnightPaletteRoot, true); }
 var facialCompatibilityRoot = Path.Combine(Path.GetTempPath(), $"crucible-hd-facial-styles-{Guid.NewGuid():N}");
 Directory.CreateDirectory(facialCompatibilityRoot);
 try
