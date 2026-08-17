@@ -1508,6 +1508,47 @@ if (bloodElfSkins.Count < 10 || bloodElfSkins[0].ColorIndex != 0 || !bloodElfSki
 var bloodElfSections = CharacterAppearanceService.LoadSections(Path.Combine(args[1], "CharSections.dbc"), bloodElfFemale);
 if (!bloodElfSections.Any(section => section.Kind == CharacterSectionKind.Face && section.Texture0 is not null && section.Texture1 is not null) || !bloodElfSections.Any(section => section.Kind == CharacterSectionKind.Hair && section.Texture1 is not null && section.Texture2 is not null) || !bloodElfSections.Any(section => section.Kind == CharacterSectionKind.Underwear))
     throw new InvalidOperationException("CharSections full appearance discovery omitted face, hair, or underwear component layers.");
+var hdCompatibilityRoot = Path.Combine(Path.GetTempPath(), $"crucible-charsections-hd-{Guid.NewGuid():N}");
+Directory.CreateDirectory(hdCompatibilityRoot);
+try
+{
+    var primaryCharSections = Path.Combine(args[1], "CharSections.dbc");
+    var companionCharSections = Path.Combine(hdCompatibilityRoot, "HDCharSections.dbc");
+    var promotedCharSections = Path.Combine(hdCompatibilityRoot, "CharSections.dbc");
+    File.Copy(primaryCharSections, companionCharSections);
+    var columns = new[]
+    {
+        new DbcColumn(0, 0, 4, "ID", DbcValueType.UInt32, true), new DbcColumn(1, 4, 4, "RaceID", DbcValueType.UInt32),
+        new DbcColumn(2, 8, 4, "SexID", DbcValueType.UInt32), new DbcColumn(3, 12, 4, "BaseSection", DbcValueType.UInt32),
+        new DbcColumn(4, 16, 4, "TextureName[0]", DbcValueType.StringOffset), new DbcColumn(5, 20, 4, "TextureName[1]", DbcValueType.StringOffset),
+        new DbcColumn(6, 24, 4, "TextureName[2]", DbcValueType.StringOffset), new DbcColumn(7, 28, 4, "Flags", DbcValueType.UInt32),
+        new DbcColumn(8, 32, 4, "VariationIndex", DbcValueType.UInt32), new DbcColumn(9, 36, 4, "ColorIndex", DbcValueType.UInt32)
+    };
+    var companion = WdbcFile.Load(companionCharSections);
+    var sourceRow = Enumerable.Range(0, companion.RowCount).First(row =>
+        companion.GetRaw(row, columns[0]) != 0 && string.IsNullOrEmpty((string)companion.GetDisplayValue(row, columns[5])));
+    var sourceId = companion.GetRaw(sourceRow, columns[0]);
+    const string promotedExtra = @"Character\Fixture\PromotedSkin_Extra.blp";
+    companion.SetDisplayValue(sourceRow, columns[5], promotedExtra);
+    var duplicateId = companion.NextId(columns[0]);
+    _ = companion.CloneRowWithId(sourceRow, columns[0], duplicateId);
+    var appendedId = checked(duplicateId + 1);
+    var appendedRow = companion.CloneRowWithId(sourceRow, columns[0], appendedId);
+    companion.SetRaw(appendedRow, columns[9], uint.MaxValue - 100);
+    companion.SetDisplayValue(appendedRow, columns[4], @"Character\Fixture\AppendedSkin.blp");
+    companion.SetDisplayValue(appendedRow, columns[5], @"Character\Fixture\AppendedSkin_Extra.blp");
+    companion.Save(companionCharSections, false);
+
+    var compatibility = CharSectionsHdCompatibilityService.Promote(primaryCharSections, companionCharSections, promotedCharSections);
+    var promoted = WdbcFile.Load(promotedCharSections);
+    var byId = Enumerable.Range(0, promoted.RowCount).ToDictionary(row => promoted.GetRaw(row, columns[0]));
+    if (compatibility.MatchedById != companion.RowCount - 2 || compatibility.MatchedBySelector != 1 || compatibility.AppendedRows != 1 ||
+        compatibility.ResultRows != WdbcFile.Load(primaryCharSections).RowCount + 1 || !byId.ContainsKey(sourceId) || byId.ContainsKey(duplicateId) || !byId.ContainsKey(appendedId) ||
+        (string)promoted.GetDisplayValue(byId[sourceId], columns[5]) != promotedExtra ||
+        (string)promoted.GetDisplayValue(byId[appendedId], columns[4]) != @"Character\Fixture\AppendedSkin.blp")
+        throw new InvalidOperationException("HD CharSections promotion did not overlay same-ID bindings, deduplicate an alternate physical ID, and append one genuinely missing selector.");
+}
+finally { Directory.Delete(hdCompatibilityRoot, true); }
 var appearanceLibrary = Path.Combine(Path.GetTempPath(), $"crucible-appearance-library-{Guid.NewGuid():N}"); var appearanceContent = Path.Combine(appearanceLibrary,"Archives","Content");
 var selectedSkinRecord=bloodElfSections.First(section=>section.Kind==CharacterSectionKind.Skin&&section.Texture0 is not null);var selectedFaceRecord=bloodElfSections.First(section=>section.Kind==CharacterSectionKind.Face&&section.ColorIndex==selectedSkinRecord.ColorIndex);var selectedFacialRecord=bloodElfSections.FirstOrDefault(section=>section.Kind==CharacterSectionKind.FacialHair);var selectedHairRecord=bloodElfSections.First(section=>section.Kind==CharacterSectionKind.Hair);var selectedUnderwearRecord=bloodElfSections.FirstOrDefault(section=>section.Kind==CharacterSectionKind.Underwear&&section.ColorIndex==selectedSkinRecord.ColorIndex);
 var appearancePixels=new byte[256*256*4];for(var offset=0;offset<appearancePixels.Length;offset+=4){appearancePixels[offset]=64;appearancePixels[offset+1]=96;appearancePixels[offset+2]=128;appearancePixels[offset+3]=255;}
