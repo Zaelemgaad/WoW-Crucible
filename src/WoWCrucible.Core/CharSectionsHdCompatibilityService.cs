@@ -80,7 +80,7 @@ public static class CharSectionsHdCompatibilityService
                     $"Physical CharSections ID {id:N0} identifies {Describe(primaryIdentity)} in the primary table " +
                     $"but {Describe(companionIdentity)} in HDCharSections. This is a real ID collision and cannot be promoted safely.");
 
-            changedCells += CopyRow(companion, companionRow, target, targetRow, includeId: false, changedRows);
+            changedCells += CopyTextureBindings(companion, companionRow, target, targetRow, changedRows);
             matchedById++;
         }
 
@@ -98,13 +98,13 @@ public static class CharSectionsHdCompatibilityService
                         "Resolve the pre-existing ambiguity before promotion.");
                 }
 
-                changedCells += CopyRow(companion, companionRow, target, matches[0], includeId: false, changedRows);
+                changedCells += CopyTextureBindings(companion, companionRow, target, matches[0], changedRows);
                 matchedBySelector++;
                 continue;
             }
 
             var targetRow = target.AddBlankRow();
-            changedCells += CopyRow(companion, companionRow, target, targetRow, includeId: true, changedRows);
+            changedCells += CopyEntireRow(companion, companionRow, target, targetRow, changedRows);
             appended++;
             targetById.Add(target.GetRaw(targetRow, Columns[0]), targetRow);
             targetBySelector[selector] = [targetRow];
@@ -182,18 +182,33 @@ public static class CharSectionsHdCompatibilityService
         file.GetRaw(row, Columns[8]),
         file.GetRaw(row, Columns[9]));
 
-    private static int CopyRow(
+    private static int CopyTextureBindings(
         WdbcFile source,
         int sourceRow,
         WdbcFile target,
         int targetRow,
-        bool includeId,
+        ISet<int> changedRows) =>
+        CopyColumns(source, sourceRow, target, targetRow, Columns.Skip(4).Take(3), changedRows);
+
+    private static int CopyEntireRow(
+        WdbcFile source,
+        int sourceRow,
+        WdbcFile target,
+        int targetRow,
+        ISet<int> changedRows) =>
+        CopyColumns(source, sourceRow, target, targetRow, Columns, changedRows);
+
+    private static int CopyColumns(
+        WdbcFile source,
+        int sourceRow,
+        WdbcFile target,
+        int targetRow,
+        IEnumerable<DbcColumn> columns,
         ISet<int> changedRows)
     {
         var changed = 0;
-        for (var index = includeId ? 0 : 1; index < Columns.Length; index++)
+        foreach (var column in columns)
         {
-            var column = Columns[index];
             if (column.Type == DbcValueType.StringOffset)
             {
                 var sourceValue = Convert.ToString(source.GetDisplayValue(sourceRow, column)) ?? string.Empty;

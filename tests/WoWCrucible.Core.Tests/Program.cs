@@ -1528,10 +1528,14 @@ try
     var sourceRow = Enumerable.Range(0, companion.RowCount).First(row =>
         companion.GetRaw(row, columns[0]) != 0 && string.IsNullOrEmpty((string)companion.GetDisplayValue(row, columns[5])));
     var sourceId = companion.GetRaw(sourceRow, columns[0]);
+    var primaryFlags = companion.GetRaw(sourceRow, columns[7]);
+    var companionFlags = primaryFlags ^ 1u;
     const string promotedExtra = @"Character\Fixture\PromotedSkin_Extra.blp";
     companion.SetDisplayValue(sourceRow, columns[5], promotedExtra);
+    companion.SetRaw(sourceRow, columns[7], companionFlags);
     var duplicateId = companion.NextId(columns[0]);
-    _ = companion.CloneRowWithId(sourceRow, columns[0], duplicateId);
+    var duplicateRow = companion.CloneRowWithId(sourceRow, columns[0], duplicateId);
+    companion.SetRaw(duplicateRow, columns[7], primaryFlags);
     var appendedId = checked(duplicateId + 1);
     var appendedRow = companion.CloneRowWithId(sourceRow, columns[0], appendedId);
     companion.SetRaw(appendedRow, columns[9], uint.MaxValue - 100);
@@ -1544,11 +1548,46 @@ try
     var byId = Enumerable.Range(0, promoted.RowCount).ToDictionary(row => promoted.GetRaw(row, columns[0]));
     if (compatibility.MatchedById != companion.RowCount - 2 || compatibility.MatchedBySelector != 1 || compatibility.AppendedRows != 1 ||
         compatibility.ResultRows != WdbcFile.Load(primaryCharSections).RowCount + 1 || !byId.ContainsKey(sourceId) || byId.ContainsKey(duplicateId) || !byId.ContainsKey(appendedId) ||
+        promoted.GetRaw(byId[sourceId], columns[7]) != primaryFlags || promoted.GetRaw(byId[appendedId], columns[7]) != companionFlags ||
         (string)promoted.GetDisplayValue(byId[sourceId], columns[5]) != promotedExtra ||
         (string)promoted.GetDisplayValue(byId[appendedId], columns[4]) != @"Character\Fixture\AppendedSkin.blp")
-        throw new InvalidOperationException("HD CharSections promotion did not overlay same-ID bindings, deduplicate an alternate physical ID, and append one genuinely missing selector.");
+        throw new InvalidOperationException("HD CharSections promotion did not preserve ordinary selector flags, overlay same-ID textures, deduplicate an alternate physical ID, and append one genuinely missing selector.");
 }
 finally { Directory.Delete(hdCompatibilityRoot, true); }
+var facialCompatibilityRoot = Path.Combine(Path.GetTempPath(), $"crucible-hd-facial-styles-{Guid.NewGuid():N}");
+Directory.CreateDirectory(facialCompatibilityRoot);
+try
+{
+    var ordinaryFacialStyles = Path.Combine(facialCompatibilityRoot, "CharacterFacialHairStyles.dbc");
+    var hdFacialStyles = Path.Combine(facialCompatibilityRoot, "HDCharacterFacialHairStyles.dbc");
+    var promotedFacialStyles = Path.Combine(facialCompatibilityRoot, "promoted.dbc");
+    WriteRawWdbc(ordinaryFacialStyles, 8,
+    [
+        [4, 1, 0, 0, 0, 0, 0, 2],
+        [4, 1, 1, 0, 0, 0, 0, 2],
+        [40, 1, 0, 1, 0, 0, 0, 0],
+        [40, 1, 1, 2, 0, 0, 0, 0]
+    ]);
+    WriteRawWdbc(hdFacialStyles, 9,
+    [
+        [100, 4, 1, 0, 0, 0, 0, 0, 2],
+        [101, 40, 1, 0, 9, 0, 0, 0, 0]
+    ]);
+
+    var compatibility = HdFacialStyleCompatibilityService.Promote(ordinaryFacialStyles, hdFacialStyles, promotedFacialStyles);
+    var promoted = WdbcFile.Load(promotedFacialStyles);
+    var raceColumn = new DbcColumn(1, 4, 4, "RaceID", DbcValueType.UInt32);
+    var sexColumn = new DbcColumn(2, 8, 4, "SexID", DbcValueType.UInt32);
+    var variationColumn = new DbcColumn(3, 12, 4, "VariationID", DbcValueType.UInt32);
+    var geosetColumn = new DbcColumn(4, 16, 4, "Geoset[0]", DbcValueType.UInt32);
+    var safeRows = Enumerable.Range(0, promoted.RowCount).Where(row => promoted.GetRaw(row, raceColumn) == 4 && promoted.GetRaw(row, sexColumn) == 1).ToArray();
+    var incompatibleRows = Enumerable.Range(0, promoted.RowCount).Where(row => promoted.GetRaw(row, raceColumn) == 40 && promoted.GetRaw(row, sexColumn) == 1).ToArray();
+    if (compatibility.CompatibleSurfaces != 1 || compatibility.IncompatibleSurfaces != 1 || compatibility.AppendedRows != 1 ||
+        compatibility.SkippedMissingRows != 1 || compatibility.ResultRows != 3 || safeRows.Length != 2 || incompatibleRows.Length != 1 ||
+        !safeRows.Any(row => promoted.GetRaw(row, variationColumn) == 1) || promoted.GetRaw(incompatibleRows[0], geosetColumn) != 9)
+        throw new InvalidOperationException("HD facial-style promotion did not append only the byte-compatible ordinary surface while preserving the incompatible HD surface.");
+}
+finally { Directory.Delete(facialCompatibilityRoot, true); }
 var appearanceLibrary = Path.Combine(Path.GetTempPath(), $"crucible-appearance-library-{Guid.NewGuid():N}"); var appearanceContent = Path.Combine(appearanceLibrary,"Archives","Content");
 var selectedSkinRecord=bloodElfSections.First(section=>section.Kind==CharacterSectionKind.Skin&&section.Texture0 is not null);var selectedFaceRecord=bloodElfSections.First(section=>section.Kind==CharacterSectionKind.Face&&section.ColorIndex==selectedSkinRecord.ColorIndex);var selectedFacialRecord=bloodElfSections.FirstOrDefault(section=>section.Kind==CharacterSectionKind.FacialHair);var selectedHairRecord=bloodElfSections.First(section=>section.Kind==CharacterSectionKind.Hair);var selectedUnderwearRecord=bloodElfSections.FirstOrDefault(section=>section.Kind==CharacterSectionKind.Underwear&&section.ColorIndex==selectedSkinRecord.ColorIndex);
 var appearancePixels=new byte[256*256*4];for(var offset=0;offset<appearancePixels.Length;offset+=4){appearancePixels[offset]=64;appearancePixels[offset+1]=96;appearancePixels[offset+2]=128;appearancePixels[offset+3]=255;}
@@ -4761,6 +4800,22 @@ static void RewriteRecoveryArtifact(
     }
     using var rewrittenManifestStream = destinationArchive.CreateEntry("manifest.json").Open();
     System.Text.Json.JsonSerializer.Serialize(rewrittenManifestStream, manifest, json);
+}
+
+static void WriteRawWdbc(string path, int fieldCount, IReadOnlyList<uint[]> rows)
+{
+    if (rows.Any(row => row.Length != fieldCount)) throw new ArgumentException("Every raw WDBC row must match the declared field count.", nameof(rows));
+    using var stream = File.Create(path);
+    using var writer = new BinaryWriter(stream);
+    writer.Write(System.Text.Encoding.ASCII.GetBytes("WDBC"));
+    writer.Write(rows.Count);
+    writer.Write(fieldCount);
+    writer.Write(checked(fieldCount * sizeof(uint)));
+    writer.Write(1);
+    foreach (var row in rows)
+        foreach (var field in row)
+            writer.Write(field);
+    writer.Write((byte)0);
 }
 
 static void WriteMapChunk(BinaryWriter writer, string id, byte[] payload)
