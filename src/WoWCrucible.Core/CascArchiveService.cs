@@ -154,7 +154,55 @@ public sealed class CascArchiveService
         if (string.IsNullOrWhiteSpace(listFile)) return null;
         var fullPath = Path.GetFullPath(listFile);
         if (!File.Exists(fullPath)) throw new FileNotFoundException("The external CASC listfile was not found.", fullPath);
-        return fullPath;
+        return NormalizeListFileForCascLib(fullPath);
+    }
+
+    /// <summary>
+    /// CascLib's native CascFindFirstFile expects a plain listfile: one WoW-internal
+    /// path per line, no leading identifier. The modern community-standard listfile
+    /// (wow.tools style, e.g. "132492;interface\icons\inv_belt_03.blp") instead prefixes
+    /// every line with "FileDataId;". Fed directly to CascLib, every line is hashed as one
+    /// literal (and invalid) path, so nothing resolves and the storage silently behaves as
+    /// if no listfile were supplied at all. Normalize either format into a plain listfile
+    /// CascLib can actually match, caching the result beside the source so repeat calls
+    /// against a multi-million-line listfile don't re-parse it every time.
+    /// </summary>
+    private static string NormalizeListFileForCascLib(string sourcePath)
+    {
+        var info = new FileInfo(sourcePath);
+        var cachePath = sourcePath + $".crucible-plain-{info.Length}-{info.LastWriteTimeUtc.Ticks}.cache";
+        if (File.Exists(cachePath)) return cachePath;
+
+        var temporary = cachePath + $".{Environment.ProcessId}.tmp";
+        using (var reader = new StreamReader(sourcePath))
+        using (var writer = new StreamWriter(temporary))
+        {
+            string? line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                var separator = line.IndexOf(';');
+                var path = separator > 0 && IsAllDigits(line.AsSpan(0, separator))
+                    ? line[(separator + 1)..]
+                    : line;
+                writer.WriteLine(path);
+            }
+        }
+        File.Move(temporary, cachePath, overwrite: true);
+
+        // Best-effort cleanup of stale caches from earlier versions of the same source file.
+        foreach (var stale in Directory.EnumerateFiles(Path.GetDirectoryName(sourcePath) ?? ".", Path.GetFileName(sourcePath) + ".crucible-plain-*.cache"))
+            if (!string.Equals(stale, cachePath, StringComparison.OrdinalIgnoreCase))
+                try { File.Delete(stale); } catch { }
+
+        return cachePath;
+    }
+
+    private static bool IsAllDigits(ReadOnlySpan<char> value)
+    {
+        foreach (var c in value)
+            if (c is < '0' or > '9') return false;
+        return true;
     }
 
     private static void EnsureDescendant(string root, string destination, string internalPath)
