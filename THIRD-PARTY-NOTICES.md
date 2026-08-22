@@ -6,6 +6,10 @@ WoW Crucible includes the 64-bit Windows StormLib binary for MPQ archive support
 
 Copyright (c) 1999-2013 Ladislav Zezula. StormLib is distributed under the MIT License; see [third_party/StormLib/LICENSE](third_party/StormLib/LICENSE).
 
+## TACTSharp
+
+WoW Crucible includes TACTSharp by Martin Benjamins as a local-only fallback for custom CASC installations that omit Blizzard install manifests while retaining usable root, encoding, and index data. TACTSharp is distributed under the MIT License; see [third_party/TACTSharp/LICENSE](third_party/TACTSharp/LICENSE) and exact build provenance in [third_party/TACTSharp/SOURCE.md](third_party/TACTSharp/SOURCE.md).
+
 ## BCnEncoder.NET
 
 WoW Crucible uses BCnEncoder.NET by Nominom for managed BC1/BC2/BC3 texture compression and decompression. The NuGet package is offered under `MIT OR Unlicense`; Crucible uses it under the Unlicense option. Project: <https://github.com/Nominom/BCnEncoder.NET>.

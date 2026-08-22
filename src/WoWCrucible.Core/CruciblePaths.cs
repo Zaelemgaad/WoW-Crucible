@@ -22,6 +22,7 @@ public static class CruciblePaths
     public static string DebugLogDirectory => Path.Combine(LogDirectory, "Debug");
     public static string CacheDirectory => Path.Combine(DataRoot, "Cache");
     public static string MpqIndexCacheDirectory => Path.Combine(CacheDirectory, "MPQ");
+    public static string CascListfileCacheDirectory => Path.Combine(CacheDirectory, "CASC", "Listfiles");
     public static string BackupDirectory => Path.Combine(DataRoot, "Backups");
     public static string SqlSchemaBackupDirectory => Path.Combine(BackupDirectory, "SqlSchema");
     public static string TransactionDirectory => Path.Combine(CacheDirectory, "Transactions");

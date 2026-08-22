@@ -39,8 +39,9 @@ public static class FileDataIdListfileService
                 while (reader.ReadLine() is { } line)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    if (!TrySplit(line, out var rawId, out var rawPath) || !uint.TryParse(rawId, NumberStyles.None, CultureInfo.InvariantCulture, out var id) || !wanted.Contains(id)) continue;
-                    var candidate = rawPath.Trim().Trim('"').TrimEnd('\0');
+                    if (!TryParseMapping(line, out var mapping) || !wanted.Contains(mapping.FileDataId)) continue;
+                    var id = mapping.FileDataId;
+                    var candidate = mapping.ClientPath;
                     if (candidate.Length == 0) continue;
                     try { candidates[id].Add(PatchInputMapper.NormalizeArchivePath(candidate)); }
                     catch (ArgumentException) { }
@@ -56,11 +57,22 @@ public static class FileDataIdListfileService
         return new(sourcePath, hash, requested, resolved, missing, ambiguous);
     }
 
-    private static bool TrySplit(string line, out string id, out string path)
+    internal static bool TryParseMapping(string line, out FileDataIdPath mapping)
     {
         var semicolon = line.IndexOf(';'); var tab = line.IndexOf('\t'); var comma = line.IndexOf(',');
         var separator = new[] { semicolon, tab, comma }.Where(value => value > 0).DefaultIfEmpty(-1).Min();
-        if (separator < 0) { id = path = string.Empty; return false; }
-        id = line[..separator].Trim().TrimStart('\uFEFF').Trim('"'); path = line[(separator + 1)..]; return id.Length > 0;
+        if (separator < 0 || !uint.TryParse(line.AsSpan(0, separator).Trim().TrimStart('\uFEFF').Trim('"'), NumberStyles.None, CultureInfo.InvariantCulture, out var id))
+        {
+            mapping = default!;
+            return false;
+        }
+        var path = line[(separator + 1)..].Trim().Trim('"').TrimEnd('\0');
+        if (path.Length == 0)
+        {
+            mapping = default!;
+            return false;
+        }
+        mapping = new(id, path);
+        return true;
     }
 }

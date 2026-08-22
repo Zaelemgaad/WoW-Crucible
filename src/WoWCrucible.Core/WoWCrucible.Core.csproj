@@ -14,4 +14,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="WoWCrucible.Core.Tests" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\third_party\TACTSharp\TACTSharp.csproj" />
+  </ItemGroup>
 </Project>

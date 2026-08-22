@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/Third party/">
+    <Project Path="third_party/TACTSharp/TACTSharp.csproj" />
+  </Folder>
   <Project Path="src/WoWCrucible.Core/WoWCrucible.Core.csproj" />
   <Project Path="src/WoWCrucible.App/WoWCrucible.App.csproj" />
   <Project Path="src/WoWCrucible.Cli/WoWCrucible.Cli.csproj" />

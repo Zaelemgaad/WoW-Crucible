@@ -476,6 +476,41 @@ if (Environment.Is64BitProcess && CascArchiveService.NativeFindDataSize != 344)
 if (OperatingSystem.IsWindows() && Environment.Is64BitProcess && !CascArchiveService.IsNativeProviderAvailable())
     throw new InvalidOperationException("The pinned CascLib native provider could not be loaded from the test output.");
 
+if (!FileDataIdListfileService.TryParseMapping("\uFEFF12345;Interface/FrameXML/Test.lua", out var cascMapping) || cascMapping.FileDataId != 12345 || cascMapping.ClientPath != "Interface/FrameXML/Test.lua" ||
+    !FileDataIdListfileService.TryParseMapping("12346,\"Interface/FrameXML/Other.lua\"", out var commaMapping) || commaMapping.FileDataId != 12346 || commaMapping.ClientPath != "Interface/FrameXML/Other.lua" ||
+    FileDataIdListfileService.TryParseMapping("not-an-id;Interface/Test.lua", out _))
+    throw new InvalidOperationException("FileDataID listfile parsing regressed across semicolon, comma, BOM, or quoted-path input.");
+
+var cascListfileFixture = Path.Combine(Path.GetTempPath(), $"wow-crucible-casc-listfile-{Guid.NewGuid():N}");
+try
+{
+    Directory.CreateDirectory(cascListfileFixture);
+    var source = Path.Combine(cascListfileFixture, "community.csv");
+    var cache = Path.Combine(cascListfileFixture, "cache");
+    File.WriteAllText(source, "12345;Interface/FrameXML/Test.lua\n12346,\"Interface/FrameXML/Other.lua\"\nInterface\\Plain\\Path.blp\n");
+    var normalized = CascArchiveService.PrepareListFileForCascLib(source, cache);
+    var lines = File.ReadAllLines(normalized);
+    if (!Path.GetDirectoryName(normalized)!.Equals(cache, StringComparison.OrdinalIgnoreCase) ||
+        lines.Length != 3 || lines[0] != "Interface/FrameXML/Test.lua" || lines[1] != "Interface/FrameXML/Other.lua" || lines[2] != "Interface\\Plain\\Path.blp" ||
+        CascArchiveService.PrepareListFileForCascLib(source, cache) != normalized || File.ReadAllLines(source)[0] != "12345;Interface/FrameXML/Test.lua")
+        throw new InvalidOperationException("CascLib listfile preparation did not preserve the raw mapping or produce a stable plain-path cache.");
+}
+finally { if (Directory.Exists(cascListfileFixture)) Directory.Delete(cascListfileFixture, recursive: true); }
+
+var cascConfigFixture = Path.Combine(Path.GetTempPath(), $"wow-crucible-casc-config-{Guid.NewGuid():N}");
+try
+{
+    var configRoot = Path.Combine(cascConfigFixture, "Data", "config", "aa", "bb"); Directory.CreateDirectory(configRoot);
+    var buildConfig = Path.Combine(configRoot, "build"); File.WriteAllText(buildConfig, "root = a\nencoding = b c\n");
+    var cdnConfig = Path.Combine(configRoot, "cdn"); File.WriteAllText(cdnConfig, "archives = a b c\n");
+    var located = TactSharpCascStorage.FindConfigs(cascConfigFixture);
+    if (located.BuildConfig != buildConfig || located.CdnConfig != cdnConfig) throw new InvalidOperationException("Incomplete-install CASC config discovery selected the wrong local files.");
+    File.WriteAllText(Path.Combine(configRoot, "ambiguous-build"), "root = d\nencoding = e f\n");
+    try { _ = TactSharpCascStorage.FindConfigs(cascConfigFixture); throw new InvalidOperationException("Ambiguous local CASC build configs were guessed instead of refused."); }
+    catch (InvalidDataException) { }
+}
+finally { if (Directory.Exists(cascConfigFixture)) Directory.Delete(cascConfigFixture, recursive: true); }
+
 var designTable = new DatabaseTableCapability("fixture_table",
 [
     new("id", "int", "int unsigned", false, null, "PRI", "auto_increment", 1),

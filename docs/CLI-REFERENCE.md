@@ -434,7 +434,7 @@ wowcrucible casc extract <storage-folder> <destination> [filter] [--quiet|--prog
 wowcrucible casc extract-folder <storage-folder> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]
 ```
 
-The desktop exposes the same provider beside MPQ in **MPQ & CASC archives**. CASC storage is always opened read-only. Enumeration preserves synthetic FileDataId, content-key, and encoded-key names when a real path is unavailable; an external listfile is only a path hint. Extraction selects one locally available locale row for each path, writes through a sibling temporary file, and never downloads absent CDN content implicitly.
+The desktop exposes the same provider beside MPQ in **MPQ & CASC archives**. CASC storage is always opened read-only. Enumeration preserves synthetic FileDataId, content-key, and encoded-key names when a real path is unavailable; an external listfile is normally only a path hint. Crucible translates modern `FileDataID;client-path` listfiles into CascLib's plain-path format inside Crucible's portable cache without modifying or writing beside the source listfile. If a custom installation omits the install manifest required by CascLib, Crucible can instead open its remaining local root, encoding, and index data through TACTSharp. That fallback receives the original ID mappings and lists only mapped rows. Extraction selects locally present encoded keys, writes through a sibling temporary file, and both providers refuse absent content rather than downloading it.
 
 ## Manifest-first patches
 

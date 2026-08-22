@@ -1,0 +1,45 @@
+﻿namespace TACTSharp
+{
+    public class Settings
+    {
+        public string Region = "us";
+        public string Product = "wow";
+        public RootInstance.LocaleFlags Locale = RootInstance.LocaleFlags.enUS;
+        public RootInstance.LoadMode RootMode = RootInstance.LoadMode.Normal;
+        public AssetManifestType ManifestType = AssetManifestType.Root;
+        public string? BaseDir;
+        public string? BuildConfig;
+        public string? CDNConfig;
+        public string? ProductConfig;
+        public string CacheDir = "cache";
+        public string CDNDir = "";
+        public bool ListfileFallback = true;
+        public bool TryCDN = true;
+        public string ListfileURL = "https://github.com/wowdev/wow-listfile/releases/latest/download/community-listfile.csv";
+        public List<string> AdditionalCDNs = [];
+        public List<string> BlockedCDNs = [];
+        public static TSLogLevel LogLevel = TSLogLevel.Info;
+        public bool ForceHTTP1 = false;
+        public VersionService versionService = VersionService.Ribbit;
+    }
+
+    public enum VersionService
+    {
+        Ribbit,
+        TACTChannels
+    }
+
+    public enum AssetManifestType
+    {
+        Root,
+        TVFS
+    }
+
+    public enum TSLogLevel
+    {
+        Debug,
+        Info,
+        Warn,
+        Off
+    }
+}

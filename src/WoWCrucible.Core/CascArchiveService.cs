@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace WoWCrucible.Core;
 
@@ -45,12 +47,22 @@ public sealed class CascArchiveService
     {
         storagePath = ValidateStoragePath(storagePath);
         externalListFile = ValidateListFile(externalListFile);
-        var storage = OpenStorage(storagePath);
+        IntPtr storage;
+        try { storage = OpenStorage(storagePath); }
+        catch (Exception nativeException) when (externalListFile is not null && IsNativeStorageOpenFailure(nativeException))
+        {
+            try { return TactSharpCascStorage.Open(storagePath).ListFiles(externalListFile!, mask, cancellationToken); }
+            catch (Exception fallbackException) when (fallbackException is not OperationCanceledException)
+            {
+                throw new AggregateException("CascLib could not open this installation, and Crucible's local root/index fallback also failed.", nativeException, fallbackException);
+            }
+        }
         var result = new List<CascFileEntry>();
         try
         {
             var data = new Native.CascFindData();
-            var find = Native.CascFindFirstFile(storage, string.IsNullOrWhiteSpace(mask) ? "*" : mask, ref data, externalListFile);
+            var nativeListFile = externalListFile is null ? null : PrepareListFileForCascLib(externalListFile, CruciblePaths.CascListfileCacheDirectory, cancellationToken);
+            var find = Native.CascFindFirstFile(storage, string.IsNullOrWhiteSpace(mask) ? "*" : mask, ref data, nativeListFile);
             if (find == InvalidHandle) return result;
             try
             {
@@ -76,7 +88,20 @@ public sealed class CascArchiveService
         destinationRoot = Path.GetFullPath(destinationRoot);
         Directory.CreateDirectory(destinationRoot);
         var entries = files.ToArray();
-        var storage = OpenStorage(storagePath);
+        IntPtr storage;
+        try { storage = OpenStorage(storagePath); }
+        catch (Exception nativeException) when (IsNativeStorageOpenFailure(nativeException))
+        {
+            try
+            {
+                TactSharpCascStorage.Open(storagePath).Extract(destinationRoot, entries, progress, cancellationToken, overwriteExisting);
+                return;
+            }
+            catch (Exception fallbackException) when (fallbackException is not OperationCanceledException)
+            {
+                throw new AggregateException("CascLib could not open this installation, and Crucible's local root/index fallback also failed.", nativeException, fallbackException);
+            }
+        }
         try
         {
             for (var index = 0; index < entries.Length; index++)
@@ -154,7 +179,7 @@ public sealed class CascArchiveService
         if (string.IsNullOrWhiteSpace(listFile)) return null;
         var fullPath = Path.GetFullPath(listFile);
         if (!File.Exists(fullPath)) throw new FileNotFoundException("The external CASC listfile was not found.", fullPath);
-        return NormalizeListFileForCascLib(fullPath);
+        return fullPath;
     }
 
     /// <summary>
@@ -164,48 +189,47 @@ public sealed class CascArchiveService
     /// every line with "FileDataId;". Fed directly to CascLib, every line is hashed as one
     /// literal (and invalid) path, so nothing resolves and the storage silently behaves as
     /// if no listfile were supplied at all. Normalize either format into a plain listfile
-    /// CascLib can actually match, caching the result beside the source so repeat calls
-    /// against a multi-million-line listfile don't re-parse it every time.
+    /// CascLib can actually match. Keep the original mapping intact for the TACTSharp
+    /// fallback, and cache the native-only copy in Crucible's own portable cache.
     /// </summary>
-    private static string NormalizeListFileForCascLib(string sourcePath)
+    internal static string PrepareListFileForCascLib(string sourcePath, string cacheDirectory, CancellationToken cancellationToken = default)
     {
+        sourcePath = Path.GetFullPath(sourcePath);
+        if (!File.Exists(sourcePath)) throw new FileNotFoundException("The external CASC listfile was not found.", sourcePath);
         var info = new FileInfo(sourcePath);
-        var cachePath = sourcePath + $".crucible-plain-{info.Length}-{info.LastWriteTimeUtc.Ticks}.cache";
+        var sourceKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sourcePath.ToUpperInvariant()))).ToLowerInvariant();
+        cacheDirectory = Path.GetFullPath(cacheDirectory);
+        Directory.CreateDirectory(cacheDirectory);
+        var cachePath = Path.Combine(cacheDirectory, $"{sourceKey}-{info.Length}-{info.LastWriteTimeUtc.Ticks}.txt");
         if (File.Exists(cachePath)) return cachePath;
 
-        var temporary = cachePath + $".{Environment.ProcessId}.tmp";
-        using (var reader = new StreamReader(sourcePath))
-        using (var writer = new StreamWriter(temporary))
+        var temporary = cachePath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        try
         {
-            string? line;
-            while ((line = reader.ReadLine()) != null)
+            using (var reader = new StreamReader(sourcePath))
+            using (var writer = new StreamWriter(new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None), new UTF8Encoding(false)))
             {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                var separator = line.IndexOf(';');
-                var path = separator > 0 && IsAllDigits(line.AsSpan(0, separator))
-                    ? line[(separator + 1)..]
-                    : line;
-                writer.WriteLine(path);
+                while (reader.ReadLine() is { } line)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    writer.WriteLine(FileDataIdListfileService.TryParseMapping(line, out var mapping) ? mapping.ClientPath : line.Trim());
+                }
             }
+            try { File.Move(temporary, cachePath, overwrite: false); }
+            catch (IOException) when (File.Exists(cachePath)) { }
         }
-        File.Move(temporary, cachePath, overwrite: true);
+        finally { try { if (File.Exists(temporary)) File.Delete(temporary); } catch { } }
 
         // Best-effort cleanup of stale caches from earlier versions of the same source file.
-        foreach (var stale in Directory.EnumerateFiles(Path.GetDirectoryName(sourcePath) ?? ".", Path.GetFileName(sourcePath) + ".crucible-plain-*.cache"))
+        foreach (var stale in Directory.EnumerateFiles(cacheDirectory, $"{sourceKey}-*.txt"))
             if (!string.Equals(stale, cachePath, StringComparison.OrdinalIgnoreCase))
                 try { File.Delete(stale); } catch { }
 
         return cachePath;
     }
 
-    private static bool IsAllDigits(ReadOnlySpan<char> value)
-    {
-        foreach (var c in value)
-            if (c is < '0' or > '9') return false;
-        return true;
-    }
-
-    private static void EnsureDescendant(string root, string destination, string internalPath)
+    internal static void EnsureDescendant(string root, string destination, string internalPath)
     {
         var relative = Path.GetRelativePath(root, destination);
         if (relative.Equals("..", StringComparison.Ordinal) || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
@@ -217,6 +241,9 @@ public sealed class CascArchiveService
         if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess) throw new PlatformNotSupportedException("Crucible's CascLib provider currently requires 64-bit Windows.");
         if (!IsNativeProviderAvailable()) throw new DllNotFoundException("CascLib.dll is missing. Reinstall the complete Crucible package; the native provider must remain beside the executable.");
     }
+
+    private static bool IsNativeStorageOpenFailure(Exception exception) =>
+        exception is Win32Exception or DllNotFoundException or BadImageFormatException or EntryPointNotFoundException or PlatformNotSupportedException;
 
     private static void ThrowNative(string operation)
     {
