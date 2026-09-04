@@ -77,6 +77,16 @@ public static class MpqPathFilter
         var pattern = "^" + Regex.Escape(filter).Replace("\\*\\*", ".*").Replace("\\*", "[^\\\\]*").Replace("\\?", "[^\\\\]") + "$";
         return Regex.IsMatch(path, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
+
+    public static bool MatchesArchiveQuery(string path, string? filter)
+    {
+        if (Matches(path, filter)) return true;
+        if (string.IsNullOrWhiteSpace(filter) || filter.IndexOfAny(['*', '?']) < 0) return false;
+
+        var normalizedFilter = filter.Replace('/', '\\');
+        if (normalizedFilter.Contains('\\')) return false;
+        return Matches(Path.GetFileName(path.Replace('/', '\\')), normalizedFilter);
+    }
 }
 
 public static class PatchInputMapper
@@ -102,8 +112,8 @@ public static class PatchInputMapper
             var fullPath = Path.GetFullPath(input);
             if (File.Exists(fullPath))
             {
-                var archivePath = Path.GetExtension(fullPath).Equals(".dbc", StringComparison.OrdinalIgnoreCase)
-                    ? $"DBFilesClient\\{Path.GetFileName(fullPath)}"
+                var archivePath = ClientTableCompatibilityPolicy.IsTableExtension(fullPath)
+                    ? ClientTableCompatibilityPolicy.ArchivePathFor(fullPath)
                     : Path.GetFileName(fullPath);
                 result.Add(new(fullPath, archivePath));
                 continue;
@@ -118,7 +128,7 @@ public static class PatchInputMapper
                 var knownRoot = Array.FindIndex(parts, part => KnownClientRoots.Contains(part));
                 if (knownRoot >= 0) relative = Path.Combine(parts[knownRoot..]);
                 else if (KnownClientRoots.Contains(selectedRootName)) relative = Path.Combine(selectedRootName, relative);
-                else if (Path.GetExtension(file).Equals(".dbc", StringComparison.OrdinalIgnoreCase)) relative = Path.Combine("DBFilesClient", Path.GetFileName(file));
+                else if (ClientTableCompatibilityPolicy.IsTableExtension(file)) relative = Path.Combine("DBFilesClient", Path.GetFileName(file));
                 var archivePath = NormalizeArchivePath(relative);
                 result.Add(new(Path.GetFullPath(file), archivePath));
             }

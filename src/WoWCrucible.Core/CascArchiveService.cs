@@ -24,6 +24,13 @@ public sealed record CascFileEntry(
     string ContentKey,
     string EncodedKey);
 
+public sealed record CascPathProbe(
+    uint FileDataId,
+    string ArchivePath,
+    bool IsAvailableLocally,
+    long Size,
+    int? NativeError);
+
 /// <summary>
 /// Read-only CASC storage access backed by the pinned, MIT-licensed CascLib native provider.
 /// The service deliberately exposes no online-download behavior and never mutates a client.
@@ -78,6 +85,57 @@ public sealed class CascArchiveService
         }
         finally { Native.CascCloseStorage(storage); }
         return result.OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    /// <summary>
+    /// Probes a bounded set of exact CASC paths without enumerating the entire root.
+    /// This is the correct path for FileDataID bridges that already resolved IDs to
+    /// names through a listfile and only need to know which payloads exist locally.
+    /// </summary>
+    public IReadOnlyList<CascPathProbe> ProbePaths(
+        string storagePath,
+        IEnumerable<FileDataIdPath> paths,
+        CancellationToken cancellationToken = default)
+    {
+        storagePath = ValidateStoragePath(storagePath);
+        ArgumentNullException.ThrowIfNull(paths);
+        var requested = paths
+            .Select(value => new FileDataIdPath(value.FileDataId, PatchInputMapper.NormalizeArchivePath(value.ClientPath)))
+            .DistinctBy(value => (value.FileDataId, value.ClientPath.ToUpperInvariant()))
+            .OrderBy(value => value.FileDataId)
+            .ThenBy(value => value.ClientPath, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var result = new List<CascPathProbe>(requested.Length);
+        var storage = OpenStorage(storagePath);
+        try
+        {
+            foreach (var requestedPath in requested)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                IntPtr file = IntPtr.Zero;
+                try
+                {
+                    if (!Native.CascOpenFile(storage, requestedPath.ClientPath, AllLocales, 0, out file))
+                    {
+                        result.Add(new(requestedPath.FileDataId, requestedPath.ClientPath, false, 0, unchecked((int)Native.GetCascError())));
+                        continue;
+                    }
+                    if (!Native.CascGetFileSize64(file, out var nativeSize))
+                    {
+                        result.Add(new(requestedPath.FileDataId, requestedPath.ClientPath, false, 0, unchecked((int)Native.GetCascError())));
+                        continue;
+                    }
+                    if (nativeSize > long.MaxValue) throw new IOException($"CASC file is too large for this process: {requestedPath.ClientPath}");
+                    result.Add(new(requestedPath.FileDataId, requestedPath.ClientPath, true, checked((long)nativeSize), null));
+                }
+                finally
+                {
+                    if (file != IntPtr.Zero) Native.CascCloseFile(file);
+                }
+            }
+        }
+        finally { Native.CascCloseStorage(storage); }
+        return result;
     }
 
     public void Extract(string storagePath, string destinationRoot, IEnumerable<CascFileEntry> files,

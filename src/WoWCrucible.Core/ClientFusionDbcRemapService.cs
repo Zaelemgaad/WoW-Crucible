@@ -32,8 +32,9 @@ public sealed record ClientFusionDbcRemapTablePlan(
 public sealed record ClientFusionDbcRemapPlan(
     int FormatVersion,
     DateTimeOffset CreatedUtc,
-    string SchemaPath,
-    string SchemaSha256,
+    int Build,
+    string? XmlSchemaPath,
+    string? XmlSchemaSha256,
     string DefinitionsRoot,
     ClientFusionPlan FusionPlan,
     IReadOnlyList<ClientFusionDbcRemapTablePlan> Tables,
@@ -61,20 +62,20 @@ public sealed record ClientFusionDbcRemapResult(
 /// </summary>
 public static class ClientFusionDbcRemapService
 {
-    private const int FormatVersion = 1;
-    private const int Build = 12340;
+    private const int FormatVersion = 2;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public static ClientFusionDbcRemapPlan CreatePlan(ClientFusionPlan fusionPlan, string schemaPath, string definitionsRoot, CancellationToken cancellationToken = default)
+    public static ClientFusionDbcRemapPlan CreatePlan(ClientFusionPlan fusionPlan, string? xmlSchemaPath, string definitionsRoot, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(fusionPlan); schemaPath = RequiredFile(schemaPath, "DBC schema"); definitionsRoot = RequiredDirectory(definitionsRoot, "WoWDBDefs definitions root"); var schema = DbcSchemaCatalog.Load(schemaPath); var blockers = new List<string>(); var contexts = new Dictionary<string, TableContext>(StringComparer.OrdinalIgnoreCase);
-        var entries = fusionPlan.Entries.Where(entry => entry.BaseFilePath is not null && IsDbc(entry.ArchivePath)).OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
+        ArgumentNullException.ThrowIfNull(fusionPlan); definitionsRoot = RequiredDirectory(definitionsRoot, "WoWDBDefs definitions root");
+        var schema = new ClientTableSchemaProvider(fusionPlan.TargetBuild, xmlSchemaPath, definitionsRoot); var blockers = new List<string>(); var contexts = new Dictionary<string, TableContext>(StringComparer.OrdinalIgnoreCase);
+        var entries = fusionPlan.Entries.Where(entry => entry.BaseFilePath is not null && ClientTableCompatibilityPolicy.IsClientTablePath(entry.ArchivePath) && entry.Status != ClientFusionStatus.IncompatibleTarget).OrderBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).ToArray();
         foreach (var entry in entries)
         {
-            cancellationToken.ThrowIfCancellationRequested(); var table = Path.GetFileNameWithoutExtension(entry.ArchivePath); try { contexts[table] = OpenTable(fusionPlan, entry, table, schema, definitionsRoot); }
+            cancellationToken.ThrowIfCancellationRequested(); var table = Path.GetFileNameWithoutExtension(entry.ArchivePath); try { contexts[table] = OpenTable(fusionPlan, entry, table, schema); }
             catch (Exception exception) when (exception is not OperationCanceledException) { blockers.Add($"{table}: {exception.Message}"); }
         }
-        if (entries.Length == 0) blockers.Add("The fusion plan contains no base-backed DBC supplied by an override layer.");
+        if (entries.Length == 0) blockers.Add("The fusion plan contains no compatible base-backed client table supplied by an override layer.");
 
         var states = new Dictionary<StateKey, PlannedRow>();
         foreach (var context in contexts.Values.OrderBy(context => context.Table, StringComparer.OrdinalIgnoreCase))
@@ -113,17 +114,21 @@ public static class ClientFusionDbcRemapService
             if (!changed && !added) { stable = true; break; }
         }
         if (!stable && blockers.All(blocker => !blocker.Contains("non-converging", StringComparison.OrdinalIgnoreCase))) blockers.Add("Reference remapping did not reach a stable fixed point within its bounded iteration count.");
+        foreach (var context in contexts.Values.Where(context => !context.BaseFile.AllowsStructuralMutation && states.Values.Any(state => state.Context == context && state.AddsRow)))
+            blockers.Add($"{context.Table}: {context.BaseFile.ContainerKind} side tables prevent safe row insertion.");
 
         var tables = contexts.Values.OrderBy(context => context.Table, StringComparer.OrdinalIgnoreCase).Select(context => new ClientFusionDbcRemapTablePlan(
             context.Table, context.ArchivePath, context.BasePath, Hash(context.BasePath), context.Layers.Values.ToDictionary(layer => layer.Path, layer => Hash(layer.Path), StringComparer.OrdinalIgnoreCase), context.DbdPath, Hash(context.DbdPath), context.Key.Name,
             states.Values.Where(state => state.Context == context).OrderBy(state => state.Layer.Source.Name, StringComparer.OrdinalIgnoreCase).ThenBy(state => state.SourceId).Select(state => new ClientFusionDbcRemapOperation(state.Layer.Source.Name, state.Layer.Source.RootPath, state.Layer.Path, state.SourceId, state.TargetId, state.AddsRow, state.Resolution, new Dictionary<string, uint>(state.ReferenceRewrites, StringComparer.OrdinalIgnoreCase))).ToArray())).ToArray();
         var findings = new[]
         {
-            $"Dependency plan covers {tables.Length:N0} base-backed DBC table(s), {tables.Sum(table => table.Operations.Count):N0} changed/propagated source row(s), and {tables.Sum(table => table.AddedRows):N0} additive target row(s).",
+            $"Dependency plan covers {tables.Length:N0} base-backed client table(s) for build {fusionPlan.TargetBuild:N0}, {tables.Sum(table => table.Operations.Count):N0} changed/propagated source row(s), and {tables.Sum(table => table.AddedRows):N0} additive target row(s).",
             $"Reused {tables.Sum(table => table.ReusedMappings):N0} semantically equivalent mapping(s); no duplicate row is emitted for those source identities.",
             "Only DBD-declared DBC-to-DBC references are rewritten. SQL, scripts, executable code, and unnamed binary references remain outside this client-table plan and require their own coordinated change plan."
         };
-        return new(FormatVersion, DateTimeOffset.UtcNow, schemaPath, Hash(schemaPath), definitionsRoot, fusionPlan, tables, blockers.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(), findings);
+        return new(FormatVersion, DateTimeOffset.UtcNow, fusionPlan.TargetBuild, schema.XmlSchemaPath,
+            schema.XmlSchemaPath is null ? null : Hash(schema.XmlSchemaPath), definitionsRoot, fusionPlan, tables,
+            blockers.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(), findings);
     }
 
     public static void SavePlan(string path, ClientFusionDbcRemapPlan plan) => AtomicJson(path, plan);
@@ -138,18 +143,18 @@ public static class ClientFusionDbcRemapService
         var parent = Path.GetDirectoryName(outputDirectory) ?? throw new InvalidOperationException("DBC remap output has no parent."); Directory.CreateDirectory(parent); var staging = Path.Combine(parent, $".{Path.GetFileName(outputDirectory)}.crucible-{Guid.NewGuid():N}"); Directory.CreateDirectory(staging);
         try
         {
-            var schema = DbcSchemaCatalog.Load(plan.SchemaPath); var outputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var omitted = new List<string>();
+            var schema = new ClientTableSchemaProvider(plan.Build, plan.XmlSchemaPath, plan.DefinitionsRoot); var outputs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var omitted = new List<string>();
             foreach (var table in plan.Tables)
             {
                 cancellationToken.ThrowIfCancellationRequested(); var additions = table.Operations.Where(operation => operation.AddsRow).ToArray(); if (additions.Length == 0) { omitted.Add(table.ArchivePath); continue; }
-                var target = WdbcFile.Load(table.BasePath); var resolution = schema.ResolveColumns(table.Table, target.FieldCount); RequirePhysicalSchema(table.Table, target, resolution); var key = DbcRecordIdentity.PhysicalColumn(resolution.Columns, resolution.KeyStrategy)!; var targetRows = DbcRecordIdentity.IndexRows(target, resolution.Columns, resolution.KeyStrategy); var sources = new Dictionary<string, (WdbcFile File, Dictionary<uint, int> Rows)>(StringComparer.OrdinalIgnoreCase);
+                var target = WdbcFile.Load(table.BasePath); var resolution = schema.Resolve(target); RequirePhysicalSchema(table.Table, target, resolution); var key = DbcRecordIdentity.PhysicalColumn(resolution.Columns, resolution.KeyStrategy)!; var targetRows = DbcRecordIdentity.IndexRows(target, resolution.Columns, resolution.KeyStrategy); var sources = new Dictionary<string, (WdbcFile File, Dictionary<uint, int> Rows)>(StringComparer.OrdinalIgnoreCase);
                 foreach (var operation in additions.OrderBy(operation => operation.TargetId))
                 {
                     if (!sources.TryGetValue(operation.SourcePath, out var source)) { var file = WdbcFile.Load(operation.SourcePath); source = (file, DbcRecordIdentity.IndexRows(file, resolution.Columns, resolution.KeyStrategy)); sources[operation.SourcePath] = source; }
                     if (!source.Rows.TryGetValue(operation.SourceId, out var sourceRow)) throw new InvalidDataException($"{table.Table} source ID {operation.SourceId:N0} disappeared after planning."); if (targetRows.ContainsKey(operation.TargetId)) throw new InvalidDataException($"{table.Table} target ID {operation.TargetId:N0} became occupied after planning.");
-                    var row = target.AddBlankRow(); foreach (var column in resolution.Columns) { if (column.Type == DbcValueType.StringOffset) target.SetDisplayValue(row, column, source.File.GetString(source.File.GetRaw(sourceRow, column))); else target.SetRaw(row, column, operation.ReferenceRewrites.GetValueOrDefault(column.Name, source.File.GetRaw(sourceRow, column))); } target.SetRaw(row, key, operation.TargetId); targetRows[operation.TargetId] = row;
+                    var row = target.AddBlankRow(); foreach (var column in resolution.Columns) { if (column.Type == DbcValueType.StringOffset) target.SetDisplayValue(row, column, source.File.GetString(source.File.GetRaw(sourceRow, column))); else target.SetRaw64(row, column, operation.ReferenceRewrites.TryGetValue(column.Name, out var rewritten) ? rewritten : source.File.GetRaw64(sourceRow, column)); } target.SetRaw(row, key, operation.TargetId); targetRows[operation.TargetId] = row;
                 }
-                var staged = Path.Combine(staging, table.Table + ".dbc"); target.Save(staged, createBackup: false); outputs[table.ArchivePath] = staged; hashes[table.ArchivePath] = Hash(staged);
+                var staged = Path.Combine(staging, Path.GetFileName(table.ArchivePath)); target.Save(staged, createBackup: false); outputs[table.ArchivePath] = staged; hashes[table.ArchivePath] = Hash(staged);
             }
             var finalFiles = outputs.ToDictionary(pair => pair.Key, pair => Path.Combine(outputDirectory, Path.GetFileName(pair.Value)), StringComparer.OrdinalIgnoreCase); var receipt = Path.Combine(outputDirectory, "client-fusion-dbc-remap.crucible.json"); var result = new ClientFusionDbcRemapResult(outputDirectory, receipt, finalFiles, hashes, omitted.Order(StringComparer.OrdinalIgnoreCase).ToArray(), plan); File.WriteAllText(Path.Combine(staging, Path.GetFileName(receipt)), JsonSerializer.Serialize(result, JsonOptions)); Directory.Move(staging, outputDirectory); return result;
         }
@@ -163,9 +168,9 @@ public static class ClientFusionDbcRemapService
 
     public static void Verify(ClientFusionDbcRemapPlan plan, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(plan); if (plan.FormatVersion != FormatVersion) throw new InvalidDataException($"Unsupported DBC dependency-remap plan version {plan.FormatVersion}."); if (!Hash(plan.SchemaPath).Equals(plan.SchemaSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("DBC remap schema changed after planning.");
+        ArgumentNullException.ThrowIfNull(plan); if (plan.FormatVersion != FormatVersion) throw new InvalidDataException($"Unsupported client-table dependency-remap plan version {plan.FormatVersion}."); if (plan.XmlSchemaPath is not null && (!Hash(plan.XmlSchemaPath).Equals(plan.XmlSchemaSha256, StringComparison.OrdinalIgnoreCase))) throw new InvalidDataException("Client-table remap XML schema changed after planning.");
         foreach (var table in plan.Tables) { if (!Hash(table.BasePath).Equals(table.BaseSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"DBC remap base {table.Table} changed after planning."); if (!Hash(table.DbdPath).Equals(table.DbdSha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"DBC definition {table.DbdPath} changed after planning."); foreach (var pair in table.SourceSha256) if (!Hash(pair.Key).Equals(pair.Value, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"DBC remap source {pair.Key} changed after planning."); }
-        var recreated = CreatePlan(plan.FusionPlan, plan.SchemaPath, plan.DefinitionsRoot, cancellationToken); if (JsonSerializer.Serialize(recreated.Tables) != JsonSerializer.Serialize(plan.Tables) || !recreated.Blockers.SequenceEqual(plan.Blockers, StringComparer.OrdinalIgnoreCase)) throw new InvalidDataException("DBC dependency-remap operations do not match a fresh fixed-point analysis of their bound inputs.");
+        var recreated = CreatePlan(plan.FusionPlan, plan.XmlSchemaPath, plan.DefinitionsRoot, cancellationToken); if (JsonSerializer.Serialize(recreated.Tables) != JsonSerializer.Serialize(plan.Tables) || !recreated.Blockers.SequenceEqual(plan.Blockers, StringComparer.OrdinalIgnoreCase)) throw new InvalidDataException("Client-table dependency-remap operations do not match a fresh fixed-point analysis of their bound inputs.");
     }
 
     public static void VerifyResult(ClientFusionDbcRemapResult result, CancellationToken cancellationToken = default)
@@ -173,13 +178,13 @@ public static class ClientFusionDbcRemapService
         ArgumentNullException.ThrowIfNull(result); Verify(result.Plan, cancellationToken); var expected = result.Plan.Tables.Where(table => table.AddedRows > 0).Select(table => table.ArchivePath).Order(StringComparer.OrdinalIgnoreCase).ToArray(); var actual = result.OutputFiles.Keys.Order(StringComparer.OrdinalIgnoreCase).ToArray(); if (!expected.SequenceEqual(actual, StringComparer.OrdinalIgnoreCase) || !actual.SequenceEqual(result.OutputSha256.Keys.Order(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase)) throw new InvalidDataException("DBC dependency-remap receipt outputs do not match its plan."); foreach (var path in actual) if (!Hash(result.OutputFiles[path]).Equals(result.OutputSha256[path], StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"DBC dependency-remap output changed after creation: {result.OutputFiles[path]}"); var omissions = result.Plan.Tables.Where(table => table.AddedRows == 0).Select(table => table.ArchivePath).Order(StringComparer.OrdinalIgnoreCase); if (!omissions.SequenceEqual(result.OmittedArchivePaths.Order(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase)) throw new InvalidDataException("DBC dependency-remap receipt omissions do not match its plan.");
     }
 
-    private static TableContext OpenTable(ClientFusionPlan fusionPlan, ClientFusionEntry entry, string table, DbcSchemaCatalog schema, string definitionsRoot)
+    private static TableContext OpenTable(ClientFusionPlan fusionPlan, ClientFusionEntry entry, string table, ClientTableSchemaProvider schema)
     {
-        var basePath = Path.GetFullPath(entry.BaseFilePath!); var baseFile = WdbcFile.Load(basePath); var resolution = schema.ResolveColumns(table, baseFile.FieldCount); RequirePhysicalSchema(table, baseFile, resolution); var key = DbcRecordIdentity.PhysicalColumn(resolution.Columns, resolution.KeyStrategy)!; var dbdPath = RequiredFile(Path.Combine(definitionsRoot, table + ".dbd"), $"{table} WoWDBDefs definition"); var dbd = DbdSchemaService.Load(dbdPath); if (dbd.ForBuild(Build) is null) throw new InvalidDataException($"{table}.dbd has no layout covering build {Build:N0}.");
+        var basePath = Path.GetFullPath(entry.BaseFilePath!); var baseFile = WdbcFile.Load(basePath); var resolution = schema.Resolve(baseFile); RequirePhysicalSchema(table, baseFile, resolution); var key = DbcRecordIdentity.PhysicalColumn(resolution.Columns, resolution.KeyStrategy)!; var dbdPath = schema.RequireDbdPath(table); var dbd = DbdSchemaService.Load(dbdPath);
         var references = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); foreach (var column in resolution.Columns) { var logicalName = column.Name.Split('[', 2)[0]; if (!dbd.Columns.TryGetValue(logicalName, out var definition) || string.IsNullOrWhiteSpace(definition.Reference)) continue; var separator = definition.Reference.IndexOf("::", StringComparison.Ordinal); var target = (separator < 0 ? definition.Reference : definition.Reference[..separator]).Trim(); if (target.Length > 0) references[column.Name] = target; }
         var layers = new Dictionary<string, LayerTable>(StringComparer.OrdinalIgnoreCase); foreach (var source in fusionPlan.Sources.OrderBy(source => source.Name, StringComparer.OrdinalIgnoreCase))
         {
-            var matches = entry.Candidates.Where(candidate => SamePath(candidate.SourceRoot, source.RootPath)).ToArray(); if (matches.Length == 0) continue; if (matches.Length > 1) throw new InvalidDataException($"Source '{source.Name}' contains {matches.Length:N0} physical candidates for {entry.ArchivePath}; choose one effective layer before ID remapping."); var candidate = matches[0]; var file = WdbcFile.Load(candidate.FilePath); if (file.FieldCount != baseFile.FieldCount || file.RecordSize != baseFile.RecordSize) throw new InvalidDataException($"Source '{source.Name}' layout {file.FieldCount}/{file.RecordSize} differs from base {baseFile.FieldCount}/{baseFile.RecordSize}."); layers[source.RootPath] = new(source with { RootPath = Path.GetFullPath(source.RootPath) }, Path.GetFullPath(candidate.FilePath), file, DbcRecordIdentity.IndexRows(file, resolution.Columns, resolution.KeyStrategy));
+            var matches = entry.Candidates.Where(candidate => SamePath(candidate.SourceRoot, source.RootPath)).ToArray(); if (matches.Length == 0) continue; if (matches.Length > 1) throw new InvalidDataException($"Source '{source.Name}' contains {matches.Length:N0} physical candidates for {entry.ArchivePath}; choose one effective layer before ID remapping."); var candidate = matches[0]; var file = WdbcFile.Load(candidate.FilePath); if (!ClientTableCompatibilityPolicy.HasSameLayout(file, baseFile)) throw new InvalidDataException($"Source '{source.Name}' {file.ContainerKind} layout {file.FieldCount}/{file.RecordSize} differs from base {baseFile.ContainerKind} {baseFile.FieldCount}/{baseFile.RecordSize}."); _ = schema.Resolve(file); layers[source.RootPath] = new(source with { RootPath = Path.GetFullPath(source.RootPath) }, Path.GetFullPath(candidate.FilePath), file, DbcRecordIdentity.IndexRows(file, resolution.Columns, resolution.KeyStrategy));
         }
         var baseRows = DbcRecordIdentity.IndexRows(baseFile, resolution.Columns, resolution.KeyStrategy); var occupied = baseRows.Keys.ToHashSet(); var maximum = occupied.Concat(layers.Values.SelectMany(layer => layer.Rows.Keys)).DefaultIfEmpty().Max(); if (maximum == uint.MaxValue) throw new InvalidDataException($"{table}.dbc already uses ID {uint.MaxValue:N0}; no collision-free automatic ID remains in its 32-bit namespace."); return new(table, PatchInputMapper.NormalizeArchivePath(entry.ArchivePath), basePath, baseFile, baseRows, resolution.Columns, key, references, dbdPath, layers, occupied, maximum + 1);
     }
@@ -191,7 +196,7 @@ public static class ClientFusionDbcRemapService
 
     private static Dictionary<string, uint> ResolveReferences(TableContext context, string sourceRoot, WdbcFile file, int row, IReadOnlyDictionary<StateKey, PlannedRow> states)
     {
-        var rewrites = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase); foreach (var pair in context.References) { var column = context.Columns.First(column => column.Name.Equals(pair.Key, StringComparison.OrdinalIgnoreCase)); var sourceId = file.GetRaw(row, column); if (sourceId == 0) continue; if (states.TryGetValue(StateKeyFor(sourceRoot, pair.Value, sourceId), out var target) && target.TargetId != sourceId) rewrites[column.Name] = target.TargetId; } return rewrites;
+        var rewrites = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase); foreach (var pair in context.References) { var column = context.Columns.First(column => column.Name.Equals(pair.Key, StringComparison.OrdinalIgnoreCase)); var rawSourceId = file.GetRaw64(row, column); if (rawSourceId == 0) continue; var sourceId = checked((uint)rawSourceId); if (states.TryGetValue(StateKeyFor(sourceRoot, pair.Value, sourceId), out var target) && target.TargetId != sourceId) rewrites[column.Name] = target.TargetId; } return rewrites;
     }
 
     private static CatalogRow? FindEquivalent(IReadOnlyDictionary<string, List<CatalogRow>> catalog, TableContext context, RowView view)
@@ -199,11 +204,10 @@ public static class ClientFusionDbcRemapService
         var hash = SemanticHash(context, view); return catalog.TryGetValue(hash, out var rows) ? rows.FirstOrDefault(row => RowsEqual(row.View, view, context.Columns, context.Key)) : null;
     }
     private static void AddCatalog(IDictionary<string, List<CatalogRow>> catalog, TableContext context, RowView view, uint targetId) { var hash = SemanticHash(context, view); if (!catalog.TryGetValue(hash, out var rows)) catalog[hash] = rows = []; rows.Add(new(targetId, view)); }
-    private static string SemanticHash(TableContext context, RowView view) { using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256); foreach (var column in context.Columns.Where(column => column.Index != context.Key.Index)) { var value = column.Type == DbcValueType.StringOffset ? view.File.GetString(view.File.GetRaw(view.Row, column)) : view.Rewrites.GetValueOrDefault(column.Name, view.File.GetRaw(view.Row, column)).ToString("X8"); hash.AppendData(Encoding.UTF8.GetBytes(value)); hash.AppendData([0]); } return Convert.ToHexString(hash.GetHashAndReset()); }
-    private static bool RowsEqual(RowView left, RowView right, IReadOnlyList<DbcColumn> columns, DbcColumn key) { foreach (var column in columns.Where(column => column.Index != key.Index)) { if (column.Type == DbcValueType.StringOffset) { if (!left.File.GetString(left.File.GetRaw(left.Row, column)).Equals(right.File.GetString(right.File.GetRaw(right.Row, column)), StringComparison.Ordinal)) return false; } else if (left.Rewrites.GetValueOrDefault(column.Name, left.File.GetRaw(left.Row, column)) != right.Rewrites.GetValueOrDefault(column.Name, right.File.GetRaw(right.Row, column))) return false; } return true; }
+    private static string SemanticHash(TableContext context, RowView view) { using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256); foreach (var column in context.Columns.Where(column => column.Index != context.Key.Index)) { var value = column.Type == DbcValueType.StringOffset ? view.File.GetString(view.File.GetRaw(view.Row, column)) : (view.Rewrites.TryGetValue(column.Name, out var rewritten) ? rewritten : view.File.GetRaw64(view.Row, column)).ToString("X16"); hash.AppendData(Encoding.UTF8.GetBytes(value)); hash.AppendData([0]); } return Convert.ToHexString(hash.GetHashAndReset()); }
+    private static bool RowsEqual(RowView left, RowView right, IReadOnlyList<DbcColumn> columns, DbcColumn key) { foreach (var column in columns.Where(column => column.Index != key.Index)) { if (column.Type == DbcValueType.StringOffset) { if (!left.File.GetString(left.File.GetRaw(left.Row, column)).Equals(right.File.GetString(right.File.GetRaw(right.Row, column)), StringComparison.Ordinal)) return false; } else { var leftValue = left.Rewrites.TryGetValue(column.Name, out var leftRewrite) ? leftRewrite : left.File.GetRaw64(left.Row, column); var rightValue = right.Rewrites.TryGetValue(column.Name, out var rightRewrite) ? rightRewrite : right.File.GetRaw64(right.Row, column); if (leftValue != rightValue) return false; } } return true; }
     private static string Signature(IReadOnlyDictionary<StateKey, PlannedRow> states) => string.Join('|', states.OrderBy(pair => pair.Key.SourceRoot, StringComparer.OrdinalIgnoreCase).ThenBy(pair => pair.Key.Table, StringComparer.OrdinalIgnoreCase).ThenBy(pair => pair.Key.SourceId).Select(pair => $"{pair.Key.SourceRoot}:{pair.Key.Table}:{pair.Key.SourceId}>{pair.Value.TargetId}:{pair.Value.AddsRow}:{string.Join(',', pair.Value.ReferenceRewrites.OrderBy(value => value.Key).Select(value => $"{value.Key}={value.Value}"))}"));
-    private static void RequirePhysicalSchema(string table, WdbcFile file, DbcSchemaResolution resolution) { if (resolution.MatchKind != DbcSchemaMatchKind.NamedMatch || resolution.Columns.Count != file.FieldCount || resolution.KeyStrategy.Kind != DbcRecordKeyKind.PhysicalColumn) throw new InvalidDataException($"{table}.dbc requires an exact named schema with a physical ID; resolved {resolution.MatchKind}, {resolution.Columns.Count:N0}/{file.FieldCount:N0} fields, {resolution.KeyStrategy.Kind}."); }
-    private static bool IsDbc(string path) => path.StartsWith("DBFilesClient\\", StringComparison.OrdinalIgnoreCase) && Path.GetExtension(path).Equals(".dbc", StringComparison.OrdinalIgnoreCase);
+    private static void RequirePhysicalSchema(string table, WdbcFile file, DbcSchemaResolution resolution) { if (!resolution.IsExactFor(file) || resolution.KeyStrategy.Kind != DbcRecordKeyKind.PhysicalColumn) throw new InvalidDataException($"{table} requires an exact named schema with a physical ID; resolved {resolution.MatchKind}, {resolution.DefinedFieldCount?.ToString("N0") ?? "-"}/{file.FieldCount:N0} declared fields, {resolution.ResolvedRecordSize:N0}/{file.RecordSize:N0} bytes, {resolution.KeyStrategy.Kind}."); }
     private static StateKey StateKeyFor(string sourceRoot, string table, uint sourceId) => new(Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceRoot)).ToUpperInvariant(), table.Trim().ToUpperInvariant(), sourceId);
     private static bool SamePath(string left, string right) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(left)).Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(right)), StringComparison.OrdinalIgnoreCase);
     private static void AtomicJson<T>(string path, T value) { path = Path.GetFullPath(path); Directory.CreateDirectory(Path.GetDirectoryName(path)!); var temporary = path + ".tmp"; File.WriteAllText(temporary, JsonSerializer.Serialize(value, JsonOptions)); File.Move(temporary, path, true); }

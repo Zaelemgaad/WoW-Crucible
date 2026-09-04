@@ -26,7 +26,7 @@ public static class CliCommandAbbreviationService
         new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
         {
             ["workspace"] = Words("discover init show"),
-            ["tools"] = Words("commands inventory"),
+            ["tools"] = Words("commands inventory compatibility-lab cross-build-mashup"),
             ["knowledge"] = Words("search show"),
             ["cache"] = Words("info rows export server-plan server-apply server-rollback"),
             ["client"] = Words("install-patch clear-cache publisher-key release-create release-sign release-verify release-plan release-apply release-rollback index corpus extract show fusion fusion-dbc-plan fusion-dbc-apply fusion-dbc-remap-plan fusion-dbc-remap-apply fusion-stage"),

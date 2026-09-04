@@ -37,6 +37,7 @@ internal sealed class DesktopSettings
     public string SchemaDefinitionPath { get; set; } = string.Empty;
     public string DbdDefinitionsPath { get; set; } = string.Empty;
     public string ModernFileDataIdListfilePath { get; set; } = string.Empty;
+    public string CompatibilityLabRequestPath { get; set; } = string.Empty;
     public string DatabaseHost { get; set; } = "127.0.0.1";
     public uint DatabasePort { get; set; } = 3306;
     public string DatabaseUser { get; set; } = string.Empty;

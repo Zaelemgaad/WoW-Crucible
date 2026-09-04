@@ -3,17 +3,36 @@ using System.Text.Json;
 
 namespace WoWCrucible.Core;
 
-public enum ClientFusionStatus { IdenticalToBase, Added, Override, IdenticalCandidates, Conflict }
+public enum ClientFusionStatus { IdenticalToBase, Added, Override, IdenticalCandidates, Conflict, IncompatibleTarget }
 public sealed record ClientFusionSource(string Name, string RootPath);
 public sealed record ClientFusionCandidate(string SourceName, string SourceRoot, string FilePath, long Size, string? Sha256);
-public sealed record ClientFusionEntry(string ArchivePath, ClientFusionStatus Status, string? BaseFilePath, IReadOnlyList<ClientFusionCandidate> Candidates, string Guidance);
-public sealed record ClientFusionPlan(int FormatVersion, DateTimeOffset GeneratedUtc, string BaseRoot, IReadOnlyList<ClientFusionSource> Sources, IReadOnlyList<ClientFusionEntry> Entries);
-public sealed record ClientFusionStageResult(string RootPath, string ManifestPath, int StagedFiles, int SkippedBaseFiles, int UnresolvedConflicts);
+public sealed record ClientFusionEntry(string ArchivePath, ClientFusionStatus Status, string? BaseFilePath, IReadOnlyList<ClientFusionCandidate> Candidates, string Guidance, string? CompatibilityIssue = null);
+public sealed record ClientFusionPlan(
+    int FormatVersion,
+    DateTimeOffset GeneratedUtc,
+    string TargetProfileId,
+    int TargetBuild,
+    ClientTableFormat TargetTableFormats,
+    ArchiveFormat TargetArchiveFormat,
+    string BaseRoot,
+    IReadOnlyList<ClientFusionSource> Sources,
+    IReadOnlyList<ClientFusionEntry> Entries);
+public sealed record ClientFusionStageResult(
+    string RootPath,
+    string? ManifestPath,
+    string ClientPayloadRoot,
+    ArchiveFormat TargetArchiveFormat,
+    bool RequiresClientPublisher,
+    int StagedFiles,
+    int SkippedBaseFiles,
+    int UnresolvedConflicts);
 
 public static class ClientFusionPlanner
 {
-    public static ClientFusionPlan Analyze(string baseRoot, IEnumerable<ClientFusionSource> sources, IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
+    public static ClientFusionPlan Analyze(string baseRoot, IEnumerable<ClientFusionSource> sources, TargetProfile target,
+        IProgress<(int Done, int Total, string Path)>? progress = null, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(target);
         baseRoot = Path.GetFullPath(baseRoot);
         if (!Directory.Exists(baseRoot)) throw new DirectoryNotFoundException($"Fusion base folder not found: {baseRoot}");
         var normalizedSources = sources.Select(source => source with { RootPath = Path.GetFullPath(source.RootPath) }).ToArray();
@@ -23,6 +42,10 @@ public static class ClientFusionPlanner
         var ambiguousBase = baseCandidates.GroupBy(entry => entry.ArchivePath, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
         if (ambiguousBase is not null)
             throw new InvalidDataException($"The selected base contains multiple files for '{ambiguousBase.Key}'. Choose/extract one effective base layer before fusion; archive load order will not be guessed.");
+        var incompatibleBase = baseCandidates.Where(entry => ClientTableCompatibilityPolicy.IsClientTablePath(entry.ArchivePath))
+            .Select(entry => ClientTableCompatibilityPolicy.Assess(entry.SourcePath, target)).FirstOrDefault(result => !result.CanTarget);
+        if (incompatibleBase is not null)
+            throw new InvalidDataException($"The selected base is not a {target.DisplayName} corpus: {incompatibleBase.Table}: {incompatibleBase.Message}");
         var baseFiles = baseCandidates.ToDictionary(entry => entry.ArchivePath, entry => entry.SourcePath, StringComparer.OrdinalIgnoreCase);
         var mapped = normalizedSources.SelectMany(source => PatchInputMapper.MapCandidates([source.RootPath]).Select(entry => (Source: source, Entry: entry)))
             .GroupBy(item => item.Entry.ArchivePath, StringComparer.OrdinalIgnoreCase).OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase).ToArray();
@@ -35,17 +58,25 @@ public static class ClientFusionPlanner
             var rawCandidates = group.Select(item => new ClientFusionCandidate(
                 repeatedSources.Contains(item.Source.Name) ? $"{item.Source.Name} · {Path.GetRelativePath(item.Source.RootPath, item.Entry.SourcePath)}" : item.Source.Name,
                 item.Source.RootPath, item.Entry.SourcePath, new FileInfo(item.Entry.SourcePath).Length, null)).ToArray();
+            var compatibilityIssues = ClientTableCompatibilityPolicy.IsClientTablePath(group.Key)
+                ? rawCandidates.Select(candidate => (candidate, assessment: ClientTableCompatibilityPolicy.Assess(candidate.FilePath, target)))
+                    .Where(value => !value.assessment.CanTarget).Select(value => $"{value.candidate.SourceName}: {value.assessment.Message}").ToArray()
+                : [];
             var candidates = rawCandidates.Length == 1 ? rawCandidates : rawCandidates.Select(candidate => candidate with { Sha256 = Hash(candidate.FilePath) }).ToArray();
             var distinctBytes = candidates.Length == 1 ? 1 : candidates.Select(candidate => candidate.Sha256!).Distinct(StringComparer.OrdinalIgnoreCase).Count();
             var matchesBase = baseFile is not null && distinctBytes == 1 && FilesMatch(baseFile, candidates[0]);
-            var status = matchesBase ? ClientFusionStatus.IdenticalToBase
+            var status = compatibilityIssues.Length > 0 ? ClientFusionStatus.IncompatibleTarget
+                : matchesBase ? ClientFusionStatus.IdenticalToBase
                 : distinctBytes > 1 ? ClientFusionStatus.Conflict
                 : group.Count() > 1 ? ClientFusionStatus.IdenticalCandidates
                 : baseFile is null ? ClientFusionStatus.Added : ClientFusionStatus.Override;
-            result.Add(new(group.Key, status, baseFile, candidates, Guidance(group.Key, status)));
+            var compatibilityIssue = compatibilityIssues.Length == 0 ? null : string.Join(" | ", compatibilityIssues);
+            result.Add(new(group.Key, status, baseFile, candidates,
+                compatibilityIssue ?? Guidance(group.Key, status, target), compatibilityIssue));
         }
         progress?.Report((mapped.Length, mapped.Length, "Complete"));
-        return new(1, DateTimeOffset.UtcNow, baseRoot, normalizedSources, result);
+        return new(2, DateTimeOffset.UtcNow, target.Id, target.ClientBuild, target.TableFormats, target.ArchiveFormat,
+            baseRoot, normalizedSources, result);
     }
 
     public static void Save(string path, ClientFusionPlan plan)
@@ -59,7 +90,7 @@ public static class ClientFusionPlanner
     public static ClientFusionPlan Load(string path)
     {
         var plan = JsonSerializer.Deserialize<ClientFusionPlan>(File.ReadAllText(path)) ?? throw new InvalidDataException("Client fusion plan is empty.");
-        if (plan.FormatVersion != 1) throw new InvalidDataException($"Unsupported client fusion plan version {plan.FormatVersion}."); return plan;
+        if (plan.FormatVersion != 2) throw new InvalidDataException($"Unsupported client fusion plan version {plan.FormatVersion}."); return plan;
     }
 
     public static ClientFusionStageResult Stage(string rootPath, ClientFusionPlan plan, IReadOnlyDictionary<string, string>? conflictSelections = null,
@@ -86,6 +117,7 @@ public static class ClientFusionPlanner
                 var remappedDestination = Path.Combine(filesRoot, entry.ArchivePath.Replace('\\', Path.DirectorySeparatorChar)); Directory.CreateDirectory(Path.GetDirectoryName(remappedDestination)!); File.Copy(remapped, remappedDestination, true); entries.Add(new(remappedDestination, entry.ArchivePath)); continue;
             }
             if (entry.Status == ClientFusionStatus.IdenticalToBase) { skipped++; continue; }
+            if (entry.Status == ClientFusionStatus.IncompatibleTarget) { unresolved++; continue; }
             if (dbcResult is not null && dbcResult.Plan.Tables.Any(table => table.ArchivePath.Equals(entry.ArchivePath, StringComparison.OrdinalIgnoreCase)))
             {
                 if (dbcResult.BlockedArchivePaths.Contains(entry.ArchivePath, StringComparer.OrdinalIgnoreCase)) { unresolved++; continue; }
@@ -106,21 +138,27 @@ public static class ClientFusionPlanner
             entries.Add(new(destination, entry.ArchivePath));
         }
         if (entries.Count == 0) throw new InvalidOperationException("The fusion plan has no resolved changes to stage.");
-        var manifest = Path.Combine(rootPath, "fusion.crucible-patch.json");
-        PatchManifestService.Save(manifest, "Client fusion patch", "patch-Crucible-Fusion.MPQ", entries, policy: new(ExpectedEntryCount: entries.Count));
-        return new(rootPath, manifest, entries.Count, skipped, unresolved);
+        string? manifest = null;
+        if (plan.TargetArchiveFormat == ArchiveFormat.Mpq)
+        {
+            manifest = Path.Combine(rootPath, "fusion.crucible-patch.json");
+            PatchManifestService.Save(manifest, "Client fusion patch", "patch-Crucible-Fusion.MPQ", entries, policy: new(ExpectedEntryCount: entries.Count));
+        }
+        return new(rootPath, manifest, filesRoot, plan.TargetArchiveFormat,
+            plan.TargetArchiveFormat == ArchiveFormat.Casc && entries.Count > 0, entries.Count, skipped, unresolved);
     }
 
-    private static string Guidance(string path, ClientFusionStatus status)
+    private static string Guidance(string path, ClientFusionStatus status, TargetProfile target)
     {
-        var dbc = path.StartsWith("DBFilesClient\\", StringComparison.OrdinalIgnoreCase) && Path.GetExtension(path).Equals(".dbc", StringComparison.OrdinalIgnoreCase);
+        var table = ClientTableCompatibilityPolicy.IsClientTablePath(path);
         return status switch
         {
             ClientFusionStatus.IdenticalToBase => "Same bytes as the selected base; omitted from the patch.",
-            ClientFusionStatus.Added => "New path supplied by one source; safe to stage after compatibility review.",
-            ClientFusionStatus.Override => dbc ? "DBC differs from base. Prefer adding new records or allocating/remapping IDs; replace existing records only by explicit review." : "Source uses a base path. Preserve both by renaming/repointing when possible; otherwise review the replacement explicitly.",
+            ClientFusionStatus.Added => $"New path supplied by one source; safe to stage for {target.DisplayName} after compatibility review.",
+            ClientFusionStatus.Override => table ? "Client table differs from base. Prefer adding new records or allocating/remapping IDs; replace existing records only by explicit review." : "Source uses a base path. Preserve both by renaming/repointing when possible; otherwise review the replacement explicitly.",
             ClientFusionStatus.IdenticalCandidates => "Multiple sources supply identical bytes; one deduplicated copy will be staged.",
-            ClientFusionStatus.Conflict when dbc => "Different DBCs target the same path. Add/remap compatible records into one merged table; do not choose a whole-file winner or rely on load order.",
+            ClientFusionStatus.Conflict when table => "Different client tables target the same path. Add/remap compatible records into one merged table; do not choose a whole-file winner or rely on load order.",
+            ClientFusionStatus.IncompatibleTarget => $"One or more client tables do not belong to {target.DisplayName}; staging is blocked.",
             _ => "Different files target the same client path. Prefer renaming the imported asset and repointing its references; selecting one source is an explicit replacement, not additive fusion."
         };
     }

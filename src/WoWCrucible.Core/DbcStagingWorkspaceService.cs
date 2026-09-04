@@ -34,6 +34,18 @@ public sealed record DbcStagingDiff(
 }
 
 public sealed record DbcStagingQueryResult(IReadOnlyList<string> Columns, IReadOnlyList<IReadOnlyList<object?>> Rows, bool Truncated);
+public sealed record DbcStagingQueryExpectation(bool RequireRows = false, int? ExpectedCount = null)
+{
+    public string? Validate(DbcStagingQueryResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        if (ExpectedCount is < 0) throw new ArgumentOutOfRangeException(nameof(ExpectedCount), "Expected row count cannot be negative.");
+        if (ExpectedCount is { } expected && result.Rows.Count != expected)
+            return $"Query returned {result.Rows.Count:N0} row(s); expected exactly {expected:N0}.";
+        if (RequireRows && result.Rows.Count == 0) return "Query returned no rows, but --require-rows was specified.";
+        return null;
+    }
+}
 public sealed record DbcStagingMutationResult(int AffectedRows, bool Applied, DbcStagingDiff Diff);
 public sealed record DbcStagingApplyResult(string OutputPath, DbcRowImportApplyResult Import, DbcStagingDiff Diff, string OutputSha256);
 

@@ -1,0 +1,53 @@
+{
+  "FormatVersion": 1,
+  "OutputRoot": "D:\\CrucibleLab\\runs",
+  "HashWorkers": 8,
+  "Lanes": [
+    {
+      "Name": "MoP 5.4.8",
+      "ProfileId": "mop-18414",
+      "TableRoot": "D:\\CrucibleLab\\worktrees\\mop\\server\\data",
+      "ServerCloneRoot": "D:\\CrucibleLab\\worktrees\\mop\\server",
+      "CoreSourceRoot": "D:\\Sources\\SkyFire_548",
+      "DefinitionsRoot": "D:\\Tools\\WoWDBDefs\\definitions",
+      "XmlSchemaPath": "D:\\Tools\\WDBX\\MoP 5.4.8 (18414).xml",
+      "ClonePairs": [
+        {
+          "Name": "client",
+          "SourceRoot": "D:\\Installed\\MoP Client",
+          "CloneRoot": "D:\\CrucibleLab\\worktrees\\mop\\client",
+          "ExcludedDirectoryNames": [ "Cache" ]
+        },
+        {
+          "Name": "server",
+          "SourceRoot": "D:\\Installed\\MoP Server",
+          "CloneRoot": "D:\\CrucibleLab\\worktrees\\mop\\server",
+          "ExcludedDirectoryNames": [ "Cache", "Logs", "Crashes" ]
+        }
+      ]
+    },
+    {
+      "Name": "Legion 7.3.5",
+      "ProfileId": "legion-26972",
+      "TableRoot": "D:\\CrucibleLab\\worktrees\\legion\\server\\ClientData\\dbc",
+      "ServerCloneRoot": "D:\\CrucibleLab\\worktrees\\legion\\server",
+      "CoreSourceRoot": "D:\\Sources\\LegionCore-7.3.5",
+      "DefinitionsRoot": "D:\\Tools\\WoWDBDefs\\definitions",
+      "XmlSchemaPath": "D:\\Tools\\WDBX\\Legion 7.3.5 (26972).xml",
+      "ClonePairs": [
+        {
+          "Name": "client",
+          "SourceRoot": "D:\\Installed\\Legion Client",
+          "CloneRoot": "D:\\CrucibleLab\\worktrees\\legion\\client",
+          "ExcludedDirectoryNames": [ "Cache", "Logs", "Errors" ]
+        },
+        {
+          "Name": "server",
+          "SourceRoot": "D:\\Installed\\Legion Server",
+          "CloneRoot": "D:\\CrucibleLab\\worktrees\\legion\\server",
+          "ExcludedDirectoryNames": [ "Cache", "Logs", "Crashes" ]
+        }
+      ]
+    }
+  ]
+}

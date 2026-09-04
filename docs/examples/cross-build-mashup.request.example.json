@@ -1,0 +1,20 @@
+{
+  "FormatVersion": 1,
+  "Name": "Mists of the Pandaren Legion",
+  "HostProfileId": "mop-18414",
+  "DonorProfileId": "legion-26972",
+  "HostTableRoot": "E:\\wowps\\mashup-worktrees\\mop-baseline\\server\\data",
+  "DonorTableRoot": "E:\\wowps\\mashup-worktrees\\legion-donor\\server\\ClientData\\dbc",
+  "DefinitionsRoot": "E:\\wowps\\Tools\\WoWDBDefs\\definitions",
+  "HostXmlSchemaPath": "E:\\wowps\\Tools\\WDBX Workspace\\Definitions\\MoP 5.4.8 (18414).xml",
+  "DonorXmlSchemaPath": "E:\\wowps\\Tools\\WDBX Workspace\\Definitions\\Legion 7.3.5 (26972).xml",
+  "OutputRoot": "E:\\wowps\\mashup-worktrees\\runs",
+  "PatchFileName": "wow-update-base-29999.MPQ",
+  "InstallClientDataRoot": "E:\\wowps\\mashup-worktrees\\mists-of-the-pandaren-legion\\client\\Data",
+  "InstallServerTableRoot": "E:\\wowps\\mashup-worktrees\\mists-of-the-pandaren-legion\\server\\data",
+  "MaximumRowsPerTable": 0,
+  "IncludeTables": [],
+  "HostClientDataRoot": "E:\\wowps\\mashup-worktrees\\mists-of-the-pandaren-legion\\client\\Data",
+  "DonorClientRoot": "E:\\wowps\\mashup-worktrees\\legion-donor\\client",
+  "DonorFileDataListPath": "E:\\wowps\\Listfiles\\community-listfile.csv"
+}

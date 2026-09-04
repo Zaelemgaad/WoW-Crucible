@@ -76,6 +76,7 @@
                                 <Button HorizontalContentAlignment="Left" Click="OpenCacheTablesClick" ToolTip.Tip="Inspect WDB/ADB client cache records."><TextBlock Text="Client cache tables" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenMpqWorkspaceClick" ToolTip.Tip="Browse, extract, build, update, validate, and merge small MPQ patches."><TextBlock Text="MPQ patches &amp; merge" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenClientWorkspaceClick" ToolTip.Tip="Index clients, inspect effective archive layers, install patches, and manage releases."><TextBlock Text="Client workshop" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenCompatibilityLabClick" ToolTip.Tip="Prepare and verify isolated client/server worktrees and run cross-expansion audits."><TextBlock Text="Compatibility lab" TextWrapping="Wrap" /></Button>
                             </StackPanel>
                         </Expander>
                         <Expander Header="SERVER &amp; DATABASE">

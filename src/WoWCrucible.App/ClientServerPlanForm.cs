@@ -8,6 +8,8 @@ internal sealed class ClientServerPlanForm : Form
     private readonly TextBox _clientDbcs = new() { Dock = DockStyle.Fill };
     private readonly TextBox _serverRoot = new() { Dock = DockStyle.Fill };
     private readonly TextBox _coreSource = new() { Dock = DockStyle.Fill };
+    private readonly ComboBox _target = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly IReadOnlyList<TargetProfile> _targetProfiles;
     private readonly DataGridView _grid = new FastDataGridView { Dock = DockStyle.Fill, ReadOnly = true, MultiSelect = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None };
     private readonly Label _summary = new() { Dock = DockStyle.Bottom, Height = 48, Padding = new(10), ForeColor = Color.FromArgb(55, 65, 81) };
     private readonly Button _analyze = new() { Text = "Analyze Client → Server", AutoSize = true };
@@ -16,22 +18,27 @@ internal sealed class ClientServerPlanForm : Form
     public ClientServerPlanForm(AppSettings settings)
     {
         _settings = settings;
-        Text = "Client DBC → Server Plan · WoW Crucible"; Width = 1400; Height = 820; StartPosition = FormStartPosition.CenterParent;
+        _targetProfiles = TargetProfileCatalog.Load();
+        Text = "Client Tables → Server Plan · WoW Crucible"; Width = 1400; Height = 820; StartPosition = FormStartPosition.CenterParent;
         _clientDbcs.Text = Directory.Exists(settings.OverrideDbcPath) ? settings.OverrideDbcPath : string.Empty;
         _serverRoot.Text = settings.ServerRootPath;
         _coreSource.Text = settings.CoreSourcePath;
+        _target.DataSource = _targetProfiles.ToList();
+        _target.SelectedItem = TargetProfileCatalog.Find(_targetProfiles, settings.SelectedTargetProfileId);
 
         var paths = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, Padding = new(10) };
         paths.ColumnStyles.Add(new(SizeType.AutoSize)); paths.ColumnStyles.Add(new(SizeType.Percent, 100)); paths.ColumnStyles.Add(new(SizeType.AutoSize));
-        AddPath(paths, 0, "Extracted/effective DBCs", _clientDbcs, "Choose DBFilesClient or a folder containing extracted DBCs", () => PickFolder(_clientDbcs));
+        AddPath(paths, 0, "Extracted/effective tables", _clientDbcs, "Choose DBFilesClient or a folder containing extracted DBC/DB2 tables", () => PickFolder(_clientDbcs));
         AddPath(paths, 1, "Installed server", _serverRoot, "Choose the server folder containing the live worldserver.conf", () => PickFolder(_serverRoot));
-        AddPath(paths, 2, "Core source (recommended)", _coreSource, "Choose current AzerothCore/TrinityCore source so every loaded DBC is discovered", () => PickFolder(_coreSource));
+        AddPath(paths, 2, "Core source (recommended)", _coreSource, "Choose current AzerothCore, TrinityCore, SkyFire, or LegionCore source so every loaded client table is discovered", () => PickFolder(_coreSource));
+        paths.Controls.Add(new Label { Text = "Target client", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 3);
+        paths.Controls.Add(_target, 1, 3); paths.SetColumnSpan(_target, 2);
 
         var actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new(10, 0, 10, 8) };
         _analyze.Click += async (_, _) => await Analyze();
         actions.Controls.Add(_analyze); actions.Controls.Add(Button("Export Plan…", ExportPlan)); actions.Controls.Add(Button("Stage Patch + Server Files…", Stage));
 
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "DBC", Width = 230 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Client table", Width = 230 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Rows", Width = 75 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Fields", Width = 65 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Client/server result", Width = 190 });
@@ -41,7 +48,7 @@ internal sealed class ClientServerPlanForm : Form
         _grid.SelectionChanged += (_, _) => ShowSelected();
 
         Controls.Add(_grid); Controls.Add(_summary); Controls.Add(actions); Controls.Add(paths);
-        _summary.Text = "Select the effective extracted DBC layer and installed server. Different same-named DBCs under the source are treated as unresolved layer conflicts, never last-writer-wins.";
+        _summary.Text = "Select the effective extracted table layer and installed server. Different same-named tables under the source are treated as unresolved layer conflicts, never last-writer-wins.";
     }
 
     private static void AddPath(TableLayoutPanel panel, int row, string label, TextBox box, string tooltip, Action browse)
@@ -61,11 +68,13 @@ internal sealed class ClientServerPlanForm : Form
     {
         try
         {
-            _analyze.Enabled = false; UseWaitCursor = true; _summary.Text = "Detecting server configuration and comparing DBC identities…";
+            _analyze.Enabled = false; UseWaitCursor = true; _summary.Text = "Detecting server configuration and comparing client-table identities…";
             var workspace = await ServerWorkspaceDetector.DetectAsync(_serverRoot.Text);
             var source = Directory.Exists(_coreSource.Text) ? _coreSource.Text : null;
-            _plan = await Task.Run(() => ClientServerDeploymentPlanner.Analyze(_clientDbcs.Text, workspace, source));
+            var target = _target.SelectedItem as TargetProfile ?? throw new InvalidOperationException("Choose the target client profile.");
+            _plan = await Task.Run(() => ClientServerDeploymentPlanner.Analyze(_clientDbcs.Text, workspace, target, source));
             _settings.OverrideDbcPath = Path.GetFullPath(_clientDbcs.Text); _settings.ServerRootPath = workspace.RootPath;
+            _settings.SelectedTargetProfileId = target.Id;
             if (source is not null) _settings.CoreSourcePath = Path.GetFullPath(source);
             _settings.CoreDbcPath = workspace.DbcPath; _settings.Save();
             FillGrid();
@@ -81,15 +90,15 @@ internal sealed class ClientServerPlanForm : Form
         {
             var row = _grid.Rows.Add(entry.DbcFileName, entry.ClientRows?.ToString("N0") ?? "—", entry.ClientFields?.ToString("N0") ?? "—", entry.Status, entry.Consumption, entry.SqlTableName ?? "—", entry.Guidance);
             _grid.Rows[row].Tag = entry;
-            if (entry.Status is ClientServerPlanStatus.ConflictingClientLayers or ClientServerPlanStatus.InvalidDbc or ClientServerPlanStatus.UnknownConsumer or ClientServerPlanStatus.MissingServerDbc)
+            if (entry.Status is ClientServerPlanStatus.ConflictingClientLayers or ClientServerPlanStatus.IncompatibleTarget or ClientServerPlanStatus.InvalidDbc or ClientServerPlanStatus.UnknownConsumer or ClientServerPlanStatus.MissingServerDbc)
                 _grid.Rows[row].DefaultCellStyle.BackColor = Color.FromArgb(254, 242, 242);
             else if (entry.Status == ClientServerPlanStatus.SqlOverlayRequiresAudit) _grid.Rows[row].DefaultCellStyle.BackColor = Color.FromArgb(255, 247, 237);
             else if (entry.Status == ClientServerPlanStatus.Identical) _grid.Rows[row].DefaultCellStyle.ForeColor = Color.Gray;
         }
         var changed = _plan.Entries.Count(entry => entry.Status != ClientServerPlanStatus.Identical);
-        var blocked = _plan.Entries.Count(entry => entry.Status is ClientServerPlanStatus.ConflictingClientLayers or ClientServerPlanStatus.InvalidDbc or ClientServerPlanStatus.UnknownConsumer or ClientServerPlanStatus.MissingServerDbc);
+        var blocked = _plan.Entries.Count(entry => entry.Status is ClientServerPlanStatus.ConflictingClientLayers or ClientServerPlanStatus.IncompatibleTarget or ClientServerPlanStatus.InvalidDbc or ClientServerPlanStatus.UnknownConsumer or ClientServerPlanStatus.MissingServerDbc);
         var sql = _plan.Entries.Count(entry => entry.Status == ClientServerPlanStatus.SqlOverlayRequiresAudit);
-        _summary.Text = $"{_plan.Entries.Count:N0} DBCs analyzed · {changed:N0} differ/need review · {sql:N0} SQL-overlay audits · {blocked:N0} blocked or unresolved. Staging writes only to a new review folder, never to the live server.";
+        _summary.Text = $"{_plan.Entries.Count:N0} client tables analyzed · {changed:N0} differ/need review · {sql:N0} SQL-overlay audits · {blocked:N0} blocked or unresolved. Staging writes only to a new review folder, never to the live server.";
     }
 
     private void ShowSelected()
@@ -110,12 +119,14 @@ internal sealed class ClientServerPlanForm : Form
     private void Stage()
     {
         if (_plan is null) { _summary.Text = "Analyze first, then stage its safe outputs."; return; }
-        using var dialog = new FolderBrowserDialog { Description = "Choose an empty/new review folder for the patch manifest and server DBC candidates" };
+        using var dialog = new FolderBrowserDialog { Description = "Choose an empty/new review folder for the client payload and server table candidates" };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         try
         {
             var result = ClientServerDeploymentPlanner.Stage(dialog.SelectedPath, _plan);
-            _summary.Text = $"Staged {result.ClientFiles:N0} client patch files and {result.ServerFiles:N0} server DBC candidates; {result.BlockedFiles:N0} unresolved. Review {result.PlanPath} before applying anything live.";
+            _summary.Text = result.RequiresClientPublisher
+                ? $"Staged {result.ClientFiles:N0} client tables and {result.ServerFiles:N0} server candidates; {result.BlockedFiles:N0} unresolved. CASC payload only: a target-build publisher is required. Review {result.PlanPath}."
+                : $"Staged {result.ClientFiles:N0} MPQ-ready client tables and {result.ServerFiles:N0} server candidates; {result.BlockedFiles:N0} unresolved. Review {result.PlanPath}.";
         }
         catch (Exception ex) { CrashLogger.Log("Client to server staging failed", ex); MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }

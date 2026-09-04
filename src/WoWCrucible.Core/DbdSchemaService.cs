@@ -21,7 +21,7 @@ public sealed record DbdBuildRange(DbdClientBuild Start, DbdClientBuild End, str
     public bool Contains(int build) => Contains(DbdClientBuild.FromNumber(build));
     public bool Contains(DbdClientBuild build) => build.CompareTo(Start) >= 0 && build.CompareTo(End) <= 0;
 }
-public sealed record DbdField(string Name, int ArraySize, int BitWidth, bool Unsigned, bool IsId, bool NonInline, string Raw);
+public sealed record DbdField(string Name, int ArraySize, int BitWidth, bool Unsigned, bool IsId, bool NonInline, bool IsRelation, string Raw);
 public sealed record DbdLayout(IReadOnlyList<DbdBuildRange> Builds, IReadOnlyList<string> LayoutHashes, IReadOnlyList<string> Comments, IReadOnlyList<DbdField> Fields)
 {
     public bool Supports(int build) => Builds.Any(range => range.Contains(build));
@@ -29,6 +29,11 @@ public sealed record DbdLayout(IReadOnlyList<DbdBuildRange> Builds, IReadOnlyLis
 public sealed record DbdDefinition(string Path, string TableName, IReadOnlyDictionary<string, DbdColumnDefinition> Columns, IReadOnlyList<DbdLayout> Layouts)
 {
     public DbdLayout? ForBuild(int build) => Layouts.FirstOrDefault(layout => layout.Supports(build));
+    public DbdLayout? ForLayoutHash(uint layoutHash)
+    {
+        var expected = layoutHash.ToString("X8", System.Globalization.CultureInfo.InvariantCulture);
+        return Layouts.FirstOrDefault(layout => layout.LayoutHashes.Any(hash => hash.TrimStart('0', 'x', 'X').PadLeft(8, '0').Equals(expected, StringComparison.OrdinalIgnoreCase)));
+    }
 }
 public enum DbdAuditStatus { Match, EmptyPlaceholder, DeltaPatch, MissingDefinition, MissingBuild, FieldCountMismatch, RoundTripMismatch, InvalidDbc, InvalidDefinition }
 public sealed record DbdSchemaAuditRow(string Table, DbdAuditStatus Status, int ActualFields, int? DbdFields, int? XmlFields, string Message,
@@ -71,6 +76,11 @@ public static partial class DbdSchemaService
     public static IReadOnlyList<DbcColumn> ResolveColumns(DbdDefinition definition, int build)
     {
         var layout = definition.ForBuild(build) ?? throw new KeyNotFoundException($"{definition.TableName}.dbd has no layout covering client build {build:N0}.");
+        return ResolveColumns(definition, layout, build);
+    }
+
+    internal static IReadOnlyList<DbcColumn> ResolveColumns(DbdDefinition definition, DbdLayout layout, int build)
+    {
         var result = new List<DbcColumn>(); var offset = 0;
         foreach (var field in layout.Fields)
         {
@@ -84,17 +94,19 @@ public static partial class DbdSchemaService
                     for (var locale = 0; locale < 16; locale++) Add($"{field.Name}[{Locale(locale)}]", DbcValueType.StringOffset, 4, field.IsId);
                     Add($"{field.Name}[Flags]", DbcValueType.UInt32, 4, false);
                 }
-                else Add(field.Name, DbcValueType.StringOffset, Math.Max(1, field.BitWidth / 8), field.IsId);
+                else Add(field.Name, DbcValueType.StringOffset, Math.Max(1, (field.BitWidth + 7) / 8), field.IsId);
                 continue;
             }
             for (var element = 0; element < field.ArraySize; element++)
             {
                 var name = field.ArraySize == 1 ? field.Name : $"{field.Name}[{element}]";
-                var size = Math.Max(1, field.BitWidth / 8); var type = logical.Type switch
+                var size = Math.Max(1, (field.BitWidth + 7) / 8); var type = logical.Type switch
                 {
                     DbdPrimitiveType.String => DbcValueType.StringOffset,
                     DbdPrimitiveType.Float => DbcValueType.Float32,
                     DbdPrimitiveType.Int when field.BitWidth == 8 && field.Unsigned => DbcValueType.Byte,
+                    DbdPrimitiveType.Int when field.BitWidth > 32 && field.Unsigned => DbcValueType.UInt64,
+                    DbdPrimitiveType.Int when field.BitWidth > 32 => DbcValueType.Int64,
                     DbdPrimitiveType.Int when field.Unsigned => DbcValueType.UInt32,
                     DbdPrimitiveType.Int => DbcValueType.Int32,
                     _ => DbcValueType.Raw32
@@ -108,13 +120,98 @@ public static partial class DbdSchemaService
 
     public static DbcSchemaResolution ResolveFile(string definitionPath, int build, int actualFieldCount, int recordSize)
     {
-        var definition = Load(definitionPath); var columns = ResolveColumns(definition, build);
-        if (columns.Count != actualFieldCount) throw new InvalidDataException($"{definition.TableName}.dbd build {build:N0} resolves {columns.Count:N0} physical fields, but the client table declares {actualFieldCount:N0}.");
+        var definition = Load(definitionPath);
+        var layout = definition.ForBuild(build);
+        if (layout is null && !KnownFixedLayoutSchemaCatalog.TryResolve(definition, build, actualFieldCount, recordSize, out layout, out _))
+            throw new KeyNotFoundException($"{definition.TableName}.dbd has no layout covering client build {build:N0}.");
+        var columns = ResolveColumns(definition, layout, build);
+        var declaredFields = DeclaredFieldCount(columns);
+        if (declaredFields != actualFieldCount) throw new InvalidDataException($"{definition.TableName}.dbd build {build:N0} resolves {declaredFields:N0} declared fields ({columns.Count:N0} editable columns including explicit padding), but the client table declares {actualFieldCount:N0}.");
         var resolvedSize = columns.Count == 0 ? 0 : columns.Max(column => column.Offset + column.Size);
         if (resolvedSize != recordSize) throw new InvalidDataException($"{definition.TableName}.dbd build {build:N0} resolves a {resolvedSize:N0}-byte record, but the client table declares {recordSize:N0} bytes.");
-        if (columns.Any(column => column.Size is not (1 or 2 or 4))) throw new NotSupportedException($"{definition.TableName}.dbd contains scalar widths outside the currently editable 8/16/32-bit WDB2 provider.");
+        if (columns.Any(column => column.Size is not (1 or 2 or 4 or 8))) throw new NotSupportedException($"{definition.TableName}.dbd contains scalar widths outside the editable 8/16/32/64-bit WDB2 provider.");
         var key = columns.FirstOrDefault(column => column.IsIndex);
-        return new(columns, DbcSchemaMatchKind.NamedMatch, columns.Count, key is null ? DbcRecordKeyStrategy.None : DbcRecordKeyStrategy.Physical(key.Index));
+        return new(columns, DbcSchemaMatchKind.NamedMatch, declaredFields, key is null ? DbcRecordKeyStrategy.None : DbcRecordKeyStrategy.Physical(key.Index));
+    }
+
+    public static DbcSchemaResolution ResolveFile(string definitionPath, int build, WdbcFile file)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        if (file.ContainerKind != ClientTableContainerKind.Wdc1)
+        {
+            var fixedResolution = ResolveFile(definitionPath, build, file.FieldCount, file.RecordSize);
+            file.ConfigureWdb2Schema(fixedResolution.Columns);
+            return fixedResolution;
+        }
+        var metadata = file.Wdc1Metadata ?? throw new InvalidDataException("WDC1 metadata is unavailable.");
+        var definition = Load(definitionPath);
+        var byHash = definition.ForLayoutHash(metadata.LayoutHash);
+        var layout = byHash ?? definition.ForBuild(build);
+        if (layout is null)
+        {
+            if (!KnownWdc1SchemaCatalog.TryResolve(definition.TableName, build, metadata, out var knownResolution))
+                throw new KeyNotFoundException($"{definition.TableName}.dbd has no layout for WDC1 hash {metadata.LayoutHash:X8} or client build {build:N0}.");
+            file.ConfigureWdc1Schema(knownResolution.Columns);
+            return knownResolution;
+        }
+        var resolution = ResolveWdc1(definition, layout, metadata);
+        file.ConfigureWdc1Schema(resolution.Columns);
+        return resolution;
+    }
+
+    private static DbcSchemaResolution ResolveWdc1(DbdDefinition definition, DbdLayout layout, Wdc1Metadata metadata)
+    {
+        var columns = new List<DbcColumn>();
+        var logicalOffset = 0;
+        var storageIndex = 0;
+        foreach (var field in layout.Fields)
+        {
+            if (!definition.Columns.TryGetValue(field.Name, out var logical)) throw new InvalidDataException($"{definition.TableName}.dbd layout references undefined column '{field.Name}'.");
+            if (field.IsRelation && metadata.HasRelationshipData)
+            {
+                if (field.ArraySize != 1) throw new InvalidDataException($"Relationship field '{field.Name}' unexpectedly declares an array.");
+                var placeholder = field.NonInline ? -1 : storageIndex++;
+                Add(field.Name, ValueType(logical, field), Math.Max(1, (field.BitWidth + 7) / 8), field.IsId, placeholder, 0, field.BitWidth, DbcColumnStorageKind.Relationship);
+                continue;
+            }
+            if (field.NonInline)
+            {
+                if (field.IsRelation) throw new InvalidDataException($"WDC1 has no relationship block for non-inline relation '{field.Name}'.");
+                if (!field.IsId) throw new NotSupportedException($"WDC1 non-inline field '{field.Name}' is neither an ID nor a relationship.");
+                Add(field.Name, ValueType(logical, field), 4, true, -1, 0, 32, DbcColumnStorageKind.ExternalId);
+                continue;
+            }
+
+            var type = ValueType(logical, field);
+            var size = Math.Max(1, (field.BitWidth + 7) / 8);
+            for (var element = 0; element < field.ArraySize; element++)
+                Add(field.ArraySize == 1 ? field.Name : $"{field.Name}[{element}]", type, size, field.IsId, storageIndex, element, field.BitWidth, DbcColumnStorageKind.Record);
+            storageIndex++;
+        }
+        if (storageIndex != metadata.TotalFieldCount)
+            throw new InvalidDataException($"{definition.TableName}.dbd maps {storageIndex:N0} WDC1 storage fields, but the file declares {metadata.TotalFieldCount:N0}.");
+        if (columns.Any(column => column.StorageKind == DbcColumnStorageKind.Relationship) != metadata.HasRelationshipData)
+            throw new InvalidDataException($"{definition.TableName}.dbd relationship annotations do not match the WDC1 relationship block.");
+        var key = columns.FirstOrDefault(column => column.IsIndex);
+        return new(columns, DbcSchemaMatchKind.NamedMatch, storageIndex, key is null ? DbcRecordKeyStrategy.None : DbcRecordKeyStrategy.Physical(key.Index));
+
+        void Add(string name, DbcValueType type, int size, bool id, int mappedStorage, int arrayIndex, int bitWidth, DbcColumnStorageKind kind)
+        {
+            columns.Add(new(columns.Count, logicalOffset, size, name, type, id, mappedStorage, arrayIndex, bitWidth, kind));
+            logicalOffset = checked(logicalOffset + size);
+        }
+
+        static DbcValueType ValueType(DbdColumnDefinition logical, DbdField field) => logical.Type switch
+        {
+            DbdPrimitiveType.String or DbdPrimitiveType.LocString => DbcValueType.StringOffset,
+            DbdPrimitiveType.Float => DbcValueType.Float32,
+            DbdPrimitiveType.Int when field.BitWidth == 8 && field.Unsigned => DbcValueType.Byte,
+            DbdPrimitiveType.Int when field.BitWidth > 32 && field.Unsigned => DbcValueType.UInt64,
+            DbdPrimitiveType.Int when field.BitWidth > 32 => DbcValueType.Int64,
+            DbdPrimitiveType.Int when field.Unsigned => DbcValueType.UInt32,
+            DbdPrimitiveType.Int => DbcValueType.Int32,
+            _ => field.BitWidth > 32 ? DbcValueType.UInt64 : DbcValueType.Raw32
+        };
     }
 
     public static DbdSchemaAuditSummary Audit(string definitionsRoot, string dbcRoot, int build, string? xmlSchemaPath = null, bool verifyRoundTrip = false)
@@ -163,12 +260,14 @@ public static partial class DbdSchemaService
             if (xml is not null)
             {
                 var resolution = xml.ResolveColumns(table, actual); xmlFields = resolution.DefinedFieldCount;
-                if (resolution.MatchKind == DbcSchemaMatchKind.NamedMatch)
+                if (file.ContainerKind == ClientTableContainerKind.Wdc1)
+                    findings.Add("WDBX XML is not used to infer WDC1 storage mappings; WoWDBDefs layout hashes are authoritative.");
+                else if (resolution.MatchKind == DbcSchemaMatchKind.NamedMatch)
                 {
-                    var bytes = ResolvedRecordSize(resolution.Columns); xmlExact = resolution.Columns.Count == actual && bytes == recordSize;
+                    var bytes = ResolvedRecordSize(resolution.Columns); xmlExact = resolution.IsExactFor(file);
                     findings.Add(xmlExact
-                        ? $"WDBX XML exactly resolves {actual:N0} physical fields and {recordSize:N0} record bytes."
-                        : $"WDBX XML resolves {resolution.Columns.Count:N0} fields and {bytes:N0} bytes; client declares {actual:N0} fields and {recordSize:N0} bytes.");
+                        ? $"WDBX XML exactly resolves {actual:N0} declared fields, {resolution.Columns.Count:N0} editable columns, and {recordSize:N0} record bytes."
+                        : $"WDBX XML resolves {resolution.DefinedFieldCount:N0} declared fields, {resolution.Columns.Count:N0} editable columns, and {bytes:N0} bytes; client declares {actual:N0} fields and {recordSize:N0} bytes.");
                 }
                 else findings.Add(resolution.MatchKind == DbcSchemaMatchKind.MissingTableFallback ? "WDBX XML has no named table definition." : $"WDBX XML defines {resolution.DefinedFieldCount?.ToString("N0") ?? "an unknown number of"} fields, not {actual:N0}.");
             }
@@ -178,15 +277,36 @@ public static partial class DbdSchemaService
             else
             try
             {
-                var definition = Load(dbdPath!); var layout = definition.ForBuild(build);
-                if (layout is null) { dbdMissingBuild = true; findings.Add($"WoWDBDefs has no layout covering build {build:N0}."); }
+                var definition = Load(dbdPath!);
+                var layout = file.ContainerKind == ClientTableContainerKind.Wdc1 && file.Wdc1Metadata is { } wdcMetadata
+                    ? definition.ForLayoutHash(wdcMetadata.LayoutHash) ?? definition.ForBuild(build)
+                    : definition.ForBuild(build);
+                var knownWdc1Layout = file.ContainerKind == ClientTableContainerKind.Wdc1 && file.Wdc1Metadata is { } exactMetadata &&
+                    KnownWdc1SchemaCatalog.TryResolve(definition.TableName, build, exactMetadata, out _);
+                var provenBuild = 0;
+                var knownFixedLayout = file.ContainerKind != ClientTableContainerKind.Wdc1 && layout is null &&
+                    KnownFixedLayoutSchemaCatalog.TryResolve(definition, build, actual, recordSize, out layout, out provenBuild);
+                if (layout is null && !knownWdc1Layout) { dbdMissingBuild = true; findings.Add($"WoWDBDefs has no layout covering build {build:N0}."); }
                 else
                 {
-                    var columns = ResolveColumns(definition, build); dbdFields = columns.Count; var bytes = ResolvedRecordSize(columns);
-                    dbdExact = columns.Count == actual && bytes == recordSize;
-                    findings.Add(dbdExact
-                        ? $"WoWDBDefs exactly resolves {actual:N0} physical fields and {recordSize:N0} record bytes."
-                        : $"WoWDBDefs resolves {columns.Count:N0} fields and {bytes:N0} bytes; client declares {actual:N0} fields and {recordSize:N0} bytes.");
+                    if (file.ContainerKind == ClientTableContainerKind.Wdc1)
+                    {
+                        var resolution = ResolveFile(dbdPath!, build, file); dbdFields = resolution.DefinedFieldCount;
+                        dbdExact = resolution.MatchKind == DbcSchemaMatchKind.NamedMatch;
+                        findings.Add(knownWdc1Layout
+                            ? $"Repository schema correction exactly maps {dbdFields:N0} WDC1 storage fields to {resolution.Columns.Count:N0} logical columns for this build and layout hash."
+                            : $"WoWDBDefs layout hash exactly maps {dbdFields:N0} WDC1 storage fields to {resolution.Columns.Count:N0} logical columns.");
+                    }
+                    else
+                    {
+                        var columns = ResolveColumns(definition, layout!, build); dbdFields = DeclaredFieldCount(columns); var bytes = ResolvedRecordSize(columns);
+                        dbdExact = dbdFields == actual && bytes == recordSize;
+                        findings.Add(knownFixedLayout && dbdExact
+                            ? $"Repository compatibility record extends the exact build-{provenBuild:N0} WoWDBDefs layout across its documented build-18414 gap; it resolves {actual:N0} declared fields, {columns.Count:N0} editable columns, and {recordSize:N0} record bytes."
+                            : dbdExact
+                            ? $"WoWDBDefs exactly resolves {actual:N0} declared fields, {columns.Count:N0} editable columns, and {recordSize:N0} record bytes."
+                            : $"WoWDBDefs resolves {dbdFields:N0} declared fields, {columns.Count:N0} editable columns, and {bytes:N0} bytes; client declares {actual:N0} fields and {recordSize:N0} bytes.");
+                    }
                 }
             }
             catch (Exception exception) { dbdError = exception; findings.Add($"WoWDBDefs error: {exception.Message}"); }
@@ -211,6 +331,9 @@ public static partial class DbdSchemaService
     }
 
     private static int ResolvedRecordSize(IReadOnlyList<DbcColumn> columns) => columns.Count == 0 ? 0 : columns.Max(column => checked(column.Offset + column.Size));
+
+    private static int DeclaredFieldCount(IEnumerable<DbcColumn> columns) =>
+        columns.Count(column => !DbcSchemaCatalog.IsPadding(column.Name));
 
     private static string ReadMagic(string path)
     {
@@ -247,7 +370,7 @@ public static partial class DbdSchemaService
         var widthText = match.Groups["width"].Value; var unsigned = widthText.StartsWith('u'); if (unsigned) widthText = widthText[1..]; var width = widthText.Length == 0 ? 32 : int.Parse(widthText, System.Globalization.CultureInfo.InvariantCulture);
         var array = match.Groups["array"].Success ? int.Parse(match.Groups["array"].Value, System.Globalization.CultureInfo.InvariantCulture) : 1;
         var flags = annotations.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return new(match.Groups["name"].Value.TrimEnd('?'), array, width, unsigned, flags.Contains("id", StringComparer.OrdinalIgnoreCase), flags.Contains("noninline", StringComparer.OrdinalIgnoreCase), line);
+        return new(match.Groups["name"].Value.TrimEnd('?'), array, width, unsigned, flags.Contains("id", StringComparer.OrdinalIgnoreCase), flags.Contains("noninline", StringComparer.OrdinalIgnoreCase), flags.Contains("relation", StringComparer.OrdinalIgnoreCase), line);
     }
 
     private static IReadOnlyList<DbdBuildRange> ParseBuilds(string value) => value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(token =>

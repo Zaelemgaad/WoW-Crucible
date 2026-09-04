@@ -68,8 +68,10 @@ public static class CrucibleWorkspaceLayoutService
         AddFinding(findings, "Server DBC", coreDbc);
         var schema = BestFile(files, file => Path.GetFileName(file).Equals("WotLK 3.3.5 (12340).xml", StringComparison.OrdinalIgnoreCase));
         AddFinding(findings, "WotLK schema", schema);
-        var dbd = directories.Where(IsDbdDefinitionsDirectory).OrderBy(Depth).ThenBy(path => path, StringComparer.OrdinalIgnoreCase).FirstOrDefault() ?? string.Empty;
+        var dbdCandidates = directories.Where(IsDbdDefinitionsDirectory).ToArray();
+        var dbd = SelectBestDbdDefinitionsDirectory(dbdCandidates);
         AddFinding(findings, "WoWDBDefs", dbd);
+        if (dbdCandidates.Length > 1) findings.Add($"WoWDBDefs: selected the highest-coverage corpus from {dbdCandidates.Length:N0} candidates");
 
         var processedAssets = directories.Where(directory => Path.GetFileName(directory).Contains("Processed", StringComparison.OrdinalIgnoreCase) &&
                                                               Path.GetFileName(directory).Contains("Asset", StringComparison.OrdinalIgnoreCase))
@@ -148,6 +150,27 @@ public static class CrucibleWorkspaceLayoutService
         return profiles;
     }
 
+    public static string SelectBestDbdDefinitionsDirectory(IEnumerable<string> candidates)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        return candidates.Where(IsDbdDefinitionsDirectory)
+            .Select(path =>
+            {
+                var files = Directory.EnumerateFiles(path, "*.dbd", SearchOption.TopDirectoryOnly).ToArray();
+                var names = files.Select(Path.GetFileNameWithoutExtension).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var anchorCoverage = DbdCoverageAnchors.Count(names.Contains);
+                var totalBytes = files.Sum(file => new FileInfo(file).Length);
+                return new { Path = Path.GetFullPath(path), AnchorCoverage = anchorCoverage, FileCount = files.Length, TotalBytes = totalBytes };
+            })
+            .OrderByDescending(candidate => candidate.AnchorCoverage)
+            .ThenByDescending(candidate => candidate.FileCount)
+            .ThenByDescending(candidate => candidate.TotalBytes)
+            .ThenBy(candidate => Depth(candidate.Path))
+            .ThenBy(candidate => candidate.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(candidate => candidate.Path)
+            .FirstOrDefault() ?? string.Empty;
+    }
+
     public static CrucibleWorkspaceLayout Load(string rootPath)
     {
         var root = NormalizeExistingDirectory(rootPath);
@@ -178,6 +201,7 @@ public static class CrucibleWorkspaceLayoutService
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    private static readonly string[] DbdCoverageAnchors = ["Achievement", "CharSections", "ChrClasses", "ChrRaces", "Item", "Map", "Spell"];
 
     private static IEnumerable<string> EnumerateDirectories(string root, int maximumDepth)
     {

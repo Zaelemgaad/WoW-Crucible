@@ -42,6 +42,7 @@ public partial class MainWindow : Window
     private NativeConversionWorkspaceView? _nativeConversionWorkspaceView;
     private KnowledgeWorkspaceView? _knowledgeWorkspaceView;
     private ToolInventoryView? _toolInventoryView;
+    private CompatibilityLabView? _compatibilityLabView;
     private ItemWorkbenchView? _itemWorkbenchView;
     private MpqWorkspaceView? _mpqWorkspaceView;
     private ClientWorkspaceView? _clientWorkspaceView;
@@ -297,7 +298,7 @@ public partial class MainWindow : Window
             : null;
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Open one or more WDBC or WDB2 client tables",
+            Title = "Open one or more WDBC, WDB2, or WDC1 client tables",
             AllowMultiple = true,
             SuggestedStartLocation = start,
             FileTypeFilter = [new FilePickerFileType("WoW client tables") { Patterns = ["*.dbc", "*.db2"] }]
@@ -323,14 +324,15 @@ public partial class MainWindow : Window
             {
                 var file = WdbcFile.Load(path);
                 var tableName = file.LogicalTableName;
-                if (file.ContainerKind == ClientTableContainerKind.Wdb2)
+                if (file.ContainerKind is ClientTableContainerKind.Wdb2 or ClientTableContainerKind.Wdc1)
                 {
-                    var definitions = FindDbdDefinitionsPath() ?? throw new DirectoryNotFoundException("Opening WDB2 requires the WoWDBDefs definitions folder. Configure it under DBD schemas & audit.");
+                    var definitions = FindDbdDefinitionsPath() ?? throw new DirectoryNotFoundException("Opening WDB2 or WDC1 requires the WoWDBDefs definitions folder. Configure it under DBD schemas & audit.");
                     var definition = Path.Combine(definitions, tableName + ".dbd");
                     if (!File.Exists(definition)) throw new FileNotFoundException($"No WoWDBDefs definition exists for {tableName}.db2.", definition);
-                    var build = file.Db2Metadata?.Build ?? throw new InvalidDataException("WDB2 build metadata is missing.");
-                    var db2Resolution = DbdSchemaService.ResolveFile(definition, build, file.FieldCount, file.RecordSize);
-                    return new DbcDocumentSession(file, db2Resolution, $"{definition} · build {build}");
+                    var build = file.Db2Metadata?.Build ?? 0;
+                    var db2Resolution = DbdSchemaService.ResolveFile(definition, build, file);
+                    var identity = file.Wdc1Metadata is { } wdc1 ? $"layout {wdc1.LayoutHash:X8}" : $"build {build}";
+                    return new DbcDocumentSession(file, db2Resolution, $"{definition} · {identity}");
                 }
                 var catalog = ResolveSchemaCatalog(); var xmlResolution = catalog.ResolveColumns(tableName, file.FieldCount);
                 return new DbcDocumentSession(file, xmlResolution, _schemaSource);
@@ -1254,6 +1256,16 @@ public partial class MainWindow : Window
         if (_toolInventoryView is null) { _toolInventoryView = new ToolInventoryView(); _toolInventoryView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
         OpenFeatureWorkspace(_toolInventoryView, "Tool Inventory"); await _toolInventoryView.ActivateAsync();
     }
+    private void OpenCompatibilityLabClick(object? sender, RoutedEventArgs e) => OpenCompatibilityLab();
+    public void OpenCompatibilityLab()
+    {
+        if (_compatibilityLabView is null)
+        {
+            _compatibilityLabView = new CompatibilityLabView(_workspaceSession.Settings);
+            _compatibilityLabView.BackRequested += (_, _) => CloseFeatureWorkspace();
+        }
+        OpenFeatureWorkspace(_compatibilityLabView, "Compatibility Lab");
+    }
     private async void OpenKnowledgeClick(object? sender, RoutedEventArgs e) => await OpenKnowledgeAsync(_knowledgeContext);
     public async Task OpenKnowledgeAsync(string? query = null)
     {
@@ -1775,6 +1787,7 @@ public partial class MainWindow : Window
             ["workspace.textures"] = Done(() => OpenTextureWorkspace()),
             ["workspace.assets"] = Done(() => OpenAssetComparison()),
             ["workspace.conversion"] = Done(OpenNativeConversionWorkspace),
+            ["workspace.compatibility-lab"] = Done(OpenCompatibilityLab),
             ["workspace.knowledge"] = () => OpenKnowledgeAsync(_knowledgeContext),
             ["workspace.tools"] = OpenToolInventoryAsync,
             ["workspace.server"] = Done(OpenServerSqlWorkspace),
@@ -1972,16 +1985,18 @@ public partial class MainWindow : Window
     {
         if (!string.IsNullOrWhiteSpace(_workspaceSession.Settings.DbdDefinitionsPath) && Directory.Exists(_workspaceSession.Settings.DbdDefinitionsPath))
             return Path.GetFullPath(_workspaceSession.Settings.DbdDefinitionsPath);
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var start in new[] { Environment.CurrentDirectory, AppContext.BaseDirectory }.Distinct(StringComparer.OrdinalIgnoreCase))
             for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
             {
                 foreach (var relative in new[] { Path.Combine("Tools", "WoWDBDefs", "definitions"), Path.Combine("WoWDBDefs", "definitions"), "definitions" })
                 {
                     var candidate = Path.Combine(directory.FullName, relative);
-                    if (Directory.Exists(candidate)) return candidate;
+                    if (Directory.Exists(candidate)) candidates.Add(candidate);
                 }
             }
-        return null;
+        var selected = CrucibleWorkspaceLayoutService.SelectBestDbdDefinitionsDirectory(candidates);
+        return selected.Length == 0 ? null : selected;
     }
 
     private string? FindSchemaDefinitionPath()

@@ -224,7 +224,9 @@ public static class M2PreviewGeometryService
     public static IReadOnlyList<M2TextureSlot> InspectTextureSlots(string modelPath)
     {
         modelPath = Path.GetFullPath(modelPath); if (!File.Exists(modelPath)) throw new FileNotFoundException("The M2 model does not exist.", modelPath);
-        var model = File.ReadAllBytes(modelPath); if (model.Length < 8 || FourCc(model, 0) != "MD20" || ReadUInt(model, 4) != 264) throw new InvalidDataException("Texture-slot inspection requires an unwrapped Wrath MD20 version 264 model.");
+        var model = File.ReadAllBytes(modelPath); var version = model.Length < 8 ? 0u : ReadUInt(model, 4);
+        if (model.Length < 8 || FourCc(model, 0) != "MD20" || version is not 264 and not 272)
+            throw new InvalidDataException("Texture-slot inspection requires an unwrapped Wrath version 264 or MoP version 272 MD20 model.");
         return ReadTextureSlots(model);
     }
 

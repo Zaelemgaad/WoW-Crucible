@@ -19,11 +19,15 @@ public sealed record DbcRecordKeyStrategy(DbcRecordKeyKind Kind, int? ColumnInde
 public sealed record DbcSchemaResolution(IReadOnlyList<DbcColumn> Columns, DbcSchemaMatchKind MatchKind, int? DefinedFieldCount, DbcRecordKeyStrategy KeyStrategy)
 {
     public bool UsedFallback => MatchKind != DbcSchemaMatchKind.NamedMatch;
+    public int ResolvedRecordSize => Columns.Count == 0 ? 0 : Columns.Max(column => checked(column.Offset + column.Size));
+    public bool IsExactFor(WdbcFile file) => MatchKind == DbcSchemaMatchKind.NamedMatch &&
+        DefinedFieldCount == file.FieldCount &&
+        (file.ContainerKind == ClientTableContainerKind.Wdc1 || ResolvedRecordSize == file.RecordSize);
 }
 
 public sealed class DbcSchemaCatalog
 {
-    private sealed record TableDefinition(IReadOnlyList<DbcColumn> Columns, DbcRecordKeyStrategy KeyStrategy);
+    private sealed record TableDefinition(IReadOnlyList<DbcColumn> Columns, int DeclaredFieldCount, DbcRecordKeyStrategy KeyStrategy);
     private readonly Dictionary<string, TableDefinition> _tables;
 
     private DbcSchemaCatalog(Dictionary<string, TableDefinition> tables) => _tables = tables;
@@ -113,7 +117,7 @@ public sealed class DbcSchemaCatalog
 
             var physicalKey = columns.FirstOrDefault(column => column.IsIndex);
             var keyStrategy = hasGeneratedKey ? DbcRecordKeyStrategy.Virtual() : physicalKey is not null ? DbcRecordKeyStrategy.Physical(physicalKey.Index) : DbcRecordKeyStrategy.None;
-            tables[tableName] = new(columns, keyStrategy);
+            tables[tableName] = new(columns, DeclaredFieldCount(columns), keyStrategy);
         }
 
         ApplyKnown12340Corrections(tables, document);
@@ -126,13 +130,13 @@ public sealed class DbcSchemaCatalog
 
     public DbcSchemaResolution ResolveColumns(string tableName, int physicalFieldCount)
     {
-        if (_tables.TryGetValue(tableName, out var defined) && defined.Columns.Count == physicalFieldCount)
-            return new(defined.Columns, DbcSchemaMatchKind.NamedMatch, defined.Columns.Count, defined.KeyStrategy);
+        if (_tables.TryGetValue(tableName, out var defined) && defined.DeclaredFieldCount == physicalFieldCount)
+            return new(defined.Columns, DbcSchemaMatchKind.NamedMatch, defined.DeclaredFieldCount, defined.KeyStrategy);
 
         var fallback = Enumerable.Range(0, physicalFieldCount)
             .Select(i => new DbcColumn(i, i * 4, 4, i == 0 ? "ID" : $"Field_{i}", DbcValueType.Raw32, i == 0))
             .ToArray();
-        return new(fallback, defined is null ? DbcSchemaMatchKind.MissingTableFallback : DbcSchemaMatchKind.FieldCountMismatchFallback, defined?.Columns.Count, DbcRecordKeyStrategy.None);
+        return new(fallback, defined is null ? DbcSchemaMatchKind.MissingTableFallback : DbcSchemaMatchKind.FieldCountMismatchFallback, defined?.DeclaredFieldCount, DbcRecordKeyStrategy.None);
     }
 
     private static string LocaleName(int index) => index switch
@@ -187,7 +191,7 @@ public sealed class DbcSchemaCatalog
         return columns;
     }
 
-    private static TableDefinition PhysicalDefinition(IReadOnlyList<DbcColumn> columns) => new(columns, DbcRecordKeyStrategy.Physical(columns.First(column => column.IsIndex).Index));
+    private static TableDefinition PhysicalDefinition(IReadOnlyList<DbcColumn> columns) => new(columns, DeclaredFieldCount(columns), DbcRecordKeyStrategy.Physical(columns.First(column => column.IsIndex).Index));
 
     private static void ApplyKnown12340Corrections(Dictionary<string, TableDefinition> tables, XDocument document)
     {
@@ -205,7 +209,7 @@ public sealed class DbcSchemaCatalog
         {
             var columns = spell.Columns.ToArray();
             SetSpellEffectMaskNames(columns);
-            tables["Spell"] = new(columns, spell.KeyStrategy);
+            tables["Spell"] = new(columns, spell.DeclaredFieldCount, spell.KeyStrategy);
         }
 
         // Stock build-12340 SpellVisualKit has the 37 defined cells plus a final
@@ -239,4 +243,12 @@ public sealed class DbcSchemaCatalog
         }).ToArray();
         tables[tableName] = PhysicalDefinition(columns);
     }
+
+    private static int DeclaredFieldCount(IEnumerable<DbcColumn> columns) =>
+        columns.Count(column => !IsPadding(column.Name));
+
+    internal static bool IsPadding(string name) =>
+        name.Equals("Padding", StringComparison.OrdinalIgnoreCase) ||
+        name.StartsWith("Padding_", StringComparison.OrdinalIgnoreCase) ||
+        name.StartsWith("Padding[", StringComparison.OrdinalIgnoreCase);
 }

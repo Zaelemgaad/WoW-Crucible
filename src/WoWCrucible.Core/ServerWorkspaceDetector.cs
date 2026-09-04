@@ -1,10 +1,11 @@
 using System.Text.RegularExpressions;
 using System.Diagnostics;
+using System.Buffers.Binary;
 using MySqlConnector;
 
 namespace WoWCrucible.Core;
 
-public enum ServerCoreFamily { Unknown, AzerothCore, TrinityCore }
+public enum ServerCoreFamily { Unknown, AzerothCore, TrinityCore, SkyFire, LegionCore }
 
 public sealed record ServerWorkspace(
     string RootPath,
@@ -17,7 +18,15 @@ public sealed record ServerWorkspace(
     string? WslConfigPath = null,
     string? WslWorldExecutable = null,
     string? WslAuthExecutable = null,
-    string? WslAuthConfigPath = null);
+    string? WslAuthConfigPath = null,
+    string? Db2Path = null)
+{
+    public IReadOnlyList<string> ClientTablePaths => new[] { DbcPath, Db2Path }
+        .Where(path => !string.IsNullOrWhiteSpace(path))
+        .Select(path => Path.GetFullPath(path!))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+}
 
 public static partial class ServerWorkspaceDetector
 {
@@ -56,8 +65,8 @@ public static partial class ServerWorkspaceDetector
             throw new InvalidDataException("WorldDatabaseInfo must use host;port;user;password;database format.");
         var ssl = parts.Length > 5 && parts[5].Equals("ssl", StringComparison.OrdinalIgnoreCase) ? MySqlSslMode.Required : MySqlSslMode.Preferred;
         var database = new DatabaseConnectionProfile(NormalizeHost(parts[0]), port, parts[2], parts[3], parts[4], ssl);
-        var dbcPath = ResolveDbcPath(root, configLocation, values.GetValueOrDefault("DataDir"), usesWsl);
-        return new(root, configLocation, dbcPath, DetectFamily(root, configText), database, usesWsl, wslDistribution, wslConfigPath);
+        var tablePaths = ResolveClientTablePaths(root, configLocation, values.GetValueOrDefault("DataDir"), usesWsl);
+        return new(root, configLocation, tablePaths.DbcPath, DetectFamily(root, configText, tablePaths), database, usesWsl, wslDistribution, wslConfigPath, Db2Path: tablePaths.Db2Path);
     }
 
     public static (string Distribution, string ConfigPath, string WorldExecutable, string AuthExecutable, string AuthConfigPath)? DetectWslLauncher(string rootPath)
@@ -116,26 +125,62 @@ public static partial class ServerWorkspaceDetector
             .OrderBy(path => path.Count(character => character is '\\' or '/')).FirstOrDefault();
     }
 
-    private static string ResolveDbcPath(string root, string configLocation, string? dataDir, bool usesWsl)
+    private static (string DbcPath, string? Db2Path) ResolveClientTablePaths(string root, string configLocation, string? dataDir, bool usesWsl)
     {
         if (!usesWsl && !string.IsNullOrWhiteSpace(dataDir))
         {
             var expanded = Environment.ExpandEnvironmentVariables(dataDir.Trim('"'));
             var basePath = Path.IsPathRooted(expanded) ? expanded : Path.Combine(root, expanded);
-            var candidate = Path.Combine(basePath, "dbc"); if (Directory.Exists(candidate)) return Path.GetFullPath(candidate);
-            var configRelative = Path.Combine(Path.GetDirectoryName(configLocation)!, expanded, "dbc"); if (Directory.Exists(configRelative)) return Path.GetFullPath(configRelative);
+            if (Directory.Exists(basePath)) return ResolveUnderDataRoot(basePath);
+            var configRelativeRoot = Path.Combine(Path.GetDirectoryName(configLocation)!, expanded);
+            if (Directory.Exists(configRelativeRoot)) return ResolveUnderDataRoot(configRelativeRoot);
         }
-        var obvious = new[] { Path.Combine(root, "data", "dbc"), Path.Combine(root, "Data", "dbc"), Path.Combine(root, "dbc") }.FirstOrDefault(Directory.Exists);
-        if (obvious is not null) return Path.GetFullPath(obvious);
-        return string.Empty;
+        var obviousRoot = new[] { Path.Combine(root, "data"), Path.Combine(root, "Data"), root }
+            .FirstOrDefault(candidate => Directory.Exists(Path.Combine(candidate, "dbc")) || Directory.Exists(Path.Combine(candidate, "db2")));
+        return obviousRoot is null ? (string.Empty, null) : ResolveUnderDataRoot(obviousRoot);
+
+        static (string DbcPath, string? Db2Path) ResolveUnderDataRoot(string dataRoot)
+        {
+            var dbc = Path.Combine(dataRoot, "dbc");
+            var db2 = Path.Combine(dataRoot, "db2");
+            return (Directory.Exists(dbc) ? Path.GetFullPath(dbc) : string.Empty, Directory.Exists(db2) ? Path.GetFullPath(db2) : null);
+        }
     }
 
-    private static ServerCoreFamily DetectFamily(string root, string configText)
+    private static ServerCoreFamily DetectFamily(string root, string configText, (string DbcPath, string? Db2Path) tablePaths)
     {
         var evidence = root + "\n" + configText;
+        if (evidence.Contains("LegionCore", StringComparison.OrdinalIgnoreCase)) return ServerCoreFamily.LegionCore;
+        if (evidence.Contains("SkyFire", StringComparison.OrdinalIgnoreCase) || evidence.Contains("ProjectSkyfire", StringComparison.OrdinalIgnoreCase)) return ServerCoreFamily.SkyFire;
         if (evidence.Contains("AzerothCore", StringComparison.OrdinalIgnoreCase) || evidence.Contains("acore_", StringComparison.OrdinalIgnoreCase)) return ServerCoreFamily.AzerothCore;
         if (evidence.Contains("TrinityCore", StringComparison.OrdinalIgnoreCase) || evidence.Contains("TDB", StringComparison.OrdinalIgnoreCase)) return ServerCoreFamily.TrinityCore;
+        foreach (var tableRoot in new[] { tablePaths.DbcPath, tablePaths.Db2Path }.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var build = DetectFixedDb2Build(tableRoot!);
+            if (build == 18414) return ServerCoreFamily.SkyFire;
+        }
         return ServerCoreFamily.Unknown;
+    }
+
+    private static int? DetectFixedDb2Build(string tableRoot)
+    {
+        if (!Directory.Exists(tableRoot)) return null;
+        Span<byte> header = stackalloc byte[28];
+        foreach (var path in Directory.EnumerateFiles(tableRoot, "*.db2", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, MaxRecursionDepth = 2, MatchCasing = MatchCasing.CaseInsensitive }).Take(32))
+        {
+            try
+            {
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                stream.ReadExactly(header);
+                if (!header[..4].SequenceEqual("WDB2"u8)) continue;
+                var build = BinaryPrimitives.ReadInt32LittleEndian(header[24..28]);
+                if (build > 0) return build;
+            }
+            catch (EndOfStreamException) { }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return null;
     }
 
     private static string NormalizeHost(string host) => host is "." or "localhost" ? "127.0.0.1" : host;

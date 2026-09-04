@@ -1,8 +1,8 @@
 # Compatibility contract
 
-WoW Crucible's primary, verified client target is World of Warcraft 3.3.5a, build 12340. Client compatibility is profile-driven so community contributors can add targets without scattering build checks throughout the editor. Server compatibility is deliberately not fixed to a bundled repack, database dump, or historical core revision.
+WoW Crucible's primary, verified client target is World of Warcraft 3.3.5a, build 12340. MoP 5.4.8 and Legion 7.3.5 are experimental target profiles with real-corpus table and server-binding proof. Client compatibility is profile-driven so community contributors can add targets without scattering build checks throughout the editor. Server compatibility is deliberately not fixed to a bundled repack, database dump, or historical core revision.
 
-WoWDBDefs `.dbd` build ranges and exact build-specific WDBX XML are independent native schema sources for WDBC and fixed-layout WDB2 tables. Either exact provider is sufficient for editing; selecting both keeps definition gaps visible as evidence. Optional audit proof writes unchanged tables to isolated temporary storage and requires byte-identical SHA-256 output. Crucible now has an explicit Cataclysm WDB2 adapter; raw `PTCH` update layers are recognized as deltas, while later WDB5/WDB6/WDC families remain separate formats and are not treated as interchangeable.
+WoWDBDefs `.dbd` build ranges and exact build-specific WDBX XML are independent native schema sources for WDBC and fixed-layout WDB2 tables. WDC1 requires an exact build and layout-hash-resolved DBD layout. Optional audit proof writes unchanged tables to isolated temporary storage and requires byte-identical SHA-256 output. Mutation audits additionally reload every changed logical value, verify metadata/side-table behavior, and require a stable second save. Raw `PTCH` update layers, WDB5/WDB6, and WDC2+ remain separate formats and are never treated as interchangeable.
 
 ## Client target profiles
 
@@ -14,10 +14,24 @@ Built-in profiles currently describe:
 | The Burning Crusade 2.4.3 | 8606 | Schema ready | WDBC definition is available; full corpus round-trip validation is still required. |
 | Wrath of the Lich King 3.3.5a | 12340 | Verified | Primary tested WDBC and MPQ target. |
 | Cataclysm 4.3.4 | 15595 | Experimental | The real locale-cache slice—20 WDBC and 5 fixed-layout WDB2 tables—is exact-schema and byte-round-trip verified. Raw update-layer `PTCH` files are identified, but complete base-plus-delta reconstruction, full base-corpus verification, and later DB2 families remain pending. |
+| Mists of Pandaria 5.4.8 | 18414 | Experimental | A real SkyFire server corpus passed 417 nonempty WDBC/WDB2 schema, byte-round-trip, and isolated mutation checks; 34 zero-byte placeholders remain explicitly unverifiable. The 58 WDB2 files carry the compatible producer build 18273. MPQ deployment is supported. |
+| Legion 7.3.5 | 26972 | Experimental | All 611 real LegionCore WDC1 tables passed exact layout resolution and byte round trips. Isolated mutations cover every supported storage mode plus external IDs, copies, relationships, and offset maps. CASC is read/extract and payload staging only; no CASC publication claim is made. |
 
-Each profile declares a stable ID, client build, schema filename, table formats, archive format, support tier, and notes. Additional JSON profiles can be placed in `%LOCALAPPDATA%\WoWCrucible\Profiles` or the application's `profiles` directory. A profile enables only capabilities implemented by the engine; WDB2 files retain their own build/hash metadata and are never mislabeled as WDBC.
+Each profile declares a stable ID, client build, compatible embedded table builds, schema filename, table formats, archive format, support tier, and notes. Additional JSON profiles can be placed in `%LOCALAPPDATA%\WoWCrucible\Profiles` or the application's `profiles` directory. A profile enables only capabilities implemented by the engine; WDB2 and WDC1 files retain their format identity and are never mislabeled as WDBC.
 
 Definition XML files provide names and types, but are not proof of safe round trips. A target moves to **Verified** only after its complete legal test corpus passes unmodified byte-for-byte round trips and representative edits.
+
+The exact 2026-08-26 MoP/Legion corpus evidence and nonclaims are recorded in [the compatibility-lab report](validation/MOP-LEGION-COMPATIBILITY-LAB.md). Outstanding field-note contracts are tracked separately in [the acceptance ledger](FIELD-NOTES-STATUS.md).
+
+`tools compatibility-clone` and the desktop **Compatibility lab** prepare isolated client/server worktrees from the same explicit request used by the audit. Copying is streamed and cancellation-resumable only through a matching Crucible ownership marker; completed clones are immutable inputs and are accepted only after full relative-path, length, and SHA-256 identity proof. The service refuses source/destination overlap, destination collisions, and reparse-point traversal before treating a tree as an isolated test surface.
+
+## Constructive MoP and Legion hybrid
+
+The native profile boundary and the constructive mashup are separate contracts. Directly opening a Legion WDC1 table as a MoP WDBC/WDB2 table remains invalid. `tools cross-build-mashup` instead reads both exact schemas, projects donor semantics into newly written host-layout rows, collision-remaps identities, rewrites declared references, and verifies the resulting MoP files before publication. The original host and donor inputs remain immutable.
+
+The currently proved direction is `mop-18414 <- legion-26972`. Optional FileData bridging resolves Legion CASC assets by exact listfile path and either reuses the MoP client's effective asset or publishes a verified host-compatible payload. Legion `ItemVisuals` model IDs receive an explicit `ItemVisualEffects` projection instead of being copied into a field with different meaning. Supported version-272/274 M2 models are projected to native unchunked MoP `MD20` v272 with their exact SKIN v3 and BLP closure; unsupported ribbons/shaders, multi-SKIN models, missing local CASC files, and every other unresolved dependency skip their owning donor rows and remain visible in the result.
+
+The full `Mists of the Pandaren Legion v5` evidence is recorded in [the compatibility-lab report](validation/MOP-LEGION-COMPATIBILITY-LAB.md). This proves an installed hybrid MPQ plus matching server-table payload in an isolated MoP clone. It does not prove that SkyFire implements donor-only Legion systems, and it does not promote either experimental profile to Verified.
 
 ## Supported server families
 
@@ -34,11 +48,25 @@ Definition XML files provide names and types, but are not proof of safe round tr
 - Compatibility is determined from the branch/revision, TDB version, and live `information_schema` metadata.
 - SQL is generated through a TrinityCore 3.3.5 adapter.
 
+### SkyFire 5.4.8
+
+- Target profile: `mop-18414` with MPQ plus WDBC/WDB2 tables.
+- Installed workspace detection recognizes ProjectSkyfire/SkyFire evidence and separate `dbc`/`db2` roots.
+- Source-backed bindings parse the selected checkout instead of reusing AzerothCore or TrinityCore assumptions. The audited checkout resolves 172 loaded DBC stores and 16 explicitly unused stores.
+- Live SQL authoring remains capability-driven; a SkyFire source binding is not a claim that every guided AzerothCore SQL workflow is portable.
+
+### LegionCore 7.3.5
+
+- Target profile: `legion-26972` with CASC plus WDC1 tables.
+- Installed workspace detection recognizes LegionCore and rebinds absolute configured client-table paths to an explicitly selected isolated clone during compatibility testing.
+- Source-backed bindings resolve 297 loaded stores and 307 explicitly unused stores in the audited checkout.
+- Server table deployment can be planned and staged. Client WDC1 publication requires a separately proved target-build CASC publisher and is therefore reported as a boundary, never silently routed through MPQ.
+
 ## Detection and safety rules
 
 Before enabling server writes, a profile must collect:
 
-1. Core family (`AzerothCore` or `TrinityCore`).
+1. Core family (`AzerothCore`, `TrinityCore`, `SkyFire`, or `LegionCore`).
 2. Git branch and revision when a source checkout is available.
 3. Server-reported core revision when a running worldserver is available.
 4. World database version/cache ID.
@@ -64,10 +92,12 @@ A WoW Crucible project will keep portable content intent separate from deploymen
 Portable content model
     ├── Selected client profile → supported DBC/DB2 changes and patch archive
     ├── Current AzerothCore adapter → revision-aware SQL/module changes
-    └── Current TrinityCore 3.3.5 adapter → revision-aware SQL/core changes
+    ├── Current TrinityCore 3.3.5 adapter → revision-aware SQL/core changes
+    ├── SkyFire source bindings → MoP server table deployment plan
+    └── LegionCore source bindings → Legion server table deployment plan
 ```
 
-This permits one custom spell/item/race/class project to be validated and deployed to either supported server family where the requested feature is implementable.
+This permits one content project to be checked against an explicit client/server target rather than copied across expansions by filename. Cross-target profile tests deliberately reject raw MoP tables under the Legion profile and raw Legion tables under the MoP profile, even when 355 logical table names overlap. A deliberate hybrid must use the constructive mashup pipeline above so every row is rewritten into the host layout and its losses remain auditable.
 
 ## Legacy SQL recovery: capture and offline baseline audit implemented
 

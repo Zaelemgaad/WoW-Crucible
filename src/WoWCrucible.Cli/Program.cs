@@ -35,7 +35,7 @@ try
         "client" => Client(commandArguments[1..]),
         "asset" => Asset(commandArguments[1..], cancellation.Token),
         "project" => Project(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
-        "tools" => Tooling(commandArguments[1..]),
+        "tools" => Tooling(commandArguments[1..], cancellation.Token),
         "knowledge" => Knowledge(commandArguments[1..]),
         "cache" => Cache(commandArguments[1..], cancellation.Token).GetAwaiter().GetResult(),
         "mpq" => Mpq(commandArguments[1..]),
@@ -301,7 +301,7 @@ static int CacheAdb(string operation, string[] options, string[] operands, strin
     return Fail($"Unknown cache operation: {operation}");
 }
 
-static int Tooling(string[] args)
+static int Tooling(string[] args, CancellationToken cancellationToken)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ToolingHelp();
     if (args[0].Equals("commands", StringComparison.OrdinalIgnoreCase))
@@ -312,6 +312,75 @@ static int Tooling(string[] args)
         if (commandJson) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Query = query, TotalCommands = CrucibleCommandCatalog.All.Count, Matches = matches.Select(match => new { match.Command.Id, match.Command.Title, match.Command.Category, match.Command.Description, match.Command.Aliases, match.Command.Shortcut, match.Score }) }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         else foreach (var match in matches) Console.WriteLine($"{match.Command.Id}\t{match.Command.Category}\t{match.Command.Title}\t{match.Command.Shortcut ?? "-"}\t{match.Command.Description}");
         return matches.Count > 0 ? 0 : 3;
+    }
+    if (args[0].Equals("compatibility-clone", StringComparison.OrdinalIgnoreCase) || args[0].Equals("compatibility-clones", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 2) return Fail("tools compatibility-clone requires a request JSON path.");
+        var cloneOptions = args[2..];
+        var cloneJson = cloneOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var cloneUnknown = cloneOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (cloneUnknown.Length > 0) return Fail($"Unknown tools compatibility-clone option: {cloneUnknown[0]}");
+        var cloneProgress = new WoWCrucible.Cli.SynchronousProgress<CompatibilityLabProgress>(value =>
+            Console.Error.WriteLine($"CLONE\t{value.Phase}\t{value.Completed:N0}/{value.Total:N0}\t{value.CurrentPath}"));
+        var cloneReport = CompatibilityLabService.PrepareClones(CompatibilityLabService.LoadRequest(args[1]), cloneProgress, cancellationToken);
+        if (cloneJson) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(cloneReport, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"RESULT\t{(cloneReport.Passed ? "PASS" : "FAIL")}");
+            Console.WriteLine($"REPORT_ROOT\t{cloneReport.ReportRoot}");
+            Console.WriteLine($"JSON\t{cloneReport.JsonReportPath}");
+            Console.WriteLine($"MARKDOWN\t{cloneReport.MarkdownReportPath}");
+            foreach (var entry in cloneReport.Entries)
+                Console.WriteLine($"PAIR\t{entry.Name}\t{entry.State}\t{(entry.Passed ? "PASS" : "FAIL")}\tcopied={entry.CopiedFiles:N0}/{entry.CopiedBytes:N0}\treused={entry.ReusedFiles:N0}/{entry.ReusedBytes:N0}\tstale={entry.RemovedStaleFiles:N0}");
+        }
+        return cloneReport.Passed ? 0 : 3;
+    }
+    if (args[0].Equals("compatibility-lab", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 2) return Fail("tools compatibility-lab requires a request JSON path.");
+        var labOptions = args[2..];
+        var labJson = labOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var labUnknown = labOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (labUnknown.Length > 0) return Fail($"Unknown tools compatibility-lab option: {labUnknown[0]}");
+        var progress = new WoWCrucible.Cli.SynchronousProgress<CompatibilityLabProgress>(value =>
+            Console.Error.WriteLine($"LAB\t{value.Phase}\t{value.Completed:N0}/{value.Total:N0}\t{value.CurrentPath}"));
+        var labReport = CompatibilityLabService.Run(CompatibilityLabService.LoadRequest(args[1]), progress, cancellationToken);
+        if (labJson) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(labReport, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"RESULT\t{(labReport.Passed ? "PASS" : "FAIL")}");
+            Console.WriteLine($"RUN_ROOT\t{labReport.RunRoot}");
+            Console.WriteLine($"JSON\t{labReport.JsonReportPath}");
+            Console.WriteLine($"MARKDOWN\t{labReport.MarkdownReportPath}");
+            foreach (var clone in labReport.CloneAudits) Console.WriteLine($"CLONE\t{clone.Name}\t{(clone.Passed ? "PASS" : "FAIL")}\t{clone.HashedPairs:N0} hashed\t{clone.MissingFiles + clone.ExtraFiles + clone.LengthMismatches + clone.HashMismatches:N0} issue(s)");
+            foreach (var lane in labReport.LaneAudits) Console.WriteLine($"LANE\t{lane.Name}\t{(lane.Passed ? "PASS" : "FAIL")}\t{lane.TableFiles:N0} tables\t{lane.SchemaAudit.RoundTripVerified:N0} round trips");
+            foreach (var cross in labReport.CrossTargetDeployments) Console.WriteLine($"CROSS\t{cross.SourceLane}->{cross.TargetLane}\t{(cross.Passed ? "PASS" : "FAIL")}\t{cross.StagedClientFiles:N0}/{cross.StagedServerFiles:N0} staged");
+        }
+        return labReport.Passed ? 0 : 3;
+    }
+    if (args[0].Equals("cross-build-mashup", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 2) return Fail("tools cross-build-mashup requires a request JSON path.");
+        var mashupOptions = args[2..];
+        var mashupJson = mashupOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var mashupUnknown = mashupOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (mashupUnknown.Length > 0) return Fail($"Unknown tools cross-build-mashup option: {mashupUnknown[0]}");
+        var mashupProgress = new WoWCrucible.Cli.SynchronousProgress<CrossBuildMashupProgress>(value =>
+            Console.Error.WriteLine($"MASHUP\t{value.Phase}\t{value.Completed:N0}/{value.Total:N0}\t{value.CurrentPath}"));
+        var mashup = CrossBuildMashupService.Run(CrossBuildMashupService.LoadRequest(args[1]), mashupProgress, cancellationToken);
+        if (mashupJson) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(mashup, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"RESULT\t{(mashup.Passed ? "PASS" : "INCOMPLETE")}");
+            Console.WriteLine($"RUN_ROOT\t{mashup.RunRoot}");
+            Console.WriteLine($"PATCH\t{mashup.PatchPath}");
+            Console.WriteLine($"REPORT\t{mashup.MarkdownReportPath}");
+            Console.WriteLine($"TABLES\t{mashup.ConvertedTables:N0}/{mashup.SharedTables:N0}");
+            Console.WriteLine($"ROWS\tadded={mashup.AddedRows:N0}\treused={mashup.ReusedRows:N0}\tretained-host={mashup.Tables.Sum(table => table.RetainedHostSameId):N0}\tremapped={mashup.RemappedIds:N0}");
+            Console.WriteLine($"REFERENCES\trewritten={mashup.RewrittenReferences:N0}\tunresolved={mashup.UnresolvedReferences:N0}");
+            if (mashup.Installation is not null) Console.WriteLine($"INSTALLED\tclient={mashup.Installation.ClientPatchPath ?? "-"}\tserver={mashup.Installation.ServerFiles.Count:N0}");
+        }
+        return mashup.Passed ? 0 : 3;
     }
     if (!args[0].Equals("inventory", StringComparison.OrdinalIgnoreCase)) return Fail($"Unknown tools operation: {args[0]}");
     var options = args[1..]; var rootArgument = options.FirstOrDefault(option => !option.StartsWith("--", StringComparison.Ordinal)); var json = options.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase)); var unassignedOnly = options.Any(option => option.Equals("--unassigned-only", StringComparison.OrdinalIgnoreCase)); var includeMissing = !options.Any(option => option.Equals("--no-missing", StringComparison.OrdinalIgnoreCase));
@@ -2123,13 +2192,15 @@ static int Client(string[] args)
     }
     if (args is ["fusion", var baseRoot, .. var fusionInputs])
     {
-        var stage = Option(fusionInputs, "--stage="); var output = Option(fusionInputs, "--output="); var showAll = fusionInputs.Contains("--all", StringComparer.OrdinalIgnoreCase);
+        var stage = Option(fusionInputs, "--stage="); var output = Option(fusionInputs, "--output="); var profileId = Option(fusionInputs, "--profile="); var showAll = fusionInputs.Contains("--all", StringComparer.OrdinalIgnoreCase);
         var sourcePaths = fusionInputs.Where(value => !value.StartsWith("--", StringComparison.Ordinal)).ToArray();
-        var unknown = fusionInputs.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.StartsWith("--stage=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !value.Equals("--all", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var unknown = fusionInputs.Where(value => value.StartsWith("--", StringComparison.Ordinal) && !value.StartsWith("--stage=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !value.StartsWith("--profile=", StringComparison.OrdinalIgnoreCase) && !value.Equals("--all", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown client fusion option: {unknown[0]}");
+        if (string.IsNullOrWhiteSpace(profileId)) return Fail("Client fusion requires --profile=<target-profile>; no build or archive format will be guessed.");
         if (sourcePaths.Length == 0) return Fail("Client fusion requires at least one extracted/effective override source.");
         var sources = sourcePaths.Select((path, index) => new ClientFusionSource($"source-{index + 1}-{Path.GetFileName(Path.TrimEndingDirectorySeparator(path))}", path)).ToArray();
-        var plan = ClientFusionPlanner.Analyze(baseRoot, sources, new ConsoleProgress(5));
+        var target = TargetProfileCatalog.FindRequired(TargetProfileCatalog.Load(), profileId);
+        var plan = ClientFusionPlanner.Analyze(baseRoot, sources, target, new ConsoleProgress(5));
         foreach (var entry in plan.Entries.Where(entry => showAll && entry.Status != ClientFusionStatus.IdenticalToBase || entry.Status == ClientFusionStatus.Conflict))
             Console.WriteLine($"{entry.Status}\t{entry.ArchivePath}\t{entry.Candidates.Count}\t{entry.Guidance}");
         var conflicts = plan.Entries.Count(entry => entry.Status == ClientFusionStatus.Conflict);
@@ -2138,16 +2209,17 @@ static int Client(string[] args)
         if (stage is not null)
         {
             var result = ClientFusionPlanner.Stage(stage, plan);
-            Console.Error.WriteLine($"Staged {result.StagedFiles:N0} resolved path(s); excluded {result.UnresolvedConflicts:N0} conflict(s). Manifest: {result.ManifestPath}");
+            var publication = result.RequiresClientPublisher ? "CASC publisher required" : $"manifest {result.ManifestPath}";
+            Console.Error.WriteLine($"Staged {result.StagedFiles:N0} resolved path(s); excluded {result.UnresolvedConflicts:N0} conflict(s); {publication}.");
         }
         return conflicts == 0 ? 0 : 3;
     }
     if (args is ["fusion-dbc-plan", var fusionPlanPath, var fusionSchemaPath, .. var fusionDbcPlanOptions])
     {
-        var planOutput = Option(fusionDbcPlanOptions, "--output="); var overwrite = fusionDbcPlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var json = fusionDbcPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
-        var unknown = fusionDbcPlanOptions.Where(option => !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var planOutput = Option(fusionDbcPlanOptions, "--output="); var definitions = Option(fusionDbcPlanOptions, "--definitions="); var overwrite = fusionDbcPlanOptions.Contains("--overwrite", StringComparer.OrdinalIgnoreCase); var json = fusionDbcPlanOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = fusionDbcPlanOptions.Where(option => !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--definitions=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--overwrite", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown fusion-dbc-plan option: {unknown[0]}"); if (planOutput is not null && File.Exists(planOutput) && !overwrite) return Fail($"DBC fusion plan already exists; use --overwrite to replace it: {Path.GetFullPath(planOutput)}");
-        var plan = ClientFusionDbcService.CreatePlan(ClientFusionPlanner.Load(fusionPlanPath), fusionSchemaPath); if (planOutput is not null) ClientFusionDbcService.SavePlan(planOutput, plan);
+        var plan = ClientFusionDbcService.CreatePlan(ClientFusionPlanner.Load(fusionPlanPath), fusionSchemaPath, definitions); if (planOutput is not null) ClientFusionDbcService.SavePlan(planOutput, plan);
         if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         else
         {
@@ -2257,17 +2329,22 @@ static async Task<int> Server(string[] args)
     if (args is ["client-plan", var planServerFolder, var clientDbcRoot, .. var planOptions])
     {
         var source = Option(planOptions, "--source="); var output = Option(planOptions, "--output="); var stage = Option(planOptions, "--stage=");
-        var unknown = planOptions.Where(option => !option.StartsWith("--source=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--stage=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var profileId = Option(planOptions, "--profile=");
+        if (string.IsNullOrWhiteSpace(profileId)) return Fail("server client-plan requires --profile=<target-profile-id>; target build/container identity cannot be inferred safely from a folder name.");
+        var unknown = planOptions.Where(option => !option.StartsWith("--source=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--stage=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--profile=", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (unknown.Length > 0) return Fail($"Unknown server client-plan option: {unknown[0]}");
         var planWorkspace = await ServerWorkspaceDetector.DetectAsync(planServerFolder);
-        var plan = ClientServerDeploymentPlanner.Analyze(clientDbcRoot, planWorkspace, source);
+        var target = TargetProfileCatalog.FindRequired(TargetProfileCatalog.Load(), profileId);
+        var plan = ClientServerDeploymentPlanner.Analyze(clientDbcRoot, planWorkspace, target, source);
         foreach (var entry in plan.Entries.Where(entry => entry.Status != ClientServerPlanStatus.Identical))
             Console.WriteLine($"{entry.Status}\t{entry.DbcFileName}\t{entry.Consumption}\t{entry.SqlTableName ?? "-"}\t{entry.Guidance}");
         if (output is not null) { ClientServerDeploymentPlanner.Save(output, plan); Console.Error.WriteLine($"Saved deployment plan: {Path.GetFullPath(output)}"); }
         if (stage is not null)
         {
             var result = ClientServerDeploymentPlanner.Stage(stage, plan);
-            Console.Error.WriteLine($"Staged {result.ClientFiles:N0} client and {result.ServerFiles:N0} server DBC file(s); {result.BlockedFiles:N0} unresolved. Plan: {result.PlanPath}");
+            Console.Error.WriteLine($"Staged {result.ClientFiles:N0} client and {result.ServerFiles:N0} server table file(s); {result.BlockedFiles:N0} unresolved. Plan: {result.PlanPath}");
+            if (result.RequiresClientPublisher)
+                Console.Error.WriteLine($"CASC payload only: {result.ClientPayloadRoot}. A target-build CASC publisher is required before client deployment.");
         }
         var blocked = plan.Entries.Count(entry => entry.Status is ClientServerPlanStatus.ConflictingClientLayers or ClientServerPlanStatus.InvalidDbc or ClientServerPlanStatus.UnknownConsumer or ClientServerPlanStatus.MissingServerDbc);
         Console.Error.WriteLine($"Client-to-server plan: {plan.Entries.Count:N0} table(s), {blocked:N0} blocked/unresolved.");
@@ -2361,7 +2438,7 @@ static async Task<int> Server(string[] args)
 
 static int ServerHelp(int code = 0)
 {
-    var text = "Usage:\n  wowcrucible server detect <installed-server-folder>\n  wowcrucible server inspect <installed-server-folder>\n  wowcrucible server bindings <installed-server-folder> [--source=core-source]\n  wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all|--summary] [--migration=output.sql] [--bundle=folder]\n  wowcrucible server dbc-apply <installed-server-folder> <bundle-folder>\n  wowcrucible server dbc-rollback <installed-server-folder> <deployment-receipt.json>\n  wowcrucible server dbc-module-export <bundle-folder> <module-root>\n  wowcrucible server client-plan <installed-server-folder> <extracted-dbc-root> [--source=core-source] [--output=plan.json] [--stage=review-folder]";
+    var text = "Usage:\n  wowcrucible server detect <installed-server-folder>\n  wowcrucible server inspect <installed-server-folder>\n  wowcrucible server bindings <installed-server-folder> [--source=core-source]\n  wowcrucible server dbc-audit <installed-server-folder> <dbc-file-or-name> <schema.xml> [--source=core-source] [--all|--summary] [--migration=output.sql] [--bundle=folder]\n  wowcrucible server dbc-apply <installed-server-folder> <bundle-folder>\n  wowcrucible server dbc-rollback <installed-server-folder> <deployment-receipt.json>\n  wowcrucible server dbc-module-export <bundle-folder> <module-root>\n  wowcrucible server client-plan <installed-server-folder> <extracted-dbc-root> --profile=<target-profile-id> [--source=core-source] [--output=plan.json] [--stage=review-folder]";
     if (code == 0) Console.WriteLine(text); else Console.Error.WriteLine(text); return code;
 }
 
@@ -3256,11 +3333,16 @@ static int Dbc(string[] args)
     if (args is ["stage-query", var stageQueryPath, var stageQuerySqlFile, .. var stageQueryOptions])
     {
         var json = stageQueryOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var limitText = Option(stageQueryOptions, "--limit=") ?? "500"; if (!int.TryParse(limitText, out var limit) || limit is < 1 or > 100000) return Fail("--limit must be from 1 to 100000.");
-        var unknown = stageQueryOptions.Where(option => !option.StartsWith("--bind=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--limit=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown stage-query option: {unknown[0]}");
+        var requireRows = stageQueryOptions.Contains("--require-rows", StringComparer.OrdinalIgnoreCase); var expectedCountText = Option(stageQueryOptions, "--expect-count="); int? expectedCount = null;
+        if (expectedCountText is not null) { if (!int.TryParse(expectedCountText, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedExpectedCount) || parsedExpectedCount < 0) return Fail("--expect-count must be a nonnegative integer."); expectedCount = parsedExpectedCount; }
+        if (requireRows && expectedCount == 0) return Fail("--require-rows conflicts with --expect-count=0.");
+        var unknown = stageQueryOptions.Where(option => !option.StartsWith("--bind=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--limit=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--expect-count=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--require-rows", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown stage-query option: {unknown[0]}");
         var result = DbcStagingWorkspaceService.Query(stageQueryPath, File.ReadAllText(stageQuerySqlFile), ParseStageBindings(stageQueryOptions), limit);
         if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { result.Columns, result.Rows, result.Truncated }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         else { Console.WriteLine(string.Join('\t', result.Columns)); foreach (var row in result.Rows) Console.WriteLine(string.Join('\t', row.Select(SqlCell))); if (result.Truncated) Console.Error.WriteLine($"Query output stopped at {limit:N0} row(s); refine the query or raise --limit."); }
-        return result.Rows.Count > 0 ? 0 : 3;
+        var expectation = new DbcStagingQueryExpectation(requireRows, expectedCount); var failure = expectation.Validate(result);
+        if (failure is not null) { Console.Error.WriteLine(failure); return 3; }
+        return 0;
     }
     if (args is ["stage-mutate", var stageMutationPath, var stageMutationSqlFile, .. var stageMutationOptions])
     {
@@ -3293,6 +3375,36 @@ static int Dbc(string[] args)
     {
         var xml=Option(auditOptions,"--xml=");var json=auditOptions.Contains("--format=json",StringComparer.OrdinalIgnoreCase);var roundTrip=auditOptions.Contains("--roundtrip",StringComparer.OrdinalIgnoreCase);var unknown=auditOptions.Where(value=>!value.StartsWith("--xml=",StringComparison.OrdinalIgnoreCase)&&!value.Equals("--roundtrip",StringComparison.OrdinalIgnoreCase)&&!value.Equals("--format=json",StringComparison.OrdinalIgnoreCase)&&!value.Equals("--format=text",StringComparison.OrdinalIgnoreCase)&&!value.Equals("--only-problems",StringComparison.OrdinalIgnoreCase)).ToArray();if(unknown.Length>0)return Fail($"Unknown schema-audit option: {unknown[0]}");var summary=DbdSchemaService.Audit(definitionsRoot,auditDbcRoot,auditBuild,xml,roundTrip);
         if(json)Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(summary,new System.Text.Json.JsonSerializerOptions{WriteIndented=true}));else{Console.WriteLine($"BUILD\t{summary.Build}\nTABLES\t{summary.Rows.Count}\nMATCHES\t{summary.Matches}\nEMPTY_PLACEHOLDERS\t{summary.EmptyPlaceholders}\nROUNDTRIP_VERIFIED\t{summary.RoundTripVerified}\nPROBLEMS\t{summary.Failures}");foreach(var row in summary.Rows.Where(row=>!auditOptions.Contains("--only-problems",StringComparer.OrdinalIgnoreCase)||row.Status is not DbdAuditStatus.Match and not DbdAuditStatus.EmptyPlaceholder))Console.WriteLine($"{row.Status.ToString().ToUpperInvariant()}\t{row.Table}\tCONTAINER={row.Container??"-"}\tFIELDS={row.ActualFields}\tBYTES={row.RecordSize?.ToString()??"-"}\tDBD={row.DbdFields?.ToString()??"-"}\tXML={row.XmlFields?.ToString()??"-"}\tROUNDTRIP={(row.ByteIdenticalRoundTrip is null?"-":row.ByteIdenticalRoundTrip==true?"EXACT":"FAILED")}\t{row.Message}");}return summary.Failures==0?0:3;
+    }
+    if (args is ["wdc1-mutation-audit", var mutationDefinitions, var mutationRoot, var mutationBuildText, .. var mutationOptions] && int.TryParse(mutationBuildText, out var mutationBuild))
+    {
+        var output = Option(mutationOptions, "--output="); var json = mutationOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = mutationOptions.Where(option => !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown wdc1-mutation-audit option: {unknown[0]}");
+        var summary = Wdc1MutationAuditService.Audit(mutationDefinitions, mutationRoot, mutationBuild, output);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(summary, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"BUILD\t{summary.Build}\nSCANNED_TABLES\t{summary.ScannedTables}\nCASES\t{summary.Cases.Count}\nCOVERED\t{string.Join(',', summary.CoveredCapabilities)}\nMISSING\t{(summary.MissingCapabilities.Count == 0 ? "none" : string.Join(',', summary.MissingCapabilities))}\nERRORS\t{summary.Errors.Count}\nARTIFACTS\t{summary.ArtifactRoot ?? "temporary-cleaned"}");
+            foreach (var result in summary.Cases) Console.WriteLine($"{(result.Passed ? "PASS" : "FAIL")}\t{result.Table}\tROWS={result.SourceRows}->{result.OutputRows}\tCAPABILITIES={string.Join(',', result.Capabilities)}\tMUTATIONS={string.Join(';', result.Mutations)}\t{result.Message}");
+            foreach (var error in summary.Errors) Console.WriteLine($"ERROR\t{error}");
+        }
+        return summary.Passed ? 0 : 3;
+    }
+    if (args is ["fixed-mutation-audit", var fixedDefinitions, var fixedRoot, var fixedBuildText, .. var fixedOptions] && int.TryParse(fixedBuildText, out var fixedBuild))
+    {
+        var output = Option(fixedOptions, "--output="); var xml = Option(fixedOptions, "--xml="); var json = fixedOptions.Contains("--format=json", StringComparer.OrdinalIgnoreCase);
+        var unknown = fixedOptions.Where(option => !option.StartsWith("--output=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--xml=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown fixed-mutation-audit option: {unknown[0]}");
+        var summary = FixedTableMutationAuditService.Audit(fixedDefinitions, fixedRoot, fixedBuild, output, xml);
+        if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(summary, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
+        else
+        {
+            Console.WriteLine($"BUILD\t{summary.Build}\nSCANNED_TABLES\t{summary.ScannedTables}\nEMPTY_PLACEHOLDERS\t{summary.EmptyPlaceholders}\nCASES\t{summary.Cases.Count}\nCOVERED\t{string.Join(',', summary.CoveredCapabilities)}\nMISSING\t{(summary.MissingCapabilities.Count == 0 ? "none" : string.Join(',', summary.MissingCapabilities))}\nERRORS\t{summary.Errors.Count}\nARTIFACTS\t{summary.ArtifactRoot ?? "temporary-cleaned"}");
+            foreach (var result in summary.Cases) Console.WriteLine($"{(result.Passed ? "PASS" : "FAIL")}\t{result.Table}\t{result.Container}\tROWS={result.SourceRows}->{result.OutputRows}\tCAPABILITIES={string.Join(',', result.Capabilities)}\tMUTATIONS={string.Join(';', result.Mutations)}\t{result.Message}");
+            foreach (var error in summary.Errors) Console.WriteLine($"ERROR\t{error}");
+        }
+        return summary.Passed ? 0 : 3;
     }
     if (args is ["lighting", var lightingRoot, .. var lightingOptions])
     {
@@ -3681,6 +3793,11 @@ static int Dbc(string[] args)
     Console.WriteLine($"Path\t{Path.GetFullPath(args[1])}");
     Console.WriteLine($"Container\t{file.ContainerKind.ToString().ToUpperInvariant()}"); Console.WriteLine($"Rows\t{file.RowCount}"); Console.WriteLine($"Fields\t{file.FieldCount}"); Console.WriteLine($"RecordBytes\t{file.RecordSize}"); Console.WriteLine($"StringBytes\t{file.StringTableSize}");
     if (file.Db2Metadata is { } db2) Console.WriteLine($"Build\t{db2.Build}\nTableHash\t0x{db2.TableHash:X8}\nTimestamp\t{db2.Timestamp}\nIdRange\t{db2.MinId}..{db2.MaxId}\nLocale\t0x{db2.Locale:X8}\nIndexEntries\t{db2.IndexMap.Count}\nCopyRows\t{db2.CopyRows}\nStructuralMutation\t{file.AllowsStructuralMutation}");
+    if (file.Wdc1Metadata is { } wdc1)
+    {
+        var storageModes = wdc1.FieldStorage.GroupBy(field => field.Mode).OrderBy(group => group.Key).Select(group => $"{group.Key}:{group.Count()}");
+        Console.WriteLine($"TableHash\t0x{wdc1.TableHash:X8}\nLayoutHash\t0x{wdc1.LayoutHash:X8}\nIdRange\t{wdc1.MinId}..{wdc1.MaxId}\nLocale\t0x{wdc1.Locale:X8}\nFlags\t0x{wdc1.Flags:X4}\nPhysicalRows\t{wdc1.PhysicalRecordCount}\nCopyRows\t{wdc1.CopyRecordCount}\nExternalIds\t{wdc1.HasExternalIds}\nOffsetMap\t{wdc1.HasOffsetMap}\nRelationshipData\t{wdc1.HasRelationshipData}\nStorageModes\t{string.Join(", ", storageModes)}\nStructuralMutation\t{file.AllowsStructuralMutation}");
+    }
     return 0;
 }
 
@@ -3696,7 +3813,7 @@ static int Casc(string[] args, CancellationToken cancellationToken)
             {
                 var options = args[2..]; var query = options.FirstOrDefault(option => !option.StartsWith("--", StringComparison.Ordinal)) ?? string.Empty; var json = options.Contains("--format=json", StringComparer.OrdinalIgnoreCase); var localOnly = options.Contains("--local-only", StringComparer.OrdinalIgnoreCase); var listFile = Option(options, "--listfile=");
                 var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) && !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase) && !option.Equals("--local-only", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown CASC list option: {unknown[0]}");
-                var all = service.ListFiles(args[1], CascProviderMask(query), listFile, cancellationToken); var files = all.Where(file => (!localOnly || file.IsAvailableLocally) && MpqPathFilter.Matches(file.ArchivePath, query)).ToArray();
+                var all = service.ListFiles(args[1], CascProviderMask(query), listFile, cancellationToken); var files = all.Where(file => (!localOnly || file.IsAvailableLocally) && MpqPathFilter.MatchesArchiveQuery(file.ArchivePath, query)).ToArray();
                 if (json) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(files, new System.Text.Json.JsonSerializerOptions { WriteIndented = true, Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } }));
                 else foreach (var file in files) Console.WriteLine($"{file.Size}\t{(file.IsAvailableLocally ? "LOCAL" : "REMOTE")}\t{file.FileDataId}\t{file.Locale:X8}\t{file.NameType}\t{file.ArchivePath}");
                 PrintCascSummary(all); return 0;
@@ -3713,7 +3830,7 @@ static int Casc(string[] args, CancellationToken cancellationToken)
             {
                 var options = args[3..]; var query = options.FirstOrDefault(option => !option.StartsWith("--", StringComparison.Ordinal)) ?? string.Empty; var listFile = Option(options, "--listfile="); var quiet = options.Contains("--quiet", StringComparer.OrdinalIgnoreCase); var progressText = Option(options, "--progress="); var progressStep = progressText is null ? 5 : int.Parse(progressText); if (progressStep is < 1 or > 100) throw new ArgumentOutOfRangeException(nameof(progressStep), "Progress percentage must be from 1 to 100.");
                 var unknown = options.Where(option => option.StartsWith("--", StringComparison.Ordinal) && !option.Equals("--quiet", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--progress=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)).ToArray(); if (unknown.Length > 0) return Fail($"Unknown CASC extract option: {unknown[0]}");
-                var all = service.ListFiles(args[1], CascProviderMask(query), listFile, cancellationToken); var matched = all.Where(file => MpqPathFilter.Matches(file.ArchivePath, query)).ToArray(); var files = matched.Where(file => file.IsAvailableLocally).GroupBy(file => file.ArchivePath, StringComparer.OrdinalIgnoreCase).Select(group => group.OrderBy(file => file.NameType).First()).ToArray(); if (files.Length == 0) return Fail("No matching CASC files are stored locally; Crucible will not download CDN data implicitly.");
+                var all = service.ListFiles(args[1], CascProviderMask(query), listFile, cancellationToken); var matched = all.Where(file => MpqPathFilter.MatchesArchiveQuery(file.ArchivePath, query)).ToArray(); var files = matched.Where(file => file.IsAvailableLocally).GroupBy(file => file.ArchivePath, StringComparer.OrdinalIgnoreCase).Select(group => group.OrderBy(file => file.NameType).First()).ToArray(); if (files.Length == 0) return Fail("No matching CASC files are stored locally; Crucible will not download CDN data implicitly.");
                 var timer = Stopwatch.StartNew(); service.Extract(args[1], args[2], files, quiet ? null : new ConsoleProgress(progressStep), cancellationToken); Console.Error.WriteLine($"Extracted {files.Length:N0} CASC file(s) to {Path.GetFullPath(args[2])} in {timer.Elapsed.TotalSeconds:0.##}s.{(matched.Length == files.Length ? string.Empty : $" Skipped {matched.Length - files.Length:N0} unavailable or duplicate locale row(s).")}"); return 0;
             }
         case "extract-folder" when args.Length >= 4:
@@ -3827,7 +3944,7 @@ static int Mpq(string[] args)
 }
 
 static int ManifestHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible manifest create <manifest.json> <output.mpq> <files/folders...> [--locale=neutral|enUS|0x0409] [--allow=glob] [--deny=glob] [--require=glob] [--count=N] [--client-exe=Wow.exe]\n  wowcrucible manifest list <manifest.json>\n  wowcrucible manifest validate <manifest.json> [archive.mpq]\n  wowcrucible manifest build <manifest.json> <output-folder>", code);
-static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc|file.db2>\n  wowcrucible dbc dbd-info <file.dbd> <build> [--format=text|json]\n  wowcrucible dbc schema-audit <definitions-root|-> <table-folder> <build> [--xml=schema.xml] [--roundtrip] [--only-problems] [--format=text|json]\n  wowcrucible dbc lighting <dbc-folder> [--map=N] [--light=N] [--slot=1..8] [--time=0..2880] [--format=text|json]\n  wowcrucible dbc lighting-band-set <LightIntBand.dbc|LightFloatBand.dbc> <band-id> <output.dbc> --key=time:value [...] [--plan=file.json] [--overwrite] [--in-place] [--format=text|json]\n  wowcrucible dbc rows <file.dbc|file.db2> <schema.xml|file.dbd|definitions-folder> <id>...\n  wowcrucible dbc export <file.dbc|file.db2> <schema> <output.csv|json|jsonl> [--format=csv|json|jsonl] [--columns=A,B|--column=Name] [--ids=1,2|--id=N] [--raw-string-offsets] [--overwrite]\n  wowcrucible dbc import <file.dbc|file.db2> <schema> <input.csv|json|jsonl> [--format=csv|json|jsonl] [--append] [--raw-string-offsets] [--output=changed.dbc|db2] [--overwrite] [--report=text|json]\n  wowcrucible dbc stage-create <file.dbc> <schema> <project> [--replace]\n  wowcrucible dbc stage-info <workspace.sqlite> [--format=text|json]\n  wowcrucible dbc stage-query <workspace.sqlite> <select.sql> [--bind=name=value] [--limit=500] [--format=text|json]\n  wowcrucible dbc stage-mutate <workspace.sqlite> <update-or-insert.sql> [--bind=name=value] [--apply] [--format=text|json]\n  wowcrucible dbc stage-diff <workspace.sqlite> [--format=text|json]\n  wowcrucible dbc stage-apply <workspace.sqlite> <source.dbc> <schema> <output.dbc> [--apply] [--overwrite] [--format=text|json]\n  wowcrucible dbc find <file.dbc|file.db2> <schema> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base> <override> <schema> [--summary]\n  wowcrucible dbc charsections-hd-promote <CharSections.dbc> <HDCharSections.dbc> <output.dbc> [--overwrite] [--format=text|json]\n  wowcrucible dbc charsections-expose-dk-palettes <CharSections.dbc> <output.dbc> --races=4,11 [--overwrite] [--format=text|json]\n  wowcrucible dbc hd-facial-styles-promote <CharacterFacialHairStyles.dbc> <HDCharacterFacialHairStyles.dbc> <output.dbc> [--overwrite] [--format=text|json]\n  wowcrucible dbc promote apply <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc promote additions <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc clone-remap where <base> <source> <schema> <column> <value>... --manifest=map.json --output=merged.dbc|db2 [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source> <parent-merged> <parent-schema> <parent-map.json> <foreign-column> <child-base> <child-source> <child-schema> --child-map=map.json --child-output=child --parent-output=parent\n  wowcrucible dbc copy-row <base> <source> <schema> <source-id> <target-id> <output> [--set=Column=Value]...\n  wowcrucible dbc set-row <input> <schema> <id> <output> --set=Column=Value [...]\n  wowcrucible dbc spell-tooltip <Spell.dbc> <spell-id>... [--format=text|json]\n  wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [--assets=processed-library]\n  wowcrucible dbc item-equipped <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> <base-skin> <output.png> --inventory=N --assets=processed-library [--source=name]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]\n\nSchema audit accepts an exact build-specific WDBX XML layout, a matching WoWDBDefs DBD layout, or both; pass - when no DBD corpus is selected. One exact provider is sufficient and the other remains visible coverage evidence. --roundtrip writes every full WDBC/WDB2 to isolated temporary storage and requires byte-identical SHA-256 output. `dbc lighting` validates the exact five-table build-12340 Light graph and samples its 18 color plus 6 float time bands without changing any DBC. `lighting-band-set` creates a complete hash/preimage-bound key edit, writes only the explicit output, and requires `--in-place` before replacing its loaded source; every replacement keeps `.bak` and a receipt. `charsections-hd-promote` projects an Ascension-style HD companion table into a stock-runtime `CharSections.dbc`: ordinary selector metadata and class flags remain authoritative, HD texture bindings are overlaid, alternate IDs are deduplicated by the complete selector, and only genuinely missing selectors are appended. `charsections-expose-dk-palettes` preserves every original Death Knight row and appends normal-player selector copies only for the requested races' DK-only base-palette surfaces. `hd-facial-styles-promote` forward-merges ordinary-only styles into compatible HD race/sex surfaces while preserving every existing HD row and refusing surfaces whose shared payloads differ. PTCH update-layer deltas are identified explicitly and require effective-chain reconstruction before table editing. Staging workspaces are project-local SQLite files with immutable baselines, named schema columns, dry-run mutations, and source/schema hash binding. DBC remains authoritative: publication always passes through Crucible's stale-safe structured importer and writes only an explicit output. For WDB2, <schema> may be the matching XML, .dbd file, or WoWDBDefs definitions folder. WDB5/WDB6/WDC are not yet supported.", code);
+static int DbcHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible dbc info <file.dbc|file.db2>\n  wowcrucible dbc dbd-info <file.dbd> <build> [--format=text|json]\n  wowcrucible dbc schema-audit <definitions-root|-> <table-folder> <build> [--xml=schema.xml] [--roundtrip] [--only-problems] [--format=text|json]\n  wowcrucible dbc fixed-mutation-audit <definitions-root> <table-folder> <build> [--xml=schema.xml] [--output=folder] [--format=text|json]\n  wowcrucible dbc wdc1-mutation-audit <definitions-root> <table-folder> <build> [--output=folder] [--format=text|json]\n  wowcrucible dbc lighting <dbc-folder> [--map=N] [--light=N] [--slot=1..8] [--time=0..2880] [--format=text|json]\n  wowcrucible dbc lighting-band-set <LightIntBand.dbc|LightFloatBand.dbc> <band-id> <output.dbc> --key=time:value [...] [--plan=file.json] [--overwrite] [--in-place] [--format=text|json]\n  wowcrucible dbc rows <file.dbc|file.db2> <schema.xml|file.dbd|definitions-folder> <id>...\n  wowcrucible dbc export <file.dbc|file.db2> <schema> <output.csv|json|jsonl> [--format=csv|json|jsonl] [--columns=A,B|--column=Name] [--ids=1,2|--id=N] [--raw-string-offsets] [--overwrite]\n  wowcrucible dbc import <file.dbc|file.db2> <schema> <input.csv|json|jsonl> [--format=csv|json|jsonl] [--append] [--raw-string-offsets] [--output=changed.dbc|db2] [--overwrite] [--report=text|json]\n  wowcrucible dbc stage-create <file.dbc> <schema> <project> [--replace]\n  wowcrucible dbc stage-info <workspace.sqlite> [--format=text|json]\n  wowcrucible dbc stage-query <workspace.sqlite> <select.sql> [--bind=name=value] [--limit=500] [--require-rows|--expect-count=N] [--format=text|json]\n  wowcrucible dbc stage-mutate <workspace.sqlite> <update-or-insert.sql> [--bind=name=value] [--apply] [--format=text|json]\n  wowcrucible dbc stage-diff <workspace.sqlite> [--format=text|json]\n  wowcrucible dbc stage-apply <workspace.sqlite> <source.dbc> <schema> <output.dbc> [--apply] [--overwrite] [--format=text|json]\n  wowcrucible dbc find <file.dbc|file.db2> <schema> <column> <value>... [--count|--limit=N]\n  wowcrucible dbc validate <schema.xml> <dbc-folder> [--strict] [--recursive]\n  wowcrucible dbc compare <base> <override> <schema> [--summary]\n  wowcrucible dbc charsections-hd-promote <CharSections.dbc> <HDCharSections.dbc> <output.dbc> [--overwrite] [--format=text|json]\n  wowcrucible dbc charsections-expose-dk-palettes <CharSections.dbc> <output.dbc> --races=4,11 [--overwrite] [--format=text|json]\n  wowcrucible dbc hd-facial-styles-promote <CharacterFacialHairStyles.dbc> <HDCharacterFacialHairStyles.dbc> <output.dbc> [--overwrite] [--format=text|json]\n  wowcrucible dbc promote apply <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc promote additions <base> <override> <schema> <manifest.json> <output>\n  wowcrucible dbc clone-remap where <base> <source> <schema> <column> <value>... --manifest=map.json --output=merged.dbc|db2 [--start-id=N]\n  wowcrucible dbc clone-dependency <parent-source> <parent-merged> <parent-schema> <parent-map.json> <foreign-column> <child-base> <child-source> <child-schema> --child-map=map.json --child-output=child --parent-output=parent\n  wowcrucible dbc copy-row <base> <source> <schema> <source-id> <target-id> <output> [--set=Column=Value]...\n  wowcrucible dbc set-row <input> <schema> <id> <output> --set=Column=Value [...]\n  wowcrucible dbc spell-tooltip <Spell.dbc> <spell-id>... [--format=text|json]\n  wowcrucible dbc item-display <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> [--assets=processed-library]\n  wowcrucible dbc item-equipped <ItemDisplayInfo.dbc> <schema.xml|-> <display-id> <base-skin> <output.png> --inventory=N --assets=processed-library [--source=name]\n  wowcrucible dbc itemset inspect <ItemSet.dbc> <schema.xml> <set-id> [--spell=Spell.dbc]\n  wowcrucible dbc itemset clone <ItemSet.dbc> <schema.xml> <output.dbc> <source-set> <new-set> --map=old:new,... [--suffix=\" Variant\"]\n  wowcrucible dbc itemset effects <ItemSet.dbc> <schema.xml> <output.dbc> <set-id> --effect=required-items:spell-id [...]\n\nSchema audit accepts an exact build-specific WDBX XML layout, a matching WoWDBDefs DBD layout, or both; pass - when no DBD corpus is selected. One exact provider is sufficient and the other remains visible coverage evidence. `--roundtrip` writes every full WDBC, WDB2, or WDC1 table to isolated temporary storage and requires byte-identical SHA-256 output. `fixed-mutation-audit` mutates every nonempty WDBC/WDB2 table in an isolated corpus, reloads and compares every logical cell, verifies metadata and mutation guards, and requires a stable second save. `wdc1-mutation-audit` selects real WDC1 tables that cover every supported storage mode and side table, performs isolated value and structural mutations, and verifies canonical stable persistence. WDC1 schema selection is layout-hash-aware and supports direct, immediate, common, pallet, pallet-array, copy, external-ID, relationship, and offset-map data; dirty writes are canonicalized and must be validated for the target runtime before publication. `dbc lighting` validates the exact five-table build-12340 Light graph and samples its 18 color plus 6 float time bands without changing any DBC. `lighting-band-set` creates a complete hash/preimage-bound key edit, writes only the explicit output, and requires `--in-place` before replacing its loaded source; every replacement keeps `.bak` and a receipt. `charsections-hd-promote` projects an Ascension-style HD companion table into a stock-runtime `CharSections.dbc`: ordinary selector metadata and class flags remain authoritative, HD texture bindings are overlaid, alternate IDs are deduplicated by the complete selector, and only genuinely missing selectors are appended. `charsections-expose-dk-palettes` preserves every original Death Knight row and appends normal-player selector copies only for the requested races' DK-only base-palette surfaces. `hd-facial-styles-promote` forward-merges ordinary-only styles into compatible HD race/sex surfaces while preserving every existing HD row and refusing surfaces whose shared payloads differ. PTCH update-layer deltas are identified explicitly and require effective-chain reconstruction before table editing. Staging workspaces are project-local SQLite files with immutable baselines, named schema columns, dry-run mutations, and source/schema hash binding. A valid query exits successfully even when it returns zero rows; use `--require-rows` or `--expect-count=N` when row count is itself an assertion. Client tables remain authoritative: publication always passes through Crucible's stale-safe structured importer and writes only an explicit output. For WDB2/WDC1, <schema> may be the matching XML, .dbd file, or WoWDBDefs definitions folder; WDC1 requires a layout-hash-backed DBD mapping. WDB5/WDB6 and WDC2+ are not yet supported.", code);
 static int MpqHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible mpq list <archive.mpq> [filter] [--content-only] [--format=json] [--listfile=paths.txt]\n  wowcrucible mpq tree <archive.mpq> [folder] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible mpq extract <archive.mpq> <folder> [filter] [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt] [--continue-on-error=report.csv]\n  wowcrucible mpq extract-folder <archive.mpq> <internal-folder> <destination> [--quiet|--progress=N] [--workers=N] [--listfile=paths.txt] [--continue-on-error=report.csv]\n  wowcrucible mpq create <archive.mpq> <files/folders...> [--locale=neutral|enUS|0x0409]\n  wowcrucible mpq update <archive.mpq> <files/folders...> [--locale=neutral|enUS|0x0409] [--listfile=original.txt]\n  wowcrucible mpq put <archive.mpq> <source-file> <archive-path> [--locale=neutral|enUS|0x0409] [--listfile=original.txt] [--create]\n  wowcrucible mpq merge <output.mpq> <source-a.mpq> <source-b.mpq> [...] [--conflicts=block|earlier|later] [--listfile=paths.txt]\n\nEvery create, update, put, and merge keeps an embedded `(listfile)` and an external `<archive>.listfile.txt` recovery sidecar. Updates refuse unresolved existing paths rather than publishing an incomplete recovery file. Path + locale is the physical MPQ identity. Extraction preserves same-path locales with explicit suffixes by default; merge deduplicates/conflicts only within the same identity. Extraction remains fail-fast unless --continue-on-error writes a CSV receipt; partial extraction returns exit code 4.", code);
 
 static void WriteMpqExtractionFailureReport(string archivePath, string reportPath, IReadOnlyList<(MpqFileEntry Entry, Exception Error)> failures)
@@ -3858,7 +3975,7 @@ static void WriteMpqExtractionFailureReport(string archivePath, string reportPat
 }
 static int CascHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible casc list <storage-folder> [filter] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc tree <storage-folder> [folder] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc extract <storage-folder> <destination> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible casc extract-folder <storage-folder> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n\nCASC operations are read-only and local-only. Crucible never mutates the storage and never downloads missing CDN payloads implicitly.", code);
 static string CascProviderMask(string query) => query.IndexOfAny(['*', '?']) >= 0 ? query : "*";
-static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools commands [search words...] [--format=text|json]\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n\nThe command catalog is shared with the desktop Ctrl+K palette, so scripts and the UI use the same searchable vocabulary. A command search with no matches returns exit code 3.\n\nWithout an inventory path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage.", code);
+static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools commands [search words...] [--format=text|json]\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n  wowcrucible tools compatibility-clone <request.json> [--format=text|json]\n  wowcrucible tools compatibility-lab <request.json> [--format=text|json]\n  wowcrucible tools cross-build-mashup <request.json> [--format=text|json]\n\nThe command catalog is shared with the desktop Ctrl+K palette, so scripts and the UI use the same searchable vocabulary. A command search with no matches returns exit code 3.\n\nWithout an inventory path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage. compatibility-clone prepares excluded-directory-aware isolated worktrees, retains only marked partial copies for cancellation-safe resume, and SHA-256 verifies every completed clone before promotion. Existing completed clones are audited but never rewritten. compatibility-lab then operates only on explicit source/clone/table paths from the same request, hashes clone integrity, and exercises each build natively. cross-build-mashup is the explicit destructive-format lane: it translates donor rows into the MPQ host's exact table layouts, rewrites DBD references, publishes a real patch plus matching server payload, and installs only when named test-worktree roots are present in the request.", code);
 static int CacheHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible cache info <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--format=text|json]\n  wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]\n  wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]\n  wowcrucible cache server-plan <file.wdb> <host> <port> <user> <database> [--definitions=WDB.xml] [--ids=1,2] [--output=plan.json] [--sql=preview.sql] [--overwrite]\n  wowcrucible cache server-apply <plan.json> <host> <port> <user> <database> <receipt.json> [--apply] [--overwrite]\n  wowcrucible cache server-rollback <receipt.json> <host> <port> <user> <database> [--apply]\n\nWDB and Cataclysm WCH2 ADB reads are bounded and read-only. Version-aware headers and record framing are always inspected; when no matching schema is available, Crucible reports raw record metadata instead of guessing field types. Unsupported cache info still reports bounded size, SHA-256, first-byte hex/ASCII, and failed magic evidence with review exit code 3. Selected WDBX or Adb_Wdb_Parser schema XML is parsed as data by Crucible's own provider. Later WCH5/WCH7/WCH8 ADB is rejected rather than guessed because it requires matching DB2 layout metadata. Export is atomic and never overwrites without --overwrite. server-plan binds selected decoded WDB rows to exact live modern-core preimages and never invents missing rows or obsolete ArcEmu targets. Apply and rollback are dry-run unless --apply is explicit; apply rechecks source/schema/preimages under row locks and writes a receipt before commit, while rollback refuses later-edited fields. Database passwords come from WOW_CRUCIBLE_DB_PASSWORD by default.", code);
 static int KnowledgeHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible knowledge search <terms...> [--root=wiki-folder] [--locale=en] [--limit=100] [--format=text|json]\n  wowcrucible knowledge show <relative-markdown-path> [--root=wiki-folder] [--section=N]\n\nSearch builds a local in-memory index over Markdown only; it never executes the wiki site generator, scripts, HTML, or remote links. Without --root, Crucible searches upward from the executable for the shared wiki folder. The desktop exposes the same provider under Offline knowledge & field reference, and F1 opens it using the selected DBC table and field as context.", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
@@ -4057,10 +4174,12 @@ static DbcSchemaResolution ResolveClientTableSchema(WdbcFile file, string schema
     var isDbd = Directory.Exists(schemaPath) || Path.GetExtension(schemaPath).Equals(".dbd", StringComparison.OrdinalIgnoreCase);
     if (!isDbd) return DbcSchemaCatalog.Load(schemaPath).ResolveColumns(tableName, file.FieldCount);
     tableName = file.LogicalTableName;
-    var build = file.Db2Metadata?.Build ?? throw new InvalidOperationException("A DBD schema path currently requires a WDB2 file carrying its client build. Use the matching XML definition for WDBC.");
+    var build = file.Db2Metadata?.Build ?? (file.Wdc1Metadata is not null
+        ? 0
+        : throw new InvalidOperationException("A DBD schema path requires WDB2 build metadata or a WDC1 layout hash. Use the matching XML definition for WDBC."));
     var definition = Directory.Exists(schemaPath) ? Path.Combine(Path.GetFullPath(schemaPath), tableName + ".dbd") : Path.GetFullPath(schemaPath);
     if (!File.Exists(definition)) throw new FileNotFoundException($"No DBD definition exists for {tableName}.", definition);
-    return DbdSchemaService.ResolveFile(definition, build, file.FieldCount, file.RecordSize);
+    return DbdSchemaService.ResolveFile(definition, build, file);
 }
 
 static bool DbcRowsEqual(WdbcFile left, int leftRow, WdbcFile right, int rightRow, IReadOnlyList<DbcColumn> columns)
@@ -4069,9 +4188,9 @@ static bool DbcRowsEqual(WdbcFile left, int leftRow, WdbcFile right, int rightRo
     {
         if (column.Type == DbcValueType.StringOffset)
         {
-            if (!left.GetString(left.GetRaw(leftRow, column)).Equals(right.GetString(right.GetRaw(rightRow, column)), StringComparison.Ordinal)) return false;
+            if (!left.GetString(left.GetRaw64(leftRow, column)).Equals(right.GetString(right.GetRaw64(rightRow, column)), StringComparison.Ordinal)) return false;
         }
-        else if (left.GetRaw(leftRow, column) != right.GetRaw(rightRow, column)) return false;
+        else if (left.GetRaw64(leftRow, column) != right.GetRaw64(rightRow, column)) return false;
     }
     return true;
 }

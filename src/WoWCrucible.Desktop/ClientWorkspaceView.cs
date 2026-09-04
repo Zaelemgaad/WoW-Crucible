@@ -23,14 +23,16 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _operationStatus = Status("Ready");
     private ClientArchiveIndex? _loadedIndex;
 
-    private readonly TextBox _clientDbcRoot = new() { PlaceholderText = "Extracted effective DBFilesClient folder" };
-    private readonly TextBox _coreSourceRoot = new() { PlaceholderText = "Optional current AzerothCore/TrinityCore source" };
+    private readonly TextBox _clientDbcRoot = new() { PlaceholderText = "Extracted effective DBFilesClient table folder" };
+    private readonly TextBox _coreSourceRoot = new() { PlaceholderText = "Optional current AzerothCore, TrinityCore, SkyFire, or LegionCore source" };
+    private readonly ComboBox _serverTarget = new();
     private readonly ListBox _serverPlanItems = new();
-    private readonly TextBlock _serverPlanSummary = Status("Analyze extracted client DBCs against the detected server before staging anything.");
+    private readonly TextBlock _serverPlanSummary = Status("Analyze extracted client DBC/DB2 tables against the detected server before staging anything.");
     private ClientServerDeploymentPlan? _serverPlan;
 
     private readonly TextBox _fusionBase = new() { PlaceholderText = "Extracted stock/effective base folder" };
     private readonly TextBox _fusionSources = new() { AcceptsReturn = true, PlaceholderText = "One extracted override folder per line" };
+    private readonly ComboBox _fusionTarget = new();
     private readonly ListBox _fusionItems = new();
     private readonly TextBlock _fusionSummary = Status("Fusion is additive-first: base-identical files are omitted and path conflicts remain blocked for review.");
     private ClientFusionPlan? _fusionPlan;
@@ -63,6 +65,11 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     public ClientWorkspaceView(DesktopWorkspaceSession session)
     {
         _session = session;
+        var profiles = TargetProfileCatalog.Load();
+        _serverTarget.ItemsSource = profiles;
+        _serverTarget.SelectedItem = TargetProfileCatalog.Find(profiles, TargetProfileCatalog.DefaultProfileId);
+        _fusionTarget.ItemsSource = profiles;
+        _fusionTarget.SelectedItem = TargetProfileCatalog.Find(profiles, TargetProfileCatalog.DefaultProfileId);
         LoadDefaults();
         ConfigureTemplates();
 
@@ -189,12 +196,13 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
 
     private Control ServerPlanPage()
     {
-        var clientDbc = Button("DBCs…", async () => { var path = await PickFolderAsync("Select extracted effective client DBCs"); if (path is not null) _clientDbcRoot.Text = path; });
+        var clientDbc = Button("Tables…", async () => { var path = await PickFolderAsync("Select extracted effective client DBC/DB2 tables"); if (path is not null) _clientDbcRoot.Text = path; });
         var core = Button("Core source…", async () => { var path = await PickFolderAsync("Select optional current core source"); if (path is not null) { _coreSourceRoot.Text = path; _session.Settings.CoreSourcePath = path; _session.Settings.Save(); } });
         var analyze = AccentButton("Analyze client against server"); analyze.Click += async (_, _) => await AnalyzeServerPlanAsync(); Register(analyze);
         var stage = AccentButton("Stage reviewed plan…"); stage.Click += async (_, _) => await StageServerPlanAsync(); Register(stage);
-        var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
-        AddPath(paths, 0, "Client DBC root", _clientDbcRoot, clientDbc, null); AddPath(paths, 1, "Core source", _coreSourceRoot, core, null);
+        var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
+        AddPath(paths, 0, "Client table root", _clientDbcRoot, clientDbc, null); AddPath(paths, 1, "Core source", _coreSourceRoot, core, null);
+        AddPath(paths, 2, "Target client", _serverTarget, null, null);
         return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, stage } }, 1), WithRow(_serverPlanItems, 2), WithRow(Card(_serverPlanSummary), 3) } };
     }
 
@@ -208,8 +216,9 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var planRemap = AccentButton("Plan ID + reference remap"); planRemap.Click += async (_, _) => await AnalyzeFusionDbcRemapAsync(); Register(planRemap);
         var writeRemap = AccentButton("Write dependency-safe DBCs…"); writeRemap.Click += async (_, _) => await ApplyFusionDbcRemapAsync(); Register(writeRemap);
         var stage = AccentButton("Stage reviewed patch…"); stage.Click += async (_, _) => await StageFusionAsync(); Register(stage);
-        var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
+        var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
         AddPath(paths, 0, "Effective base", _fusionBase, chooseBase, null); AddPath(paths, 1, "Override sources", _fusionSources, addSource, null);
+        AddPath(paths, 2, "Target client", _fusionTarget, null, null);
         return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, analyzeDbcs, writeDbcs, planRemap, writeRemap, stage } }, 1), WithRow(_fusionItems, 2), WithRow(Card(_fusionSummary), 3) } };
     }
 
@@ -462,15 +471,16 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private async Task AnalyzeServerPlanAsync()
     {
         if (_session.Server is null) { _serverPlanSummary.Text = "Detect Server & SQL first."; return; }
-        Begin("Analyzing client DBC consumers and SQL overlays…");
+        Begin("Analyzing client-table consumers and SQL overlays…");
         try
         {
             var clientDbcRoot = _clientDbcRoot.Text ?? string.Empty;
             var coreSourceRoot = _coreSourceRoot.Text;
-            _serverPlan = await Task.Run(() => ClientServerDeploymentPlanner.Analyze(clientDbcRoot, _session.Server, coreSourceRoot, _operation!.Token), _operation!.Token);
+            var target = _serverTarget.SelectedItem as TargetProfile ?? throw new InvalidOperationException("Choose the target client profile.");
+            _serverPlan = await Task.Run(() => ClientServerDeploymentPlanner.Analyze(clientDbcRoot, _session.Server, target, coreSourceRoot, _operation!.Token), _operation!.Token);
             _serverPlanItems.ItemsSource = _serverPlan.Entries;
             var grouped = _serverPlan.Entries.GroupBy(entry => entry.Status).OrderBy(group => group.Key).Select(group => $"{group.Key}: {group.Count():N0}");
-            _serverPlanSummary.Text = $"{_serverPlan.Entries.Count:N0} DBCs analyzed against {_serverPlan.CoreFamily}.\n{string.Join(" · ", grouped)}\nSQL-overlay entries require an audit before deployment; conflicting client layers remain blocked.";
+            _serverPlanSummary.Text = $"{_serverPlan.Entries.Count:N0} client tables analyzed against {_serverPlan.CoreFamily} ({_serverPlan.ClientArchiveFormat}).\n{string.Join(" · ", grouped)}\nSQL-overlay entries require an audit before deployment; conflicting client layers remain blocked.";
             _operationStatus.Text = "Client → server plan ready for review.";
         }
         catch (OperationCanceledException) { _operationStatus.Text = "Client → server analysis cancelled."; }
@@ -483,7 +493,14 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         if (_serverPlan is null) { _serverPlanSummary.Text = "Analyze a plan first."; return; }
         var root = await PickFolderAsync("Select a non-live staging folder for the client/server plan"); if (root is null) return;
         var plan = _serverPlan;
-        try { var result = await Task.Run(() => ClientServerDeploymentPlanner.Stage(root, plan)); _serverPlanSummary.Text = $"Staged {result.ClientFiles:N0} client DBCs and {result.ServerFiles:N0} server candidates. {result.BlockedFiles:N0} blocked entries remain.\nPlan: {result.PlanPath}\nManifest: {result.PatchManifestPath ?? "none"}"; }
+        try
+        {
+            var result = await Task.Run(() => ClientServerDeploymentPlanner.Stage(root, plan));
+            var publication = result.RequiresClientPublisher
+                ? "CASC payload staged only; a target-build CASC publisher is still required before client deployment."
+                : $"MPQ manifest: {result.PatchManifestPath ?? "none"}";
+            _serverPlanSummary.Text = $"Staged {result.ClientFiles:N0} client tables and {result.ServerFiles:N0} server candidates. {result.BlockedFiles:N0} blocked entries remain.\nPlan: {result.PlanPath}\n{publication}";
+        }
         catch (Exception exception) { Fail("Client/server staging failed", exception); }
     }
 
@@ -495,7 +512,8 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
             var sources = Lines(_fusionSources.Text).Select((path, index) => new ClientFusionSource($"{index + 1}: {Path.GetFileName(Path.TrimEndingDirectorySeparator(path))}", path)).ToArray();
             var baseRoot = _fusionBase.Text ?? string.Empty;
             var progress = new Progress<(int Done, int Total, string Path)>(value => _operationStatus.Text = $"{value.Done:N0}/{value.Total:N0} · {value.Path}");
-            _fusionPlan = await Task.Run(() => ClientFusionPlanner.Analyze(baseRoot, sources, progress, _operation!.Token), _operation!.Token); _fusionDbcPlan = null; _fusionDbcResult = null; _fusionDbcRemapPlan = null; _fusionDbcRemapResult = null;
+            var target = _fusionTarget.SelectedItem as TargetProfile ?? throw new InvalidOperationException("Choose the target client profile.");
+            _fusionPlan = await Task.Run(() => ClientFusionPlanner.Analyze(baseRoot, sources, target, progress, _operation!.Token), _operation!.Token); _fusionDbcPlan = null; _fusionDbcResult = null; _fusionDbcRemapPlan = null; _fusionDbcRemapResult = null;
             _fusionItems.ItemsSource = _fusionPlan.Entries;
             var grouped = _fusionPlan.Entries.GroupBy(entry => entry.Status).OrderBy(group => group.Key).Select(group => $"{group.Key}: {group.Count():N0}");
             _fusionSummary.Text = $"{_fusionPlan.Entries.Count:N0} logical paths analyzed.\n{string.Join(" · ", grouped)}\nConflicts are not silently resolved; DBC conflicts should be merged by record/ID instead of choosing a whole-file winner.";
@@ -509,11 +527,12 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private async Task AnalyzeFusionDbcsAsync()
     {
         if (_fusionPlan is null) { _fusionSummary.Text = "Analyze the client fusion paths first."; return; } var schema = _session.Settings.SchemaDefinitionPath;
-        if (string.IsNullOrWhiteSpace(schema) || !File.Exists(schema)) { _fusionSummary.Text = "Configure the exact WotLK schema XML in Server & SQL before semantic DBC fusion."; return; }
-        Begin("Comparing every colliding DBC by record ID and decoded field semantics…");
+        var definitions = Directory.Exists(_session.Settings.DbdDefinitionsPath) ? _session.Settings.DbdDefinitionsPath : null;
+        if ((string.IsNullOrWhiteSpace(schema) || !File.Exists(schema)) && definitions is null) { _fusionSummary.Text = "Configure an exact WDBX XML schema or WoWDBDefs definitions root before semantic client-table fusion."; return; }
+        Begin("Comparing every colliding client table by record ID and decoded field semantics…");
         try
         {
-            var plan = _fusionPlan; _fusionDbcPlan = await Task.Run(() => ClientFusionDbcService.CreatePlan(plan, schema, _operation!.Token), _operation!.Token); _fusionDbcResult = null; _fusionDbcRemapPlan = null; _fusionDbcRemapResult = null;
+            var plan = _fusionPlan; _fusionDbcPlan = await Task.Run(() => ClientFusionDbcService.CreatePlan(plan, schema, definitions, _operation!.Token), _operation!.Token); _fusionDbcResult = null; _fusionDbcRemapPlan = null; _fusionDbcRemapResult = null;
             var details = _fusionDbcPlan.Tables.Select(table => $"{(table.Ready ? table.RequiresOutput ? "MERGE" : "OMIT EQUAL" : "BLOCKED")} {table.Table}: +{table.Additions.Count:N0}, reuse {table.ReusedRows:N0}, conflicts {table.Conflicts.Count:N0}{(table.Conflicts.Count == 0 ? string.Empty : $" [{string.Join(", ", table.Conflicts.Take(8).Select(conflict => $"ID {conflict.Id}: {string.Join('/', conflict.DifferingColumns.Take(4))}"))}]")}");
             _fusionSummary.Text = $"Semantic DBC review: {_fusionDbcPlan.ResolvableTables:N0} resolvable, {_fusionDbcPlan.BlockedTables:N0} blocked.\n{string.Join(Environment.NewLine, details)}\nDifferent content at an occupied ID remains blocked; Crucible will not discard it or guess cross-table reference rewrites.";
             _operationStatus.Text = _fusionDbcPlan.BlockedTables == 0 ? "Every colliding DBC is additive or semantically equal." : "DBC review complete with explicit same-ID/layout/schema blockers.";
@@ -582,7 +601,12 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         if (unresolvedDbcPaths.Length > 0 && _fusionDbcResult is null && _fusionDbcRemapResult is null) { _fusionSummary.Text = $"{unresolvedDbcPaths.Length:N0} byte-different DBC path(s) require either quick additive review or the preferred ID + reference remap before staging. Crucible will not copy a whole source DBC over the effective base without record-level review."; return; }
         var root = await PickFolderAsync("Select a staging folder for the small fusion patch"); if (root is null) return;
         var plan = _fusionPlan;
-        try { var result = await Task.Run(() => ClientFusionPlanner.Stage(root, plan, dbcResult: _fusionDbcResult, dbcRemapResult: _fusionDbcRemapResult)); _fusionSummary.Text = $"Staged {result.StagedFiles:N0} resolved changes; skipped {result.SkippedBaseFiles:N0} base-identical/semantically-equal files; left {result.UnresolvedConflicts:N0} conflicts unresolved.\nManifest: {result.ManifestPath}"; }
+        try
+        {
+            var result = await Task.Run(() => ClientFusionPlanner.Stage(root, plan, dbcResult: _fusionDbcResult, dbcRemapResult: _fusionDbcRemapResult));
+            var publication = result.RequiresClientPublisher ? "CASC payload staged; a target-build CASC publisher is required." : $"MPQ manifest: {result.ManifestPath}";
+            _fusionSummary.Text = $"Staged {result.StagedFiles:N0} resolved changes; skipped {result.SkippedBaseFiles:N0} base-identical/semantically-equal files; left {result.UnresolvedConflicts:N0} conflicts unresolved.\n{publication}";
+        }
         catch (Exception exception) { Fail("Fusion staging failed", exception); }
     }
 
@@ -627,10 +651,10 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private static string FormatBytes(long bytes) => bytes < 1024 ? $"{bytes:N0} B" : bytes < 1024 * 1024 ? $"{bytes / 1024d:0.#} KiB" : bytes < 1024L * 1024 * 1024 ? $"{bytes / (1024d * 1024):0.#} MiB" : $"{bytes / (1024d * 1024 * 1024):0.##} GiB";
     private static string ScopeGuidance(ClientArchiveScope scope) => scope switch { ClientArchiveScope.RootData => "Root Data layer; usually effective, but filename precedence still matters.", ClientArchiveScope.ActiveLocale => "Active locale layer; reuse only for the matching locale unless content is proven language-neutral.", ClientArchiveScope.InactiveLocale => "Inactive locale layer; excluded from the effective view by default.", ClientArchiveScope.Cache => "Cache layer; treat as generated or launcher-managed until proven otherwise.", ClientArchiveScope.CustomSubdirectory => "Custom loader subdirectory; preserve separately and expect executable/launcher coupling.", ClientArchiveScope.Backup => "Backup archive; excluded from effective content and patch inputs by default.", _ => "Unknown archive scope." };
     private static IBrush ScopeBrush(ClientArchiveScope scope) => scope is ClientArchiveScope.Backup or ClientArchiveScope.InactiveLocale ? Brush.Parse("#78859A") : scope == ClientArchiveScope.CustomSubdirectory ? Brush.Parse("#F0A34A") : Brush.Parse("#B8C4D8");
-    private static IBrush PlanBrush(ClientServerPlanStatus status) => status is ClientServerPlanStatus.Identical ? Brush.Parse("#67C587") : status is ClientServerPlanStatus.ConflictingClientLayers or ClientServerPlanStatus.InvalidDbc or ClientServerPlanStatus.UnknownConsumer ? Brush.Parse("#E36B6B") : Brush.Parse("#E5B75A");
+    private static IBrush PlanBrush(ClientServerPlanStatus status) => status is ClientServerPlanStatus.Identical ? Brush.Parse("#67C587") : status is ClientServerPlanStatus.ConflictingClientLayers or ClientServerPlanStatus.IncompatibleTarget or ClientServerPlanStatus.InvalidDbc or ClientServerPlanStatus.UnknownConsumer ? Brush.Parse("#E36B6B") : Brush.Parse("#E5B75A");
     private static IBrush FusionBrush(ClientFusionStatus status) => status is ClientFusionStatus.IdenticalToBase ? Brush.Parse("#78859A") : status is ClientFusionStatus.Conflict ? Brush.Parse("#E36B6B") : Brush.Parse("#67C587");
     private static IBrush ReleaseBrush(ClientReleaseActionKind kind) => kind switch { ClientReleaseActionKind.Add => Brush.Parse("#67C587"), ClientReleaseActionKind.Replace => Brush.Parse("#E5B75A"), ClientReleaseActionKind.RemoveManaged => Brush.Parse("#E36B6B"), _ => Brush.Parse("#78859A") };
-    private static void AddPath(Grid grid, int row, string label, Control field, Control firstButton, Control? secondButton) { var text = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center }; Grid.SetRow(text, row); grid.Children.Add(text); Grid.SetRow(field, row); Grid.SetColumn(field, 1); grid.Children.Add(field); Grid.SetRow(firstButton, row); Grid.SetColumn(firstButton, 2); grid.Children.Add(firstButton); if (secondButton is not null) { Grid.SetRow(secondButton, row); Grid.SetColumn(secondButton, 3); grid.Children.Add(secondButton); } }
+    private static void AddPath(Grid grid, int row, string label, Control field, Control? firstButton, Control? secondButton) { var text = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center }; Grid.SetRow(text, row); grid.Children.Add(text); Grid.SetRow(field, row); Grid.SetColumn(field, 1); grid.Children.Add(field); if (firstButton is not null) { Grid.SetRow(firstButton, row); Grid.SetColumn(firstButton, 2); grid.Children.Add(firstButton); } if (secondButton is not null) { Grid.SetRow(secondButton, row); Grid.SetColumn(secondButton, 3); grid.Children.Add(secondButton); } }
     private static T WithColumn<T>(T control, int column) where T : Control { Grid.SetColumn(control, column); return control; }
     private static T WithRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
 }

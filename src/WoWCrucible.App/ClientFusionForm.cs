@@ -10,17 +10,23 @@ internal sealed class ClientFusionForm : Form
     private readonly Label _status = new() { Dock = DockStyle.Bottom, Height = 44, Padding = new(10), ForeColor = Color.FromArgb(55, 65, 81) };
     private readonly Button _analyze = new() { Text = "Analyze Fusion", AutoSize = true };
     private readonly List<ClientFusionSource> _sourceValues = [];
+    private readonly IReadOnlyList<TargetProfile> _targetProfiles;
+    private readonly ComboBox _target = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     private ClientFusionPlan? _plan;
 
     public ClientFusionForm(AppSettings settings)
     {
+        _targetProfiles = TargetProfileCatalog.Load();
         Text = "Client Fusion Planner · WoW Crucible"; Width = 1450; Height = 850; StartPosition = FormStartPosition.CenterParent;
         _base.Text = Directory.Exists(settings.BaseDbcPath) ? settings.BaseDbcPath : string.Empty;
+        _target.DataSource = _targetProfiles.ToArray();
+        _target.SelectedItem = TargetProfileCatalog.Find(_targetProfiles, settings.SelectedTargetProfileId);
         var top = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, Padding = new(10) };
         top.ColumnStyles.Add(new(SizeType.AutoSize)); top.ColumnStyles.Add(new(SizeType.Percent, 100)); top.ColumnStyles.Add(new(SizeType.AutoSize));
         top.Controls.Add(new Label { Text = "Stock/effective base", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0); top.Controls.Add(_base, 1, 0); top.Controls.Add(Button("Browse…", () => PickBase()), 2, 0);
         top.Controls.Add(new Label { Text = "Override sources", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1); top.Controls.Add(_sources, 1, 1);
         var sourceButtons = new FlowLayoutPanel { AutoSize = true }; sourceButtons.Controls.Add(Button("Add…", AddSource)); sourceButtons.Controls.Add(Button("Remove", RemoveSource)); top.Controls.Add(sourceButtons, 2, 1);
+        top.Controls.Add(new Label { Text = "Target client", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 2); top.Controls.Add(_target, 1, 2);
         var actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new(10, 0, 10, 8) };
         _analyze.Click += async (_, _) => await Analyze(); actions.Controls.Add(_analyze); actions.Controls.Add(Button("Export Plan…", ExportPlan)); actions.Controls.Add(Button("Stage Resolved Patch…", Stage));
 
@@ -55,7 +61,8 @@ internal sealed class ClientFusionForm : Form
         {
             _analyze.Enabled = false; UseWaitCursor = true; _status.Text = "Mapping client paths and hashing collisions…";
             var progress = new Progress<(int Done, int Total, string Path)>(value => _status.Text = $"{value.Done:N0}/{value.Total:N0} · {value.Path}");
-            _plan = await Task.Run(() => ClientFusionPlanner.Analyze(_base.Text, _sourceValues, progress)); Fill();
+            var target = _target.SelectedItem as TargetProfile ?? throw new InvalidOperationException("Choose the target client profile.");
+            _plan = await Task.Run(() => ClientFusionPlanner.Analyze(_base.Text, _sourceValues, target, progress)); Fill();
         }
         catch (Exception ex) { CrashLogger.Log("Client fusion analysis failed", ex); MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
         finally { UseWaitCursor = false; _analyze.Enabled = true; }
@@ -89,7 +96,12 @@ internal sealed class ClientFusionForm : Form
         }
         using var dialog = new FolderBrowserDialog { Description = "Choose a new review folder for the small fusion patch staging tree" };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        try { var result = ClientFusionPlanner.Stage(dialog.SelectedPath, _plan, selections); _status.Text = $"Staged {result.StagedFiles:N0} changed files; omitted {result.SkippedBaseFiles:N0} base-identical files; {result.UnresolvedConflicts:N0} conflicts remain excluded. Manifest: {result.ManifestPath}"; }
+        try
+        {
+            var result = ClientFusionPlanner.Stage(dialog.SelectedPath, _plan, selections);
+            var publication = result.RequiresClientPublisher ? "CASC publisher required" : $"manifest {result.ManifestPath}";
+            _status.Text = $"Staged {result.StagedFiles:N0} changed files; omitted {result.SkippedBaseFiles:N0} base-identical files; {result.UnresolvedConflicts:N0} conflicts remain excluded; {publication}.";
+        }
         catch (Exception ex) { CrashLogger.Log("Client fusion staging failed", ex); MessageBox.Show(this, ex.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 

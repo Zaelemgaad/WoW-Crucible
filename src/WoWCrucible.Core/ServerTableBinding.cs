@@ -35,6 +35,7 @@ public sealed record InspectedServerTableBinding(ServerTableBinding Binding, Dat
 
 public static class ServerTableBindingCatalog
 {
+    private const int WrathClientBuild = 12340;
     private const string AzerothProfile = "AzerothCore 3.3.5 profile";
     private const string TrinityProfile = "TrinityCore 3.3.5 profile";
 
@@ -53,8 +54,9 @@ public static class ServerTableBindingCatalog
         ("gtRegenMPPerSpt.dbc", "gtregenmpperspt_dbc", DbcRecordKeyStrategy.Virtual(), RowDimensionKind.ClassAndLevel100)
     ];
 
-    public static IReadOnlyList<ServerTableBinding> BuiltIn(ServerCoreFamily family)
+    public static IReadOnlyList<ServerTableBinding> BuiltIn(ServerCoreFamily family, int? clientBuild = null)
     {
+        if (clientBuild is not null && clientBuild != WrathClientBuild) return [];
         if (family == ServerCoreFamily.AzerothCore)
         {
             var bindings = AzerothGtOverlays.Select(value => Overlay(family, AzerothProfile, value.File, value.Table, value.Key, value.Dimensions)).ToList();
@@ -70,18 +72,21 @@ public static class ServerTableBindingCatalog
         return [];
     }
 
-    public static IReadOnlyList<ServerTableBinding> Resolve(ServerCoreFamily family, string? sourceRoot = null)
+    public static IReadOnlyList<ServerTableBinding> Resolve(ServerCoreFamily family, string? sourceRoot = null, int? clientBuild = null)
     {
-        var builtIn = BuiltIn(family).ToDictionary(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase);
+        var builtIn = BuiltIn(family, clientBuild).ToDictionary(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(sourceRoot)) return builtIn.Values.OrderBy(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase).ToArray();
-        var sourceFile = FindDbcStores(sourceRoot);
-        if (sourceFile is null) throw new FileNotFoundException("Could not find src/server/game/DataStores/DBCStores.cpp in the selected core source folder.", sourceRoot);
+        var sourceFiles = FindTableStores(sourceRoot);
+        if (sourceFiles.Count == 0) throw new FileNotFoundException("Could not find DBCStores.cpp or DB2Stores.cpp in the selected core source folder.", sourceRoot);
         var revision = ReadGitRevision(sourceRoot);
-        return ParseSource(family, sourceFile, builtIn).Select(binding => binding with { SupportedRevision = revision }).OrderBy(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase).ToArray();
+        return sourceFiles.SelectMany(sourceFile => ParseSource(family, sourceFile, builtIn))
+            .GroupBy(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderBy(binding => binding.Consumption == ServerTableConsumption.Unused).First() with { SupportedRevision = revision })
+            .OrderBy(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    public static ServerTableBinding ResolveFile(ServerCoreFamily family, string dbcFileName, string? sourceRoot = null)
-        => Resolve(family, sourceRoot).FirstOrDefault(binding => binding.DbcFileName.Equals(Path.GetFileName(dbcFileName), StringComparison.OrdinalIgnoreCase))
+    public static ServerTableBinding ResolveFile(ServerCoreFamily family, string dbcFileName, string? sourceRoot = null, int? clientBuild = null)
+        => Resolve(family, sourceRoot, clientBuild).FirstOrDefault(binding => binding.DbcFileName.Equals(Path.GetFileName(dbcFileName), StringComparison.OrdinalIgnoreCase))
            ?? (sourceRoot is not null
                ? new(family, "Current core source (absent from DBCStores)", Path.GetFileName(dbcFileName), Path.GetFileNameWithoutExtension(dbcFileName), ServerTableConsumption.ClientOnly, null, DbcRecordKeyStrategy.None, RowDimensionKind.None, DeploymentDestination.ClientPatch, RestartRequirement.ClientRestart, true, "Selected source checkout")
                : new(family, $"{family} profile (mapping unknown)", Path.GetFileName(dbcFileName), Path.GetFileNameWithoutExtension(dbcFileName), ServerTableConsumption.Unknown, null, DbcRecordKeyStrategy.None, RowDimensionKind.None, DeploymentDestination.ClientPatch, RestartRequirement.ClientRestart, false, "No matching built-in binding"));
@@ -99,18 +104,24 @@ public static class ServerTableBindingCatalog
 
     public static IReadOnlyList<ServerTableBinding> ParseSource(ServerCoreFamily family, string sourceFile, IReadOnlyDictionary<string, ServerTableBinding>? metadata = null)
     {
+        if (Path.GetFileName(sourceFile).Equals("DB2Stores.cpp", StringComparison.OrdinalIgnoreCase))
+            return ParseDb2Source(family, sourceFile, metadata);
         var results = new List<ServerTableBinding>();
         foreach (var line in File.ReadLines(sourceFile))
         {
-            var match = Regex.Match(line, "^(?<comment>\\s*//)?\\s*LOAD_DBC\\([^,]+,\\s*\"(?<file>[^\"]+\\.dbc)\"(?:,\\s*\"(?<table>[^\"]+)\")?");
-            if (!match.Success) continue;
-            var file = match.Groups["file"].Value;
+            var call = Regex.Match(line, @"^(?<comment>\s*//)?\s*(?:LOAD_DBC|LoadDBC)\s*\((?<arguments>.*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!call.Success) continue;
+            var quoted = Regex.Matches(call.Groups["arguments"].Value, "\"(?<value>[^\"]+)\"")
+                .Select(match => match.Groups["value"].Value).ToArray();
+            var fileIndex = Array.FindIndex(quoted, value => value.EndsWith(".dbc", StringComparison.OrdinalIgnoreCase));
+            if (fileIndex < 0) continue;
+            var file = Path.GetFileName(quoted[fileIndex]);
             ServerTableBinding? known = null;
             metadata?.TryGetValue(file, out known);
             var key = known?.KeyStrategy ?? DbcRecordKeyStrategy.None;
             var dimensions = known?.Dimensions ?? RowDimensionKind.None;
-            var unused = match.Groups["comment"].Success;
-            var sqlTable = match.Groups["table"].Success ? match.Groups["table"].Value : null;
+            var unused = call.Groups["comment"].Success;
+            var sqlTable = quoted.Skip(fileIndex + 1).FirstOrDefault(value => !value.EndsWith(".dbc", StringComparison.OrdinalIgnoreCase));
             results.Add(unused ? Unused(family, "Current core source", file, key, dimensions, true)
                 : sqlTable is not null ? Overlay(family, "Current core source", file, sqlTable, key, dimensions, true)
                 : DbcLoaded(family, "Current core source", file, key, dimensions, true));
@@ -118,9 +129,54 @@ public static class ServerTableBindingCatalog
         return results;
     }
 
-    private static string? FindDbcStores(string root) => Directory.Exists(root)
-        ? Directory.EnumerateFiles(root, "DBCStores.cpp", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, MaxRecursionDepth = 8 }).FirstOrDefault(path => path.Contains($"{Path.DirectorySeparatorChar}DataStores{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-        : null;
+    private static IReadOnlyList<ServerTableBinding> ParseDb2Source(ServerCoreFamily family, string sourceFile, IReadOnlyDictionary<string, ServerTableBinding>? metadata)
+    {
+        var declarations = new Dictionary<string, string>(StringComparer.Ordinal);
+        var lines = File.ReadAllLines(sourceFile);
+        foreach (var line in lines)
+        {
+            var declaration = Regex.Match(line, "^\\s*DB2Storage<[^>]+>\\s+(?<store>[A-Za-z_][A-Za-z0-9_]*)\\s*\\((?<arguments>.*)$");
+            if (!declaration.Success) continue;
+            var file = Regex.Matches(declaration.Groups["arguments"].Value, "\"(?<value>[^\"]+\\.db2)\"", RegexOptions.IgnoreCase)
+                .Select(match => match.Groups["value"].Value).FirstOrDefault();
+            declarations[declaration.Groups["store"].Value] = file ?? string.Empty;
+        }
+
+        var results = new List<ServerTableBinding>();
+        foreach (var line in lines)
+        {
+            var load = Regex.Match(line, @"^(?<comment>\s*//)?\s*(?:LOAD_DB2|LoadDB2)\s*\((?<arguments>.*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!load.Success) continue;
+            var arguments = load.Groups["arguments"].Value;
+            var file = Regex.Matches(arguments, "\"(?<value>[^\"]+\\.db2)\"", RegexOptions.IgnoreCase)
+                .Select(match => match.Groups["value"].Value).FirstOrDefault();
+            if (file is null)
+            {
+                var store = declarations.Keys.FirstOrDefault(name => Regex.IsMatch(arguments, $@"(?:^|[^A-Za-z0-9_]){Regex.Escape(name)}(?:[^A-Za-z0-9_]|$)"));
+                if (store is null || string.IsNullOrWhiteSpace(declarations[store])) continue;
+                file = declarations[store];
+            }
+            file = Path.GetFileName(file);
+            ServerTableBinding? known = null;
+            metadata?.TryGetValue(file, out known);
+            var key = known?.KeyStrategy ?? DbcRecordKeyStrategy.None;
+            var dimensions = known?.Dimensions ?? RowDimensionKind.None;
+            results.Add(load.Groups["comment"].Success
+                ? Unused(family, "Current core source", file, key, dimensions, true)
+                : DbcLoaded(family, "Current core source", file, key, dimensions, true));
+        }
+        return results;
+    }
+
+    private static IReadOnlyList<string> FindTableStores(string root)
+    {
+        if (!Directory.Exists(root)) return [];
+        var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, MaxRecursionDepth = 8 };
+        return new[] { "DBCStores.cpp", "DB2Stores.cpp" }
+            .SelectMany(name => Directory.EnumerateFiles(root, name, options))
+            .Where(path => path.Contains($"{Path.DirectorySeparatorChar}DataStores{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
 
     private static string ReadGitRevision(string root)
     {

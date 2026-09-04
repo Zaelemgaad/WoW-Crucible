@@ -599,6 +599,76 @@ Values[3]
 }
 finally { if(File.Exists(dbdFixture))File.Delete(dbdFixture); }
 
+var mopGapFixtureRoot = Path.Combine(Path.GetTempPath(), $"crucible-mop-dbd-gap-{Guid.NewGuid():N}");
+var mopGapDefinitions = Path.Combine(mopGapFixtureRoot, "definitions");
+var mopGapTables = Path.Combine(mopGapFixtureRoot, "tables");
+Directory.CreateDirectory(mopGapDefinitions); Directory.CreateDirectory(mopGapTables);
+try
+{
+    var pvpDbd = Path.Combine(mopGapDefinitions, "PvpDifficulty.dbd");
+    File.WriteAllText(pvpDbd, """
+COLUMNS
+int ID
+int MapID
+int RangeIndex
+int MinLevel
+int MaxLevel
+int Difficulty
+
+BUILD 5.0.1.15464-5.4.8.18273
+$id$ID<32>
+MapID<32>
+RangeIndex<32>
+MinLevel<32>
+MaxLevel<32>
+Difficulty<32>
+""");
+    var pvpTablePath = Path.Combine(mopGapTables, "PvpDifficulty.dbc");
+    WriteRawWdbc(pvpTablePath, 6, [new uint[] { 1, 30, 4, 10, 19, 0 }]);
+    var pvpTable = WdbcFile.Load(pvpTablePath);
+    var pvpResolution = DbdSchemaService.ResolveFile(pvpDbd, 18414, pvpTable.FieldCount, pvpTable.RecordSize);
+    var pvpAudit = DbdSchemaService.Audit(mopGapDefinitions, mopGapTables, 18414);
+    if (!pvpResolution.IsExactFor(pvpTable) || pvpResolution.Columns.Single(column => column.Name == "MapID").Offset != 4 ||
+        pvpAudit.Matches != 1 || !pvpAudit.Rows.Single().Message.Contains("compatibility record", StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("The signature-guarded MoP 18414 WoWDBDefs history-gap resolution regressed.");
+
+    var unrelatedDbd = Path.Combine(mopGapDefinitions, "Unrelated.dbd"); File.Copy(pvpDbd, unrelatedDbd);
+    try { _ = DbdSchemaService.ResolveFile(unrelatedDbd, 18414, pvpTable.FieldCount, pvpTable.RecordSize); throw new InvalidOperationException("An unrelated fixed-layout table incorrectly inherited a known MoP compatibility record."); }
+    catch (KeyNotFoundException) { }
+}
+finally { if (Directory.Exists(mopGapFixtureRoot)) Directory.Delete(mopGapFixtureRoot, true); }
+
+var packedXmlFixtureRoot = Path.Combine(Path.GetTempPath(), $"crucible-packed-xml-{Guid.NewGuid():N}"); Directory.CreateDirectory(packedXmlFixtureRoot);
+try
+{
+    var packedPath = Path.Combine(packedXmlFixtureRoot, "Packed.dbc");
+    using (var stream = File.Create(packedPath))
+    using (var writer = new BinaryWriter(stream))
+    {
+        writer.Write("WDBC"u8); writer.Write(1); writer.Write(2); writer.Write(6); writer.Write(1);
+        writer.Write(17); writer.Write((byte)3); writer.Write((byte)0); writer.Write((byte)0);
+    }
+    var packedXml = Path.Combine(packedXmlFixtureRoot, "packed.xml");
+    File.WriteAllText(packedXml, """
+<Definition>
+  <Table Name="Packed" Build="18414">
+    <Field Name="ID" Type="int" IsIndex="true" />
+    <Field Name="Mode" Type="byte" />
+    <Field Name="Padding_0" Type="byte" />
+  </Table>
+</Definition>
+""");
+    var packedAudit = DbdSchemaService.Audit("-", packedXmlFixtureRoot, 18414, packedXml);
+    if (packedAudit.Matches != 1 || packedAudit.Failures != 0 || !packedAudit.Rows.Single().Message.Contains("2 declared fields, 3 editable columns", StringComparison.Ordinal))
+        throw new InvalidOperationException("Packed WDBX XML validation counted editable padding as a declared header field.");
+    var packedTable = WdbcFile.Load(packedPath); var packedSchema = DbcSchemaCatalog.Load(packedXml).ResolveColumns("Packed", packedTable.FieldCount);
+    var packedPadding = packedSchema.Columns.Single(column => column.Name == "Padding_0"); packedTable.SetRaw(0, packedPadding, 7);
+    var packedOutput = Path.Combine(packedXmlFixtureRoot, "Packed-mutated.dbc"); packedTable.Save(packedOutput, false); var packedReloaded = WdbcFile.Load(packedOutput);
+    if (packedPadding.Index < packedTable.FieldCount || packedReloaded.GetRaw(0, packedPadding) != 7)
+        throw new InvalidOperationException("Packed-layout editable columns beyond the declared header FieldCount could not be persisted by byte offset.");
+}
+finally { if (Directory.Exists(packedXmlFixtureRoot)) Directory.Delete(packedXmlFixtureRoot, true); }
+
 var wdb2FixtureRoot = Path.Combine(Path.GetTempPath(), $"crucible-wdb2-{Guid.NewGuid():N}");
 Directory.CreateDirectory(wdb2FixtureRoot);
 try
@@ -672,6 +742,55 @@ SheatheType<32>
     if (newRow != 2 || editedTable.RowCount != 3 || editedTable.GetRaw(newRow, itemIdColumn) != 17803)
         throw new InvalidOperationException("A simple WDB2 could not safely allocate a new physical row and ID.");
 
+    var indexedDb2 = Path.Combine(wdb2FixtureRoot, "Indexed.db2");
+    var indexedBytes = new byte[48 + 6 + 8 + 3];
+    "WDB2"u8.CopyTo(indexedBytes);
+    BinaryPrimitives.WriteInt32LittleEndian(indexedBytes.AsSpan(4, 4), 1);
+    BinaryPrimitives.WriteInt32LittleEndian(indexedBytes.AsSpan(8, 4), 2);
+    BinaryPrimitives.WriteInt32LittleEndian(indexedBytes.AsSpan(12, 4), 8);
+    BinaryPrimitives.WriteInt32LittleEndian(indexedBytes.AsSpan(16, 4), 3);
+    BinaryPrimitives.WriteUInt32LittleEndian(indexedBytes.AsSpan(20, 4), 0x12345678);
+    BinaryPrimitives.WriteInt32LittleEndian(indexedBytes.AsSpan(24, 4), 18273);
+    BinaryPrimitives.WriteUInt32LittleEndian(indexedBytes.AsSpan(32, 4), 10);
+    BinaryPrimitives.WriteUInt32LittleEndian(indexedBytes.AsSpan(36, 4), 10);
+    BinaryPrimitives.WriteUInt32LittleEndian(indexedBytes.AsSpan(40, 4), 1);
+    BinaryPrimitives.WriteInt32LittleEndian(indexedBytes.AsSpan(48, 4), 1);
+    BinaryPrimitives.WriteUInt16LittleEndian(indexedBytes.AsSpan(52, 2), 2);
+    BinaryPrimitives.WriteUInt32LittleEndian(indexedBytes.AsSpan(54, 4), 10);
+    BinaryPrimitives.WriteUInt32LittleEndian(indexedBytes.AsSpan(58, 4), 1);
+    indexedBytes[62] = 0; indexedBytes[63] = (byte)'A'; indexedBytes[64] = 0;
+    File.WriteAllBytes(indexedDb2, indexedBytes);
+    var indexedColumns = new DbcColumn[]
+    {
+        new(0, 0, 4, "ID", DbcValueType.UInt32, true),
+        new(1, 4, 4, "Name", DbcValueType.StringOffset)
+    };
+    var indexedTable = WdbcFile.Load(indexedDb2);
+    if (indexedTable.AllowsStructuralMutation)
+        throw new InvalidOperationException("An indexed WDB2 allowed structural mutation before its exact schema was configured.");
+    indexedTable.ConfigureWdb2Schema(indexedColumns);
+    if (!indexedTable.AllowsStructuralMutation)
+        throw new InvalidOperationException("A schema-bound indexed WDB2 without copy records remained structurally blocked.");
+    var indexedNewRow = indexedTable.AddBlankRow();
+    indexedTable.SetRaw(indexedNewRow, indexedColumns[0], 25);
+    indexedTable.SetDisplayValue(indexedNewRow, indexedColumns[1], "Legion Item");
+    var indexedOutput = Path.Combine(wdb2FixtureRoot, "Indexed-mutated.db2");
+    indexedTable.Save(indexedOutput, false);
+    var indexedReloaded = WdbcFile.Load(indexedOutput); indexedReloaded.ConfigureWdb2Schema(indexedColumns);
+    var indexedMetadata = indexedReloaded.Db2Metadata ?? throw new InvalidOperationException("Indexed WDB2 metadata disappeared after append.");
+    if (indexedReloaded.RowCount != 2 || indexedMetadata.MinId != 10 || indexedMetadata.MaxId != 25 ||
+        indexedMetadata.IndexMap.Count != 16 || indexedMetadata.IndexMap[0] != 1 || indexedMetadata.IndexMap[15] != 2 ||
+        indexedMetadata.StringLengths[0] != 2 || indexedMetadata.StringLengths[15] != 12 ||
+        indexedReloaded.GetRaw(1, indexedColumns[0]) != 25 || indexedReloaded.GetString(indexedReloaded.GetRaw(1, indexedColumns[1])) != "Legion Item")
+        throw new InvalidOperationException("Indexed WDB2 append did not rebuild its ID map, string-length map, records, and string offsets together.");
+    indexedReloaded.DeleteRows([0]);
+    var indexedDelete = Path.Combine(wdb2FixtureRoot, "Indexed-deleted.db2"); indexedReloaded.Save(indexedDelete, false);
+    var indexedDeleteReloaded = WdbcFile.Load(indexedDelete); indexedDeleteReloaded.ConfigureWdb2Schema(indexedColumns);
+    var indexedStable = Path.Combine(wdb2FixtureRoot, "Indexed-stable.db2"); indexedDeleteReloaded.Save(indexedStable, false);
+    if (indexedDeleteReloaded.RowCount != 1 || indexedDeleteReloaded.Db2Metadata is not { MinId: 25, MaxId: 25 } ||
+        !File.ReadAllBytes(indexedDelete).SequenceEqual(File.ReadAllBytes(indexedStable)))
+        throw new InvalidOperationException("Indexed WDB2 delete did not compact its side tables or persist canonically on a second save.");
+
     var complexDb2 = Path.Combine(wdb2FixtureRoot, "Complex.db2");
     var complexBytes = new byte[48 + 6 + 4 + 1 + 8];
     "WDB2"u8.CopyTo(complexBytes);
@@ -702,7 +821,7 @@ SheatheType<32>
     try { complexTable.AddBlankRow(complexId); throw new InvalidOperationException("A complex WDB2 incorrectly allowed a structural edit."); }
     catch (InvalidOperationException exception) when (exception.Message.Contains("side table", StringComparison.OrdinalIgnoreCase)) { }
     try { complexTable.SetRaw(0, complexId, 11); throw new InvalidOperationException("A complex WDB2 incorrectly allowed its indexed ID to change."); }
-    catch (InvalidOperationException exception) when (exception.Message.Contains("ID index map", StringComparison.OrdinalIgnoreCase)) { }
+    catch (InvalidOperationException exception) when (exception.Message.Contains("Resolve and configure its exact schema", StringComparison.OrdinalIgnoreCase)) { }
 
     var nestedTables = Path.Combine(wdb2FixtureRoot, "client", "DBFilesClient"); Directory.CreateDirectory(nestedTables); File.Copy(itemDb2, Path.Combine(nestedTables, "Item.db2"));
     var db2Audit = DbdSchemaService.Audit(wdb2FixtureRoot, nestedTables, 15595);
@@ -1747,6 +1866,13 @@ File.WriteAllBytes(Path.Combine(assetFixture, "static-modern00.skin"), staticMod
 var staticPlan = StaticM2DownportService.Plan(staticModernModel);
 if (!staticPlan.Ready || staticPlan.VertexCount != 3 || staticPlan.TriangleCount != 3 || staticPlan.SubmeshCount != 3 || staticPlan.MaterialCount != 1 || staticPlan.ShadowBatchCount != 1 || staticPlan.GlobalSequenceCount != 0 || staticPlan.AnimationSequenceCount != 0 || staticPlan.Losses.Count != 1)
     throw new InvalidOperationException($"Portable static M2 downport planning rejected the verified fixture: {string.Join("; ", staticPlan.Blockers)}");
+var earlyChunkedPayload = staticModernPayload.ToArray(); BitConverter.GetBytes((uint)272).CopyTo(earlyChunkedPayload, 4); BitConverter.GetBytes((uint)0x80).CopyTo(earlyChunkedPayload, 0x10); BitConverter.GetBytes((uint)0).CopyTo(earlyChunkedPayload, textureDefinitionOffset); BitConverter.GetBytes((uint)embeddedFixtureBytes.Length).CopyTo(earlyChunkedPayload, textureDefinitionOffset + 8); BitConverter.GetBytes((uint)(textureDefinitionOffset + 16)).CopyTo(earlyChunkedPayload, textureDefinitionOffset + 12); for (var offset = 0xA0; offset < 0xD8; offset += 4) BitConverter.GetBytes(1.25f + offset).CopyTo(earlyChunkedPayload, offset);
+var earlyChunkedModel = Path.Combine(assetFixture, "static-early-chunked.m2"); using (var stream = File.Create(earlyChunkedModel)) using (var writer = new BinaryWriter(stream)) { writer.Write(System.Text.Encoding.ASCII.GetBytes("MD21")); writer.Write((uint)earlyChunkedPayload.Length); writer.Write(earlyChunkedPayload); writer.Write(System.Text.Encoding.ASCII.GetBytes("SFID")); writer.Write((uint)4); writer.Write((uint)12345); } File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-early-chunked00.skin"));
+var earlyChunkedPlan = StaticM2DownportService.Plan(earlyChunkedModel); if (!earlyChunkedPlan.Ready || earlyChunkedPlan.SourceVersion != 272 || !StaticM2DownportService.ReferencedSkinFileDataIds(earlyChunkedModel).SequenceEqual([12345u]) || earlyChunkedPlan.ResolvedTexturePaths.Count != 0) throw new InvalidOperationException($"Early chunked M2 with an embedded hardcoded texture and no TXID was not accepted exactly: {string.Join("; ", earlyChunkedPlan.Blockers)}");
+var earlyChunkedOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-early-{Guid.NewGuid():N}"); var earlyChunkedResult = StaticM2DownportService.Convert(earlyChunkedPlan, earlyChunkedOutput); var earlyChunkedSlot = M2PreviewGeometryService.InspectTextureSlots(earlyChunkedResult.OutputModelPath).Single(); if (!string.Equals(earlyChunkedSlot.EmbeddedPath, System.Text.Encoding.UTF8.GetString(embeddedFixtureBytes).TrimEnd('\0'), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Early chunked M2 conversion did not preserve its embedded texture path."); Directory.Delete(earlyChunkedOutput, true);
+var earlyMopPlan = StaticM2DownportService.PlanForMop(earlyChunkedModel); if (!earlyMopPlan.Ready || earlyMopPlan.Target != StaticM2ProjectionTarget.Mop548 || earlyMopPlan.OutputVersion != 272 || earlyMopPlan.OutputFlags != 0x80 || earlyMopPlan.Losses.Count != 0) throw new InvalidOperationException($"Native MoP projection planning rejected the embedded-path fixture: {string.Join("; ", earlyMopPlan.Blockers)}");
+var earlyMopOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-early-mop-{Guid.NewGuid():N}"); var earlyMopResult = StaticM2DownportService.Convert(earlyMopPlan, earlyMopOutput); var earlyMopBytes = File.ReadAllBytes(earlyMopResult.OutputModelPath); var earlyMopSkin = File.ReadAllBytes(earlyMopResult.OutputSkinPath); var earlyMopSlot = M2PreviewGeometryService.InspectTextureSlots(earlyMopResult.OutputModelPath).Single();
+if (System.Text.Encoding.ASCII.GetString(earlyMopBytes, 0, 4) != "MD20" || BitConverter.ToUInt32(earlyMopBytes, 4) != 272 || BitConverter.ToUInt32(earlyMopBytes, 0x10) != 0x80 || BitConverter.ToUInt32(earlyMopBytes, 0x88) != 0 || !earlyMopSkin.SequenceEqual(File.ReadAllBytes(earlyMopPlan.SourceSkinPath!)) || BitConverter.ToUInt32(earlyMopSkin, 48) != 1 || !string.Equals(earlyMopSlot.EmbeddedPath, System.Text.Encoding.UTF8.GetString(embeddedFixtureBytes).TrimEnd('\0'), StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Native MoP M2 projection changed its layout, SKIN v3 shadow array, or embedded texture path."); Directory.Delete(earlyMopOutput, true);
 var staticOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-downport-{Guid.NewGuid():N}"); var sourceModelBefore = File.ReadAllBytes(staticModernModel); var sourceSkinBefore = File.ReadAllBytes(staticPlan.SourceSkinPath!);
 var staticResult = StaticM2DownportService.Convert(staticPlan, staticOutput); var staticGeometry = M2PreviewGeometryService.Load(staticResult.OutputModelPath, staticResult.OutputSkinPath, M2PreviewVisibilityMode.AllGeosets);
 if (staticGeometry.Vertices.Count != 3 || staticGeometry.TotalTriangleIndices / 3 != 3 || staticGeometry.Submeshes.Count != 3 || staticGeometry.MaterialUnits.Count != 1 || !File.Exists(staticResult.ReceiptPath) || !File.ReadAllBytes(staticModernModel).SequenceEqual(sourceModelBefore) || !File.ReadAllBytes(staticPlan.SourceSkinPath!).SequenceEqual(sourceSkinBefore))
@@ -1760,14 +1886,24 @@ var staticParticleModel = Path.Combine(assetFixture, "static-modern-particle.m2"
 var staticParticlePlan = StaticM2DownportService.Plan(staticParticleModel); if (!staticParticlePlan.Ready || staticParticlePlan.ParticleEmitterCount != 1 || !staticParticlePlan.Transformations.Any(value => value.Contains("particle emitter", StringComparison.OrdinalIgnoreCase)) || !staticParticlePlan.Transformations.Any(value => value.Contains("neutral EXP2", StringComparison.OrdinalIgnoreCase)) || !staticParticlePlan.Losses.Any(value => value.Contains("EXP2", StringComparison.Ordinal))) throw new InvalidOperationException($"Verified particle/neutral-EXP2 downport was blocked or not loss-accounted: {string.Join("; ", staticParticlePlan.Blockers)}");
 var staticParticleOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-particle-{Guid.NewGuid():N}"); var staticParticleResult = StaticM2DownportService.Convert(staticParticlePlan, staticParticleOutput); var staticParticleWritten = File.ReadAllBytes(staticParticleResult.OutputModelPath); var staticParticleWrittenOffset = checked((int)BitConverter.ToUInt32(staticParticleWritten, 0x12C)); var staticParticleGeometry = M2PreviewGeometryService.Load(staticParticleResult.OutputModelPath, staticParticleResult.OutputSkinPath, M2PreviewVisibilityMode.AllGeosets);
 if (BitConverter.ToUInt32(staticParticleWritten, 0x128) != 1 || staticParticleGeometry.ParticleEmitters.Count != 1 || !staticParticlePayload.AsSpan(staticParticleOffset, 476).SequenceEqual(staticParticleWritten.AsSpan(staticParticleWrittenOffset, 476))) throw new InvalidOperationException("Modern particle downport did not repack the legacy 476-byte record byte-for-byte or independently reload it."); Directory.Delete(staticParticleOutput, true);
+var multiParticlePayload = staticModernPayload.ToArray(); BitConverter.GetBytes((uint)272).CopyTo(multiParticlePayload, 4); BitConverter.GetBytes((uint)0x80).CopyTo(multiParticlePayload, 0x10); var multiTextureOffset = (multiParticlePayload.Length + 15) / 16 * 16; Array.Resize(ref multiParticlePayload, multiTextureOffset + 3 * 16); BitConverter.GetBytes((uint)3).CopyTo(multiParticlePayload, 0x50); BitConverter.GetBytes((uint)multiTextureOffset).CopyTo(multiParticlePayload, 0x54); for (var texture = 0; texture < 3; texture++) BitConverter.GetBytes((uint)2).CopyTo(multiParticlePayload, multiTextureOffset + texture * 16);
+var multiParticleOffset = (multiParticlePayload.Length + 15) / 16 * 16; Array.Resize(ref multiParticlePayload, multiParticleOffset + 492); BitConverter.GetBytes((uint)1).CopyTo(multiParticlePayload, 0x128); BitConverter.GetBytes((uint)multiParticleOffset).CopyTo(multiParticlePayload, 0x12C); BitConverter.GetBytes(-1).CopyTo(multiParticlePayload, multiParticleOffset); BitConverter.GetBytes((uint)0x10000000).CopyTo(multiParticlePayload, multiParticleOffset + 4); BitConverter.GetBytes((short)-1).CopyTo(multiParticlePayload, multiParticleOffset + 20); BitConverter.GetBytes((ushort)(0 | (1 << 5) | (2 << 10))).CopyTo(multiParticlePayload, multiParticleOffset + 22); multiParticlePayload[multiParticleOffset + 40] = 4; multiParticlePayload[multiParticleOffset + 41] = 1; BitConverter.GetBytes((ushort)1).CopyTo(multiParticlePayload, multiParticleOffset + 48); BitConverter.GetBytes((ushort)1).CopyTo(multiParticlePayload, multiParticleOffset + 50); foreach (var trackOffset in new[] { 52,72,92,112,132,152,176,200,220,240,456 }) BitConverter.GetBytes((short)-1).CopyTo(multiParticlePayload, multiParticleOffset + trackOffset + 2); multiParticlePayload[multiParticleOffset + 476] = 7;
+var earlyMultiParticleModel = Path.Combine(assetFixture, "static-early-multi-particle.m2"); using (var stream = File.Create(earlyMultiParticleModel)) using (var writer = new BinaryWriter(stream)) { writer.Write(System.Text.Encoding.ASCII.GetBytes("MD21")); writer.Write((uint)multiParticlePayload.Length); writer.Write(multiParticlePayload); writer.Write(System.Text.Encoding.ASCII.GetBytes("SFID")); writer.Write((uint)4); writer.Write((uint)12345); } File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-early-multi-particle00.skin"));
+var earlyMultiParticlePlan = StaticM2DownportService.Plan(earlyMultiParticleModel); if (!earlyMultiParticlePlan.Ready || earlyMultiParticlePlan.SourceVersion != 272 || earlyMultiParticlePlan.ParticleEmitterCount != 1 || !earlyMultiParticlePlan.Transformations.Any(value => value.Contains("three-texture", StringComparison.OrdinalIgnoreCase)) || !earlyMultiParticlePlan.Losses.Any(value => value.Contains("16-byte post-Cataclysm", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException($"Early chunked three-texture particle was not converted with an explicit modern-tail loss: {string.Join("; ", earlyMultiParticlePlan.Blockers)}");
+var earlyMultiParticleOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-multi-particle-{Guid.NewGuid():N}"); var earlyMultiParticleResult = StaticM2DownportService.Convert(earlyMultiParticlePlan, earlyMultiParticleOutput); var earlyMultiParticleWritten = File.ReadAllBytes(earlyMultiParticleResult.OutputModelPath); var earlyMultiParticleWrittenOffset = checked((int)BitConverter.ToUInt32(earlyMultiParticleWritten, 0x12C)); if ((BitConverter.ToUInt32(earlyMultiParticleWritten, earlyMultiParticleWrittenOffset + 4) & 0x10000000) == 0 || BitConverter.ToUInt16(earlyMultiParticleWritten, earlyMultiParticleWrittenOffset + 22) != (ushort)(0 | (1 << 5) | (2 << 10)) || !multiParticlePayload.AsSpan(multiParticleOffset, 476).SequenceEqual(earlyMultiParticleWritten.AsSpan(earlyMultiParticleWrittenOffset, 476)) || M2PreviewGeometryService.Load(earlyMultiParticleResult.OutputModelPath, earlyMultiParticleResult.OutputSkinPath, M2PreviewVisibilityMode.AllGeosets).ParticleEmitters.Count != 1) throw new InvalidOperationException("Three-texture particle conversion did not preserve the complete Wrath-native record and packed texture indices."); Directory.Delete(earlyMultiParticleOutput, true);
+var earlyMultiParticleMopPlan = StaticM2DownportService.PlanForMop(earlyMultiParticleModel); if (!earlyMultiParticleMopPlan.Ready || earlyMultiParticleMopPlan.Losses.Any(value => value.Contains("particle", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException($"Native MoP projection incorrectly discarded a 492-byte particle tail: {string.Join("; ", earlyMultiParticleMopPlan.Blockers)}");
+var earlyMultiParticleMopOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-multi-particle-mop-{Guid.NewGuid():N}"); var earlyMultiParticleMopResult = StaticM2DownportService.Convert(earlyMultiParticleMopPlan, earlyMultiParticleMopOutput); var earlyMultiParticleMopWritten = File.ReadAllBytes(earlyMultiParticleMopResult.OutputModelPath); var earlyMultiParticleMopOffset = checked((int)BitConverter.ToUInt32(earlyMultiParticleMopWritten, 0x12C)); if (BitConverter.ToUInt32(earlyMultiParticleMopWritten, 4) != 272 || BitConverter.ToUInt16(earlyMultiParticleMopWritten, earlyMultiParticleMopOffset + 22) != (ushort)(0 | (1 << 5) | (2 << 10)) || earlyMultiParticleMopWritten[earlyMultiParticleMopOffset + 476] != 7 || !multiParticlePayload.AsSpan(multiParticleOffset, 492).SequenceEqual(earlyMultiParticleMopWritten.AsSpan(earlyMultiParticleMopOffset, 492))) throw new InvalidOperationException("Native MoP projection did not preserve the complete 492-byte particle record and packed texture indices."); Directory.Delete(earlyMultiParticleMopOutput, true);
 var nonNeutralExp2Model = Path.Combine(assetFixture, "static-modern-particle-exp2-blocked.m2"); var nonNeutralExp2 = neutralExp2.ToArray(); BitConverter.GetBytes(2f).CopyTo(nonNeutralExp2, 20); using (var stream = File.Create(nonNeutralExp2Model)) using (var writer = new BinaryWriter(stream)) { writer.Write(System.Text.Encoding.ASCII.GetBytes("MD21")); writer.Write((uint)staticParticlePayload.Length); writer.Write(staticParticlePayload); writer.Write(System.Text.Encoding.ASCII.GetBytes("SFID")); writer.Write((uint)4); writer.Write((uint)12345); writer.Write(System.Text.Encoding.ASCII.GetBytes("TXID")); writer.Write((uint)4); writer.Write((uint)0); writer.Write(System.Text.Encoding.ASCII.GetBytes("EXP2")); writer.Write((uint)nonNeutralExp2.Length); writer.Write(nonNeutralExp2); } File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-particle-exp2-blocked00.skin")); if (StaticM2DownportService.Plan(nonNeutralExp2Model).Blockers.All(value => !value.Contains("non-neutral", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("Non-neutral EXP2 particle semantics were silently discarded.");
 var zSourcePayload = staticParticlePayload.ToArray(); var zSequenceOffset = (zSourcePayload.Length + 3) / 4 * 4; var zLookupOffset = zSequenceOffset + 64; Array.Resize(ref zSourcePayload, zLookupOffset + 2); BitConverter.GetBytes((uint)1).CopyTo(zSourcePayload, 0x1C); BitConverter.GetBytes((uint)zSequenceOffset).CopyTo(zSourcePayload, 0x20); BitConverter.GetBytes((uint)1000).CopyTo(zSourcePayload, zSequenceOffset + 4); BitConverter.GetBytes((uint)0x20).CopyTo(zSourcePayload, zSequenceOffset + 12); BitConverter.GetBytes((short)-1).CopyTo(zSourcePayload, zSequenceOffset + 60); BitConverter.GetBytes((uint)1).CopyTo(zSourcePayload, 0x24); BitConverter.GetBytes((uint)zLookupOffset).CopyTo(zSourcePayload, 0x28);
 var zSourceExp2 = neutralExp2.ToArray(); BitConverter.GetBytes(-1.25f).CopyTo(zSourceExp2, 16); var zSourceModel = Path.Combine(assetFixture, "static-modern-particle-exp2-z.m2"); using (var stream = File.Create(zSourceModel)) using (var writer = new BinaryWriter(stream)) { writer.Write(System.Text.Encoding.ASCII.GetBytes("MD21")); writer.Write((uint)zSourcePayload.Length); writer.Write(zSourcePayload); writer.Write(System.Text.Encoding.ASCII.GetBytes("SFID")); writer.Write((uint)4); writer.Write((uint)12345); writer.Write(System.Text.Encoding.ASCII.GetBytes("TXID")); writer.Write((uint)4); writer.Write((uint)0); writer.Write(System.Text.Encoding.ASCII.GetBytes("EXP2")); writer.Write((uint)zSourceExp2.Length); writer.Write(zSourceExp2); } File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-particle-exp2-z00.skin"));
 var zSourcePlan = StaticM2DownportService.Plan(zSourceModel); if (!zSourcePlan.Ready || zSourcePlan.AnimationSequenceCount != 1 || zSourcePlan.ParticleZSourceTranslations.Count != 1 || zSourcePlan.ParticleZSourceTranslations[0] != new M2ParticleZSourceTranslation(0, -1.25f) || !zSourcePlan.Transformations.Any(value => value.Contains("Z-source override", StringComparison.Ordinal))) throw new InvalidOperationException($"Exact EXP2 Z-source translation was not planned: {string.Join("; ", zSourcePlan.Blockers)}");
 var zSourceOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-particle-z-{Guid.NewGuid():N}"); var zSourceResult = StaticM2DownportService.Convert(zSourcePlan, zSourceOutput); var zSourceWritten = File.ReadAllBytes(zSourceResult.OutputModelPath); var zParticleOffset = checked((int)BitConverter.ToUInt32(zSourceWritten, 0x12C)); var zTrackOffset = zParticleOffset + 240; var zTimesOuter = checked((int)BitConverter.ToUInt32(zSourceWritten, zTrackOffset + 8)); var zValuesOuter = checked((int)BitConverter.ToUInt32(zSourceWritten, zTrackOffset + 16)); var zTimeKey = checked((int)BitConverter.ToUInt32(zSourceWritten, zTimesOuter + 4)); var zValueKey = checked((int)BitConverter.ToUInt32(zSourceWritten, zValuesOuter + 4));
 if (BitConverter.ToUInt16(zSourceWritten, zTrackOffset) != 0 || BitConverter.ToInt16(zSourceWritten, zTrackOffset + 2) != -1 || BitConverter.ToUInt32(zSourceWritten, zTrackOffset + 4) != 1 || BitConverter.ToUInt32(zSourceWritten, zTrackOffset + 12) != 1 || BitConverter.ToUInt32(zSourceWritten, zTimesOuter) != 1 || BitConverter.ToUInt32(zSourceWritten, zValuesOuter) != 1 || BitConverter.ToUInt32(zSourceWritten, zTimeKey) != 0 || BitConverter.ToSingle(zSourceWritten, zValueKey) != -1.25f || !zSourcePayload.AsSpan(staticParticleOffset, 240).SequenceEqual(zSourceWritten.AsSpan(zParticleOffset, 240)) || !zSourcePayload.AsSpan(staticParticleOffset + 260, 216).SequenceEqual(zSourceWritten.AsSpan(zParticleOffset + 260, 216))) throw new InvalidOperationException("EXP2 Z-source translation did not author an exact constant Wrath track while preserving every other legacy particle byte."); Directory.Delete(zSourceOutput, true);
+var zSourceMopPlan = StaticM2DownportService.PlanForMop(zSourceModel); if (!zSourceMopPlan.Ready || zSourceMopPlan.ParticleZSourceTranslations.Count != 1) throw new InvalidOperationException($"Native MoP EXP2 Z-source planning failed: {string.Join("; ", zSourceMopPlan.Blockers)}");
+var zSourceMopOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-particle-z-mop-{Guid.NewGuid():N}"); var zSourceMopResult = StaticM2DownportService.Convert(zSourceMopPlan, zSourceMopOutput); var zSourceMopWritten = File.ReadAllBytes(zSourceMopResult.OutputModelPath); var zMopParticleOffset = checked((int)BitConverter.ToUInt32(zSourceMopWritten, 0x12C)); var zMopTrackOffset = zMopParticleOffset + 240; var zMopTimesOuter = checked((int)BitConverter.ToUInt32(zSourceMopWritten, zMopTrackOffset + 8)); var zMopValuesOuter = checked((int)BitConverter.ToUInt32(zSourceMopWritten, zMopTrackOffset + 16)); var zMopTimeKey = checked((int)BitConverter.ToUInt32(zSourceMopWritten, zMopTimesOuter + 4)); var zMopValueKey = checked((int)BitConverter.ToUInt32(zSourceMopWritten, zMopValuesOuter + 4));
+if (BitConverter.ToUInt32(zSourceMopWritten, 4) != 272 || BitConverter.ToUInt32(zSourceMopWritten, zMopTimeKey) != 0 || BitConverter.ToSingle(zSourceMopWritten, zMopValueKey) != -1.25f || !zSourcePayload.AsSpan(staticParticleOffset, 240).SequenceEqual(zSourceMopWritten.AsSpan(zMopParticleOffset, 240)) || !zSourcePayload.AsSpan(staticParticleOffset + 260, 232).SequenceEqual(zSourceMopWritten.AsSpan(zMopParticleOffset + 260, 232))) throw new InvalidOperationException("Native MoP EXP2 translation did not preserve the complete 492-byte emitter outside its exact Z-source track."); Directory.Delete(zSourceMopOutput, true);
 var zSourceWithoutAnimationModel = Path.Combine(assetFixture, "static-modern-particle-exp2-z-no-animation.m2"); using (var stream = File.Create(zSourceWithoutAnimationModel)) using (var writer = new BinaryWriter(stream)) { writer.Write(System.Text.Encoding.ASCII.GetBytes("MD21")); writer.Write((uint)staticParticlePayload.Length); writer.Write(staticParticlePayload); writer.Write(System.Text.Encoding.ASCII.GetBytes("SFID")); writer.Write((uint)4); writer.Write((uint)12345); writer.Write(System.Text.Encoding.ASCII.GetBytes("TXID")); writer.Write((uint)4); writer.Write((uint)0); writer.Write(System.Text.Encoding.ASCII.GetBytes("EXP2")); writer.Write((uint)zSourceExp2.Length); writer.Write(zSourceExp2); } File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-particle-exp2-z-no-animation00.skin")); if (StaticM2DownportService.Plan(zSourceWithoutAnimationModel).Blockers.All(value => !value.Contains("no animation sequence", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("EXP2 Z-source translation invented a track for a model with no animation sequence.");
-var nonzeroParticleTailModel = Path.Combine(assetFixture, "static-modern-particle-tail-blocked.m2"); var nonzeroParticleTailBytes = File.ReadAllBytes(staticParticleModel); nonzeroParticleTailBytes[8 + staticParticleOffset + 476] = 1; File.WriteAllBytes(nonzeroParticleTailModel, nonzeroParticleTailBytes); File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-particle-tail-blocked00.skin")); if (StaticM2DownportService.Plan(nonzeroParticleTailModel).Blockers.All(value => !value.Contains("post-Cataclysm", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("Nonzero modern particle-tail semantics were silently discarded.");
+var nonzeroParticleTailModel = Path.Combine(assetFixture, "static-modern-particle-tail-loss.m2"); var nonzeroParticleTailBytes = File.ReadAllBytes(staticParticleModel); nonzeroParticleTailBytes[8 + staticParticleOffset + 476] = 1; File.WriteAllBytes(nonzeroParticleTailModel, nonzeroParticleTailBytes); File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-particle-tail-loss00.skin")); var nonzeroParticleTailPlan = StaticM2DownportService.Plan(nonzeroParticleTailModel); if (!nonzeroParticleTailPlan.Ready || !nonzeroParticleTailPlan.Losses.Any(value => value.Contains("post-Cataclysm", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("Nonzero modern particle-tail omission was not explicitly loss-accounted.");
 var embeddedAnimationPayload = staticModernPayload.ToArray(); var embeddedGlobalOffset = (embeddedAnimationPayload.Length + 3) / 4 * 4; var embeddedSequenceOffset = embeddedGlobalOffset + 8; var embeddedLookupOffset = embeddedSequenceOffset + 128; Array.Resize(ref embeddedAnimationPayload, embeddedLookupOffset + 10);
 BitConverter.GetBytes((uint)0x2090).CopyTo(embeddedAnimationPayload, 0x10);
 BitConverter.GetBytes((uint)2).CopyTo(embeddedAnimationPayload, 0x14); BitConverter.GetBytes((uint)embeddedGlobalOffset).CopyTo(embeddedAnimationPayload, 0x18); BitConverter.GetBytes((uint)1333).CopyTo(embeddedAnimationPayload, embeddedGlobalOffset); BitConverter.GetBytes((uint)0).CopyTo(embeddedAnimationPayload, embeddedGlobalOffset + 4);
@@ -1815,7 +1951,11 @@ BitConverter.GetBytes((uint)0).CopyTo(constantColorPayload, rgbTime); BitConvert
 var constantColorModel = Path.Combine(assetFixture, "static-modern-color.m2"); using (var stream = File.Create(constantColorModel)) using (var writer = new BinaryWriter(stream)) { writer.Write(System.Text.Encoding.ASCII.GetBytes("MD21")); writer.Write((uint)constantColorPayload.Length); writer.Write(constantColorPayload); writer.Write(System.Text.Encoding.ASCII.GetBytes("SFID")); writer.Write((uint)4); writer.Write((uint)12345); writer.Write(System.Text.Encoding.ASCII.GetBytes("TXID")); writer.Write((uint)4); writer.Write((uint)0); } File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-color00.skin"));
 var constantColorPlan = StaticM2DownportService.Plan(constantColorModel); if (!constantColorPlan.Ready || constantColorPlan.ConstantColorTrackCount != 1 || !constantColorPlan.Transformations.Any(value => value.Contains("single-key constant color", StringComparison.Ordinal))) throw new InvalidOperationException($"Verified static color track was blocked: {string.Join("; ", constantColorPlan.Blockers)}");
 var constantColorOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-color-{Guid.NewGuid():N}"); var constantColorResult = StaticM2DownportService.Convert(constantColorPlan, constantColorOutput); if (M2PreviewGeometryService.Load(constantColorResult.OutputModelPath, constantColorResult.OutputSkinPath, M2PreviewVisibilityMode.AllGeosets).Vertices.Count != 3) throw new InvalidOperationException("Constant-color static downport did not preserve geometry."); Directory.Delete(constantColorOutput, true);
-var animatedColorModel = Path.Combine(assetFixture, "static-modern-animated-color.m2"); var animatedColorBytes = File.ReadAllBytes(constantColorModel); BitConverter.GetBytes((uint)1).CopyTo(animatedColorBytes, 8 + rgbTime); File.WriteAllBytes(animatedColorModel, animatedColorBytes); File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-animated-color00.skin")); if (StaticM2DownportService.Plan(animatedColorModel).Ready) throw new InvalidOperationException("Static M2 downport accepted a color key outside timestamp zero.");
+var animatedColorModel = Path.Combine(assetFixture, "static-modern-animated-color.m2"); var animatedColorBytes = File.ReadAllBytes(constantColorModel); BitConverter.GetBytes((uint)1).CopyTo(animatedColorBytes, 8 + rgbTime); File.WriteAllBytes(animatedColorModel, animatedColorBytes); File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-animated-color00.skin")); var animatedColorPlan = StaticM2DownportService.Plan(animatedColorModel); if (!animatedColorPlan.Ready || animatedColorPlan.ColorTrackCount != 1 || animatedColorPlan.ConstantColorTrackCount != 0 || !animatedColorPlan.Transformations.Any(value => value.Contains("animated color", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException($"Animated color-track preservation was blocked or mislabeled: {string.Join("; ", animatedColorPlan.Blockers)}");
+var animatedColorOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-animated-color-{Guid.NewGuid():N}"); var animatedColorResult = StaticM2DownportService.Convert(animatedColorPlan, animatedColorOutput); if (BitConverter.ToUInt32(File.ReadAllBytes(animatedColorResult.OutputModelPath), rgbTime) != 1) throw new InvalidOperationException("Animated color-track timestamp was not preserved through conversion."); Directory.Delete(animatedColorOutput, true);
+var eventPayload = staticModernPayload.ToArray(); var eventRecordOffset = (eventPayload.Length + 3) / 4 * 4; var eventTimeOffset = eventRecordOffset + 36; Array.Resize(ref eventPayload, eventTimeOffset + 4); BitConverter.GetBytes((uint)1).CopyTo(eventPayload, 0x100); BitConverter.GetBytes((uint)eventRecordOffset).CopyTo(eventPayload, 0x104); System.Text.Encoding.ASCII.GetBytes("CRUC").CopyTo(eventPayload, eventRecordOffset); BitConverter.GetBytes(0).CopyTo(eventPayload, eventRecordOffset + 8); BitConverter.GetBytes((short)-1).CopyTo(eventPayload, eventRecordOffset + 26); BitConverter.GetBytes((uint)1).CopyTo(eventPayload, eventRecordOffset + 28); BitConverter.GetBytes((uint)eventTimeOffset).CopyTo(eventPayload, eventRecordOffset + 32); BitConverter.GetBytes((uint)777).CopyTo(eventPayload, eventTimeOffset);
+var eventModel = Path.Combine(assetFixture, "static-modern-event.m2"); using (var stream = File.Create(eventModel)) using (var writer = new BinaryWriter(stream)) { writer.Write(System.Text.Encoding.ASCII.GetBytes("MD21")); writer.Write((uint)eventPayload.Length); writer.Write(eventPayload); writer.Write(System.Text.Encoding.ASCII.GetBytes("SFID")); writer.Write((uint)4); writer.Write((uint)12345); writer.Write(System.Text.Encoding.ASCII.GetBytes("TXID")); writer.Write((uint)4); writer.Write((uint)0); } File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-event00.skin")); var eventPlan = StaticM2DownportService.Plan(eventModel); if (!eventPlan.Ready || eventPlan.EventCount != 1 || !eventPlan.Transformations.Any(value => value.Contains("event record", StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException($"Native event preservation was blocked: {string.Join("; ", eventPlan.Blockers)}");
+var eventOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-event-{Guid.NewGuid():N}"); var eventResult = StaticM2DownportService.Convert(eventPlan, eventOutput); var eventWritten = File.ReadAllBytes(eventResult.OutputModelPath); var eventWrittenOffset = checked((int)BitConverter.ToUInt32(eventWritten, 0x104)); if (!eventPayload.AsSpan(eventRecordOffset, 36).SequenceEqual(eventWritten.AsSpan(eventWrittenOffset, 36)) || BitConverter.ToUInt32(eventWritten, checked((int)BitConverter.ToUInt32(eventWritten, eventWrittenOffset + 32))) != 777) throw new InvalidOperationException("Native M2 event record or timestamp payload was not preserved."); Directory.Delete(eventOutput, true);
 var emptyTxacModel = Path.Combine(assetFixture, "static-modern-empty-txac.m2"); var emptyTxacBytes = new byte[File.ReadAllBytes(staticModernModel).Length + 12]; File.ReadAllBytes(staticModernModel).CopyTo(emptyTxacBytes, 0); System.Text.Encoding.ASCII.GetBytes("TXAC").CopyTo(emptyTxacBytes, emptyTxacBytes.Length - 12); BitConverter.GetBytes((uint)4).CopyTo(emptyTxacBytes, emptyTxacBytes.Length - 8); File.WriteAllBytes(emptyTxacModel, emptyTxacBytes); File.Copy(staticPlan.SourceSkinPath!, Path.Combine(assetFixture, "static-modern-empty-txac00.skin"));
 var emptyTxacPlan = StaticM2DownportService.Plan(emptyTxacModel); if (!emptyTxacPlan.Ready || !emptyTxacPlan.Transformations.Any(value => value.Contains("zero-filled TXAC", StringComparison.Ordinal))) throw new InvalidOperationException($"A proven empty TXAC extension was not handled explicitly: {string.Join("; ", emptyTxacPlan.Blockers)}");
 var emptyTxacOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-txac-{Guid.NewGuid():N}"); var emptyTxacResult = StaticM2DownportService.Convert(emptyTxacPlan, emptyTxacOutput); if (M2PreviewGeometryService.Load(emptyTxacResult.OutputModelPath, emptyTxacResult.OutputSkinPath, M2PreviewVisibilityMode.AllGeosets).TotalTriangleIndices / 3 != 3) throw new InvalidOperationException("Empty-TXAC static downport did not preserve geometry."); Directory.Delete(emptyTxacOutput, true);
@@ -1838,6 +1978,8 @@ var mappedPlan = StaticM2DownportService.Plan(mappedModernModel, listfilePath: t
 if (!mappedPlan.Ready || mappedPlan.ResolvedTexturePaths.Count != 1 || mappedPlan.ResolvedTexturePaths[0].FileDataId != 9 || mappedPlan.SourceListfileSha256 is null) throw new InvalidOperationException($"Listfile-backed static M2 plan did not resolve an exact case-insensitive FileDataID path: {string.Join("; ", mappedPlan.Blockers)}");
 var mappedOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-mapped-{Guid.NewGuid():N}"); var mappedResult = StaticM2DownportService.Convert(mappedPlan, mappedOutput); var mappedSlot = M2PreviewGeometryService.InspectTextureSlots(mappedResult.OutputModelPath).Single();
 if (!string.Equals(mappedSlot.EmbeddedPath, @"item\objectcomponents\head\crucible_fixture.blp", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Listfile-backed downport did not embed the resolved client texture path."); Directory.Delete(mappedOutput, true);
+var mappedMopPlan = StaticM2DownportService.PlanForMop(mappedModernModel, listfilePath: textureListfile); if (!mappedMopPlan.Ready || mappedMopPlan.SourceVersion != 274 || mappedMopPlan.OutputVersion != 272 || mappedMopPlan.OutputFlags != 0x80) throw new InvalidOperationException($"Listfile-backed native MoP projection did not normalize the Legion source exactly: {string.Join("; ", mappedMopPlan.Blockers)}");
+var mappedMopOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-mapped-mop-{Guid.NewGuid():N}"); var mappedMopResult = StaticM2DownportService.Convert(mappedMopPlan, mappedMopOutput); var mappedMopBytes = File.ReadAllBytes(mappedMopResult.OutputModelPath); var mappedMopSlot = M2PreviewGeometryService.InspectTextureSlots(mappedMopResult.OutputModelPath).Single(); if (BitConverter.ToUInt32(mappedMopBytes, 4) != 272 || BitConverter.ToUInt32(mappedMopBytes, 0x10) != 0x80 || !string.Equals(mappedMopSlot.EmbeddedPath, @"item\objectcomponents\head\crucible_fixture.blp", StringComparison.OrdinalIgnoreCase) || !File.ReadAllBytes(mappedMopResult.OutputSkinPath).SequenceEqual(File.ReadAllBytes(mappedMopPlan.SourceSkinPath!))) throw new InvalidOperationException("Listfile-backed native MoP projection did not embed the resolved texture while preserving SKIN v3."); Directory.Delete(mappedMopOutput, true);
 var missingTextureListfile = Path.Combine(assetFixture, "fixture-listfile-missing.csv"); File.WriteAllText(missingTextureListfile, "10;unused/path.blp\n"); if (StaticM2DownportService.Plan(mappedModernModel, listfilePath: missingTextureListfile).Blockers.All(value => !value.Contains("FileDataID 9 is missing", StringComparison.Ordinal))) throw new InvalidOperationException("A missing external texture ID was not retained as an explicit blocker.");
 var ambiguousTextureListfile = Path.Combine(assetFixture, "fixture-listfile-ambiguous.csv"); File.WriteAllText(ambiguousTextureListfile, "9;item/first.blp\n9;item/second.blp\n"); if (StaticM2DownportService.Plan(mappedModernModel, listfilePath: ambiguousTextureListfile).Blockers.All(value => !value.Contains("multiple distinct client paths", StringComparison.Ordinal))) throw new InvalidOperationException("An ambiguous external texture ID was not retained as an explicit blocker.");
 var staleListfilePlan = StaticM2DownportService.Plan(mappedModernModel, listfilePath: textureListfile); File.AppendAllText(textureListfile, "11;changed/after/plan.blp\n"); var staleListfileOutput = Path.Combine(Path.GetTempPath(), $"crucible-static-stale-listfile-{Guid.NewGuid():N}");
@@ -2343,9 +2485,64 @@ Directory.Delete(gobBulkOutput, true);
 Directory.Delete(assetFixture, true);
 
 var targetProfiles = TargetProfileCatalog.Load(Path.Combine(Path.GetTempPath(), $"crucible-profiles-{Guid.NewGuid():N}"), Path.Combine(Path.GetTempPath(), $"crucible-app-profiles-{Guid.NewGuid():N}"));
-if (targetProfiles.Count != 4 || TargetProfileCatalog.Find(targetProfiles, null).ClientBuild != 12340 ||
-    targetProfiles.Single(profile => profile.ClientBuild == 15595).SupportTier != TargetSupportTier.Experimental)
+var wotlkProfile = targetProfiles.Single(profile => profile.ClientBuild == 12340);
+var mopProfile = targetProfiles.Single(profile => profile.ClientBuild == 18414);
+var legionProfile = targetProfiles.Single(profile => profile.ClientBuild == 26972);
+if (targetProfiles.Count != 6 || TargetProfileCatalog.Find(targetProfiles, null).ClientBuild != 12340 ||
+    targetProfiles.Single(profile => profile.ClientBuild == 15595).SupportTier != TargetSupportTier.Experimental ||
+    !mopProfile.SupportsWdbc || !mopProfile.SupportsDb2 || mopProfile.ArchiveFormat != ArchiveFormat.Mpq ||
+    !mopProfile.AcceptsEmbeddedTableBuild(18273) || !mopProfile.AcceptsEmbeddedTableBuild(18414) || mopProfile.AcceptsEmbeddedTableBuild(18272) ||
+    !legionProfile.SupportsWdc1 || legionProfile.SupportsWdbc || legionProfile.ArchiveFormat != ArchiveFormat.Casc)
     throw new InvalidOperationException("Built-in target profiles are incomplete or the verified default changed.");
+var targetCompatibilityRoot = Path.Combine(Path.GetTempPath(), $"crucible-target-compatibility-{Guid.NewGuid():N}"); Directory.CreateDirectory(targetCompatibilityRoot);
+var compatibleMopWdb2 = Path.Combine(targetCompatibilityRoot, "BattlePetAbility.db2"); WriteMinimalWdb2(compatibleMopWdb2, 18273, 1);
+if (ClientTableCompatibilityPolicy.Assess(compatibleMopWdb2, mopProfile).State != ClientTableCompatibilityState.Supported ||
+    ClientTableCompatibilityPolicy.Assess(compatibleMopWdb2, mopProfile with { CompatibleEmbeddedTableBuilds = [] }).State != ClientTableCompatibilityState.UnsupportedContainer)
+    throw new InvalidOperationException("Target profiles did not enforce their explicit compatible embedded WDB2 build set.");
+var exactHashWdc1 = Path.Combine(targetCompatibilityRoot, "ExactHash.db2"); WriteMinimalWdc1(exactHashWdc1, 0x11223344);
+var exactHashDbd = Path.Combine(targetCompatibilityRoot, "ExactHash.dbd");
+File.WriteAllText(exactHashDbd, "COLUMNS\nint ID\nint Value\n\nBUILD 7.3.5.26972\n$id$ID<32>\n\nLAYOUT AABBCCDD\nValue<32>\n");
+var exactHashResolution = DbdSchemaService.ResolveFile(exactHashDbd, 26972, WdbcFile.Load(exactHashWdc1));
+if (exactHashResolution.Columns.Count != 1 || exactHashResolution.Columns[0].Name != "Value")
+    throw new InvalidOperationException("An exact WDC1 layout hash did not take precedence over a conflicting generic build layout.");
+if (CrossBuildFieldAliasCatalog.DonorField(mopProfile.Id, legionProfile.Id, "ITEMSPARSE", "Quality") != "OverallQualityID" ||
+    CrossBuildFieldAliasCatalog.DonorField(mopProfile.Id, legionProfile.Id, "ITEMSPARSE", "ItemStatValue[9]") != "StatModifier_bonusAmount[9]" ||
+    CrossBuildFieldAliasCatalog.DonorField(legionProfile.Id, mopProfile.Id, "ITEMSPARSE", "Quality") is not null)
+    throw new InvalidOperationException("Profile-scoped MoP/Legion field aliases are missing, array-unsafe, or leaking into the reverse conversion direction.");
+var itemVisualRule = CrossBuildItemVisualProjection.FindRule("ITEMVISUALS", "Slot[4]");
+if (!CrossBuildItemVisualProjection.Supports(mopProfile.Id, legionProfile.Id) || CrossBuildItemVisualProjection.Supports(legionProfile.Id, mopProfile.Id) || itemVisualRule is null || itemVisualRule.DonorField != "ModelFileID[4]" || itemVisualRule.AssetRule.Kind != CrossBuildAssetKind.Model)
+    throw new InvalidOperationException("MoP <- Legion ItemVisuals projection is missing, directionally unsafe, or not bound to the model-asset bridge.");
+Directory.Delete(targetCompatibilityRoot, true);
+var mashupFixture = Path.Combine(Path.GetTempPath(), $"crucible-cross-build-mashup-{Guid.NewGuid():N}");
+var mashupHost = Path.Combine(mashupFixture, "host"); var mashupDonor = Path.Combine(mashupFixture, "donor"); var mashupDefinitions = Path.Combine(mashupFixture, "definitions");
+Directory.CreateDirectory(mashupHost); Directory.CreateDirectory(mashupDonor); Directory.CreateDirectory(mashupDefinitions);
+var parentDbd = Path.Combine(mashupDefinitions, "MashupParent.dbd");
+var childDbd = Path.Combine(mashupDefinitions, "MashupChild.dbd");
+File.WriteAllText(parentDbd, "COLUMNS\nint ID\nint Value\nint SignedBits\n\nBUILD 5.4.8.18414\n$id$ID<32>\nValue<u32>\nSignedBits<32>\n\nLAYOUT AABBCCDD\nBUILD 7.3.5.26972\n$id$ID<32>\nValue<32>\nSignedBits<u32>\n");
+File.WriteAllText(childDbd, "COLUMNS\nint ID\nint<MashupParent::ID> ParentID\nint Value\n\nBUILD 5.4.8.18414\n$id$ID<32>\nParentID<32>\nValue<32>\n\nLAYOUT AABBCCDD\nBUILD 7.3.5.26972\n$id$ID<32>\nParentID<32>\nValue<32>\n");
+WriteSimpleWdbc(Path.Combine(mashupHost, "MashupParent.dbc"), [(1u, new uint[] { 10, 1 })]);
+WriteSimpleWdbc(Path.Combine(mashupHost, "MashupChild.dbc"), [(5u, new uint[] { 1, 100 })]);
+WriteSimpleWdc1(Path.Combine(mashupDonor, "MashupParent.db2"), parentDbd, [(1u, new uint[] { 0x80002000, 0x80000001 }), (3u, new uint[] { 30, 40 })]);
+WriteSimpleWdc1(Path.Combine(mashupDonor, "MashupChild.db2"), childDbd, [(5u, new uint[] { 1, 200 })]);
+var mashupResult = CrossBuildMashupService.Run(new(1, "Mists of the Pandaren Legion fixture", mopProfile.Id, legionProfile.Id,
+    mashupHost, mashupDonor, mashupDefinitions, null, null, Path.Combine(mashupFixture, "runs"), "wow-update-base-29999.MPQ"));
+var mashupChildReport = mashupResult.Tables.Single(table => table.HostTable == "MashupChild");
+var mashupChildOutput = WdbcFile.Load(mashupChildReport.OutputClientTable ?? throw new InvalidOperationException("Mashup child output was not published."));
+var mashupChildSchema = DbdSchemaService.ResolveFile(childDbd, 18414, mashupChildOutput);
+var mashupChildRows = DbcRecordIdentity.IndexRows(mashupChildOutput, mashupChildSchema.Columns, mashupChildSchema.KeyStrategy);
+var mashupParentReference = mashupChildSchema.Columns.Single(column => column.Name == "ParentID");
+var mashupParentReport = mashupResult.Tables.Single(table => table.HostTable == "MashupParent");
+var mashupParentOutput = WdbcFile.Load(mashupParentReport.OutputClientTable ?? throw new InvalidOperationException("Mashup parent output was not published."));
+var mashupParentSchema = DbdSchemaService.ResolveFile(parentDbd, 18414, mashupParentOutput);
+var mashupParentRows = DbcRecordIdentity.IndexRows(mashupParentOutput, mashupParentSchema.Columns, mashupParentSchema.KeyStrategy);
+var mashupUnsignedBits = mashupParentSchema.Columns.Single(column => column.Name == "Value");
+var mashupSignedBits = mashupParentSchema.Columns.Single(column => column.Name == "SignedBits");
+if (!mashupResult.Passed || mashupResult.ConvertedTables != 2 || mashupResult.AddedRows != 3 || mashupResult.RemappedIds != 2 || mashupResult.RewrittenReferences != 1 ||
+    !File.Exists(mashupResult.PatchPath) || mashupChildOutput.GetRaw(mashupChildRows[6], mashupParentReference) != 4 ||
+    mashupParentOutput.GetRaw(mashupParentRows[4], mashupUnsignedBits) != 0x80002000 ||
+    mashupParentOutput.GetRaw(mashupParentRows[4], mashupSignedBits) != 0x80000001)
+    throw new InvalidOperationException($"Cross-build mashup did not remap colliding parent/child IDs, rewrite the DBD reference, and publish a verified MPQ: passed={mashupResult.Passed}, tables={mashupResult.ConvertedTables}, added={mashupResult.AddedRows}, remapped={mashupResult.RemappedIds}, refs={mashupResult.RewrittenReferences}.");
+Directory.Delete(mashupFixture, true);
 var contentProjectRoot = Path.Combine(Path.GetTempPath(), $"crucible-content-project-{Guid.NewGuid():N}"); var defaultContentProject = CrucibleContentProjectService.Create(contentProjectRoot, "Fixture project");
 var firstIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.CreatureDisplayInfo, 3, 100, [100u, 102u], "fixture displays").Reservation.Values;
 var secondIds = CrucibleContentProjectService.ReserveIds(contentProjectRoot, ContentIdDomain.CreatureDisplayInfo, 2, 100, [100u, 102u], "more displays").Reservation.Values;
@@ -2374,7 +2571,7 @@ Directory.Delete(contentProjectRoot, true);
 var customProfileDirectory = Path.Combine(Path.GetTempPath(), $"crucible-custom-profile-{Guid.NewGuid():N}");
 TargetProfileCatalog.SaveTemplate(Path.Combine(customProfileDirectory, "custom.json"), new("custom-9999", "Custom Test Build", "Test", 9999, "custom.xml", ClientTableFormat.Wdbc, ArchiveFormat.Mpq, TargetSupportTier.Experimental, "Fixture"));
 var profilesWithCustom = TargetProfileCatalog.Load(customProfileDirectory, Path.Combine(Path.GetTempPath(), $"crucible-empty-{Guid.NewGuid():N}"));
-if (profilesWithCustom.Count != 5 || profilesWithCustom.Single(profile => profile.Id == "custom-9999").ClientBuild != 9999)
+if (profilesWithCustom.Count != 7 || profilesWithCustom.Single(profile => profile.Id == "custom-9999").ClientBuild != 9999)
     throw new InvalidOperationException("External target profile loading failed.");
 Directory.Delete(customProfileDirectory, true);
 
@@ -2646,6 +2843,7 @@ try
     Directory.CreateDirectory(Path.Combine(workspaceFixture, "Server", "data", "dbc"));
     Directory.CreateDirectory(Path.Combine(workspaceFixture, "Core", "src", "server"));
     Directory.CreateDirectory(Path.Combine(workspaceFixture, "Client", "Data"));
+    Directory.CreateDirectory(Path.Combine(workspaceFixture, "definitions"));
     Directory.CreateDirectory(Path.Combine(workspaceFixture, "Tools", "Definitions", "WoWDBDefs", "definitions"));
     Directory.CreateDirectory(Path.Combine(workspaceFixture, "Tools", "Schemas"));
     Directory.CreateDirectory(Path.Combine(workspaceFixture, "Tools", "Noggit"));
@@ -2656,7 +2854,10 @@ try
     File.WriteAllText(Path.Combine(workspaceFixture, "Core", "CMakeLists.txt"), "project(Fixture)");
     File.WriteAllBytes(Path.Combine(workspaceFixture, "Client", "Wow.exe"), [0]);
     File.WriteAllText(Path.Combine(workspaceFixture, "Tools", "Schemas", "WotLK 3.3.5 (12340).xml"), "<DBFilesClient />");
+    File.WriteAllText(Path.Combine(workspaceFixture, "definitions", "Spell.dbd"), "COLUMNS");
     File.WriteAllText(Path.Combine(workspaceFixture, "Tools", "Definitions", "WoWDBDefs", "definitions", "Spell.dbd"), "COLUMNS");
+    File.WriteAllText(Path.Combine(workspaceFixture, "Tools", "Definitions", "WoWDBDefs", "definitions", "Item.dbd"), "COLUMNS");
+    File.WriteAllText(Path.Combine(workspaceFixture, "Tools", "Definitions", "WoWDBDefs", "definitions", "ChrRaces.dbd"), "COLUMNS");
     File.WriteAllBytes(Path.Combine(workspaceFixture, "Tools", "Noggit", "noggit.exe"), [0]);
     File.WriteAllBytes(Path.Combine(workspaceFixture, "Extracted", "World", "Maps", "Azeroth.wdt"), [0]);
     var discoveredWorkspace = CrucibleWorkspaceLayoutService.Discover(workspaceFixture);
@@ -2665,7 +2866,7 @@ try
         !discoveredWorkspace.CoreSourcePath.EndsWith("Core", StringComparison.OrdinalIgnoreCase) ||
         !discoveredWorkspace.CoreDbcPath.EndsWith(Path.Combine("data", "dbc"), StringComparison.OrdinalIgnoreCase) ||
         !discoveredWorkspace.SchemaDefinitionPath.EndsWith("WotLK 3.3.5 (12340).xml", StringComparison.OrdinalIgnoreCase) ||
-        !discoveredWorkspace.DbdDefinitionsPath.EndsWith("definitions", StringComparison.OrdinalIgnoreCase) ||
+        !discoveredWorkspace.DbdDefinitionsPath.Equals(Path.Combine(workspaceFixture, "Tools", "Definitions", "WoWDBDefs", "definitions"), StringComparison.OrdinalIgnoreCase) ||
         !discoveredWorkspace.NoggitExecutablePath.EndsWith("noggit.exe", StringComparison.OrdinalIgnoreCase) ||
         !discoveredWorkspace.MapSourcePath.EndsWith("Maps", StringComparison.OrdinalIgnoreCase))
         throw new InvalidOperationException("One-root workspace discovery did not identify the synthetic server/core/client/schema/tool layout.");
@@ -2724,6 +2925,14 @@ File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf"), """
 var explicitlyConfiguredServer = ServerWorkspaceDetector.DetectLocal(serverFixture);
 if (!explicitlyConfiguredServer.DbcPath.EndsWith(Path.Combine("configured-data", "dbc")))
     throw new InvalidOperationException("An incidental root data\\dbc incorrectly overrode the explicit DataDir setting.");
+var skyfireData = Path.Combine(serverFixture, "skyfire-data"); Directory.CreateDirectory(Path.Combine(skyfireData, "db2"));
+var skyfireDb2 = new byte[53]; "WDB2"u8.CopyTo(skyfireDb2); BinaryPrimitives.WriteInt32LittleEndian(skyfireDb2.AsSpan(4, 4), 1); BinaryPrimitives.WriteInt32LittleEndian(skyfireDb2.AsSpan(8, 4), 1);
+BinaryPrimitives.WriteInt32LittleEndian(skyfireDb2.AsSpan(12, 4), 4); BinaryPrimitives.WriteInt32LittleEndian(skyfireDb2.AsSpan(16, 4), 1); BinaryPrimitives.WriteInt32LittleEndian(skyfireDb2.AsSpan(24, 4), 18414);
+BinaryPrimitives.WriteUInt32LittleEndian(skyfireDb2.AsSpan(48, 4), 1); File.WriteAllBytes(Path.Combine(skyfireData, "db2", "BuildEvidence.db2"), skyfireDb2);
+File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf"), $"WorldDatabaseInfo = \"localhost;3307;fixture_user;fixture_password;fixture_world\"\nDataDir = \"{skyfireData.Replace("\\", "/", StringComparison.Ordinal)}\"");
+var skyfireDetectedServer = ServerWorkspaceDetector.DetectLocal(serverFixture);
+if (skyfireDetectedServer.CoreFamily != ServerCoreFamily.SkyFire || skyfireDetectedServer.Db2Path is null || skyfireDetectedServer.ClientTablePaths.Count != 1)
+    throw new InvalidOperationException("A real WDB2 build marker did not identify a SkyFire 18414 runtime or its DB2 table root.");
 File.Delete(Path.Combine(serverFixture, "etc", "worldserver.conf")); File.WriteAllText(Path.Combine(serverFixture, "etc", "worldserver.conf.dist"), "WorldDatabaseInfo = \"bad;3306;bad;bad;bad\"");
 try { _ = ServerWorkspaceDetector.DetectLocal(serverFixture); throw new InvalidOperationException("A .conf.dist template was accepted as a live server configuration."); }
 catch (FileNotFoundException) { }
@@ -3575,6 +3784,26 @@ if (rawSpellPreview.Rows[0]["Name_Lang[enUS]"] is not uint)
     throw new InvalidOperationException("DBC export raw-string mode did not expose the physical string-table offset.");
 File.Delete(spellJsonLinesExport);
 
+var unsignedImportRoot = Path.Combine(Path.GetTempPath(), $"crucible-unsigned-import-{Guid.NewGuid():N}"); Directory.CreateDirectory(unsignedImportRoot);
+try
+{
+    var unsignedSource = Path.Combine(unsignedImportRoot, "UnsignedFixture.dbc"); WriteRawWdbc(unsignedSource, 2, [new uint[] { 1, 0 }]);
+    var unsignedColumns = new[] { new DbcColumn(0, 0, 4, "ID", DbcValueType.UInt32, true), new DbcColumn(1, 4, 4, "Value", DbcValueType.UInt32) };
+    var unsignedSchema = new DbcSchemaResolution(unsignedColumns, DbcSchemaMatchKind.NamedMatch, 2, DbcRecordKeyStrategy.Physical(0));
+    var unsignedInputs = new[] { "[{\"$recordKey\":1,\"Value\":4294967295}]", "[{\"$recordKey\":1,\"Value\":\"0xFFFFFFFF\"}]", "[{\"$recordKey\":1,\"Value\":\"FFFFFFFF\"}]" };
+    var unsignedOutputs = new List<byte[]>();
+    for (var index = 0; index < unsignedInputs.Length; index++)
+    {
+        var input = Path.Combine(unsignedImportRoot, $"input-{index}.json"); File.WriteAllText(input, unsignedInputs[index]);
+        var file = WdbcFile.Load(unsignedSource); var plan = DbcRowImportService.Preview(file, unsignedSchema, input, new(DbcRowImportFormat.Json)); DbcRowImportService.Apply(file, plan);
+        if (file.GetRaw(0, unsignedColumns[1]) != uint.MaxValue) throw new InvalidOperationException("Structured DBC import did not preserve the full unsigned UInt32 range.");
+        var output = Path.Combine(unsignedImportRoot, $"output-{index}.dbc"); file.Save(output, false); unsignedOutputs.Add(File.ReadAllBytes(output));
+    }
+    if (unsignedOutputs.Skip(1).Any(bytes => !bytes.AsSpan().SequenceEqual(unsignedOutputs[0])))
+        throw new InvalidOperationException("Decimal, prefixed hexadecimal, and raw hexadecimal UInt32 imports did not produce identical DBC bytes.");
+}
+finally { if (Directory.Exists(unsignedImportRoot)) Directory.Delete(unsignedImportRoot, true); }
+
 var generatedImportFile = WdbcFile.Load(generatedKeyPath); var generatedImportOriginalHash = generatedImportFile.ComputeContentSha256();
 var generatedBefore = Convert.ToSingle(generatedImportFile.GetDisplayValue(900, generatedData), System.Globalization.CultureInfo.InvariantCulture);
 var generatedImportCsv = Path.Combine(Path.GetTempPath(), $"crucible-gt-import-{Guid.NewGuid():N}.csv");
@@ -3635,6 +3864,10 @@ try
     if (stagingSource.RowCount <= 150) throw new InvalidOperationException("Real Spell.dbc fixture is unexpectedly too small for bulk staging coverage.");
     stagingSource.DeleteRows(Enumerable.Range(150, stagingSource.RowCount - 150)); stagingSource.SaveAs(stagingSourcePath, false);
     var stagingInfo = DbcStagingWorkspaceService.Create(stagingProjectRoot, stagingSource, spellExportSchema);
+    var emptyStageQuery = new DbcStagingQueryResult(["ID"], [], false); var populatedStageQuery = new DbcStagingQueryResult(["ID"], [new object?[] { 1L }], false);
+    if (new DbcStagingQueryExpectation().Validate(emptyStageQuery) is not null || new DbcStagingQueryExpectation(ExpectedCount: 0).Validate(emptyStageQuery) is not null ||
+        new DbcStagingQueryExpectation(RequireRows: true).Validate(emptyStageQuery) is null || new DbcStagingQueryExpectation(ExpectedCount: 1).Validate(populatedStageQuery) is not null)
+        throw new InvalidOperationException("DBC staging query row-count assertions do not distinguish valid empty results from explicit nonempty/count requirements.");
     var emptyStageDiff = DbcStagingWorkspaceService.Diff(stagingInfo.WorkspacePath);
     if (stagingInfo.SourceRows != 150 || stagingInfo.Fields != 234 || emptyStageDiff.HasChanges || !emptyStageDiff.CanApply || !File.Exists(stagingInfo.WorkspacePath))
         throw new InvalidOperationException("Schema-bound project-local DBC staging creation or empty-baseline diff regressed.");
@@ -3682,6 +3915,98 @@ var manaBinding = azerothBindings.Single(binding => binding.DbcFileName.Equals("
 var unusedManaBinding = azerothBindings.Single(binding => binding.DbcFileName.Equals("gtOCTRegenMP.dbc", StringComparison.OrdinalIgnoreCase));
 if (manaBinding.Consumption != ServerTableConsumption.SqlOverlayed || manaBinding.SqlTableName != "gtregenmpperspt_dbc" || manaBinding.DescribeRow(900) != "class 10, level 1" || unusedManaBinding.Consumption != ServerTableConsumption.Unused)
     throw new InvalidOperationException("The built-in AzerothCore GT binding profile is incorrect.");
+if (ServerTableBindingCatalog.Resolve(ServerCoreFamily.TrinityCore, clientBuild: 12340).Count == 0 ||
+    ServerTableBindingCatalog.Resolve(ServerCoreFamily.TrinityCore, clientBuild: 18414).Count != 0)
+    throw new InvalidOperationException("Build-scoped server bindings leaked Wrath-only Trinity assumptions into a MoP target.");
+var binaryLaneRequestPath = Path.Combine(Path.GetTempPath(), $"crucible-binary-lane-{Guid.NewGuid():N}.json");
+var binaryLaneClone = new CompatibilityLabClonePair("server", "C:\\source", "C:\\clone");
+var binaryLane = new CompatibilityLabLane("Binary MoP", "mop-18414", "C:\\tables", "C:\\clone", null,
+    "C:\\definitions", null, [binaryLaneClone]);
+CompatibilityLabService.SaveRequest(binaryLaneRequestPath, new(1, "C:\\runs",
+[
+    binaryLane,
+    binaryLane with { Name = "Source-backed Legion", ProfileId = "legion-26972", CoreSourceRoot = "C:\\source-code" }
+]));
+var loadedBinaryLane = CompatibilityLabService.LoadRequest(binaryLaneRequestPath).Lanes[0];
+File.Delete(binaryLaneRequestPath);
+if (loadedBinaryLane.CoreSourceRoot is not null)
+    throw new InvalidOperationException("A binary-only compatibility lane did not preserve its explicit null core-source contract.");
+
+var clonePreparationFixture = Path.Combine(Path.GetTempPath(), $"crucible-clone-preparation-{Guid.NewGuid():N}");
+try
+{
+    var sourceOne = Path.Combine(clonePreparationFixture, "source-one");
+    var sourceTwo = Path.Combine(clonePreparationFixture, "source-two");
+    Directory.CreateDirectory(Path.Combine(sourceOne, "Data"));
+    Directory.CreateDirectory(Path.Combine(sourceOne, "Cache"));
+    Directory.CreateDirectory(sourceTwo);
+    File.WriteAllText(Path.Combine(sourceOne, "Wow.exe"), "client-one");
+    File.WriteAllText(Path.Combine(sourceOne, "Data", "common.MPQ"), "archive-one");
+    File.WriteAllText(Path.Combine(sourceOne, "Cache", "ignored.bin"), "runtime-cache");
+    File.WriteAllText(Path.Combine(sourceTwo, "worldserver.exe"), "server-two");
+    var cloneOne = Path.Combine(clonePreparationFixture, "worktrees", "one");
+    var cloneTwo = Path.Combine(clonePreparationFixture, "worktrees", "two");
+    var cloneRequest = new CompatibilityLabRequest(1, Path.Combine(clonePreparationFixture, "runs"),
+    [
+        new("Fixture one", "mop-18414", cloneOne, cloneOne, null, "fixture-definitions", null,
+            [new("client", sourceOne, cloneOne, ["Cache"])]),
+        new("Fixture two", "legion-26972", cloneTwo, cloneTwo, null, "fixture-definitions", null,
+            [new("server", sourceTwo, cloneTwo)])
+    ], 1);
+    var createdClones = CompatibilityLabService.PrepareClones(cloneRequest);
+    if (!createdClones.Passed || createdClones.Entries.Any(entry => entry.State != CompatibilityLabClonePreparationState.Created) ||
+        !File.Exists(Path.Combine(cloneOne, "Wow.exe")) || !File.Exists(Path.Combine(cloneOne, "Data", "common.MPQ")) ||
+        File.Exists(Path.Combine(cloneOne, "Cache", "ignored.bin")) || !File.Exists(createdClones.JsonReportPath) || !File.Exists(createdClones.MarkdownReportPath))
+        throw new InvalidOperationException("Compatibility clone preparation did not create and independently verify exact excluded-directory-aware clones.");
+    var verifiedClones = CompatibilityLabService.PrepareClones(cloneRequest);
+    if (!verifiedClones.Passed || verifiedClones.Entries.Any(entry => entry.State != CompatibilityLabClonePreparationState.VerifiedExisting || entry.CopiedFiles != 0))
+        throw new InvalidOperationException("Compatibility clone preparation rewrote or failed to verify completed clone trees.");
+    File.WriteAllText(Path.Combine(cloneOne, "Wow.exe"), "drifted-clone");
+    var driftedClones = CompatibilityLabService.PrepareClones(cloneRequest);
+    if (driftedClones.Passed || driftedClones.Entries[0].State != CompatibilityLabClonePreparationState.Failed ||
+        File.ReadAllText(Path.Combine(cloneOne, "Wow.exe")) != "drifted-clone")
+        throw new InvalidOperationException("Compatibility clone preparation overwrote a completed clone after identity drift.");
+
+    var resumeRoot = Path.Combine(clonePreparationFixture, "resume");
+    var resumeSourceOne = Path.Combine(resumeRoot, "source-one");
+    var resumeSourceTwo = Path.Combine(resumeRoot, "source-two");
+    Directory.CreateDirectory(resumeSourceOne); Directory.CreateDirectory(resumeSourceTwo);
+    File.WriteAllBytes(Path.Combine(resumeSourceOne, "large.bin"), new byte[10 * 1024 * 1024]);
+    File.WriteAllText(Path.Combine(resumeSourceTwo, "small.bin"), "second-lane");
+    var resumeCloneOne = Path.Combine(resumeRoot, "clones", "one");
+    var resumeCloneTwo = Path.Combine(resumeRoot, "clones", "two");
+    var resumeRequest = new CompatibilityLabRequest(1, Path.Combine(resumeRoot, "runs"),
+    [
+        new("Resume one", "mop-18414", resumeCloneOne, resumeCloneOne, null, "fixture-definitions", null,
+            [new("client", resumeSourceOne, resumeCloneOne)]),
+        new("Resume two", "legion-26972", resumeCloneTwo, resumeCloneTwo, null, "fixture-definitions", null,
+            [new("server", resumeSourceTwo, resumeCloneTwo)])
+    ], 1);
+    using (var cancellation = new CancellationTokenSource())
+    {
+        var cancelProgress = new InlineProgress<CompatibilityLabProgress>(value =>
+        {
+            if (value.Phase.Contains("clone copy bytes", StringComparison.Ordinal) && value.Completed > 0) cancellation.Cancel();
+        });
+        try
+        {
+            _ = CompatibilityLabService.PrepareClones(resumeRequest, cancelProgress, cancellation.Token);
+            throw new InvalidOperationException("Compatibility clone preparation ignored cancellation during a streamed file copy.");
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+    }
+    var partialRoot = resumeCloneOne + ".crucible-partial";
+    if (!Directory.Exists(partialRoot) || !File.Exists(partialRoot + ".json") || Directory.Exists(resumeCloneOne))
+        throw new InvalidOperationException("Cancelled compatibility clone preparation did not retain only its marked resumable partial tree.");
+    var resumedClones = CompatibilityLabService.PrepareClones(resumeRequest);
+    if (!resumedClones.Passed || resumedClones.Entries[0].State != CompatibilityLabClonePreparationState.Resumed ||
+        resumedClones.Entries[1].State != CompatibilityLabClonePreparationState.Created || !File.Exists(Path.Combine(resumeCloneOne, "large.bin")))
+        throw new InvalidOperationException("Compatibility clone preparation did not resume and verify a Crucible-owned partial tree.");
+}
+finally
+{
+    if (Directory.Exists(clonePreparationFixture)) Directory.Delete(clonePreparationFixture, true);
+}
 var bindingSourceFixture = Path.Combine(Path.GetTempPath(), $"crucible-dbcstores-{Guid.NewGuid():N}.cpp");
 File.WriteAllText(bindingSourceFixture, """
     LOAD_DBC(sGtRegenMPPerSptStore, "gtRegenMPPerSpt.dbc", "gtregenmpperspt_dbc");
@@ -4095,6 +4420,9 @@ if (promotedAnimation.GetString(promotedAnimation.GetRaw(1, nameColumn)) != "Cru
 var stagingRoot = Path.Combine(layerRoot, "my-staging-folder"); Directory.CreateDirectory(Path.Combine(stagingRoot, "Interface", "FrameXML"));
 if (!MpqPathFilter.Matches("DBFilesClient\\Spell.dbc", "DBFilesClient\\*.dbc") || MpqPathFilter.Matches("DBFilesClient\\Spell.dbc", "Interface\\*.dbc") || !MpqPathFilter.Matches("DBFilesClient\\Spell.dbc", "spell"))
     throw new InvalidOperationException("MPQ path filtering does not support both globs and plain-text searches.");
+if (!MpqPathFilter.MatchesArchiveQuery("Interface\\Icons\\Achievement_Test.blp", "*achievement*") ||
+    MpqPathFilter.MatchesArchiveQuery("Interface\\Icons\\Achievement_Test.blp", "DBFilesClient\\*achievement*"))
+    throw new InvalidOperationException("Interactive archive queries did not apply separator-free wildcards to file names without weakening rooted globs.");
 File.WriteAllText(Path.Combine(stagingRoot, "Interface", "FrameXML", "Test.lua"), "-- test");
 var stagedEntry = PatchInputMapper.Map([stagingRoot]).Single();
 if (stagedEntry.ArchivePath != "Interface\\FrameXML\\Test.lua" || PatchInputMapper.AssessArchivePath(stagedEntry.ArchivePath).HasWarning)
@@ -4125,20 +4453,170 @@ File.Copy(Path.Combine(overrideLayer, "SpellCastTimes.dbc"), Path.Combine(deploy
 File.WriteAllBytes(Path.Combine(deploymentClient, "CharVariations.dbc"), []); File.WriteAllBytes(Path.Combine(deploymentServer, "CharVariations.dbc"), []);
 var deploymentSource = Path.Combine(layerRoot, "deployment-source"); var dataStores = Path.Combine(deploymentSource, "src", "server", "game", "DataStores"); Directory.CreateDirectory(dataStores);
 File.WriteAllText(Path.Combine(dataStores, "DBCStores.cpp"), "LOAD_DBC(store, \"AnimationData.dbc\");\nLOAD_DBC(store, \"SpellCastTimes.dbc\");\nLOAD_DBC(store, \"CharVariations.dbc\");\n");
+var sourceParserFixtures = Path.Combine(layerRoot, "source-parser-fixtures"); Directory.CreateDirectory(sourceParserFixtures);
+var skyfireStores = Path.Combine(sourceParserFixtures, "SkyFireStores.cpp");
+File.WriteAllText(skyfireStores, "LoadDBC(locales, errors, sAreaStore, dbcPath, \"AreaTable.dbc\");\n//LoadDBC(locales, errors, sAchievementStore, dbcPath, \"Achievement.dbc\");\nLOAD_DBC(store, \"gtCombatRatings.dbc\", \"gtcombatratings_dbc\");\n");
+var skyfireBindings = ServerTableBindingCatalog.ParseSource(ServerCoreFamily.SkyFire, skyfireStores).ToDictionary(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase);
+if (skyfireBindings["AreaTable.dbc"].Consumption != ServerTableConsumption.DbcLoaded || skyfireBindings["Achievement.dbc"].Consumption != ServerTableConsumption.Unused ||
+    skyfireBindings["gtCombatRatings.dbc"].Consumption != ServerTableConsumption.SqlOverlayed)
+    throw new InvalidOperationException("SkyFire LoadDBC calls, disabled loads, or explicit SQL overlays were not classified from source.");
+var legionStores = Path.Combine(sourceParserFixtures, "DB2Stores.cpp");
+File.WriteAllText(legionStores, "DB2Storage<AchievementEntry> sAchievementStore(\"Achievement.db2\", AchievementLoadInfo::Instance());\nDB2Storage<AlliedRaceEntry> sAlliedRaceStore(\"AlliedRace.db2\", AlliedRaceLoadInfo::Instance());\nLOAD_DB2(sAchievementStore);\n//LOAD_DB2(sAlliedRaceStore);\n");
+var legionBindings = ServerTableBindingCatalog.ParseSource(ServerCoreFamily.LegionCore, legionStores).ToDictionary(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase);
+if (legionBindings["Achievement.db2"].Consumption != ServerTableConsumption.DbcLoaded || legionBindings["AlliedRace.db2"].Consumption != ServerTableConsumption.Unused)
+    throw new InvalidOperationException("LegionCore DB2 declarations and active/disabled loads were not classified from source.");
+var skyfireDb2StoreRoot = Path.Combine(sourceParserFixtures, "skyfire"); Directory.CreateDirectory(skyfireDb2StoreRoot);
+var skyfireDb2Stores = Path.Combine(skyfireDb2StoreRoot, "DB2Stores.cpp");
+File.WriteAllText(skyfireDb2Stores, "DB2Storage<BattlePetAbilityEntry> sBattlePetAbilityStore(BattlePetAbilityfmt);\nDB2Storage<CreatureEntry> sCreatureStore(Creaturefmt);\nLoadDB2(locales, errors, sBattlePetAbilityStore, db2Path, \"BattlePetAbility.db2\");\n//LoadDB2(locales, errors, sCreatureStore, db2Path, \"Creature.db2\");\n");
+var skyfireDb2Bindings = ServerTableBindingCatalog.ParseSource(ServerCoreFamily.SkyFire, skyfireDb2Stores).ToDictionary(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase);
+if (skyfireDb2Bindings["BattlePetAbility.db2"].Consumption != ServerTableConsumption.DbcLoaded || skyfireDb2Bindings["Creature.db2"].Consumption != ServerTableConsumption.Unused)
+    throw new InvalidOperationException("SkyFire LoadDB2 calls and disabled DB2 loads were not classified from source.");
 var workspace = new ServerWorkspace(Path.Combine(layerRoot, "deployment-server"), "fixture.conf", deploymentServer, ServerCoreFamily.AzerothCore, new("127.0.0.1", 3306, "test", "test", "test"));
 if (ServerTableBindingCatalog.ResolveFile(ServerCoreFamily.AzerothCore, "ClientOnlyFixture.dbc", deploymentSource).Consumption != ServerTableConsumption.ClientOnly)
     throw new InvalidOperationException("A source-backed table absent from DBCStores was not classified as client-only.");
-var deploymentPlan = ClientServerDeploymentPlanner.Analyze(deploymentClient, workspace, deploymentSource);
+var deploymentPlan = ClientServerDeploymentPlanner.Analyze(deploymentClient, workspace, wotlkProfile, deploymentSource);
 if (deploymentPlan.Entries.Single(entry => entry.DbcFileName == "AnimationData.dbc").Status != ClientServerPlanStatus.Identical ||
     deploymentPlan.Entries.Single(entry => entry.DbcFileName == "SpellCastTimes.dbc").Status != ClientServerPlanStatus.ServerDbcChange ||
     deploymentPlan.Entries.Single(entry => entry.DbcFileName == "CharVariations.dbc").Status != ClientServerPlanStatus.Identical)
     throw new InvalidOperationException("Client-to-server DBC planning did not distinguish identical and changed server-loaded tables.");
 var deploymentStage = ClientServerDeploymentPlanner.Stage(Path.Combine(layerRoot, "deployment-stage"), deploymentPlan);
 if (deploymentStage.ClientFiles != 1 || deploymentStage.ServerFiles != 1 || deploymentStage.PatchManifestPath is null ||
-    !File.Exists(Path.Combine(deploymentStage.RootPath, "server-dbc", "SpellCastTimes.dbc")))
+    deploymentStage.ClientArchiveFormat != ArchiveFormat.Mpq || deploymentStage.RequiresClientPublisher ||
+    !File.Exists(Path.Combine(deploymentStage.RootPath, "server-files", "data", "dbc", "SpellCastTimes.dbc")) ||
+    !File.Exists(Path.Combine(deploymentStage.ClientPayloadRoot, "DBFilesClient", "SpellCastTimes.dbc")))
     throw new InvalidOperationException("Client-to-server safe staging did not create the expected separated outputs.");
+
+var mopDeploymentRoot = Path.Combine(layerRoot, "deployment-mop");
+var mopClientTables = Path.Combine(mopDeploymentRoot, "client", "DBFilesClient");
+var mopServerDbc = Path.Combine(mopDeploymentRoot, "server", "data", "dbc");
+var mopServerDb2 = Path.Combine(mopDeploymentRoot, "server", "data", "db2");
+Directory.CreateDirectory(mopClientTables); Directory.CreateDirectory(mopServerDbc); Directory.CreateDirectory(mopServerDb2);
+WriteMinimalWdb2(Path.Combine(mopClientTables, "BattlePetAbility.db2"), 18414, 101);
+WriteMinimalWdb2(Path.Combine(mopServerDb2, "BattlePetAbility.db2"), 18414, 100);
+var mopSource = Path.Combine(mopDeploymentRoot, "source", "src", "server", "game", "DataStores"); Directory.CreateDirectory(mopSource);
+File.WriteAllText(Path.Combine(mopSource, "DB2Stores.cpp"), "DB2Storage<BattlePetAbilityEntry> sBattlePetAbilityStore(BattlePetAbilityfmt);\nLoadDB2(locales, errors, sBattlePetAbilityStore, db2Path, \"BattlePetAbility.db2\");\n");
+var mopWorkspace = new ServerWorkspace(Path.Combine(mopDeploymentRoot, "server"), "fixture.conf", mopServerDbc, ServerCoreFamily.SkyFire,
+    new("127.0.0.1", 3306, "test", "test", "test"), Db2Path: mopServerDb2);
+var mopDeploymentPlan = ClientServerDeploymentPlanner.Analyze(mopClientTables, mopWorkspace, mopProfile, Path.Combine(mopDeploymentRoot, "source"));
+var mopEntry = mopDeploymentPlan.Entries.Single();
+var mopStage = ClientServerDeploymentPlanner.Stage(Path.Combine(mopDeploymentRoot, "stage"), mopDeploymentPlan);
+if (mopDeploymentPlan.ClientArchiveFormat != ArchiveFormat.Mpq || mopDeploymentPlan.ServerTableRoots.Count != 2 ||
+    mopEntry.Status != ClientServerPlanStatus.ServerDbcChange || mopEntry.Consumption != ServerTableConsumption.DbcLoaded ||
+    mopStage.PatchManifestPath is null || mopStage.RequiresClientPublisher ||
+    !File.Exists(Path.Combine(mopStage.ClientPayloadRoot, "DBFilesClient", "BattlePetAbility.db2")) ||
+    !File.Exists(Path.Combine(mopStage.RootPath, "server-files", "data", "db2", "BattlePetAbility.db2")) ||
+    !PatchManifestService.Load(mopStage.PatchManifestPath).Entries.Any(entry => entry.ArchivePath == "DBFilesClient\\BattlePetAbility.db2"))
+    throw new InvalidOperationException("MoP DB2 deployment did not preserve MPQ publication and the server's data/db2 destination.");
+
+var legionDeploymentRoot = Path.Combine(layerRoot, "deployment-legion");
+var legionClientTables = Path.Combine(legionDeploymentRoot, "client", "DBFilesClient");
+var legionServerTables = Path.Combine(legionDeploymentRoot, "server", "ClientData", "dbc");
+Directory.CreateDirectory(legionClientTables); Directory.CreateDirectory(legionServerTables);
+WriteMinimalWdc1(Path.Combine(legionClientTables, "Achievement.db2"), 0x11223344);
+WriteMinimalWdc1(Path.Combine(legionServerTables, "Achievement.db2"), 0x11223344);
+var legionServerFixtureBytes = File.ReadAllBytes(Path.Combine(legionServerTables, "Achievement.db2"));
+BinaryPrimitives.WriteUInt32LittleEndian(legionServerFixtureBytes.AsSpan(36, 4), 1); File.WriteAllBytes(Path.Combine(legionServerTables, "Achievement.db2"), legionServerFixtureBytes);
+var legionSourceRoot = Path.Combine(legionDeploymentRoot, "source"); var legionSourceStores = Path.Combine(legionSourceRoot, "src", "server", "game", "DataStores"); Directory.CreateDirectory(legionSourceStores);
+File.WriteAllText(Path.Combine(legionSourceStores, "DB2Stores.cpp"), "DB2Storage<AchievementEntry> sAchievementStore(\"Achievement.db2\", AchievementLoadInfo::Instance());\nLOAD_DB2(sAchievementStore);\n");
+var legionWorkspace = new ServerWorkspace(Path.Combine(legionDeploymentRoot, "server"), "fixture.conf", legionServerTables, ServerCoreFamily.LegionCore,
+    new("127.0.0.1", 3306, "test", "test", "test"));
+var legionDeploymentPlan = ClientServerDeploymentPlanner.Analyze(legionClientTables, legionWorkspace, legionProfile, legionSourceRoot);
+var legionEntry = legionDeploymentPlan.Entries.Single();
+var legionStage = ClientServerDeploymentPlanner.Stage(Path.Combine(legionDeploymentRoot, "stage"), legionDeploymentPlan);
+if (legionDeploymentPlan.ClientArchiveFormat != ArchiveFormat.Casc || legionEntry.Status != ClientServerPlanStatus.ServerDbcChange ||
+    legionEntry.Consumption != ServerTableConsumption.DbcLoaded || legionStage.PatchManifestPath is not null || !legionStage.RequiresClientPublisher ||
+    !File.Exists(Path.Combine(legionStage.ClientPayloadRoot, "DBFilesClient", "Achievement.db2")) ||
+    !File.Exists(Path.Combine(legionStage.RootPath, "server-files", "ClientData", "dbc", "Achievement.db2")))
+    throw new InvalidOperationException("Legion WDC1 deployment was not staged as an unpublished CASC payload with its real server-relative destination.");
+
+var mopIntoLegionPlan = ClientServerDeploymentPlanner.Analyze(mopClientTables, legionWorkspace, legionProfile, legionSourceRoot);
+if (mopIntoLegionPlan.Entries.Single().Status != ClientServerPlanStatus.IncompatibleTarget ||
+    ClientServerDeploymentPlanner.Stage(Path.Combine(legionDeploymentRoot, "mop-cross-stage"), mopIntoLegionPlan).ClientFiles != 0)
+    throw new InvalidOperationException("A MoP WDB2 table crossed the Legion WDC1 deployment boundary.");
+var legionIntoMopPlan = ClientServerDeploymentPlanner.Analyze(legionClientTables, mopWorkspace, mopProfile, Path.Combine(mopDeploymentRoot, "source"));
+if (legionIntoMopPlan.Entries.Single().Status != ClientServerPlanStatus.IncompatibleTarget ||
+    ClientServerDeploymentPlanner.Stage(Path.Combine(mopDeploymentRoot, "legion-cross-stage"), legionIntoMopPlan).ClientFiles != 0)
+    throw new InvalidOperationException("A Legion WDC1 table crossed the MoP WDB2 deployment boundary.");
+
+var directDb2Mapping = PatchInputMapper.Map([Path.Combine(legionClientTables, "Achievement.db2")]).Single();
+if (directDb2Mapping.ArchivePath != "DBFilesClient\\Achievement.db2")
+    throw new InvalidOperationException("A direct DB2 input was not mapped to DBFilesClient.");
+var crossVersionFusion = ClientFusionPlanner.Analyze(Path.GetDirectoryName(legionClientTables)!,
+    [new("MoP table", Path.GetDirectoryName(mopClientTables)!)], legionProfile);
+if (crossVersionFusion.Entries.Single().Status != ClientFusionStatus.IncompatibleTarget ||
+    !crossVersionFusion.Entries.Single().Guidance.Contains("Wdb2", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Legion fusion did not block an otherwise valid MoP WDB2 table at the target-profile boundary.");
+var legionFusionSource = Path.Combine(legionDeploymentRoot, "fusion-source", "DBFilesClient"); Directory.CreateDirectory(legionFusionSource);
+WriteMinimalWdc1(Path.Combine(legionFusionSource, "Spell.db2"), 0x77889900);
+var compatibleLegionFusion = ClientFusionPlanner.Analyze(Path.GetDirectoryName(legionClientTables)!,
+    [new("Legion table", Path.GetDirectoryName(legionFusionSource)!)], legionProfile);
+var compatibleLegionStage = ClientFusionPlanner.Stage(Path.Combine(legionDeploymentRoot, "fusion-stage"), compatibleLegionFusion);
+if (compatibleLegionStage.ManifestPath is not null || !compatibleLegionStage.RequiresClientPublisher ||
+    compatibleLegionStage.TargetArchiveFormat != ArchiveFormat.Casc ||
+    !File.Exists(Path.Combine(compatibleLegionStage.ClientPayloadRoot, "DBFilesClient", "Spell.db2")))
+    throw new InvalidOperationException("Legion fusion did not stage a profile-verified WDC1 table as a CASC publisher payload.");
+
+var mopSemanticRoot = Path.Combine(layerRoot, "fusion-mop-semantic");
+var mopSemanticBase = Path.Combine(mopSemanticRoot, "base", "DBFilesClient");
+var mopSemanticSource = Path.Combine(mopSemanticRoot, "source", "DBFilesClient");
+var mopSemanticDefinitions = Path.Combine(mopSemanticRoot, "definitions");
+Directory.CreateDirectory(mopSemanticBase); Directory.CreateDirectory(mopSemanticSource); Directory.CreateDirectory(mopSemanticDefinitions);
+WriteMinimalWdb2(Path.Combine(mopSemanticBase, "BattlePetAbility.db2"), 18414, 100);
+WriteMinimalWdb2(Path.Combine(mopSemanticSource, "BattlePetAbility.db2"), 18414, 101);
+File.WriteAllText(Path.Combine(mopSemanticDefinitions, "BattlePetAbility.dbd"), "COLUMNS\nint ID\n\nBUILD 5.4.8.18414\n$id$ID<32>\n");
+var mopSemanticFusion = ClientFusionPlanner.Analyze(Path.GetDirectoryName(mopSemanticBase)!,
+    [new("MoP additive DB2", Path.GetDirectoryName(mopSemanticSource)!)], mopProfile);
+var mopSemanticPlan = ClientFusionDbcService.CreatePlan(mopSemanticFusion, null, mopSemanticDefinitions);
+var mopSemanticTable = mopSemanticPlan.Tables.Single();
+if (!mopSemanticTable.Ready || mopSemanticTable.Additions.Count != 1 || mopSemanticTable.Additions[0].Id != 101 ||
+    !mopSemanticTable.SchemaSourcePath.EndsWith("BattlePetAbility.dbd", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("MoP WDB2 semantic fusion did not resolve its exact build schema and additive row.");
+var mopSemanticResult = ClientFusionDbcService.Apply(mopSemanticPlan, Path.Combine(mopSemanticRoot, "output"));
+var mopSemanticOutput = WdbcFile.Load(mopSemanticResult.OutputFiles.Single().Value);
+if (mopSemanticOutput.ContainerKind != ClientTableContainerKind.Wdb2 || mopSemanticOutput.Db2Metadata?.Build != 18414 ||
+    mopSemanticOutput.RowCount != 2 || Enumerable.Range(0, mopSemanticOutput.RowCount).Select(row => mopSemanticOutput.GetRaw(row, new(0, 0, 4, "ID", DbcValueType.UInt32, true))).Order().ToArray() is not [100, 101])
+    throw new InvalidOperationException("Applied MoP semantic fusion did not preserve WDB2 identity while publishing the exact row union.");
+var mopSemanticStage = ClientFusionPlanner.Stage(Path.Combine(mopSemanticRoot, "stage"), mopSemanticFusion, dbcResult: mopSemanticResult);
+if (mopSemanticStage.ManifestPath is null || mopSemanticStage.RequiresClientPublisher || mopSemanticStage.UnresolvedConflicts != 0 ||
+    !PatchManifestService.Load(mopSemanticStage.ManifestPath).Entries.Any(entry => entry.ArchivePath == "DBFilesClient\\BattlePetAbility.db2"))
+    throw new InvalidOperationException("Resolved MoP WDB2 fusion did not enter the normal MPQ manifest pipeline.");
+
+var legionSemanticRoot = Path.Combine(layerRoot, "fusion-legion-semantic");
+var legionSemanticBase = Path.Combine(legionSemanticRoot, "base", "DBFilesClient");
+var legionSemanticSource = Path.Combine(legionSemanticRoot, "source", "DBFilesClient");
+var legionSemanticDefinitions = Path.Combine(legionSemanticRoot, "definitions");
+Directory.CreateDirectory(legionSemanticBase); Directory.CreateDirectory(legionSemanticSource); Directory.CreateDirectory(legionSemanticDefinitions);
+var legionSemanticDefinition = Path.Combine(legionSemanticDefinitions, "Spell.dbd");
+File.WriteAllText(legionSemanticDefinition, "COLUMNS\nint ID\n\nLAYOUT AABBCCDD\nBUILD 7.3.5.26972\n$id$ID<32>\n");
+foreach (var fixture in new[] { (Path: Path.Combine(legionSemanticBase, "Spell.db2"), Id: 100u), (Path: Path.Combine(legionSemanticSource, "Spell.db2"), Id: 101u) })
+{
+    WriteMinimalWdc1(fixture.Path, 0x77889900);
+    var table = WdbcFile.Load(fixture.Path);
+    var columns = DbdSchemaService.ResolveFile(legionSemanticDefinition, 26972, table).Columns;
+    var fixtureIdColumn = columns.Single(column => column.IsIndex);
+    var row = table.AddBlankRow(fixtureIdColumn); table.SetRaw(row, fixtureIdColumn, fixture.Id); table.Save(fixture.Path, false);
+}
+var legionSemanticFusion = ClientFusionPlanner.Analyze(Path.GetDirectoryName(legionSemanticBase)!,
+    [new("Legion additive DB2", Path.GetDirectoryName(legionSemanticSource)!)], legionProfile);
+var legionSemanticPlan = ClientFusionDbcService.CreatePlan(legionSemanticFusion, null, legionSemanticDefinitions);
+var legionSemanticTable = legionSemanticPlan.Tables.Single();
+if (!legionSemanticTable.Ready || legionSemanticTable.Additions.Count != 1 || legionSemanticTable.Additions[0].Id != 101 ||
+    !legionSemanticTable.SchemaSourcePath.EndsWith("Spell.dbd", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("Legion WDC1 semantic fusion did not resolve its exact layout hash and additive row.");
+var legionSemanticResult = ClientFusionDbcService.Apply(legionSemanticPlan, Path.Combine(legionSemanticRoot, "output"));
+var legionSemanticOutput = WdbcFile.Load(legionSemanticResult.OutputFiles.Single().Value);
+var legionSemanticColumns = DbdSchemaService.ResolveFile(legionSemanticDefinition, 26972, legionSemanticOutput).Columns;
+var legionSemanticId = legionSemanticColumns.Single(column => column.IsIndex);
+if (legionSemanticOutput.ContainerKind != ClientTableContainerKind.Wdc1 || legionSemanticOutput.Wdc1Metadata?.LayoutHash != 0xAABBCCDD ||
+    legionSemanticOutput.RowCount != 2 || !Enumerable.Range(0, legionSemanticOutput.RowCount).Select(row => legionSemanticOutput.GetRaw(row, legionSemanticId)).Order().SequenceEqual([100u, 101u]))
+    throw new InvalidOperationException("Applied Legion semantic fusion did not preserve WDC1 layout identity while publishing the exact row union.");
+var legionSemanticStage = ClientFusionPlanner.Stage(Path.Combine(legionSemanticRoot, "stage"), legionSemanticFusion, dbcResult: legionSemanticResult);
+if (legionSemanticStage.ManifestPath is not null || !legionSemanticStage.RequiresClientPublisher || legionSemanticStage.UnresolvedConflicts != 0 ||
+    !File.Exists(Path.Combine(legionSemanticStage.ClientPayloadRoot, "DBFilesClient", "Spell.db2")))
+    throw new InvalidOperationException("Resolved Legion WDC1 fusion was not staged as an explicit CASC publication payload.");
+
 var conflictingLayer = Path.Combine(deploymentClient, "nested-layer"); Directory.CreateDirectory(conflictingLayer); File.Copy(castTimesSource, Path.Combine(conflictingLayer, "SpellCastTimes.dbc"));
-var conflictPlan = ClientServerDeploymentPlanner.Analyze(deploymentClient, workspace, deploymentSource);
+var conflictPlan = ClientServerDeploymentPlanner.Analyze(deploymentClient, workspace, wotlkProfile, deploymentSource);
 if (conflictPlan.Entries.Single(entry => entry.DbcFileName == "SpellCastTimes.dbc").Status != ClientServerPlanStatus.ConflictingClientLayers)
     throw new InvalidOperationException("Different same-named extracted DBC layers were not blocked as a conflict.");
 var fusionBase = Path.Combine(layerRoot, "fusion-base", "DBFilesClient"); var fusionA = Path.Combine(layerRoot, "fusion-a", "DBFilesClient"); var fusionB = Path.Combine(layerRoot, "fusion-b", "DBFilesClient");
@@ -4146,7 +4624,7 @@ Directory.CreateDirectory(fusionBase); Directory.CreateDirectory(fusionA); Direc
 File.Copy(animationPath, Path.Combine(fusionBase, "AnimationData.dbc")); File.Copy(animationPath, Path.Combine(fusionA, "AnimationData.dbc"));
 File.Copy(castTimesSource, Path.Combine(fusionBase, "SpellCastTimes.dbc")); File.Copy(Path.Combine(overrideLayer, "SpellCastTimes.dbc"), Path.Combine(fusionA, "SpellCastTimes.dbc")); File.Copy(castTimesSource, Path.Combine(fusionB, "SpellCastTimes.dbc"));
 var fusionInterface = Path.Combine(Path.GetDirectoryName(fusionA)!, "Interface", "FrameXML"); Directory.CreateDirectory(fusionInterface); File.WriteAllText(Path.Combine(fusionInterface, "FusionFixture.lua"), "-- additive UI fixture");
-var fusionPlan = ClientFusionPlanner.Analyze(Path.GetDirectoryName(fusionBase)!, [new("Mod A", Path.GetDirectoryName(fusionA)!), new("Mod B", Path.GetDirectoryName(fusionB)!)]);
+var fusionPlan = ClientFusionPlanner.Analyze(Path.GetDirectoryName(fusionBase)!, [new("Mod A", Path.GetDirectoryName(fusionA)!), new("Mod B", Path.GetDirectoryName(fusionB)!)], wotlkProfile);
 var savedFusionPlan = Path.Combine(layerRoot, "fusion-plan.json"); ClientFusionPlanner.Save(savedFusionPlan, fusionPlan);
 if (fusionPlan.Entries.Single(entry => entry.ArchivePath.EndsWith("AnimationData.dbc", StringComparison.OrdinalIgnoreCase)).Status != ClientFusionStatus.IdenticalToBase ||
     fusionPlan.Entries.Single(entry => entry.ArchivePath.EndsWith("SpellCastTimes.dbc", StringComparison.OrdinalIgnoreCase)).Status != ClientFusionStatus.Conflict)
@@ -4161,7 +4639,7 @@ var loadedFusionPlan = ClientFusionPlanner.Load(savedFusionPlan); var blockedFus
 if (blockedFusionDbcPlan.Tables.Count != 1 || blockedFusionDbcPlan.Tables[0].Ready || blockedFusionDbcPlan.Tables[0].Conflicts.Count != 1 || blockedFusionDbcPlan.Tables[0].Conflicts[0].DifferingColumns.Count == 0)
     throw new InvalidOperationException("Semantic DBC fusion did not preserve a genuinely different occupied record as an explicit field-level blocker.");
 var blockedFusionDbcResult = ClientFusionDbcService.Apply(blockedFusionDbcPlan, Path.Combine(layerRoot, "fusion-dbc-blocked-result")); var partiallyStagedFusion = ClientFusionPlanner.Stage(Path.Combine(layerRoot, "fusion-dbc-partial-stage"), loadedFusionPlan, dbcResult: blockedFusionDbcResult);
-if (blockedFusionDbcResult.OutputFiles.Count != 0 || blockedFusionDbcResult.BlockedArchivePaths.Count != 1 || partiallyStagedFusion.StagedFiles != 1 || partiallyStagedFusion.UnresolvedConflicts != 1 || !PatchManifestService.Validate(PatchManifestService.Load(partiallyStagedFusion.ManifestPath)).Passed)
+if (blockedFusionDbcResult.OutputFiles.Count != 0 || blockedFusionDbcResult.BlockedArchivePaths.Count != 1 || partiallyStagedFusion.StagedFiles != 1 || partiallyStagedFusion.UnresolvedConflicts != 1 || !PatchManifestService.Validate(PatchManifestService.Load(partiallyStagedFusion.ManifestPath ?? throw new InvalidOperationException("WotLK fusion did not produce an MPQ manifest."))).Passed)
     throw new InvalidOperationException("A blocked DBC did not remain excluded while unrelated additive client assets continued into a valid tiny patch manifest.");
 
 var additiveFusionA = Path.Combine(layerRoot, "fusion-add-a", "DBFilesClient"); var additiveFusionB = Path.Combine(layerRoot, "fusion-add-b", "DBFilesClient"); Directory.CreateDirectory(additiveFusionA); Directory.CreateDirectory(additiveFusionB);
@@ -4169,7 +4647,7 @@ File.Copy(additionsOverridePath, Path.Combine(additiveFusionA, "SpellCastTimes.d
 var secondAddition = WdbcFile.Load(castTimesSource); var secondAdditionId = Enumerable.Range(0, secondAddition.RowCount).Select(row => secondAddition.GetRaw(row, castColumns[0])).Max() + 2; var secondAdditionRow = secondAddition.AddBlankRow();
 foreach (var column in castColumns) { if (column.Type == DbcValueType.StringOffset) secondAddition.SetDisplayValue(secondAdditionRow, column, secondAddition.GetString(secondAddition.GetRaw(0, column))); else secondAddition.SetRaw(secondAdditionRow, column, secondAddition.GetRaw(0, column)); }
 secondAddition.SetRaw(secondAdditionRow, castColumns[0], secondAdditionId); secondAddition.Save(Path.Combine(additiveFusionB, "SpellCastTimes.dbc"), false);
-var additiveFusionPlan = ClientFusionPlanner.Analyze(Path.GetDirectoryName(fusionBase)!, [new("Add A", Path.GetDirectoryName(additiveFusionA)!), new("Add B", Path.GetDirectoryName(additiveFusionB)!)]);
+var additiveFusionPlan = ClientFusionPlanner.Analyze(Path.GetDirectoryName(fusionBase)!, [new("Add A", Path.GetDirectoryName(additiveFusionA)!), new("Add B", Path.GetDirectoryName(additiveFusionB)!)], wotlkProfile);
 if (additiveFusionPlan.Entries.Single().Status != ClientFusionStatus.Conflict) throw new InvalidOperationException("Whole-file fusion fixture did not expose its byte-different additive DBC candidates as a path conflict.");
 var additiveDbcPlan = ClientFusionDbcService.CreatePlan(additiveFusionPlan, args[0]); var additiveTablePlan = additiveDbcPlan.Tables.Single();
 if (!additiveTablePlan.Ready || additiveTablePlan.Additions.Count != 2 || additiveTablePlan.Conflicts.Count != 0 || additiveTablePlan.ReusedRows < WdbcFile.Load(castTimesSource).RowCount * 2)
@@ -4178,7 +4656,7 @@ var additiveDbcPlanPath = Path.Combine(layerRoot, "fusion-dbc-plan.json"); Clien
 var mergedAdditivePath = reloadedAdditiveDbcResult.OutputFiles.Single().Value; if (WdbcFile.Load(mergedAdditivePath).RowCount != WdbcFile.Load(castTimesSource).RowCount + 2 || reloadedAdditiveDbcResult.BlockedArchivePaths.Count != 0)
     throw new InvalidOperationException("Applied additive DBC fusion did not publish exactly the union of base and two new records.");
 var additiveFusionStage = ClientFusionPlanner.Stage(Path.Combine(layerRoot, "fusion-add-stage"), additiveFusionPlan, dbcResult: reloadedAdditiveDbcResult);
-if (additiveFusionStage.StagedFiles != 1 || additiveFusionStage.UnresolvedConflicts != 0 || !PatchManifestService.Validate(PatchManifestService.Load(additiveFusionStage.ManifestPath)).Passed)
+if (additiveFusionStage.StagedFiles != 1 || additiveFusionStage.UnresolvedConflicts != 0 || !PatchManifestService.Validate(PatchManifestService.Load(additiveFusionStage.ManifestPath ?? throw new InvalidOperationException("WotLK additive fusion did not produce an MPQ manifest."))).Passed)
     throw new InvalidOperationException("A semantically resolved DBC path conflict did not feed the normal tiny client-fusion manifest.");
 var staleAdditivePath = Path.Combine(additiveFusionB, "SpellCastTimes.dbc"); var staleAdditiveBytes = File.ReadAllBytes(staleAdditivePath); File.WriteAllBytes(staleAdditivePath, staleAdditiveBytes.Concat(new byte[] { 1 }).ToArray());
 try { ClientFusionDbcService.Verify(additiveDbcPlan); throw new InvalidOperationException("DBC fusion accepted a source changed after planning."); }
@@ -4201,10 +4679,12 @@ foreach (var path in new[] { Path.Combine(remapSourceADbc, "CreatureModelData.db
 var remapDefinitions = Path.Combine(layerRoot, "fusion-remap-definitions"); Directory.CreateDirectory(remapDefinitions);
 File.WriteAllText(Path.Combine(remapDefinitions, "CreatureModelData.dbd"), "COLUMNS\nint ID\nint Flags\n\nBUILD 3.3.5.12340\n$id$ID<32>\nFlags<32>\n");
 File.WriteAllText(Path.Combine(remapDefinitions, "CreatureDisplayInfo.dbd"), "COLUMNS\nint ID\nint<CreatureModelData::ID> ModelID\n\nBUILD 3.3.5.12340\n$id$ID<32>\nModelID<32>\n");
-var remapFusionPlan = ClientFusionPlanner.Analyze(Path.GetDirectoryName(remapBaseDbc)!, [new("Remap A", Path.GetDirectoryName(remapSourceADbc)!), new("Remap B", Path.GetDirectoryName(remapSourceBDbc)!)]);
+var remapFusionPlan = ClientFusionPlanner.Analyze(Path.GetDirectoryName(remapBaseDbc)!, [new("Remap A", Path.GetDirectoryName(remapSourceADbc)!), new("Remap B", Path.GetDirectoryName(remapSourceBDbc)!)], wotlkProfile);
 if (remapFusionPlan.Entries.Single(entry => entry.ArchivePath.EndsWith("CreatureModelData.dbc", StringComparison.OrdinalIgnoreCase)).Candidates.Count != 2 || remapFusionPlan.Entries.Single(entry => entry.ArchivePath.EndsWith("CreatureDisplayInfo.dbc", StringComparison.OrdinalIgnoreCase)).Status != ClientFusionStatus.IdenticalToBase)
     throw new InvalidOperationException("Client fusion collapsed source provenance needed for dependency propagation or misclassified the unchanged referencing table.");
-var remapPlan = ClientFusionDbcRemapService.CreatePlan(remapFusionPlan, args[0], remapDefinitions); var modelRemapTable = remapPlan.Tables.Single(table => table.Table == "CreatureModelData"); var displayRemapTable = remapPlan.Tables.Single(table => table.Table == "CreatureDisplayInfo");
+var remapPlan = ClientFusionDbcRemapService.CreatePlan(remapFusionPlan, args[0], remapDefinitions); var modelRemapTable = remapPlan.Tables.SingleOrDefault(table => table.Table == "CreatureModelData"); var displayRemapTable = remapPlan.Tables.SingleOrDefault(table => table.Table == "CreatureDisplayInfo");
+if (modelRemapTable is null || displayRemapTable is null)
+    throw new InvalidOperationException($"Dependency remap lost a required table. Tables: {string.Join(',', remapPlan.Tables.Select(table => table.Table))}. Blockers: {string.Join(" | ", remapPlan.Blockers)}");
 var addedModelMap = modelRemapTable.Operations.Single(operation => operation.SourceId == selectedModelId && operation.AddsRow); var reusedModelMap = modelRemapTable.Operations.Single(operation => operation.SourceId == selectedModelId && !operation.AddsRow);
 var addedDisplayMap = displayRemapTable.Operations.Single(operation => operation.SourceId == selectedDisplayId && operation.AddsRow); var reusedDisplayMap = displayRemapTable.Operations.Single(operation => operation.SourceId == selectedDisplayId && !operation.AddsRow);
 if (!remapPlan.Ready || addedModelMap.TargetId == selectedModelId || reusedModelMap.TargetId != addedModelMap.TargetId || addedDisplayMap.TargetId == selectedDisplayId || reusedDisplayMap.TargetId != addedDisplayMap.TargetId || addedDisplayMap.ReferenceRewrites.GetValueOrDefault("ModelID") != addedModelMap.TargetId)
@@ -4215,7 +4695,7 @@ var outputModelRows = DbcRecordIdentity.IndexRows(outputModels, remapModelColumn
 if (!outputModelRows.ContainsKey(addedModelMap.TargetId) || outputDisplays.GetRaw(outputDisplayRows[addedDisplayMap.TargetId], remapDisplayModelColumn) != addedModelMap.TargetId || outputDisplays.GetRaw(outputDisplayRows[selectedDisplayId], remapDisplayModelColumn) != selectedModelId)
     throw new InvalidOperationException("Applied DBC dependency remap did not preserve the base row while publishing its cloned referencing closure.");
 var remapStage = ClientFusionPlanner.Stage(Path.Combine(layerRoot, "fusion-dbc-remap-stage"), remapFusionPlan, dbcRemapResult: loadedRemapResult);
-if (remapStage.StagedFiles != 2 || remapStage.UnresolvedConflicts != 0 || !PatchManifestService.Validate(PatchManifestService.Load(remapStage.ManifestPath)).Passed)
+if (remapStage.StagedFiles != 2 || remapStage.UnresolvedConflicts != 0 || !PatchManifestService.Validate(PatchManifestService.Load(remapStage.ManifestPath ?? throw new InvalidOperationException("WotLK remap fusion did not produce an MPQ manifest."))).Passed)
     throw new InvalidOperationException("Dependency-remapped DBC outputs—including a source-byte-identical propagated table—did not stage into the tiny fusion manifest.");
 var staleRemapPath = Path.Combine(remapSourceBDbc, "CreatureModelData.dbc"); var staleRemapBytes = File.ReadAllBytes(staleRemapPath); File.WriteAllBytes(staleRemapPath, staleRemapBytes.Concat(new byte[] { 1 }).ToArray());
 try { ClientFusionDbcRemapService.Verify(remapPlan); throw new InvalidOperationException("DBC dependency remapping accepted a source changed after planning."); }
@@ -4916,6 +5396,79 @@ static void WriteRawWdbc(string path, int fieldCount, IReadOnlyList<uint[]> rows
         foreach (var field in row)
             writer.Write(field);
     writer.Write((byte)0);
+}
+
+static void WriteMinimalWdb2(string path, int build, uint value)
+{
+    var bytes = new byte[53];
+    "WDB2"u8.CopyTo(bytes);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4, 4), 1);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8, 4), 1);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12, 4), 4);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(16, 4), 1);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(24, 4), build);
+    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(48, 4), value);
+    File.WriteAllBytes(path, bytes);
+}
+
+static void WriteMinimalWdc1(string path, uint tableHash)
+{
+    var bytes = new byte[88];
+    "WDC1"u8.CopyTo(bytes);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8, 4), 1);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12, 4), 4);
+    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(20, 4), tableHash);
+    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(24, 4), 0xAABBCCDD);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(48, 4), 1);
+    File.WriteAllBytes(path, bytes);
+}
+
+static void WriteSimpleWdbc(string path, IReadOnlyList<(uint Id, uint[] Values)> rows)
+{
+    if (rows.Count == 0) throw new ArgumentException("Simple WDBC fixture requires at least one row.", nameof(rows));
+    var fieldCount = rows[0].Values.Length + 1;
+    if (rows.Any(row => row.Values.Length + 1 != fieldCount)) throw new ArgumentException("Simple WDBC fixture rows must have equal widths.", nameof(rows));
+    var recordSize = checked(fieldCount * 4);
+    var bytes = new byte[checked(20 + rows.Count * recordSize + 1)];
+    "WDBC"u8.CopyTo(bytes);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(4, 4), rows.Count);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8, 4), fieldCount);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12, 4), recordSize);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(16, 4), 1);
+    for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+    {
+        var offset = 20 + rowIndex * recordSize;
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset, 4), rows[rowIndex].Id);
+        for (var field = 0; field < rows[rowIndex].Values.Length; field++)
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(offset + (field + 1) * 4, 4), rows[rowIndex].Values[field]);
+    }
+    File.WriteAllBytes(path, bytes);
+}
+
+static void WriteSimpleWdc1(string path, string definitionPath, IReadOnlyList<(uint Id, uint[] Values)> rows)
+{
+    if (rows.Count == 0) throw new ArgumentException("Simple WDC1 fixture requires at least one row.", nameof(rows));
+    var fieldCount = rows[0].Values.Length + 1;
+    if (rows.Any(row => row.Values.Length + 1 != fieldCount)) throw new ArgumentException("Simple WDC1 fixture rows must have equal widths.", nameof(rows));
+    var bytes = new byte[84 + fieldCount * 4];
+    "WDC1"u8.CopyTo(bytes);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8, 4), fieldCount);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12, 4), fieldCount * 4);
+    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(20, 4), 0x12345678);
+    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(24, 4), 0xAABBCCDD);
+    BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(48, 4), fieldCount);
+    for (var field = 0; field < fieldCount; field++) BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(84 + field * 4 + 2, 2), checked((ushort)(field * 4)));
+    File.WriteAllBytes(path, bytes);
+    var table = WdbcFile.Load(path);
+    var schema = DbdSchemaService.ResolveFile(definitionPath, 26972, table);
+    var key = DbcRecordIdentity.PhysicalColumn(schema.Columns, schema.KeyStrategy) ?? throw new InvalidOperationException("Simple WDC1 fixture has no physical ID.");
+    foreach (var source in rows)
+    {
+        var row = table.AddBlankRow(key);
+        table.SetRaw(row, key, source.Id);
+        for (var field = 0; field < source.Values.Length; field++) table.SetRaw(row, schema.Columns[field + 1], source.Values[field]);
+    }
+    table.Save(path, false);
 }
 
 static void WriteMapChunk(BinaryWriter writer, string id, byte[] payload)
