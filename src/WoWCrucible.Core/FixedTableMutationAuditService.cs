@@ -53,7 +53,8 @@ public static class FixedTableMutationAuditService
         int build,
         string? artifactParent = null,
         string? xmlSchemaPath = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool recursiveTableDiscovery = true)
     {
         definitionsRoot = RequiredDirectory(definitionsRoot, "WoWDBDefs definitions folder");
         tableRoot = RequiredDirectory(tableRoot, "fixed-layout client-table folder");
@@ -75,7 +76,7 @@ public static class FixedTableMutationAuditService
         var scanned = 0;
         try
         {
-            var paths = Directory.EnumerateFiles(tableRoot, "*", SearchOption.AllDirectories)
+            var paths = Directory.EnumerateFiles(tableRoot, "*", recursiveTableDiscovery ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
                 .Where(path => Path.GetExtension(path) is ".dbc" or ".db2" || Path.GetExtension(path).Equals(".dbc", StringComparison.OrdinalIgnoreCase) || Path.GetExtension(path).Equals(".db2", StringComparison.OrdinalIgnoreCase))
                 .Order(StringComparer.OrdinalIgnoreCase).ToArray();
             foreach (var path in paths)

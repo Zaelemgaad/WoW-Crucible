@@ -16,7 +16,8 @@
           "Name": "client",
           "SourceRoot": "D:\\Installed\\MoP Client",
           "CloneRoot": "D:\\CrucibleLab\\worktrees\\mop\\client",
-          "ExcludedDirectoryNames": [ "Cache" ]
+          "ExcludedDirectoryNames": [ "Cache" ],
+          "ExcludedFilePaths": [ "World of Warcraft 5.4.8.rar" ]
         },
         {
           "Name": "server",

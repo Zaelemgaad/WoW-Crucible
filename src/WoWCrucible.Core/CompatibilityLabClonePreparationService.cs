@@ -46,7 +46,8 @@ public static partial class CompatibilityLabService
         int FormatVersion,
         string SourceRoot,
         string CloneRoot,
-        IReadOnlyList<string> ExcludedDirectoryNames);
+        IReadOnlyList<string> ExcludedDirectoryNames,
+        IReadOnlyList<string>? ExcludedFilePaths = null);
 
     public static CompatibilityLabClonePreparationReport PrepareClones(
         CompatibilityLabRequest request,
@@ -103,7 +104,8 @@ public static partial class CompatibilityLabService
     {
         var sourceRoot = RequiredDirectory(pair.SourceRoot, $"{name} source");
         var cloneRoot = Path.GetFullPath(pair.CloneRoot ?? string.Empty);
-        var exclusions = NormalizeCloneExclusions(pair.ExcludedDirectoryNames);
+        var excludedDirectories = NormalizeExcludedDirectoryNames(pair.ExcludedDirectoryNames);
+        var excludedFiles = NormalizeExcludedFilePaths(pair.ExcludedFilePaths);
         ValidateDisjointRoots(sourceRoot, cloneRoot, name);
         var partialRoot = PartialRoot(cloneRoot);
         ValidateDisjointRoots(sourceRoot, partialRoot, name);
@@ -119,12 +121,17 @@ public static partial class CompatibilityLabService
         }
         if (File.Exists(cloneRoot)) throw new IOException($"Clone destination is an existing file: {cloneRoot}");
 
-        var sourceFiles = FileMap(sourceRoot, exclusions);
+        var sourceFiles = FileMap(sourceRoot, excludedDirectories, excludedFiles);
         var sourceBytes = sourceFiles.Values.Sum(file => file.Length);
         EnsureCloneCapacity(cloneRoot, sourceBytes);
         var markerPath = MarkerPath(partialRoot);
         var resumed = Directory.Exists(partialRoot) || File.Exists(markerPath);
-        var expectedMarker = new CompatibilityCloneResumeMarker(ClonePreparationFormatVersion, sourceRoot, cloneRoot, exclusions);
+        var expectedMarker = new CompatibilityCloneResumeMarker(
+            ClonePreparationFormatVersion,
+            sourceRoot,
+            cloneRoot,
+            excludedDirectories,
+            excludedFiles);
         if (resumed)
         {
             if (!File.Exists(markerPath))
@@ -134,7 +141,8 @@ public static partial class CompatibilityLabService
             if (marker.FormatVersion != expectedMarker.FormatVersion ||
                 !PathEquals(marker.SourceRoot, expectedMarker.SourceRoot) ||
                 !PathEquals(marker.CloneRoot, expectedMarker.CloneRoot) ||
-                !marker.ExcludedDirectoryNames.SequenceEqual(expectedMarker.ExcludedDirectoryNames, StringComparer.OrdinalIgnoreCase))
+                !NormalizeExcludedDirectoryNames(marker.ExcludedDirectoryNames).SequenceEqual(expectedMarker.ExcludedDirectoryNames, StringComparer.OrdinalIgnoreCase) ||
+                !NormalizeExcludedFilePaths(marker.ExcludedFilePaths).SequenceEqual(expectedMarker.ExcludedFilePaths!, StringComparer.OrdinalIgnoreCase))
                 throw new InvalidDataException($"Partial clone marker does not match the current source, destination, or exclusions: {markerPath}");
         }
         else
@@ -144,7 +152,7 @@ public static partial class CompatibilityLabService
         }
         Directory.CreateDirectory(partialRoot);
 
-        var partialFiles = FileMap(partialRoot, []);
+        var partialFiles = FileMap(partialRoot, [], []);
         var stale = partialFiles.Keys.Except(sourceFiles.Keys, StringComparer.OrdinalIgnoreCase).ToArray();
         foreach (var relative in stale)
         {
@@ -188,7 +196,13 @@ public static partial class CompatibilityLabService
         }
         ReportCopyProgress(progress, name, completedBytes, sourceBytes, sourceRoot, timer, force: true);
 
-        var partialPair = pair with { SourceRoot = sourceRoot, CloneRoot = partialRoot, ExcludedDirectoryNames = exclusions };
+        var partialPair = pair with
+        {
+            SourceRoot = sourceRoot,
+            CloneRoot = partialRoot,
+            ExcludedDirectoryNames = excludedDirectories,
+            ExcludedFilePaths = excludedFiles
+        };
         var audit = AuditClone(name, partialPair, hashWorkers, progress, cancellationToken);
         if (!audit.Passed)
             return new(name, sourceRoot, cloneRoot, partialRoot, CompatibilityLabClonePreparationState.Failed,
@@ -237,7 +251,7 @@ public static partial class CompatibilityLabService
         }
     }
 
-    private static string[] NormalizeCloneExclusions(IReadOnlyList<string>? values)
+    private static string[] NormalizeExcludedDirectoryNames(IReadOnlyList<string>? values)
     {
         var result = (values ?? []).Select(value => value?.Trim() ?? string.Empty)
             .Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase)
@@ -245,6 +259,24 @@ public static partial class CompatibilityLabService
         if (result.Any(value => value is "." or ".." || value.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0))
             throw new InvalidDataException("Clone exclusions must be individual directory names, not relative or absolute paths.");
         return result;
+    }
+
+    private static string[] NormalizeExcludedFilePaths(IReadOnlyList<string>? values)
+    {
+        var normalized = new List<string>();
+        foreach (var raw in values ?? [])
+        {
+            var value = raw?.Trim() ?? string.Empty;
+            if (value.Length == 0) continue;
+            if (Path.IsPathRooted(value) || value.StartsWith('\\') || value.StartsWith('/'))
+                throw new InvalidDataException("Excluded clone files must be exact source-relative paths, not absolute paths.");
+
+            var segments = value.Replace('\\', '/').Split('/');
+            if (segments.Any(segment => segment.Length == 0 || segment is "." or ".." || segment.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0))
+                throw new InvalidDataException($"Excluded clone file path is invalid or escapes its source root: {value}");
+            normalized.Add(string.Join(Path.DirectorySeparatorChar, segments));
+        }
+        return normalized.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
     private static void ValidateCloneDestinations(IReadOnlyList<(string Name, CompatibilityLabClonePair Pair)> pairs)

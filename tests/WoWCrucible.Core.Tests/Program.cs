@@ -3942,6 +3942,9 @@ try
     Directory.CreateDirectory(sourceTwo);
     File.WriteAllText(Path.Combine(sourceOne, "Wow.exe"), "client-one");
     File.WriteAllText(Path.Combine(sourceOne, "Data", "common.MPQ"), "archive-one");
+    File.WriteAllText(Path.Combine(sourceOne, "backup.rar"), "excluded-backup");
+    File.WriteAllText(Path.Combine(sourceOne, "Data", "backup.rar"), "same-name-but-included");
+    File.WriteAllText(Path.Combine(sourceOne, "Data", "scratch.tmp"), "excluded-exact-path");
     File.WriteAllText(Path.Combine(sourceOne, "Cache", "ignored.bin"), "runtime-cache");
     File.WriteAllText(Path.Combine(sourceTwo, "worldserver.exe"), "server-two");
     var cloneOne = Path.Combine(clonePreparationFixture, "worktrees", "one");
@@ -3949,15 +3952,18 @@ try
     var cloneRequest = new CompatibilityLabRequest(1, Path.Combine(clonePreparationFixture, "runs"),
     [
         new("Fixture one", "mop-18414", cloneOne, cloneOne, null, "fixture-definitions", null,
-            [new("client", sourceOne, cloneOne, ["Cache"])]),
+            [new("client", sourceOne, cloneOne, ["Cache"], ["backup.rar", "Data/scratch.tmp"])]),
         new("Fixture two", "legion-26972", cloneTwo, cloneTwo, null, "fixture-definitions", null,
             [new("server", sourceTwo, cloneTwo)])
     ], 1);
     var createdClones = CompatibilityLabService.PrepareClones(cloneRequest);
     if (!createdClones.Passed || createdClones.Entries.Any(entry => entry.State != CompatibilityLabClonePreparationState.Created) ||
         !File.Exists(Path.Combine(cloneOne, "Wow.exe")) || !File.Exists(Path.Combine(cloneOne, "Data", "common.MPQ")) ||
-        File.Exists(Path.Combine(cloneOne, "Cache", "ignored.bin")) || !File.Exists(createdClones.JsonReportPath) || !File.Exists(createdClones.MarkdownReportPath))
-        throw new InvalidOperationException("Compatibility clone preparation did not create and independently verify exact excluded-directory-aware clones.");
+        File.Exists(Path.Combine(cloneOne, "Cache", "ignored.bin")) || File.Exists(Path.Combine(cloneOne, "backup.rar")) ||
+        File.Exists(Path.Combine(cloneOne, "Data", "scratch.tmp")) || !File.Exists(Path.Combine(cloneOne, "Data", "backup.rar")) ||
+        createdClones.Entries[0].Audit?.ExcludedFilePaths.Count != 2 ||
+        !File.Exists(createdClones.JsonReportPath) || !File.Exists(createdClones.MarkdownReportPath))
+        throw new InvalidOperationException("Compatibility clone preparation did not create and independently verify exact directory/file-exclusion-aware clones.");
     var verifiedClones = CompatibilityLabService.PrepareClones(cloneRequest);
     if (!verifiedClones.Passed || verifiedClones.Entries.Any(entry => entry.State != CompatibilityLabClonePreparationState.VerifiedExisting || entry.CopiedFiles != 0))
         throw new InvalidOperationException("Compatibility clone preparation rewrote or failed to verify completed clone trees.");
@@ -3966,6 +3972,21 @@ try
     if (driftedClones.Passed || driftedClones.Entries[0].State != CompatibilityLabClonePreparationState.Failed ||
         File.ReadAllText(Path.Combine(cloneOne, "Wow.exe")) != "drifted-clone")
         throw new InvalidOperationException("Compatibility clone preparation overwrote a completed clone after identity drift.");
+
+    var invalidFileExclusionRequest = new CompatibilityLabRequest(1, Path.Combine(clonePreparationFixture, "invalid-runs"),
+    [
+        new("Invalid fixture", "mop-18414", cloneOne, cloneOne, null, "fixture-definitions", null,
+            [new("client", sourceOne, Path.Combine(clonePreparationFixture, "invalid-clone"), null, ["../outside.rar"])]),
+        new("Required second lane", "legion-26972", cloneTwo, cloneTwo, null, "fixture-definitions", null,
+            [new("server", sourceTwo, Path.Combine(clonePreparationFixture, "invalid-clone-two"))])
+    ]);
+    try
+    {
+        _ = CompatibilityLabService.PrepareClones(invalidFileExclusionRequest);
+        throw new InvalidOperationException("Compatibility clone preparation accepted a file exclusion that escaped its source root.");
+    }
+    catch (InvalidDataException exception) when (exception.Message.Contains("source-relative", StringComparison.OrdinalIgnoreCase) ||
+                                                  exception.Message.Contains("escapes", StringComparison.OrdinalIgnoreCase)) { }
 
     var resumeRoot = Path.Combine(clonePreparationFixture, "resume");
     var resumeSourceOne = Path.Combine(resumeRoot, "source-one");
@@ -4619,6 +4640,10 @@ var conflictingLayer = Path.Combine(deploymentClient, "nested-layer"); Directory
 var conflictPlan = ClientServerDeploymentPlanner.Analyze(deploymentClient, workspace, wotlkProfile, deploymentSource);
 if (conflictPlan.Entries.Single(entry => entry.DbcFileName == "SpellCastTimes.dbc").Status != ClientServerPlanStatus.ConflictingClientLayers)
     throw new InvalidOperationException("Different same-named extracted DBC layers were not blocked as a conflict.");
+var directOnlyPlan = ClientServerDeploymentPlanner.Analyze(deploymentClient, workspace, wotlkProfile, deploymentSource,
+    recursiveClientTables: false);
+if (directOnlyPlan.Entries.Single(entry => entry.DbcFileName == "SpellCastTimes.dbc").Status != ClientServerPlanStatus.ServerDbcChange)
+    throw new InvalidOperationException("Explicit top-level table discovery did not isolate the selected effective DBC layer.");
 var fusionBase = Path.Combine(layerRoot, "fusion-base", "DBFilesClient"); var fusionA = Path.Combine(layerRoot, "fusion-a", "DBFilesClient"); var fusionB = Path.Combine(layerRoot, "fusion-b", "DBFilesClient");
 Directory.CreateDirectory(fusionBase); Directory.CreateDirectory(fusionA); Directory.CreateDirectory(fusionB);
 File.Copy(animationPath, Path.Combine(fusionBase, "AnimationData.dbc")); File.Copy(animationPath, Path.Combine(fusionA, "AnimationData.dbc"));

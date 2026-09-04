@@ -67,7 +67,7 @@ public static class ClientServerDeploymentPlanner
     private const int FormatVersion = 3;
 
     public static ClientServerDeploymentPlan Analyze(string clientDbcRoot, ServerWorkspace workspace, TargetProfile target,
-        string? coreSourceRoot = null, CancellationToken cancellationToken = default)
+        string? coreSourceRoot = null, CancellationToken cancellationToken = default, bool recursiveClientTables = true)
     {
         ArgumentNullException.ThrowIfNull(workspace);
         ArgumentNullException.ThrowIfNull(target);
@@ -78,10 +78,10 @@ public static class ClientServerDeploymentPlanner
             throw new DirectoryNotFoundException($"No detected server DBC/DB2 table folder is available below {workspace.RootPath}.");
         coreSourceRoot = Directory.Exists(coreSourceRoot) ? Path.GetFullPath(coreSourceRoot) : null;
 
-        var clientGroups = EnumerateTables(clientDbcRoot)
+        var clientGroups = EnumerateTables(clientDbcRoot, recursiveClientTables)
             .GroupBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase).ToArray();
         if (clientGroups.Length == 0) throw new InvalidDataException($"No .dbc or .db2 files were found under {clientDbcRoot}. Select an extracted DBFilesClient table folder first.");
-        var serverFiles = serverTableRoots.SelectMany(EnumerateTables)
+        var serverFiles = serverTableRoots.SelectMany(root => EnumerateTables(root, recursive: true))
             .GroupBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key!, group => SelectServerCandidate(group, workspace.RootPath), StringComparer.OrdinalIgnoreCase);
         var bindings = ServerTableBindingCatalog.Resolve(workspace.CoreFamily, coreSourceRoot, target.ClientBuild)
             .ToDictionary(binding => binding.DbcFileName, StringComparer.OrdinalIgnoreCase);
@@ -275,9 +275,9 @@ public static class ClientServerDeploymentPlanner
         _ => "Resolve this entry before deployment."
     };
 
-    private static IEnumerable<string> EnumerateTables(string root) =>
-        Directory.EnumerateFiles(root, "*.dbc", SearchOption.AllDirectories)
-            .Concat(Directory.EnumerateFiles(root, "*.db2", SearchOption.AllDirectories));
+    private static IEnumerable<string> EnumerateTables(string root, bool recursive) =>
+        Directory.EnumerateFiles(root, "*.dbc", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
+            .Concat(Directory.EnumerateFiles(root, "*.db2", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly));
 
     private static string SelectServerCandidate(IEnumerable<string> candidates, string serverRoot) => candidates
         .OrderBy(path => Path.GetRelativePath(serverRoot, path).Count(character => character is '\\' or '/'))

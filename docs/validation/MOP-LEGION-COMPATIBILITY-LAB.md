@@ -29,6 +29,59 @@ resulting loss of source-backed server-consumer evidence instead of substituting
 These routes are staged in separate date-named clone roots. They have not replaced the passing corpus
 or been claimed as a passing run.
 
+## Current-source refresh (2026-09-04 UTC)
+
+Crucible prepared the current routes above through the public clone-preparation workflow. The passing
+clone report is `clone-20260904-020509-a8ffdf21ef74428cb427679ffa64362d` under the ignored
+`.local\compat-lab\runs\clone-preparations` directory.
+
+| Pair | Files | Bytes | Identity result |
+|---|---:|---:|---:|
+| MoP client | 166 | 49,525,153,060 | PASS |
+| Emucoach MoP server | 35,338 | 11,526,516,930 | PASS |
+| Firestorm Legion client | 12,642 | 54,228,823,060 | PASS |
+| LegionCore server | 73,457 | 12,427,690,535 | PASS |
+
+The first real preparation exposed a request-contract gap by copying the MoP client's protected
+24,381,421,738-byte `World of Warcraft 5.4.8.rar` backup into the disposable clone. The source backup
+and completed clone were not modified. Clone requests now support exact source-relative
+`ExcludedFilePaths`; those paths are normalized, traversal-refused, bound into resume ownership, and
+used by both preparation and later identity audits. The current audit therefore hashes 165 included
+MoP client files while leaving the already copied backup untouched.
+
+An initial current-source audit (`compat-20260904-022023-ed06345079224ebaaa96749ec0aeba41`)
+recursively treated Emucoach's active tables, localized `ruRU` copies, and archived `ruRU_old` tables
+as one corpus. That correctly reported 150 schema failures and 239 conflicting client layers, but it
+did not represent the running configuration: `worldserver.conf` sets `DBC.Locale = 0`. Compatibility
+lanes now support `RecursiveTableDiscovery = false`, and that scope is applied consistently to schema,
+mutation, native/cross deployment, and collision analysis instead of being a report-only filter.
+
+The corrected current-source run is
+`compat-20260904-022807-98594061c58340b3bf05f17685e0fca7`. It selected the direct files in the
+cloned Emucoach `dbc` directory and produced these results:
+
+| Check | Emucoach MoP | Firestorm/LegionCore |
+|---|---:|---:|
+| Selected table files | 453 | 611 |
+| Format-supported nonempty files | 428 | 611 |
+| Empty placeholders | 25 | 0 |
+| Byte-identical unchanged round trips | 428 | 611 |
+| Exact schemas | 426 | 611 |
+| Exact-schema mutation cases passed | 426 | 611 |
+| Native deployment entries identical | 453 | 611 |
+| Lane result | FAIL | PASS |
+
+Both cross-target attacks still passed by staging zero incompatible files. MoP native deployment is
+now entirely clean; the lane remains failed for two real, isolated schema blockers. Emucoach provides
+`SpellVisual.dbc` as a 38-field/152-byte WDBC beside a 30-field/120-byte build-18273 WDB2, and
+`SpellVisualEffectName.dbc` as a 10-field/40-byte WDBC beside a 9-field/36-byte build-18273 WDB2.
+Stock build-18414 WoWDBDefs and WDBX schemas describe the paired DB2 layouts, not the extra WDBC
+fields. All nonempty files, including both custom WDBCs, round-trip unchanged byte for byte, but the
+two custom files are deliberately blocked from structured mutation until an exact Emucoach schema or
+matching core source proves their field meanings. The current corpus also lacks a dependent-side-table
+WDB2 specimen, so that mutation-guard capability remains covered by the earlier passing corpus rather
+than this repack. No opaque fields were invented to turn the current report green.
+
 ## Results
 
 | Check | MoP 5.4.8 | Legion 7.3.5 |

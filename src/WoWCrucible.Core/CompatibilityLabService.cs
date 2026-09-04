@@ -10,7 +10,8 @@ public sealed record CompatibilityLabClonePair(
     string Name,
     string SourceRoot,
     string CloneRoot,
-    IReadOnlyList<string>? ExcludedDirectoryNames = null);
+    IReadOnlyList<string>? ExcludedDirectoryNames = null,
+    IReadOnlyList<string>? ExcludedFilePaths = null);
 
 public sealed record CompatibilityLabLane(
     string Name,
@@ -20,7 +21,8 @@ public sealed record CompatibilityLabLane(
     string? CoreSourceRoot,
     string DefinitionsRoot,
     string? XmlSchemaPath,
-    IReadOnlyList<CompatibilityLabClonePair> ClonePairs);
+    IReadOnlyList<CompatibilityLabClonePair> ClonePairs,
+    bool RecursiveTableDiscovery = true);
 
 public sealed record CompatibilityLabRequest(
     int FormatVersion,
@@ -37,6 +39,7 @@ public sealed record CompatibilityLabCloneAudit(
     string SourceRoot,
     string CloneRoot,
     IReadOnlyList<string> ExcludedDirectoryNames,
+    IReadOnlyList<string> ExcludedFilePaths,
     int SourceFiles,
     int CloneFiles,
     long SourceBytes,
@@ -74,6 +77,7 @@ public sealed record CompatibilityLabLaneAudit(
     ArchiveFormat ArchiveFormat,
     ServerCoreFamily CoreFamily,
     string TableRoot,
+    bool RecursiveTableDiscovery,
     int TableFiles,
     IReadOnlyDictionary<ClientTableCompatibilityState, int> CompatibilityCounts,
     DbdSchemaAuditSummary SchemaAudit,
@@ -251,7 +255,7 @@ public static partial class CompatibilityLabService
         var tableRoot = RequiredDirectory(lane.Request.TableRoot, $"{lane.Request.Name} table root");
         var definitions = RequiredDirectory(lane.Request.DefinitionsRoot, $"{lane.Request.Name} WoWDBDefs root");
         var xml = string.IsNullOrWhiteSpace(lane.Request.XmlSchemaPath) ? null : RequiredFile(lane.Request.XmlSchemaPath, $"{lane.Request.Name} WDBX XML");
-        var tables = EnumerateTables(tableRoot).ToArray();
+        var tables = EnumerateTables(tableRoot, lane.Request.RecursiveTableDiscovery).ToArray();
         progress?.Report(new($"{lane.Request.Name}: compatibility", 0, tables.Length, tableRoot));
         var compatibility = new List<ClientTableCompatibilityAssessment>(tables.Length);
         for (var index = 0; index < tables.Length; index++)
@@ -263,7 +267,7 @@ public static partial class CompatibilityLabService
         }
 
         progress?.Report(new($"{lane.Request.Name}: schema round-trip", 0, tables.Length, tableRoot));
-        var schema = AuditSchemas(definitions, tableRoot, lane.Profile.ClientBuild, xml);
+        var schema = AuditSchemas(definitions, tableRoot, lane.Profile.ClientBuild, xml, lane.Request.RecursiveTableDiscovery);
         FixedTableMutationAuditSummary? fixedMutation = null;
         Wdc1MutationAuditSummary? wdc1Mutation = null;
         var mutationRoot = Path.Combine(runRoot, "mutations", Slug(lane.Request.Name));
@@ -271,13 +275,13 @@ public static partial class CompatibilityLabService
         {
             progress?.Report(new($"{lane.Request.Name}: fixed mutation", 0, tables.Length, tableRoot));
             fixedMutation = FixedTableMutationAuditService.Audit(definitions, tableRoot, lane.Profile.ClientBuild,
-                Path.Combine(mutationRoot, "fixed"), xml, cancellationToken);
+                Path.Combine(mutationRoot, "fixed"), xml, cancellationToken, lane.Request.RecursiveTableDiscovery);
         }
         if (lane.Profile.SupportsWdc1)
         {
             progress?.Report(new($"{lane.Request.Name}: WDC1 mutation", 0, tables.Length, tableRoot));
             wdc1Mutation = AuditWdc1Mutations(definitions, tableRoot, lane.Profile.ClientBuild,
-                Path.Combine(mutationRoot, "wdc1"), cancellationToken);
+                Path.Combine(mutationRoot, "wdc1"), cancellationToken, lane.Request.RecursiveTableDiscovery);
         }
 
         var coreSourceRoot = string.IsNullOrWhiteSpace(lane.Request.CoreSourceRoot)
@@ -293,7 +297,7 @@ public static partial class CompatibilityLabService
         if (tables.Length == 0) laneErrors.Add("No client tables were found.");
         if (workspace.CoreFamily == ServerCoreFamily.Unknown) laneErrors.Add("The cloned server family was not detected.");
         return new(lane.Request.Name, lane.Profile.Id, lane.Profile.ClientBuild, lane.Profile.ArchiveFormat,
-            workspace.CoreFamily, tableRoot, tables.Length,
+            workspace.CoreFamily, tableRoot, lane.Request.RecursiveTableDiscovery, tables.Length,
             compatibility.GroupBy(value => value.State).ToDictionary(group => group.Key, group => group.Count()),
             schema, fixedMutation, wdc1Mutation,
             bindings.GroupBy(value => value.Consumption).ToDictionary(group => group.Key, group => group.Count()),
@@ -311,7 +315,7 @@ public static partial class CompatibilityLabService
         var label = $"{Slug(source.Request.Name)}-to-{Slug(target.Request.Name)}";
         var root = Path.Combine(runRoot, expectedCompatible ? "native-deployments" : "cross-deployments", label);
         var plan = ClientServerDeploymentPlanner.Analyze(source.Request.TableRoot, targetWorkspace, target.Profile,
-            target.Request.CoreSourceRoot, cancellationToken);
+            target.Request.CoreSourceRoot, cancellationToken, source.Request.RecursiveTableDiscovery);
         Directory.CreateDirectory(root);
         var exportedPlan = Path.Combine(root, "client-server-plan.json");
         ClientServerDeploymentPlanner.Save(exportedPlan, plan);
@@ -338,9 +342,9 @@ public static partial class CompatibilityLabService
 
     private static CompatibilityLabCollisionAudit AuditCollisions(ResolvedLane left, ResolvedLane right, CancellationToken cancellationToken)
     {
-        var leftTables = EnumerateTables(left.Request.TableRoot).GroupBy(Path.GetFileNameWithoutExtension, StringComparer.OrdinalIgnoreCase)
+        var leftTables = EnumerateTables(left.Request.TableRoot, left.Request.RecursiveTableDiscovery).GroupBy(Path.GetFileNameWithoutExtension, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key!, group => group.Order(StringComparer.OrdinalIgnoreCase).First(), StringComparer.OrdinalIgnoreCase);
-        var rightTables = EnumerateTables(right.Request.TableRoot).GroupBy(Path.GetFileNameWithoutExtension, StringComparer.OrdinalIgnoreCase)
+        var rightTables = EnumerateTables(right.Request.TableRoot, right.Request.RecursiveTableDiscovery).GroupBy(Path.GetFileNameWithoutExtension, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key!, group => group.Order(StringComparer.OrdinalIgnoreCase).First(), StringComparer.OrdinalIgnoreCase);
         var shared = leftTables.Keys.Intersect(rightTables.Keys, StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
         var samples = new List<CompatibilityLabCollisionSample>();
@@ -375,10 +379,10 @@ public static partial class CompatibilityLabService
     {
         var sourceRoot = RequiredDirectory(pair.SourceRoot, $"{name} source");
         var cloneRoot = RequiredDirectory(pair.CloneRoot, $"{name} clone");
-        var exclusions = (pair.ExcludedDirectoryNames ?? []).Where(value => !string.IsNullOrWhiteSpace(value))
-            .Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
-        var source = FileMap(sourceRoot, exclusions);
-        var clone = FileMap(cloneRoot, exclusions);
+        var excludedDirectories = NormalizeExcludedDirectoryNames(pair.ExcludedDirectoryNames);
+        var excludedFiles = NormalizeExcludedFilePaths(pair.ExcludedFilePaths);
+        var source = FileMap(sourceRoot, excludedDirectories, excludedFiles);
+        var clone = FileMap(cloneRoot, excludedDirectories, excludedFiles);
         var issues = new ConcurrentBag<CompatibilityLabIntegrityIssue>();
         var errors = new ConcurrentBag<string>();
         var missing = source.Keys.Except(clone.Keys, StringComparer.OrdinalIgnoreCase).ToArray();
@@ -420,16 +424,21 @@ public static partial class CompatibilityLabService
                 if (done % 256 == 0 || done == common.Length) progress?.Report(new($"{name}: clone SHA-256", done, common.Length, relative));
             }
         });
-        return new(name, sourceRoot, cloneRoot, exclusions, source.Count, clone.Count,
+        return new(name, sourceRoot, cloneRoot, excludedDirectories, excludedFiles, source.Count, clone.Count,
             source.Values.Sum(file => file.Length), clone.Values.Sum(file => file.Length), hashed,
             missing.Length, extra.Length, lengthMismatch, hashMismatch,
             issues.OrderBy(issue => issue.RelativePath, StringComparer.OrdinalIgnoreCase).Take(MaximumIssueSamples).ToArray(),
             errors.Order(StringComparer.OrdinalIgnoreCase).ToArray());
     }
 
-    private static DbdSchemaAuditSummary AuditSchemas(string definitionsRoot, string tableRoot, int build, string? xmlSchemaPath)
+    private static DbdSchemaAuditSummary AuditSchemas(
+        string definitionsRoot,
+        string tableRoot,
+        int build,
+        string? xmlSchemaPath,
+        bool recursiveTableDiscovery)
     {
-        var roots = DirectTableRoots(tableRoot);
+        var roots = DirectTableRoots(tableRoot, recursiveTableDiscovery);
         if (roots.Count == 0) throw new InvalidDataException($"No direct client-table corpus exists below {tableRoot}.");
         var summaries = roots.Select(root => DbdSchemaService.Audit(definitionsRoot, root, build, xmlSchemaPath, verifyRoundTrip: true)).ToArray();
         return new(build, definitionsRoot, tableRoot, summaries.SelectMany(summary => summary.Rows)
@@ -441,9 +450,10 @@ public static partial class CompatibilityLabService
         string tableRoot,
         int build,
         string artifactParent,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool recursiveTableDiscovery)
     {
-        var roots = DirectTableRoots(tableRoot).Where(root => Directory.EnumerateFiles(root, "*.db2", SearchOption.TopDirectoryOnly)
+        var roots = DirectTableRoots(tableRoot, recursiveTableDiscovery).Where(root => Directory.EnumerateFiles(root, "*.db2", SearchOption.TopDirectoryOnly)
             .Any(path => new FileInfo(path).Length > 0 && WdbcFile.Load(path).ContainerKind == ClientTableContainerKind.Wdc1)).ToArray();
         if (roots.Length == 0) throw new InvalidDataException($"No direct WDC1 corpus exists below {tableRoot}.");
         var summaries = roots.Select((root, index) => Wdc1MutationAuditService.Audit(definitionsRoot, root, build,
@@ -454,19 +464,30 @@ public static partial class CompatibilityLabService
             summaries.SelectMany(summary => summary.Errors).Order(StringComparer.OrdinalIgnoreCase).ToArray(), artifactParent);
     }
 
-    private static IReadOnlyList<string> DirectTableRoots(string root)
+    private static IReadOnlyList<string> DirectTableRoots(string root, bool recursiveTableDiscovery)
     {
         root = RequiredDirectory(root, "Client-table root");
+        if (!recursiveTableDiscovery)
+        {
+            if (!Directory.EnumerateFiles(root, "*", SearchOption.TopDirectoryOnly).Any(ClientTableCompatibilityPolicy.IsTableExtension))
+                throw new InvalidDataException($"No direct client-table corpus exists below {root}; recursive table discovery is disabled.");
+            return [root];
+        }
         return Directory.EnumerateDirectories(root, "*", SearchOption.AllDirectories).Prepend(root)
             .Where(directory => Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly).Any(ClientTableCompatibilityPolicy.IsTableExtension))
             .Order(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    private static Dictionary<string, FileInfo> FileMap(string root, IReadOnlyList<string> exclusions)
+    private static Dictionary<string, FileInfo> FileMap(
+        string root,
+        IReadOnlyList<string> excludedDirectoryNames,
+        IReadOnlyList<string> excludedFilePaths)
     {
-        var excluded = exclusions.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return EnumerateCompatibilityTreeFiles(root, excluded)
+        var excludedDirectories = excludedDirectoryNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var excludedFiles = excludedFilePaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return EnumerateCompatibilityTreeFiles(root, excludedDirectories)
             .Select(path => (Path: path, Relative: Path.GetRelativePath(root, path)))
+            .Where(value => !excludedFiles.Contains(value.Relative))
             .ToDictionary(value => value.Relative, value => new FileInfo(value.Path), StringComparer.OrdinalIgnoreCase);
     }
 
@@ -493,10 +514,10 @@ public static partial class CompatibilityLabService
         }
     }
 
-    private static IEnumerable<string> EnumerateTables(string root)
+    private static IEnumerable<string> EnumerateTables(string root, bool recursiveTableDiscovery = true)
     {
         root = RequiredDirectory(root, "Client-table root");
-        return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+        return Directory.EnumerateFiles(root, "*", recursiveTableDiscovery ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
             .Where(ClientTableCompatibilityPolicy.IsTableExtension)
             .Order(StringComparer.OrdinalIgnoreCase);
     }
@@ -584,6 +605,8 @@ public static partial class CompatibilityLabService
             {
                 if (string.IsNullOrWhiteSpace(pair.Name) || string.IsNullOrWhiteSpace(pair.SourceRoot) || string.IsNullOrWhiteSpace(pair.CloneRoot))
                     throw new InvalidDataException($"Every compatibility clone pair in lane {lane.Name} requires a name, source root, and clone root.");
+                _ = NormalizeExcludedDirectoryNames(pair.ExcludedDirectoryNames);
+                _ = NormalizeExcludedFilePaths(pair.ExcludedFilePaths);
             }
         }
     }
