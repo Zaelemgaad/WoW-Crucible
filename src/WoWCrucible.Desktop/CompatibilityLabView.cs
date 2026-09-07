@@ -81,7 +81,7 @@ internal sealed class CompatibilityLabView : UserControl
             _lastReportRoot = report.ReportRoot; _reveal.IsEnabled = true;
             _results.ItemsSource = report.Entries.Select(entry => new ResultRow("CLONE", entry.Name,
                 entry.Passed ? entry.State.ToString() : "FAILED",
-                $"Source: {entry.SourceRoot}\nClone: {entry.CloneRoot}\nCopied: {entry.CopiedFiles:N0} files ({FormatBytes(entry.CopiedBytes)})\nReused: {entry.ReusedFiles:N0} files ({FormatBytes(entry.ReusedBytes)})\nRemoved stale partial files: {entry.RemovedStaleFiles:N0}\nIdentity audit: {(entry.Audit?.Passed == true ? "PASS" : "FAIL")}\n{string.Join(Environment.NewLine, entry.Errors)}")).ToArray();
+                $"Source: {entry.SourceRoot}\nClone: {entry.CloneRoot}\nCopied: {entry.CopiedFiles:N0} files ({FormatBytes(entry.CopiedBytes)})\nConsensus hard links: {entry.LinkedFiles:N0} files ({FormatBytes(entry.LinkedBytes)})\nReused: {entry.ReusedFiles:N0} files ({FormatBytes(entry.ReusedBytes)})\nRemoved stale partial files: {entry.RemovedStaleFiles:N0}\nIdentity audit: {(entry.Audit?.Passed == true ? "PASS" : "FAIL")}\n{string.Join(Environment.NewLine, entry.Errors)}")).ToArray();
             _status.Text = $"Clone preparation {(report.Passed ? "passed" : "failed")} - {report.Entries.Count:N0} pair(s) - {report.ReportRoot}";
             _progress.Value = report.Passed ? 1 : 0;
             DesktopCrashLogger.Debug("COMPAT", "clone-preparation-complete", ("passed", report.Passed), ("pairs", report.Entries.Count), ("report", report.ReportRoot));

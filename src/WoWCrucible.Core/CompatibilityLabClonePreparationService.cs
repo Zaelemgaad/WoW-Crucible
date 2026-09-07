@@ -15,6 +15,8 @@ public sealed record CompatibilityLabClonePreparationEntry(
     CompatibilityLabClonePreparationState State,
     int CopiedFiles,
     long CopiedBytes,
+    int LinkedFiles,
+    long LinkedBytes,
     int ReusedFiles,
     long ReusedBytes,
     int RemovedStaleFiles,
@@ -47,7 +49,11 @@ public static partial class CompatibilityLabService
         string SourceRoot,
         string CloneRoot,
         IReadOnlyList<string> ExcludedDirectoryNames,
-        IReadOnlyList<string>? ExcludedFilePaths = null);
+        IReadOnlyList<string>? ExcludedFilePaths = null,
+        string? ClientConsensusPlanFingerprint = null);
+
+    private sealed record EligibleConsensusFile(long Length, string Sha256);
+    private sealed record ConsensusLinkAudit(int LinkedFiles, long LinkedBytes, IReadOnlyList<string> Errors);
 
     public static CompatibilityLabClonePreparationReport PrepareClones(
         CompatibilityLabRequest request,
@@ -81,7 +87,7 @@ public static partial class CompatibilityLabService
                 var message = $"{item.Name}: {exception.Message}";
                 errors.Add(message);
                 entries.Add(new(item.Name, source, clone, PartialRoot(clone), CompatibilityLabClonePreparationState.Failed,
-                    0, 0, 0, 0, 0, null, [exception.Message]));
+                    0, 0, 0, 0, 0, 0, 0, null, [exception.Message]));
             }
         }
 
@@ -106,6 +112,10 @@ public static partial class CompatibilityLabService
         var cloneRoot = Path.GetFullPath(pair.CloneRoot ?? string.Empty);
         var excludedDirectories = NormalizeExcludedDirectoryNames(pair.ExcludedDirectoryNames);
         var excludedFiles = NormalizeExcludedFilePaths(pair.ExcludedFilePaths);
+        var consensusPlan = string.IsNullOrWhiteSpace(pair.ClientConsensusPlanPath)
+            ? null
+            : ClientCorpusHardLinkService.LoadPlan(pair.ClientConsensusPlanPath);
+        var eligibleFiles = ResolveEligibleClientFiles(consensusPlan, sourceRoot, name, cancellationToken);
         ValidateDisjointRoots(sourceRoot, cloneRoot, name);
         var partialRoot = PartialRoot(cloneRoot);
         ValidateDisjointRoots(sourceRoot, partialRoot, name);
@@ -113,17 +123,22 @@ public static partial class CompatibilityLabService
         if (Directory.Exists(cloneRoot))
         {
             var existingAudit = AuditClone(name, pair with { SourceRoot = sourceRoot, CloneRoot = cloneRoot }, hashWorkers, progress, cancellationToken);
-            return existingAudit.Passed
+            var consensusAudit = AuditConsensusLinks(sourceRoot, cloneRoot, eligibleFiles, cancellationToken);
+            return existingAudit.Passed && consensusAudit.Errors.Count == 0
                 ? new(name, sourceRoot, cloneRoot, partialRoot, CompatibilityLabClonePreparationState.VerifiedExisting,
-                    0, 0, existingAudit.CloneFiles, existingAudit.CloneBytes, 0, existingAudit, [])
+                    0, 0, consensusAudit.LinkedFiles, consensusAudit.LinkedBytes,
+                    Math.Max(0, existingAudit.CloneFiles - consensusAudit.LinkedFiles),
+                    Math.Max(0, existingAudit.CloneBytes - consensusAudit.LinkedBytes), 0, existingAudit, [])
                 : new(name, sourceRoot, cloneRoot, partialRoot, CompatibilityLabClonePreparationState.Failed,
-                    0, 0, 0, 0, 0, existingAudit, ["The completed clone failed identity verification and was not modified. Select a new clone root or review the reported drift."]);
+                    0, 0, 0, 0, 0, 0, 0, existingAudit,
+                    ["The completed clone failed byte or required hard-link identity verification and was not modified. Select a new clone root or review the reported drift.", .. consensusAudit.Errors]);
         }
         if (File.Exists(cloneRoot)) throw new IOException($"Clone destination is an existing file: {cloneRoot}");
 
         var sourceFiles = FileMap(sourceRoot, excludedDirectories, excludedFiles);
         var sourceBytes = sourceFiles.Values.Sum(file => file.Length);
-        EnsureCloneCapacity(cloneRoot, sourceBytes);
+        var copyBytes = sourceFiles.Values.Where(file => !eligibleFiles.ContainsKey(file.FullName)).Sum(file => file.Length);
+        EnsureCloneCapacity(cloneRoot, copyBytes);
         var markerPath = MarkerPath(partialRoot);
         var resumed = Directory.Exists(partialRoot) || File.Exists(markerPath);
         var expectedMarker = new CompatibilityCloneResumeMarker(
@@ -131,7 +146,8 @@ public static partial class CompatibilityLabService
             sourceRoot,
             cloneRoot,
             excludedDirectories,
-            excludedFiles);
+            excludedFiles,
+            consensusPlan?.Fingerprint);
         if (resumed)
         {
             if (!File.Exists(markerPath))
@@ -142,7 +158,8 @@ public static partial class CompatibilityLabService
                 !PathEquals(marker.SourceRoot, expectedMarker.SourceRoot) ||
                 !PathEquals(marker.CloneRoot, expectedMarker.CloneRoot) ||
                 !NormalizeExcludedDirectoryNames(marker.ExcludedDirectoryNames).SequenceEqual(expectedMarker.ExcludedDirectoryNames, StringComparer.OrdinalIgnoreCase) ||
-                !NormalizeExcludedFilePaths(marker.ExcludedFilePaths).SequenceEqual(expectedMarker.ExcludedFilePaths!, StringComparer.OrdinalIgnoreCase))
+                !NormalizeExcludedFilePaths(marker.ExcludedFilePaths).SequenceEqual(expectedMarker.ExcludedFilePaths!, StringComparer.OrdinalIgnoreCase) ||
+                !string.Equals(marker.ClientConsensusPlanFingerprint, expectedMarker.ClientConsensusPlanFingerprint, StringComparison.Ordinal))
                 throw new InvalidDataException($"Partial clone marker does not match the current source, destination, or exclusions: {markerPath}");
         }
         else
@@ -166,6 +183,8 @@ public static partial class CompatibilityLabService
 
         var copiedFiles = 0;
         var copiedBytes = 0L;
+        var linkedFiles = 0;
+        var linkedBytes = 0L;
         var reusedFiles = 0;
         var reusedBytes = 0L;
         var completedBytes = 0L;
@@ -176,6 +195,33 @@ public static partial class CompatibilityLabService
             var source = sourceFiles[relative];
             var destination = Path.GetFullPath(Path.Combine(partialRoot, relative));
             EnsureInsideClone(partialRoot, destination);
+            if (eligibleFiles.TryGetValue(source.FullName, out var eligible))
+            {
+                VerifyConsensusSource(source, eligible, cancellationToken);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                if (File.Exists(destination))
+                {
+                    var sourceIdentity = NativeHardLinks.ReadIdentity(source.FullName);
+                    var destinationIdentity = NativeHardLinks.ReadIdentity(destination);
+                    if (sourceIdentity.Key != destinationIdentity.Key)
+                    {
+                        if (new FileInfo(destination).Length != source.Length || Hash(destination) != eligible.Sha256)
+                            throw new InvalidDataException($"Partial client clone file no longer matches its unanimous source: {destination}");
+                        NativeHardLinks.ReplaceWithHardLink(destination, source.FullName);
+                    }
+                    reusedFiles++;
+                    reusedBytes += source.Length;
+                }
+                else
+                {
+                    NativeHardLinks.Create(destination, source.FullName);
+                    linkedFiles++;
+                    linkedBytes += source.Length;
+                }
+                completedBytes += source.Length;
+                ReportCopyProgress(progress, name, completedBytes, sourceBytes, relative, timer, force: false);
+                continue;
+            }
             if (File.Exists(destination) && new FileInfo(destination).Length == source.Length && Hash(source.FullName) == Hash(destination))
             {
                 reusedFiles++;
@@ -206,8 +252,18 @@ public static partial class CompatibilityLabService
         var audit = AuditClone(name, partialPair, hashWorkers, progress, cancellationToken);
         if (!audit.Passed)
             return new(name, sourceRoot, cloneRoot, partialRoot, CompatibilityLabClonePreparationState.Failed,
-                copiedFiles, copiedBytes, reusedFiles, reusedBytes, stale.Length, audit,
+                copiedFiles, copiedBytes, linkedFiles, linkedBytes, reusedFiles, reusedBytes, stale.Length, audit,
                 ["The prepared bytes failed source-to-clone identity verification. The marked partial tree was retained for diagnosis and resumption."]);
+        foreach (var eligible in eligibleFiles.Keys)
+        {
+            var relative = Path.GetRelativePath(sourceRoot, eligible);
+            if (!sourceFiles.ContainsKey(relative)) continue;
+            var destination = Path.Combine(partialRoot, relative);
+            if (NativeHardLinks.ReadIdentity(eligible).Key != NativeHardLinks.ReadIdentity(destination).Key)
+                return new(name, sourceRoot, cloneRoot, partialRoot, CompatibilityLabClonePreparationState.Failed,
+                    copiedFiles, copiedBytes, linkedFiles, linkedBytes, reusedFiles, reusedBytes, stale.Length, audit,
+                    [$"Consensus-eligible client file is byte-identical but not hard-linked: {relative}"]);
+        }
 
         cancellationToken.ThrowIfCancellationRequested();
         if (Directory.Exists(cloneRoot) || File.Exists(cloneRoot))
@@ -216,7 +272,7 @@ public static partial class CompatibilityLabService
         File.Delete(markerPath);
         return new(name, sourceRoot, cloneRoot, partialRoot,
             resumed ? CompatibilityLabClonePreparationState.Resumed : CompatibilityLabClonePreparationState.Created,
-            copiedFiles, copiedBytes, reusedFiles, reusedBytes, stale.Length, audit with { CloneRoot = cloneRoot }, []);
+            copiedFiles, copiedBytes, linkedFiles, linkedBytes, reusedFiles, reusedBytes, stale.Length, audit with { CloneRoot = cloneRoot }, []);
     }
 
     private static void CopyCloneFile(FileInfo source, string destination, Action<int> copied, CancellationToken cancellationToken)
@@ -249,6 +305,59 @@ public static partial class CompatibilityLabService
         {
             if (File.Exists(temporary)) File.Delete(temporary);
         }
+    }
+
+    private static IReadOnlyDictionary<string, EligibleConsensusFile> ResolveEligibleClientFiles(
+        ClientCorpusHardLinkPlan? plan,
+        string sourceRoot,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        if (plan is null) return new Dictionary<string, EligibleConsensusFile>(StringComparer.OrdinalIgnoreCase);
+        ClientCorpusHardLinkService.VerifyCurrentCoverage(plan, cancellationToken: cancellationToken);
+        sourceRoot = Path.GetFullPath(sourceRoot);
+        if (!plan.Roots.Any(root => PathEquals(root.RootPath, sourceRoot)))
+            throw new InvalidDataException($"{name} client source is not one of the reviewed roots in consensus plan {plan.PlanPath}: {sourceRoot}");
+        return plan.ConsensusGroups.SelectMany(group => group.Files
+                .Where(file => PathEquals(file.ClientRoot, sourceRoot))
+                .Select(file => (file.FullPath, Value: new EligibleConsensusFile(group.Length, group.Sha256))))
+            .ToDictionary(value => Path.GetFullPath(value.FullPath), value => value.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void VerifyConsensusSource(FileInfo source, EligibleConsensusFile eligible, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        source.Refresh();
+        if (!source.Exists || source.Length != eligible.Length || !Hash(source.FullName).Equals(eligible.Sha256, StringComparison.Ordinal))
+            throw new InvalidDataException($"Consensus-eligible client source changed after its reviewed plan was created: {source.FullName}");
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private static ConsensusLinkAudit AuditConsensusLinks(
+        string sourceRoot,
+        string cloneRoot,
+        IReadOnlyDictionary<string, EligibleConsensusFile> eligibleFiles,
+        CancellationToken cancellationToken)
+    {
+        var errors = new List<string>();
+        var linkedFiles = 0;
+        long linkedBytes = 0;
+        foreach (var item in eligibleFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var source = item.Key;
+            var relative = Path.GetRelativePath(sourceRoot, source);
+            var clone = Path.Combine(cloneRoot, relative);
+            if (!File.Exists(clone)) continue;
+            if (NativeHardLinks.ReadIdentity(source).Key != NativeHardLinks.ReadIdentity(clone).Key)
+                errors.Add($"Consensus-eligible client file is not hard-linked to its source: {relative}");
+            else
+            {
+                linkedFiles++;
+                linkedBytes += item.Value.Length;
+            }
+        }
+        return new(linkedFiles, linkedBytes, errors);
     }
 
     private static string[] NormalizeExcludedDirectoryNames(IReadOnlyList<string>? values)
@@ -379,10 +488,10 @@ public static partial class CompatibilityLabService
         text.AppendLine($"- Started UTC: {report.StartedUtc:O}");
         text.AppendLine($"- Completed UTC: {report.CompletedUtc:O}");
         text.AppendLine($"- Report root: `{report.ReportRoot}`").AppendLine();
-        text.AppendLine("| Pair | State | Copied files | Copied bytes | Reused files | Removed stale | Identity audit |");
-        text.AppendLine("|---|---|---:|---:|---:|---:|---|");
+        text.AppendLine("| Pair | State | Copied files | Copied bytes | Linked files | Linked bytes | Reused files | Removed stale | Identity audit |");
+        text.AppendLine("|---|---|---:|---:|---:|---:|---:|---:|---|");
         foreach (var entry in report.Entries)
-            text.AppendLine($"| {entry.Name} | {entry.State} | {entry.CopiedFiles:N0} | {entry.CopiedBytes:N0} | {entry.ReusedFiles:N0} | {entry.RemovedStaleFiles:N0} | {(entry.Audit?.Passed == true ? "PASS" : "FAIL")} |");
+            text.AppendLine($"| {entry.Name} | {entry.State} | {entry.CopiedFiles:N0} | {entry.CopiedBytes:N0} | {entry.LinkedFiles:N0} | {entry.LinkedBytes:N0} | {entry.ReusedFiles:N0} | {entry.RemovedStaleFiles:N0} | {(entry.Audit?.Passed == true ? "PASS" : "FAIL")} |");
         var errors = report.Errors.Concat(report.Entries.SelectMany(entry => entry.Errors.Select(error => $"{entry.Name}: {error}"))).Distinct(StringComparer.Ordinal).ToArray();
         if (errors.Length > 0)
         {

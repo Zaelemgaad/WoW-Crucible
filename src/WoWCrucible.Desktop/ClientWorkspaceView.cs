@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
@@ -22,6 +23,19 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     private readonly TextBlock _clientGuidance = Status("Archive scope, content counts, unresolved names, and compatibility guidance appear here.");
     private readonly TextBlock _operationStatus = Status("Ready");
     private ClientArchiveIndex? _loadedIndex;
+    private readonly TextBox _hardLinkRequest = new() { PlaceholderText = "Same-version client cohort request JSON" };
+    private readonly TextBox _hardLinkPlanPath = new() { PlaceholderText = "Reviewed client hard-link plan JSON" };
+    private readonly ListBox _hardLinkGroups = new();
+    private readonly TextBlock _hardLinkSummary = Status("No client storage plan loaded.");
+    private readonly Border _hardLinkConfirmation = new()
+    {
+        IsVisible = false,
+        Padding = new Thickness(10),
+        BorderBrush = Brush.Parse("#755A2B"),
+        BorderThickness = new Thickness(1)
+    };
+    private ClientCorpusHardLinkPlan? _hardLinkPlan;
+    private string? _hardLinkReportRoot;
 
     private readonly TextBox _clientDbcRoot = new() { PlaceholderText = "Extracted effective DBFilesClient table folder" };
     private readonly TextBox _coreSourceRoot = new() { PlaceholderText = "Optional current AzerothCore, TrinityCore, SkyFire, or LegionCore source" };
@@ -91,6 +105,7 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
             Items =
             {
                 new TabItem { Header = "Inspect / index / extract", Content = InspectorPage() },
+                new TabItem { Header = "Client storage", Content = HardLinkPage() },
                 new TabItem { Header = "Client → server DBC plan", Content = ServerPlanPage() },
                 new TabItem { Header = "Additive client fusion", Content = FusionPage() },
                 new TabItem { Header = "Player release & rollback", Content = ReleasePage() }
@@ -165,6 +180,17 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
                 WithColumn(new TextBlock { Text = action.Detail, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, 3)
             }
         });
+        _hardLinkGroups.ItemTemplate = new FuncDataTemplate<ClientCorpusConsensusGroup>((group, _) => group is null ? new Grid() : new Grid
+        {
+            ColumnDefinitions = new("2*,Auto,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(3, 2), Children =
+            {
+                new TextBlock { Text = group.Files.FirstOrDefault()?.RelativePath ?? group.Sha256, TextTrimming = TextTrimming.CharacterEllipsis },
+                WithColumn(new TextBlock { Text = group.CohortId }, 1),
+                WithColumn(new TextBlock { Text = $"{group.ClientCount:N0}/{group.ClientCount:N0} clients", Foreground = Brush.Parse("#67C587") }, 2),
+                WithColumn(new TextBlock { Text = FormatBytes(group.Length) }, 3),
+                WithColumn(new TextBlock { Text = FormatBytes(group.EstimatedReclaimableBytes) }, 4)
+            }
+        });
         _archives.SelectionChanged += async (_, _) => await ExplainArchiveAsync();
         _looseFiles.SelectionChanged += (_, _) => ExplainLooseFile();
     }
@@ -190,6 +216,68 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
                 WithRow(new WrapPanel { Children = { index, cancel, open, extract } }, 1),
                 WithRow(inventory, 2),
                 WithRow(new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { Card(_clientSummary), WithColumn(Card(_clientGuidance), 1) } }, 3)
+            }
+        };
+    }
+
+    private Control HardLinkPage()
+    {
+        var chooseRequest = Button("Request…", async () =>
+        {
+            var path = await PickFileAsync("Select same-version client cohort request", ["*.json"]);
+            if (path is not null)
+            {
+                _hardLinkRequest.Text = path;
+                _session.Settings.ClientHardLinkRequestPath = path;
+                _session.Settings.Save();
+            }
+        });
+        var choosePlan = Button("Plan…", async () =>
+        {
+            var path = await PickFileAsync("Select reviewed client hard-link plan", ["*.json"]);
+            if (path is not null)
+            {
+                _hardLinkPlanPath.Text = path;
+                _session.Settings.ClientHardLinkPlanPath = path;
+                _session.Settings.Save();
+                LoadHardLinkPlan();
+            }
+        });
+        var plan = AccentButton("Build consensus plan");
+        plan.Click += async (_, _) => await PlanHardLinksAsync();
+        Register(plan);
+        var apply = AccentButton("Apply reviewed links…");
+        apply.Click += (_, _) => PrepareHardLinkOperation(materialize: false);
+        Register(apply);
+        var materialize = new Button { Content = "Restore independent files…" };
+        materialize.Click += (_, _) => PrepareHardLinkOperation(materialize: true);
+        Register(materialize);
+        var reveal = Button("Reveal report", () =>
+        {
+            RevealHardLinkReport();
+            return Task.CompletedTask;
+        });
+        var paths = new Grid
+        {
+            ColumnDefinitions = new("Auto,*,Auto"),
+            RowDefinitions = new("Auto,Auto"),
+            ColumnSpacing = 8,
+            RowSpacing = 7
+        };
+        AddPath(paths, 0, "Cohort request", _hardLinkRequest, chooseRequest, null);
+        AddPath(paths, 1, "Reviewed plan", _hardLinkPlanPath, choosePlan, null);
+        return new Grid
+        {
+            RowDefinitions = new("Auto,Auto,Auto,*,Auto"),
+            RowSpacing = 8,
+            Margin = new Thickness(8),
+            Children =
+            {
+                paths,
+                WithRow(new WrapPanel { Children = { plan, apply, materialize, reveal } }, 1),
+                WithRow(_hardLinkConfirmation, 2),
+                WithRow(_hardLinkGroups, 3),
+                WithRow(Card(_hardLinkSummary), 4)
             }
         };
     }
@@ -245,6 +333,144 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var identity = new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { new StackPanel { Children = { new TextBlock { Text = "Release name" }, _releaseName } }, WithColumn(new StackPanel { Children = { new TextBlock { Text = "Channel (stable ownership identity)" }, _releaseChannel } }, 1) } };
         var configuration = new StackPanel { Spacing = 7, Children = { paths, identity, new TextBlock { Text = "Changelog" }, _releaseChangelog, new TextBlock { Text = "Optional groups · group|client-relative prefix · a group may own multiple prefixes" }, _releaseOptionalRules, new WrapPanel { Children = { create } }, new TextBlock { Text = "Publisher authentication", FontSize = 16, FontWeight = FontWeight.SemiBold }, trustPaths, new TextBlock { Text = $"Publisher password (minimum {ClientReleaseSigningService.MinimumPasswordLength} characters; held in memory only and never saved or logged)" }, _releasePublisherPassword, new WrapPanel { Children = { createKey, sign, verify } }, new TextBlock { Text = "Optional groups selected for this target" }, _releaseSelectedGroups, new WrapPanel { Children = { plan, export, install, rollback } }, _releaseConfirmation, Card(_releaseSummary), new TextBlock { Text = "Safety contract: local unsigned bundles remain available for private work and are labeled as such. A signed plan re-verifies the explicit trusted public key, exact signed descriptor, manifest, every payload, target preimage, and ownership state again at install time. Private keys are encrypted, must remain outside bundles, and never enter settings or logs. Updates back up every replaced/removed file, prune only unchanged Crucible-owned paths, close Wow.exe only for the selected client, and clear that client's Cache. Network transport remains separate.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8995A9") } } };
         return new Grid { RowDefinitions = new("*,*"), RowSpacing = 8, Margin = new Thickness(8), Children = { new ScrollViewer { Content = configuration }, WithRow(_releaseActions, 1) } };
+    }
+
+    private async Task PlanHardLinksAsync()
+    {
+        Begin("Discovering every complete same-build client, validating cohort coverage, and hashing unanimous-size candidates…");
+        _hardLinkConfirmation.IsVisible = false;
+        try
+        {
+            var requestPath = Path.GetFullPath(_hardLinkRequest.Text?.Trim() ?? string.Empty);
+            var request = ClientCorpusHardLinkService.LoadRequest(requestPath);
+            var progress = new Progress<ClientCorpusHardLinkProgress>(value =>
+                _operationStatus.Text = value.Total > 0
+                    ? $"{value.Completed:N0}/{value.Total:N0} · {value.Phase} · {value.CurrentPath}"
+                    : $"{value.Phase} · {value.CurrentPath}");
+            var result = await Task.Run(() => new ClientCorpusHardLinkService().Plan(request, progress, _operation!.Token),
+                _operation!.Token);
+            _hardLinkPlan = result;
+            _hardLinkPlanPath.Text = result.PlanPath;
+            _hardLinkReportRoot = Path.GetDirectoryName(result.PlanPath);
+            _hardLinkGroups.ItemsSource = result.ConsensusGroups;
+            _hardLinkSummary.Text = $"{(result.Ready ? "READY" : "BLOCKED")} · whole-library coverage validated for {result.Roots.Count:N0} clients · {result.ConsensusGroups.Count:N0} unanimous content groups · {result.Actions.Count:N0} hard-link actions · {FormatBytes(result.EstimatedReclaimableBytes)} conservatively reclaimable\nPartial matches remain independent: {result.NearConsensusGroups.Count:N0} reported · reused hashes: {result.ReusedHashes:N0} · freshly hashed: {result.HashedFiles:N0}\n{result.PlanPath}";
+            _session.Settings.ClientHardLinkRequestPath = requestPath;
+            _session.Settings.ClientHardLinkPlanPath = result.PlanPath;
+            _session.Settings.Save();
+            _operationStatus.Text = "Consensus plan complete. No client file was changed.";
+        }
+        catch (OperationCanceledException)
+        {
+            _operationStatus.Text = "Client storage planning cancelled; committed hash checkpoints remain reusable.";
+        }
+        catch (Exception exception)
+        {
+            _hardLinkPlan = null;
+            _hardLinkGroups.ItemsSource = null;
+            Fail("Client storage planning failed", exception);
+        }
+        finally { End(); }
+    }
+
+    private void LoadHardLinkPlan()
+    {
+        try
+        {
+            var path = Path.GetFullPath(_hardLinkPlanPath.Text?.Trim() ?? string.Empty);
+            _hardLinkPlan = ClientCorpusHardLinkService.LoadPlan(path);
+            _hardLinkGroups.ItemsSource = _hardLinkPlan.ConsensusGroups;
+            _hardLinkReportRoot = Path.GetDirectoryName(path);
+            var current = _hardLinkPlan.FormatVersion == ClientCorpusHardLinkService.PlanFormatVersion;
+            _hardLinkSummary.Text = $"{(current ? "REVIEWED" : "LEGACY / MATERIALIZE ONLY")} · format {_hardLinkPlan.FormatVersion:N0} · {_hardLinkPlan.Roots.Count:N0} clients · {_hardLinkPlan.ConsensusGroups.Count:N0} unanimous content groups · {_hardLinkPlan.Actions.Count:N0} actions · {FormatBytes(_hardLinkPlan.EstimatedReclaimableBytes)} conservatively reclaimable\nFingerprint: {_hardLinkPlan.Fingerprint}";
+            _operationStatus.Text = current
+                ? "Fingerprint-bound client storage plan loaded."
+                : "Legacy plan loaded for independent-file materialization only.";
+        }
+        catch (Exception exception)
+        {
+            _hardLinkPlan = null;
+            _hardLinkGroups.ItemsSource = null;
+            Fail("Client storage plan load failed", exception);
+        }
+    }
+
+    private void PrepareHardLinkOperation(bool materialize)
+    {
+        if (_hardLinkPlan is null) LoadHardLinkPlan();
+        if (_hardLinkPlan is not { Ready: true } plan)
+        {
+            _operationStatus.Text = "Load or build a blocker-free client storage plan first.";
+            return;
+        }
+        if (!materialize && plan.FormatVersion != ClientCorpusHardLinkService.PlanFormatVersion)
+        {
+            _operationStatus.Text = "Legacy plans may restore independent files but cannot create hard links. Build a new whole-library plan.";
+            return;
+        }
+        var cancel = new Button { Content = "Cancel" };
+        var confirm = AccentButton(materialize ? "Confirm independent copies" : "Confirm hard-link consolidation");
+        cancel.Click += (_, _) => _hardLinkConfirmation.IsVisible = false;
+        confirm.Click += async (_, _) => await RunHardLinkOperationAsync(confirm, plan, materialize);
+        _hardLinkConfirmation.Child = new Grid
+        {
+            ColumnDefinitions = new("*,Auto,Auto"),
+            ColumnSpacing = 8,
+            Children =
+            {
+                new TextBlock
+                {
+                    Text = materialize
+                        ? $"Restore independent physical files for {plan.Actions.Count:N0} reviewed target paths?"
+                        : $"Replace {plan.Actions.Count:N0} reviewed independent duplicates with NTFS hard links? Every target is rehashed and byte-compared before replacement.",
+                    TextWrapping = TextWrapping.Wrap
+                },
+                WithColumn(cancel, 1),
+                WithColumn(confirm, 2)
+            }
+        };
+        _hardLinkConfirmation.IsVisible = true;
+    }
+
+    private async Task RunHardLinkOperationAsync(Button confirmation, ClientCorpusHardLinkPlan plan, bool materialize)
+    {
+        confirmation.IsEnabled = false;
+        Begin(materialize ? "Restoring independent client files…" : "Revalidating and linking unanimous client files…");
+        try
+        {
+            var progress = new Progress<ClientCorpusHardLinkProgress>(value =>
+                _operationStatus.Text = $"{value.Completed:N0}/{value.Total:N0} · {value.Phase} · {value.CurrentPath}");
+            var report = await Task.Run(() => new ClientCorpusHardLinkService().Apply(plan.PlanPath, materialize,
+                progress, _operation!.Token), _operation!.Token);
+            _hardLinkReportRoot = report.ReportRoot;
+            var counts = string.Join(" · ", report.Entries.GroupBy(entry => entry.State)
+                .OrderBy(group => group.Key).Select(group => $"{group.Key}: {group.Count():N0}"));
+            _hardLinkSummary.Text = $"{(report.Passed ? "PASS" : "FAIL")} · {counts}\nJournal: {report.JournalPath}\nReport: {report.MarkdownReportPath}";
+            _operationStatus.Text = report.Passed
+                ? materialize ? "Independent client files restored and verified." : "Unanimous client files consolidated and verified."
+                : "Client storage operation stopped at its first stale or failed target; the durable journal contains the exact boundary.";
+        }
+        catch (OperationCanceledException)
+        {
+            _operationStatus.Text = "Client storage operation cancelled between journaled files.";
+        }
+        catch (Exception exception) { Fail("Client storage operation failed", exception); }
+        finally
+        {
+            _hardLinkConfirmation.IsVisible = false;
+            End();
+        }
+    }
+
+    private void RevealHardLinkReport()
+    {
+        var path = _hardLinkReportRoot;
+        if (path is null || !Directory.Exists(path))
+        {
+            _operationStatus.Text = "No client storage report folder is available.";
+            return;
+        }
+        try { Process.Start(new ProcessStartInfo("explorer.exe", path) { UseShellExecute = true }); }
+        catch (Exception exception) { Fail("Could not reveal client storage report", exception); }
     }
 
     private async Task CreatePublisherKeyAsync()
@@ -625,6 +851,8 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         _indexRoot.Text = _session.Settings.ClientIndexPath;
         _coreSourceRoot.Text = _session.Settings.CoreSourcePath;
         _releaseTargetRoot.Text = _clientRoot.Text;
+        _hardLinkRequest.Text = _session.Settings.ClientHardLinkRequestPath;
+        _hardLinkPlanPath.Text = _session.Settings.ClientHardLinkPlanPath;
     }
 
     private void Begin(string text) { _operation?.Cancel(); _operation?.Dispose(); _operation = new(); foreach (var button in _operationButtons) button.IsEnabled = false; _operationStatus.Text = text; }

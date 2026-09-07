@@ -17,7 +17,8 @@
           "SourceRoot": "D:\\Installed\\MoP Client",
           "CloneRoot": "D:\\CrucibleLab\\worktrees\\mop\\client",
           "ExcludedDirectoryNames": [ "Cache" ],
-          "ExcludedFilePaths": [ "World of Warcraft 5.4.8.rar" ]
+          "ExcludedFilePaths": [ "World of Warcraft 5.4.8.rar" ],
+          "ClientConsensusPlanPath": "D:\\CrucibleStorage\\client-hardlinks\\plans\\reviewed\\client-hardlink-plan.json"
         },
         {
           "Name": "server",
@@ -40,7 +41,8 @@
           "Name": "client",
           "SourceRoot": "D:\\Installed\\Legion Client",
           "CloneRoot": "D:\\CrucibleLab\\worktrees\\legion\\client",
-          "ExcludedDirectoryNames": [ "Cache", "Logs", "Errors" ]
+          "ExcludedDirectoryNames": [ "Cache", "Logs", "Errors" ],
+          "ClientConsensusPlanPath": "D:\\CrucibleStorage\\client-hardlinks\\plans\\reviewed\\client-hardlink-plan.json"
         },
         {
           "Name": "server",

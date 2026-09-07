@@ -42,6 +42,8 @@ if (missingCorpusFiles.Length > 0)
     return;
 }
 
+ClientCorpusHardLinkTestSuite.Run();
+
 var backupFixtureSource = Path.Combine(Path.GetTempPath(), $"wow-crucible-backup-source-{Guid.NewGuid():N}.dbc");
 File.WriteAllBytes(backupFixtureSource, [1, 2, 3, 4]);
 var backupOne = CrucibleBackupService.Create(backupFixtureSource, "PolicyTest");

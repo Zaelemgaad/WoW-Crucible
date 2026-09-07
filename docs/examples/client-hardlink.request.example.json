@@ -1,0 +1,38 @@
+{
+  "FormatVersion": 2,
+  "OutputRoot": "D:\\CrucibleStorage\\client-hardlinks",
+  "DiscoveryRoots": [
+    "D:\\WoW Clients"
+  ],
+  "MinimumFileBytes": 1,
+  "HashWorkers": 8,
+  "MinimumCompleteClientDataBytes": 1073741824,
+  "ExcludedDirectoryNames": [
+    "Cache",
+    "Errors",
+    "Logs",
+    "Screenshots",
+    "WTF"
+  ],
+  "ExcludedRelativePaths": [],
+  "Cohorts": [
+    {
+      "Id": "wrath-3.3.5a-12340",
+      "ClientBuild": 12340,
+      "ClientRoots": [
+        "D:\\WoW Clients\\Wrath Clean",
+        "D:\\WoW Clients\\Wrath HD",
+        "D:\\WoW Clients\\Wrath Classless",
+        "D:\\WoW Clients\\Wrath Repack"
+      ]
+    },
+    {
+      "Id": "mop-5.4.8-18414",
+      "ClientBuild": 18414,
+      "ClientRoots": [
+        "D:\\WoW Clients\\MoP Clean",
+        "D:\\WoW Clients\\MoP Development"
+      ]
+    }
+  ]
+}

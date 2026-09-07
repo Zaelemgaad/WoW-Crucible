@@ -11,7 +11,8 @@ public sealed record CompatibilityLabClonePair(
     string SourceRoot,
     string CloneRoot,
     IReadOnlyList<string>? ExcludedDirectoryNames = null,
-    IReadOnlyList<string>? ExcludedFilePaths = null);
+    IReadOnlyList<string>? ExcludedFilePaths = null,
+    string? ClientConsensusPlanPath = null);
 
 public sealed record CompatibilityLabLane(
     string Name,

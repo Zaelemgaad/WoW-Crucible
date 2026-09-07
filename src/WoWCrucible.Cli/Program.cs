@@ -313,6 +313,70 @@ static int Tooling(string[] args, CancellationToken cancellationToken)
         else foreach (var match in matches) Console.WriteLine($"{match.Command.Id}\t{match.Command.Category}\t{match.Command.Title}\t{match.Command.Shortcut ?? "-"}\t{match.Command.Description}");
         return matches.Count > 0 ? 0 : 3;
     }
+    if (args[0].Equals("client-hardlink-plan", StringComparison.OrdinalIgnoreCase))
+    {
+        if (args.Length < 2) return Fail("tools client-hardlink-plan requires a request JSON path.");
+        var planOptions = args[2..];
+        var planJson = planOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var planUnknown = planOptions.Where(option => !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (planUnknown.Length > 0) return Fail($"Unknown tools client-hardlink-plan option: {planUnknown[0]}");
+        var hardLinkProgress = new WoWCrucible.Cli.SynchronousProgress<ClientCorpusHardLinkProgress>(value =>
+            Console.Error.WriteLine($"CLIENT-LINK\t{value.Phase}\t{value.Completed:N0}/{value.Total:N0}\t{value.CurrentPath}"));
+        var service = new ClientCorpusHardLinkService();
+        var plan = service.Plan(ClientCorpusHardLinkService.LoadRequest(args[1]), hardLinkProgress, cancellationToken);
+        if (planJson)
+            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(plan, new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
+            }));
+        else
+        {
+            Console.WriteLine($"RESULT\t{(plan.Ready ? "READY" : "BLOCKED")}");
+            Console.WriteLine($"PLAN\t{plan.PlanPath}");
+            Console.WriteLine($"REPORT\t{plan.MarkdownReportPath}");
+            Console.WriteLine($"COHORTS\t{plan.Roots.Select(root => root.CohortId).Distinct(StringComparer.OrdinalIgnoreCase).Count():N0}");
+            Console.WriteLine($"CLIENTS\t{plan.Roots.Count:N0}");
+            Console.WriteLine($"UNANIMOUS\t{plan.ConsensusGroups.Count:N0}");
+            Console.WriteLine($"ACTIONS\t{plan.Actions.Count:N0}");
+            Console.WriteLine($"RECLAIMABLE_BYTES\t{plan.EstimatedReclaimableBytes:N0}");
+        }
+        return plan.Ready ? 0 : 3;
+    }
+    if (args[0].Equals("client-hardlink-apply", StringComparison.OrdinalIgnoreCase) ||
+        args[0].Equals("client-hardlink-materialize", StringComparison.OrdinalIgnoreCase))
+    {
+        var materialize = args[0].Equals("client-hardlink-materialize", StringComparison.OrdinalIgnoreCase);
+        if (args.Length < 2) return Fail($"tools {args[0]} requires a reviewed plan JSON path.");
+        var applyOptions = args[2..];
+        if (!applyOptions.Any(option => option.Equals("--apply", StringComparison.OrdinalIgnoreCase)))
+            return Fail($"tools {args[0]} changes client file identities and requires --apply.");
+        var applyJson = applyOptions.Any(option => option.Equals("--format=json", StringComparison.OrdinalIgnoreCase));
+        var applyUnknown = applyOptions.Where(option => !option.Equals("--apply", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--format=json", StringComparison.OrdinalIgnoreCase) &&
+            !option.Equals("--format=text", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (applyUnknown.Length > 0) return Fail($"Unknown tools {args[0]} option: {applyUnknown[0]}");
+        var hardLinkProgress = new WoWCrucible.Cli.SynchronousProgress<ClientCorpusHardLinkProgress>(value =>
+            Console.Error.WriteLine($"CLIENT-LINK\t{value.Phase}\t{value.Completed:N0}/{value.Total:N0}\t{value.CurrentPath}"));
+        var hardLinkReport = new ClientCorpusHardLinkService().Apply(args[1], materialize, hardLinkProgress, cancellationToken);
+        if (applyJson)
+            Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(hardLinkReport, new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true,
+                Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
+            }));
+        else
+        {
+            Console.WriteLine($"RESULT\t{(hardLinkReport.Passed ? "PASS" : "FAIL")}");
+            Console.WriteLine($"REPORT_ROOT\t{hardLinkReport.ReportRoot}");
+            Console.WriteLine($"JOURNAL\t{hardLinkReport.JournalPath}");
+            foreach (var group in hardLinkReport.Entries.GroupBy(entry => entry.State).OrderBy(group => group.Key))
+                Console.WriteLine($"{group.Key.ToString().ToUpperInvariant()}\t{group.Count():N0}");
+            Console.WriteLine($"RECLAIMABLE_BYTES\t{hardLinkReport.Entries.Sum(entry => entry.ReclaimableBytes):N0}");
+        }
+        return hardLinkReport.Passed ? 0 : 3;
+    }
     if (args[0].Equals("compatibility-clone", StringComparison.OrdinalIgnoreCase) || args[0].Equals("compatibility-clones", StringComparison.OrdinalIgnoreCase))
     {
         if (args.Length < 2) return Fail("tools compatibility-clone requires a request JSON path.");
@@ -331,7 +395,7 @@ static int Tooling(string[] args, CancellationToken cancellationToken)
             Console.WriteLine($"JSON\t{cloneReport.JsonReportPath}");
             Console.WriteLine($"MARKDOWN\t{cloneReport.MarkdownReportPath}");
             foreach (var entry in cloneReport.Entries)
-                Console.WriteLine($"PAIR\t{entry.Name}\t{entry.State}\t{(entry.Passed ? "PASS" : "FAIL")}\tcopied={entry.CopiedFiles:N0}/{entry.CopiedBytes:N0}\treused={entry.ReusedFiles:N0}/{entry.ReusedBytes:N0}\tstale={entry.RemovedStaleFiles:N0}");
+                Console.WriteLine($"PAIR\t{entry.Name}\t{entry.State}\t{(entry.Passed ? "PASS" : "FAIL")}\tcopied={entry.CopiedFiles:N0}/{entry.CopiedBytes:N0}\tlinked={entry.LinkedFiles:N0}/{entry.LinkedBytes:N0}\treused={entry.ReusedFiles:N0}/{entry.ReusedBytes:N0}\tstale={entry.RemovedStaleFiles:N0}");
         }
         return cloneReport.Passed ? 0 : 3;
     }
@@ -3975,7 +4039,7 @@ static void WriteMpqExtractionFailureReport(string archivePath, string reportPat
 }
 static int CascHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible casc list <storage-folder> [filter] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc tree <storage-folder> [folder] [--local-only] [--format=text|json] [--listfile=paths.txt]\n  wowcrucible casc extract <storage-folder> <destination> [filter] [--quiet|--progress=N] [--listfile=paths.txt]\n  wowcrucible casc extract-folder <storage-folder> <internal-folder> <destination> [--quiet|--progress=N] [--listfile=paths.txt]\n\nCASC operations are read-only and local-only. Crucible never mutates the storage and never downloads missing CDN payloads implicitly.", code);
 static string CascProviderMask(string query) => query.IndexOfAny(['*', '?']) >= 0 ? query : "*";
-static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools commands [search words...] [--format=text|json]\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n  wowcrucible tools compatibility-clone <request.json> [--format=text|json]\n  wowcrucible tools compatibility-lab <request.json> [--format=text|json]\n  wowcrucible tools cross-build-mashup <request.json> [--format=text|json]\n\nThe command catalog is shared with the desktop Ctrl+K palette, so scripts and the UI use the same searchable vocabulary. A command search with no matches returns exit code 3.\n\nWithout an inventory path, Crucible searches upward from the executable for the shared wow-edits workspace. Any new unassigned directory returns exit code 3 so automation cannot silently claim complete tool coverage. compatibility-clone prepares excluded-directory-aware isolated worktrees, retains only marked partial copies for cancellation-safe resume, and SHA-256 verifies every completed clone before promotion. Existing completed clones are audited but never rewritten. compatibility-lab then operates only on explicit source/clone/table paths from the same request, hashes clone integrity, and exercises each build natively. cross-build-mashup is the explicit destructive-format lane: it translates donor rows into the MPQ host's exact table layouts, rewrites DBD references, publishes a real patch plus matching server payload, and installs only when named test-worktree roots are present in the request.", code);
+static int ToolingHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible tools commands [search words...] [--format=text|json]\n  wowcrucible tools inventory [workspace-root] [--format=text|json] [--unassigned-only] [--no-missing]\n  wowcrucible tools client-hardlink-plan <request.json> [--format=text|json]\n  wowcrucible tools client-hardlink-apply <plan.json> --apply [--format=text|json]\n  wowcrucible tools client-hardlink-materialize <plan.json> --apply [--format=text|json]\n  wowcrucible tools compatibility-clone <request.json> [--format=text|json]\n  wowcrucible tools compatibility-lab <request.json> [--format=text|json]\n  wowcrucible tools cross-build-mashup <request.json> [--format=text|json]\n\nThe command catalog is shared with the desktop Ctrl+K palette, so scripts and the UI use the same searchable vocabulary. A command search with no matches returns exit code 3.\n\nclient-hardlink-plan discovers every complete client below the reviewed library roots and requires each represented build cohort to list all of them. A file qualifies only when its exact SHA-256 occurs in that entire same-build cohort; pairwise, three-client, all-but-one, and other partial matches are reports, never actions. Apply repeats discovery, rejects cohort drift, and revalidates the reviewed plan, current NTFS identities, full SHA-256, and a final byte-for-byte comparison before atomically replacing an independent duplicate with a hard link; materialize restores independent files. Both changing operations require --apply and write durable per-file journals. compatibility-clone prepares excluded-directory-aware isolated worktrees, retains only marked partial copies for cancellation-safe resume, and SHA-256 verifies every completed clone before promotion. Existing completed clones are audited but never rewritten. compatibility-lab then operates only on explicit source/clone/table paths from the same request, hashes clone integrity, and exercises each build natively. cross-build-mashup is the explicit destructive-format lane: it translates donor rows into the MPQ host's exact table layouts, rewrites DBD references, publishes a real patch plus matching server payload, and installs only when named test-worktree roots are present in the request.", code);
 static int CacheHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible cache info <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--format=text|json]\n  wowcrucible cache rows <file.wdb|file.adb> [--definitions=definitions.xml] [--definition=name] [--search=text] [--limit=100] [--format=text|json]\n  wowcrucible cache export <file.wdb|file.adb> <output.csv|jsonl> [--definitions=definitions.xml] [--definition=name] [--format=csv|jsonl] [--overwrite]\n  wowcrucible cache server-plan <file.wdb> <host> <port> <user> <database> [--definitions=WDB.xml] [--ids=1,2] [--output=plan.json] [--sql=preview.sql] [--overwrite]\n  wowcrucible cache server-apply <plan.json> <host> <port> <user> <database> <receipt.json> [--apply] [--overwrite]\n  wowcrucible cache server-rollback <receipt.json> <host> <port> <user> <database> [--apply]\n\nWDB and Cataclysm WCH2 ADB reads are bounded and read-only. Version-aware headers and record framing are always inspected; when no matching schema is available, Crucible reports raw record metadata instead of guessing field types. Unsupported cache info still reports bounded size, SHA-256, first-byte hex/ASCII, and failed magic evidence with review exit code 3. Selected WDBX or Adb_Wdb_Parser schema XML is parsed as data by Crucible's own provider. Later WCH5/WCH7/WCH8 ADB is rejected rather than guessed because it requires matching DB2 layout metadata. Export is atomic and never overwrites without --overwrite. server-plan binds selected decoded WDB rows to exact live modern-core preimages and never invents missing rows or obsolete ArcEmu targets. Apply and rollback are dry-run unless --apply is explicit; apply rechecks source/schema/preimages under row locks and writes a receipt before commit, while rollback refuses later-edited fields. Database passwords come from WOW_CRUCIBLE_DB_PASSWORD by default.", code);
 static int KnowledgeHelp(int code = 0) => GroupHelp("Usage:\n  wowcrucible knowledge search <terms...> [--root=wiki-folder] [--locale=en] [--limit=100] [--format=text|json]\n  wowcrucible knowledge show <relative-markdown-path> [--root=wiki-folder] [--section=N]\n\nSearch builds a local in-memory index over Markdown only; it never executes the wiki site generator, scripts, HTML, or remote links. Without --root, Crucible searches upward from the executable for the shared wiki folder. The desktop exposes the same provider under Offline knowledge & field reference, and F1 opens it using the selected DBC table and field as context.", code);
 static void PrintAnonymousMpqWarning(IReadOnlyList<MpqFileEntry> files, string? listFile)
