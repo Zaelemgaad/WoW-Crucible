@@ -31,6 +31,7 @@ public static class ArtifactOwnershipService
     {
         var root = RequireProjectRoot(projectOrRoot); var project = CrucibleContentProjectService.Load(root); Initialize(root, project.ProjectId);
         operationId = SafeToken(operationId, "operation"); var runId = $"{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}"[..32]; var runRoot = Path.Combine(root, "Runs", operationId, runId);
+        RequireUnlinkedPath(runRoot);
         string Make(string name) { var path = Path.Combine(runRoot, name); Directory.CreateDirectory(path); return path; }
         return new(operationId, runId, runRoot, Make("Deliverable"), Make("Cache"), Make("Scratch"), Make("Diagnostics"), Make("Backup"), Make("Receipt"));
     }
@@ -41,10 +42,10 @@ public static class ArtifactOwnershipService
         var root = RequireProjectRoot(projectOrRoot); var project = CrucibleContentProjectService.Load(root); Initialize(root, project.ProjectId); operationId = SafeToken(operationId, "operation");
         if ((category is ArtifactLifecycleCategory.Deliverable or ArtifactLifecycleCategory.PreimageBackup or ArtifactLifecycleCategory.Receipt) && expiresUtc is not null)
             throw new InvalidOperationException($"{category} artifacts cannot expire automatically.");
-        var manifest = Load(root); var owned = manifest.Artifacts.ToDictionary(item => item.RelativePath, StringComparer.OrdinalIgnoreCase); var now = DateTimeOffset.UtcNow;
+        var manifest = Load(root); RequireManifestIdentity(manifest, project.ProjectId); var owned = manifest.Artifacts.ToDictionary(item => item.RelativePath, StringComparer.OrdinalIgnoreCase); var now = DateTimeOffset.UtcNow;
         foreach (var input in paths)
         {
-            var absolute = Path.GetFullPath(input); EnsureInside(root, absolute); if (!File.Exists(absolute)) throw new FileNotFoundException("Only existing generated files can be registered as owned artifacts.", absolute);
+            var absolute = Path.GetFullPath(input); EnsureInside(root, absolute); RequireUnlinkedPath(absolute); if (!File.Exists(absolute)) throw new FileNotFoundException("Only existing generated files can be registered as owned artifacts.", absolute);
             var relative = Path.GetRelativePath(root, absolute).Replace(Path.DirectorySeparatorChar, '/'); if (relative is "project.crucible.json" or "ids.crucible.json" or ManifestName) throw new InvalidOperationException("Project control files cannot be registered as operation artifacts.");
             if (!relative.StartsWith("Runs/", StringComparison.OrdinalIgnoreCase) && !CategoryRoot(category).Any(prefix => relative.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidOperationException($"A {category} artifact must live in an owned Runs directory or its dedicated project category, not at '{relative}'.");
@@ -55,12 +56,11 @@ public static class ArtifactOwnershipService
 
     public static ArtifactCleanupPlan PlanCleanup(string projectOrRoot, DateTimeOffset? now = null)
     {
-        var root = RequireProjectRoot(projectOrRoot); var project = CrucibleContentProjectService.Load(root); var manifest = Load(root); if (!manifest.ProjectId.Equals(project.ProjectId, StringComparison.Ordinal)) throw new InvalidDataException("The ownership manifest belongs to another project.");
+        var root = RequireProjectRoot(projectOrRoot); var project = CrucibleContentProjectService.Load(root); var manifest = Load(root); RequireManifestIdentity(manifest, project.ProjectId);
         var instant = now ?? DateTimeOffset.UtcNow; var entries = new List<ArtifactCleanupEntry>();
         foreach (var artifact in manifest.Artifacts)
         {
-            if (artifact.RequiredByPublishedDeliverable || artifact.Category is not (ArtifactLifecycleCategory.Cache or ArtifactLifecycleCategory.Scratch or ArtifactLifecycleCategory.Diagnostics)) continue;
-            if (artifact.Category == ArtifactLifecycleCategory.Diagnostics && (artifact.ExpiresUtc is null || artifact.ExpiresUtc > instant)) continue;
+            if (!CanCleanup(artifact, instant)) continue;
             var absolute = ResolveOwned(root, artifact.RelativePath); if (!File.Exists(absolute)) continue; var info = new FileInfo(absolute);
             if (info.Length != artifact.Bytes || !Hash(absolute).Equals(artifact.Sha256, StringComparison.OrdinalIgnoreCase)) continue;
             entries.Add(new(artifact.RelativePath, absolute, info.Length, artifact.Sha256, artifact.Category, artifact.OperationId));
@@ -71,24 +71,26 @@ public static class ArtifactOwnershipService
     public static ArtifactCleanupResult ApplyCleanup(ArtifactCleanupPlan plan)
     {
         var root = RequireProjectRoot(plan.ProjectRoot); var project = CrucibleContentProjectService.Load(root); if (!project.ProjectId.Equals(plan.ProjectId, StringComparison.Ordinal)) throw new InvalidDataException("Cleanup plan project identity is stale.");
-        var manifest = Load(root); var byPath = manifest.Artifacts.ToDictionary(item => item.RelativePath, StringComparer.OrdinalIgnoreCase); var removed = new List<string>(); long bytes = 0;
-        var verified = new List<(ArtifactCleanupEntry Entry, string Absolute, long Bytes)>();
+        var manifest = Load(root); RequireManifestIdentity(manifest, project.ProjectId); var byPath = manifest.Artifacts.ToDictionary(item => item.RelativePath, StringComparer.OrdinalIgnoreCase); var removed = new List<string>(); long bytes = 0;
+        var verified = new List<(ArtifactCleanupEntry Entry, long Bytes)>();
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var instant = DateTimeOffset.UtcNow;
         foreach (var entry in plan.Entries)
         {
-            if (!byPath.TryGetValue(entry.RelativePath, out var owned) || owned.RequiredByPublishedDeliverable ||
-                owned.Category is not (ArtifactLifecycleCategory.Cache or ArtifactLifecycleCategory.Scratch or ArtifactLifecycleCategory.Diagnostics) ||
+            if (!byPath.TryGetValue(entry.RelativePath, out var owned) || !CanCleanup(owned, instant) ||
                 owned.Category != entry.Category || !owned.OperationId.Equals(entry.OperationId, StringComparison.Ordinal) || owned.Bytes != entry.Bytes ||
                 !owned.Sha256.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"Cleanup ownership changed after preview: {entry.RelativePath}");
             var absolute = ResolveOwned(root, entry.RelativePath); if (!absolute.Equals(Path.GetFullPath(entry.AbsolutePath), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Cleanup path changed after preview: {entry.RelativePath}");
+            if (!paths.Add(absolute)) throw new InvalidDataException($"Cleanup plan contains a duplicate target: {entry.RelativePath}");
             if (!File.Exists(absolute)) throw new FileNotFoundException("Cleanup target disappeared after preview.", absolute); var info = new FileInfo(absolute);
             var hash = Hash(absolute); if (info.Length != entry.Bytes || !hash.Equals(entry.Sha256, StringComparison.OrdinalIgnoreCase) || !hash.Equals(owned.Sha256, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException($"Cleanup target changed after preview: {entry.RelativePath}");
-            verified.Add((entry, absolute, info.Length));
+            verified.Add((entry, info.Length));
         }
         // Nothing is deleted until every exact target has passed the stale-plan check.
         foreach (var item in verified)
         {
-            var entry = item.Entry; var absolute = item.Absolute;
+            var entry = item.Entry; var absolute = ResolveOwned(root, entry.RelativePath);
             File.Delete(absolute); bytes += item.Bytes; removed.Add(entry.RelativePath); byPath.Remove(entry.RelativePath); RemoveEmptyOwnedParents(root, Path.GetDirectoryName(absolute)!);
         }
         WriteAtomic(Path.Combine(root, ManifestName), manifest with { UpdatedUtc = DateTimeOffset.UtcNow, Artifacts = byPath.Values.OrderBy(item => item.RelativePath, StringComparer.OrdinalIgnoreCase).ToArray() });
@@ -102,8 +104,27 @@ public static class ArtifactOwnershipService
     }
 
     private static IEnumerable<string> CategoryRoot(ArtifactLifecycleCategory category) => category switch { ArtifactLifecycleCategory.Deliverable => ["Deliverables"], ArtifactLifecycleCategory.Cache => ["Cache"], ArtifactLifecycleCategory.Scratch => ["Staging"], ArtifactLifecycleCategory.Diagnostics => ["Diagnostics","Reports"], ArtifactLifecycleCategory.PreimageBackup => ["Backups"], ArtifactLifecycleCategory.Receipt => ["Receipts","Manifests"], _ => [] };
-    private static string RequireProjectRoot(string path) { path = Path.GetFullPath(path); if (File.Exists(path)) path = Path.GetDirectoryName(path)!; if (!File.Exists(Path.Combine(path, "project.crucible.json"))) throw new DirectoryNotFoundException($"No Crucible project exists at {path}"); return path; }
-    private static string ResolveOwned(string root, string relative) { if (Path.IsPathRooted(relative)) throw new InvalidDataException("Owned artifact paths must be portable project-relative paths."); var absolute = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar))); EnsureInside(root, absolute); return absolute; }
+    private static string RequireProjectRoot(string path) { path = Path.GetFullPath(path); RequireUnlinkedPath(path); if (File.Exists(path)) path = Path.GetDirectoryName(path)!; RequireUnlinkedPath(Path.Combine(path, "project.crucible.json")); RequireUnlinkedPath(Path.Combine(path, ManifestName)); if (!File.Exists(Path.Combine(path, "project.crucible.json"))) throw new DirectoryNotFoundException($"No Crucible project exists at {path}"); return path; }
+    private static string ResolveOwned(string root, string relative) { if (Path.IsPathRooted(relative)) throw new InvalidDataException("Owned artifact paths must be portable project-relative paths."); var absolute = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar))); EnsureInside(root, absolute); RequireUnlinkedPath(absolute); return absolute; }
+    private static bool CanCleanup(OwnedArtifact artifact, DateTimeOffset instant) => !artifact.RequiredByPublishedDeliverable &&
+        (artifact.Category is ArtifactLifecycleCategory.Cache or ArtifactLifecycleCategory.Scratch ||
+         artifact.Category == ArtifactLifecycleCategory.Diagnostics && artifact.ExpiresUtc is { } expiry && expiry <= instant);
+    private static void RequireManifestIdentity(ArtifactOwnershipManifest manifest, string projectId)
+    {
+        if (!string.Equals(manifest.ProjectId, projectId, StringComparison.Ordinal)) throw new InvalidDataException("The ownership manifest belongs to another project.");
+    }
+    private static void RequireUnlinkedPath(string path)
+    {
+        // Lexical containment alone does not protect a baseline reached through a junction.
+        for (var current = Path.GetFullPath(path); current is not null; current = Path.GetDirectoryName(current))
+        {
+            FileAttributes attributes;
+            try { attributes = File.GetAttributes(current); }
+            catch (FileNotFoundException) { continue; }
+            catch (DirectoryNotFoundException) { continue; }
+            if ((attributes & FileAttributes.ReparsePoint) != 0) throw new InvalidDataException($"Owned artifact path traverses a link/reparse point: {current}");
+        }
+    }
     private static void EnsureInside(string root, string path) { var relative = Path.GetRelativePath(root, path); if (relative is "." or ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)) throw new InvalidOperationException($"Owned artifact path escapes the project: {path}"); }
     private static string SafeToken(string value, string name) { value = value?.Trim() ?? string.Empty; if (value.Length == 0 || value.Any(character => !(char.IsAsciiLetterOrDigit(character) || character is '-' or '_'))) throw new ArgumentException($"The {name} must contain only letters, digits, '-' or '_'."); return value; }
     private static string Hash(string path) { using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan); return Convert.ToHexString(SHA256.HashData(stream)); }

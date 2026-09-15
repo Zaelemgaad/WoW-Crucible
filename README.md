@@ -136,6 +136,8 @@ The corpus suite is intentionally a real-data executable rather than an empty `d
 
 `test.cmd` provides the same entry point for Command Prompt. CI can instead set `WOW_CRUCIBLE_TEST_SCHEMA` and `WOW_CRUCIBLE_TEST_DBC`. The runner builds Release first, lists every missing required corpus fixture, and returns a normal usage exit code instead of an unhandled exception.
 
+For small, repeatable GUI checks with explicit expected results, see [GUI audit](docs/GUI-AUDIT.md). The cleanup regression runner also supports `--artifact-ownership` without a game-data corpus. Native Skia/HarfBuzz debugger symbols remain in the NuGet cache instead of being copied into every desktop build; use `-p:IncludeNativeDependencySymbols=true` only when debugging those native libraries.
+
 ```text
 wowcrucible asset inspect modern-model.m2 [building.wmo ...]
 wowcrucible asset m2-material-audit extracted-wrath-assets --workers=8 --format=json

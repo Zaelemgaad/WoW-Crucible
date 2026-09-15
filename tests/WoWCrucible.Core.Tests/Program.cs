@@ -7,6 +7,17 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+if (args is ["--artifact-ownership"])
+{
+    ArtifactOwnershipTestSuite.Run();
+    return;
+}
+if (args is ["--gui-cleanup-fixture", var fixtureRoot])
+{
+    ArtifactOwnershipTestSuite.CreateGuiFixture(fixtureRoot);
+    return;
+}
+
 if (args.Length != 2)
 {
     Console.Error.WriteLine("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
@@ -43,6 +54,7 @@ if (missingCorpusFiles.Length > 0)
 }
 
 ClientCorpusHardLinkTestSuite.Run();
+ArtifactOwnershipTestSuite.Run();
 
 var backupFixtureSource = Path.Combine(Path.GetTempPath(), $"wow-crucible-backup-source-{Guid.NewGuid():N}.dbc");
 File.WriteAllBytes(backupFixtureSource, [1, 2, 3, 4]);

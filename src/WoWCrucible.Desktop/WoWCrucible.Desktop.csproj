@@ -9,6 +9,7 @@
     <!-- A copied single-file build must carry Avalonia's native renderer libraries
          with it. Without this, Windows reports a misleading "Unknown Hard Error". -->
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeNativeDependencySymbols Condition="'$(IncludeNativeDependencySymbols)' == ''">false</IncludeNativeDependencySymbols>
   </PropertyGroup>
 
   <ItemGroup>
@@ -40,4 +41,15 @@
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+  <!-- Native package PDBs are optional debugger inputs, not renderer dependencies.
+       Filter before build/publish asset copying instead of deleting them afterwards. -->
+  <Target Name="ExcludeNativeDependencySymbols" AfterTargets="ResolvePackageAssets"
+          Condition="'$(IncludeNativeDependencySymbols)' != 'true'">
+    <ItemGroup>
+      <NativeCopyLocalItems Remove="@(NativeCopyLocalItems)"
+          Condition="'%(NativeCopyLocalItems.Extension)' == '.pdb' and ('%(NativeCopyLocalItems.Filename)' == 'libSkiaSharp' or '%(NativeCopyLocalItems.Filename)' == 'libHarfBuzzSharp')" />
+      <RuntimeTargetsCopyLocalItems Remove="@(RuntimeTargetsCopyLocalItems)"
+          Condition="'%(RuntimeTargetsCopyLocalItems.Extension)' == '.pdb' and ('%(RuntimeTargetsCopyLocalItems.Filename)' == 'libSkiaSharp' or '%(RuntimeTargetsCopyLocalItems.Filename)' == 'libHarfBuzzSharp')" />
+    </ItemGroup>
+  </Target>
 </Project>

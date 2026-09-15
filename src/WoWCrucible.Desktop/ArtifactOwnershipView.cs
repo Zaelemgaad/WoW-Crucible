@@ -13,12 +13,22 @@ internal sealed class ArtifactOwnershipView : UserControl
     private readonly TextBox _project = new() { PlaceholderText = "Crucible project folder…" };
     private readonly TextBlock _summary = new() { Text = "Open a project to inspect only the artifacts Crucible explicitly owns.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#99A5B8") };
     private readonly ListBox _entries = new();
+    private readonly Button _browse = new() { Content = "Browse…" };
+    private readonly Button _inspect = new() { Content = "Inspect ownership" };
+    private readonly Button _preview = Accent("Preview cleanup");
+    private readonly Button _apply = Accent("Apply exact preview");
     private ArtifactCleanupPlan? _plan;
+    private bool _busy;
+    private int _revision;
 
     public ArtifactOwnershipView(DesktopWorkspaceSession session)
     {
         _project.Text = session.Settings.ActiveProjectPath;
-        _project.TextChanged += (_, _) => { _plan = null; _entries.ItemsSource = null; };
+        _project.TextChanged += (_, _) =>
+        {
+            InvalidatePreview();
+            _summary.Text = "Project changed. No cleanup preview is active.";
+        };
         _entries.ItemTemplate = new FuncDataTemplate<ArtifactCleanupEntry>((entry, _) => entry is null ? new TextBlock() : new StackPanel
         {
             Spacing = 2, Margin = new Thickness(5, 4), Children =
@@ -28,15 +38,16 @@ internal sealed class ArtifactOwnershipView : UserControl
                 new TextBlock { Text = $"operation {entry.OperationId} · SHA-256 {entry.Sha256}", Foreground = Brush.Parse("#8793A7"), FontSize = 10, TextWrapping = TextWrapping.Wrap }
             }
         });
-        var browse = new Button { Content = "Browse…" }; browse.Click += async (_, _) => await BrowseAsync();
-        var inspect = new Button { Content = "Inspect ownership" }; inspect.Click += (_, _) => Inspect();
-        var preview = Accent("Preview cleanup"); preview.Click += async (_, _) => await PreviewAsync();
-        var apply = Accent("Apply exact preview"); apply.Click += async (_, _) => await ApplyAsync();
+        _browse.Click += async (_, _) => await BrowseAsync();
+        _inspect.Click += (_, _) => Inspect();
+        _preview.Click += async (_, _) => await PreviewAsync();
+        _apply.Click += async (_, _) => await ApplyAsync();
+        SetBusy(false);
         Content = new Grid
         {
             RowDefinitions = new("Auto,Auto,*"), RowSpacing = 9, Margin = new Thickness(12), Children =
             {
-                new StackPanel { Spacing = 8, Children = { new TextBlock { Text = "ARTIFACT OWNERSHIP & SAFE CLEANUP", FontSize = 17, FontWeight = FontWeight.SemiBold }, new TextBlock { Text = "Cleanup never infers ownership from names and never uses wildcards. Only manifest-owned cache, scratch, and expired diagnostics can appear here; deliverables, receipts, and preimage backups are protected.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#8793A7"), FontSize = 11 }, Row(_project, browse), new WrapPanel { Children = { inspect, preview, apply } } } },
+                new StackPanel { Spacing = 8, Children = { new TextBlock { Text = "ARTIFACT OWNERSHIP & SAFE CLEANUP", FontSize = 17, FontWeight = FontWeight.SemiBold }, Row(_project, _browse), new WrapPanel { Children = { _inspect, _preview, _apply } } } },
                 AtRow(_summary, 1), AtRow(_entries, 2)
             }
         };
@@ -51,27 +62,63 @@ internal sealed class ArtifactOwnershipView : UserControl
 
     private void Inspect()
     {
+        if (_busy) return;
+        InvalidatePreview();
         try { var manifest = ArtifactOwnershipService.Load(Root()); _summary.Text = $"Project {manifest.ProjectId} · {manifest.Artifacts.Count:N0} owned artifact(s) · {FormatBytes(manifest.Artifacts.Sum(item => item.Bytes))}. Cleanup has not been previewed."; }
         catch (Exception exception) { Fail("Ownership inspection failed", exception); }
     }
     private async Task PreviewAsync()
     {
-        try { _plan = await Task.Run(() => ArtifactOwnershipService.PlanCleanup(Root())); _entries.ItemsSource = _plan.Entries; _summary.Text = $"Preview only · {_plan.Entries.Count:N0} exact file(s) · {FormatBytes(_plan.ReclaimableBytes)} reclaimable. Nothing has been deleted."; }
-        catch (Exception exception) { Fail("Cleanup preview failed", exception); }
+        if (_busy) return;
+        InvalidatePreview();
+        var revision = _revision;
+        SetBusy(true);
+        try
+        {
+            var root = Root();
+            _summary.Text = $"Checking ownership and file hashes: {root}";
+            var plan = await Task.Run(() => ArtifactOwnershipService.PlanCleanup(root));
+            if (revision != _revision) return;
+            _plan = plan;
+            _entries.ItemsSource = plan.Entries;
+            _summary.Text = $"Preview only · {plan.Entries.Count:N0} exact file(s) · {FormatBytes(plan.ReclaimableBytes)} eligible file bytes.\nProject: {plan.ProjectRoot}";
+        }
+        catch (Exception exception) { Fail("Cleanup preview failed", exception, revision); }
+        finally { SetBusy(false); }
     }
     private async Task ApplyAsync()
     {
+        if (_busy || _plan is not { Entries.Count: > 0 } plan) return;
+        InvalidatePreview();
+        var revision = _revision;
+        SetBusy(true);
         try
         {
-            if (_plan is null) throw new InvalidOperationException("Preview cleanup first. Apply uses that exact immutable path/hash plan.");
-            var result = await Task.Run(() => ArtifactOwnershipService.ApplyCleanup(_plan)); _plan = null; _entries.ItemsSource = null;
-            _summary.Text = $"Removed {result.RemovedFiles:N0} exact manifest-owned file(s) and reclaimed {FormatBytes(result.ReclaimedBytes)}. Protected artifacts were untouched.";
+            if (!Path.TrimEndingDirectorySeparator(Root()).Equals(Path.TrimEndingDirectorySeparator(plan.ProjectRoot), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The project changed. Preview cleanup again.");
+            _summary.Text = $"Revalidating cleanup: {plan.ProjectRoot}";
+            var result = await Task.Run(() => ArtifactOwnershipService.ApplyCleanup(plan));
+            if (revision == _revision) _summary.Text = $"Removed {result.RemovedFiles:N0} exact manifest-owned file(s) · {FormatBytes(result.ReclaimedBytes)} file bytes. Protected artifacts were untouched.\nProject: {plan.ProjectRoot}";
         }
-        catch (Exception exception) { Fail("Cleanup apply failed", exception); }
+        catch (Exception exception) { Fail("Cleanup apply failed", exception, revision); }
+        finally { SetBusy(false); }
+    }
+    private void InvalidatePreview()
+    {
+        _revision++;
+        _plan = null;
+        _entries.ItemsSource = null;
+        _apply.IsEnabled = false;
+    }
+    private void SetBusy(bool busy)
+    {
+        _busy = busy;
+        _project.IsEnabled = _browse.IsEnabled = _inspect.IsEnabled = _preview.IsEnabled = !busy;
+        _apply.IsEnabled = !busy && _plan is { Entries.Count: > 0 };
     }
     private async Task BrowseAsync() { var folders = await Storage().OpenFolderPickerAsync(new() { Title = "Choose a Crucible project", AllowMultiple = false }); if (folders.Count > 0) _project.Text = folders[0].TryGetLocalPath(); }
     private string Root() => string.IsNullOrWhiteSpace(_project.Text) ? throw new InvalidOperationException("Choose a Crucible project first.") : Path.GetFullPath(_project.Text);
-    private void Fail(string action, Exception exception) { DesktopCrashLogger.Log(action, exception); _summary.Text = $"ERROR · {exception.Message}"; }
+    private void Fail(string action, Exception exception, int? revision = null) { DesktopCrashLogger.Log(action, exception); if (revision is null || revision == _revision) _summary.Text = $"ERROR · {exception.Message}"; }
     private IStorageProvider Storage() => TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The workspace is not attached to a desktop window.");
     private static Button Accent(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
     private static Grid Row(params Control[] controls) { var grid = new Grid { ColumnDefinitions = new(string.Join(',', controls.Select((_, index) => index == 0 ? "*" : "Auto"))), ColumnSpacing = 7 }; for (var index = 0; index < controls.Length; index++) { Grid.SetColumn(controls[index], index); grid.Children.Add(controls[index]); } return grid; }
