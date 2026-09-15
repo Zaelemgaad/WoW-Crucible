@@ -6,6 +6,25 @@ namespace WoWCrucible.Core;
 /// </summary>
 public static class ItemSemanticCatalog
 {
+    public static IReadOnlyList<SemanticOption> StatTypes { get; } =
+    [
+        new(uint.MaxValue, "Unused"), new(0, "Mana"), new(1, "Health"),
+        new(3, "Agility"), new(4, "Strength"), new(5, "Intellect"), new(6, "Spirit"), new(7, "Stamina"),
+        new(12, "Defense rating"), new(13, "Dodge rating"), new(14, "Parry rating"), new(15, "Block rating"),
+        new(16, "Melee hit rating"), new(17, "Ranged hit rating"), new(18, "Spell hit rating"),
+        new(19, "Melee critical strike rating"), new(20, "Ranged critical strike rating"), new(21, "Spell critical strike rating"),
+        new(22, "Melee hit avoidance rating"), new(23, "Ranged hit avoidance rating"), new(24, "Spell hit avoidance rating"),
+        new(25, "Melee critical strike avoidance rating"), new(26, "Ranged critical strike avoidance rating"), new(27, "Spell critical strike avoidance rating"),
+        new(28, "Melee haste rating"), new(29, "Ranged haste rating"), new(30, "Spell haste rating"),
+        new(31, "Hit rating"), new(32, "Critical strike rating"), new(33, "Hit avoidance rating"), new(34, "Critical strike avoidance rating"),
+        new(35, "Resilience rating"), new(36, "Haste rating"), new(37, "Expertise rating"),
+        new(38, "Attack power"), new(39, "Ranged attack power"),
+        new(40, "Feral attack power (obsolete)"),
+        new(41, "Spell healing (obsolete)"), new(42, "Spell damage (obsolete)"), new(43, "Mana regeneration"),
+        new(44, "Armor penetration rating"), new(45, "Spell power"), new(46, "Health regeneration"),
+        new(47, "Spell penetration"), new(48, "Block value")
+    ];
+
     public static string ClassName(int value) => value switch
     {
         0 => "Consumable", 1 => "Container", 2 => "Weapon", 3 => "Gem", 4 => "Armor", 5 => "Reagent",

@@ -9,41 +9,37 @@
         WindowStartupLocation="CenterScreen">
     <Grid x:Name="RootLayout" RowDefinitions="Auto,Auto,*,Auto" ColumnDefinitions="1.1*,Auto,3*,Auto,1.5*">
         <local:WorkspaceRuntimeStrip x:Name="RuntimeStrip" Grid.Row="0" Grid.ColumnSpan="5" />
-        <Border x:Name="MainHeader" Grid.Row="1" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,0,0,1">
-            <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*,Auto" Margin="14,4">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="9" Margin="0,2,10,4">
-                    <TextBlock Text="WOW CRUCIBLE" FontWeight="SemiBold" FontSize="15" VerticalAlignment="Center" />
-                    <TextBlock x:Name="BuildIdentityText" Foreground="#7F8A9F" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center" />
-                </StackPanel>
-                <WrapPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <ToggleSwitch x:Name="DevbugModeToggle" OnContent="DEVBUG ON" OffContent="DEVBUG OFF" IsCheckedChanged="DevbugModeChanged" />
-                    <Border Margin="8,0,0,0" Padding="9,5" CornerRadius="5" Background="#13251F" BorderBrush="#285845" BorderThickness="1">
-                        <TextBlock Text="AVALONIA PREVIEW" Foreground="#79D7A8" FontSize="11" FontWeight="SemiBold" />
-                    </Border>
+        <Border x:Name="MainHeader" Grid.Row="1" Grid.ColumnSpan="5" Background="#191B1E" BorderBrush="#36393E" BorderThickness="0,0,0,1">
+            <StackPanel Margin="8,4" Spacing="4">
+                <WrapPanel Orientation="Horizontal">
+                    <Button Margin="0,0,6,0" Content="Open DBC / DB2" Click="OpenDbcClick" ToolTip.Tip="Open DBC or DB2 files (Ctrl+O)" />
+                    <WrapPanel x:Name="DbcQuickActions" IsVisible="False">
+                        <Button Margin="0,0,6,0" Content="Save" Click="SaveClick" ToolTip.Tip="Save (Ctrl+S)" />
+                        <Button Margin="0,0,6,0" Content="Save As…" Click="SaveAsClick" ToolTip.Tip="Save As (Ctrl+Shift+S)" />
+                        <Button Margin="0,0,12,0" Content="×" Click="CloseDocumentClick" AutomationProperties.Name="Close current file" ToolTip.Tip="Close current file (Ctrl+W)" />
+                    </WrapPanel>
+                    <ToggleButton x:Name="ToolsPaneToggle" Margin="0,0,6,0" Content="Tools" Click="ToggleNavigationPaneClick" ToolTip.Tip="Show or hide the tools pane" />
+                    <ToggleButton x:Name="DetailsPaneToggle" Margin="0,0,6,0" Content="Row editor" Click="ToggleInspectorPaneClick" ToolTip.Tip="Show or hide the selected record" />
+                    <Button Content="Commands…" Click="OpenCommandPaletteClick" ToolTip.Tip="All commands (Ctrl+K)" />
                 </WrapPanel>
-                <ScrollViewer Grid.Row="1" Grid.ColumnSpan="2" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                <StackPanel x:Name="FindReplaceBar" IsVisible="False" Spacing="4">
                     <WrapPanel Orientation="Horizontal">
-                        <Button Margin="0,0,8,0" Content="Home" Click="OpenHomeClick" />
-                        <Button Margin="0,0,8,0" Classes="accent" Content="Open DBC" Click="OpenDbcClick" />
-                        <WrapPanel x:Name="DbcQuickActions" IsVisible="False">
-                            <Button Margin="0,0,8,0" Content="Save" Click="SaveClick" />
-                            <Button Margin="0,0,8,0" Content="Save As" Click="SaveAsClick" />
-                        </WrapPanel>
-                        <Button Margin="0,0,8,0" Content="Commands · Ctrl+K" Click="OpenCommandPaletteClick" />
+                        <TextBox x:Name="SearchBox" Width="260" Margin="0,0,4,0" PlaceholderText="Filter records…" AutomationProperties.Name="Filter records" TextChanged="SearchChanged" />
+                        <Button Margin="0,0,4,0" Content="×" Click="ClearFilterClick" AutomationProperties.Name="Clear filter" ToolTip.Tip="Clear filter" />
+                        <Button Margin="0,0,4,0" Content="↑" Click="FindPreviousClick" AutomationProperties.Name="Previous match" ToolTip.Tip="Previous matching cell (Shift+Enter)" />
+                        <Button Margin="0,0,6,0" Content="↓" Click="FindNextClick" AutomationProperties.Name="Next match" ToolTip.Tip="Next matching cell (Enter)" />
+                        <ToggleButton x:Name="ReplaceToggle" Margin="0,0,16,0" Content="Replace" Click="ToggleReplaceClick" ToolTip.Tip="Find and replace (Ctrl+H)" />
+                        <TextBox x:Name="GoToIdBox" Width="125" Margin="0,0,4,0" PlaceholderText="Record ID" AutomationProperties.Name="Record ID" KeyDown="GoToIdKeyDown" />
+                        <Button x:Name="GoToIdButton" Content="Go to ID" Click="GoToIdClick" />
                     </WrapPanel>
-                </ScrollViewer>
-                <Border x:Name="FindReplaceBar" Grid.Row="2" Grid.ColumnSpan="2" IsVisible="False" Margin="0,4,0,0" Padding="6" Background="#111722" BorderBrush="#39465E" BorderThickness="1" CornerRadius="5">
-                    <WrapPanel Orientation="Horizontal">
-                        <TextBox x:Name="SearchBox" Margin="0,0,6,0" PlaceholderText="Find in current view…" TextChanged="SearchChanged" />
-                        <TextBox x:Name="ReplaceBox" Margin="0,0,6,0" PlaceholderText="Replace with…" />
-                        <Button Margin="0,0,4,0" Content="Previous" Click="FindPreviousClick" />
-                        <Button Margin="0,0,4,0" Content="Next" Click="FindNextClick" />
-                        <Button x:Name="ReplaceOneButton" Margin="0,0,4,0" Content="Replace" Click="ReplaceOneClick" />
-                        <Button x:Name="ReplaceAllButton" Margin="0,0,4,0" Content="Replace all" Click="ReplaceAllClick" />
-                        <Button Content="Close · Esc" Click="CloseFindReplaceClick" />
+                    <WrapPanel x:Name="ReplaceControls" IsVisible="False" Orientation="Horizontal">
+                        <TextBox x:Name="ReplaceBox" Width="260" Margin="0,0,6,0" PlaceholderText="Replace with…" />
+                        <Button x:Name="ReplaceOneButton" Margin="0,0,4,0" Content="Replace next" Click="ReplaceOneClick" />
+                        <Button x:Name="ReplaceAllButton" Margin="0,0,4,0" Content="Replace all…" Click="ReplaceAllClick" />
+                        <Button Content="×" Click="CloseFindReplaceClick" AutomationProperties.Name="Close replace" ToolTip.Tip="Close replace" />
                     </WrapPanel>
-                </Border>
-            </Grid>
+                </StackPanel>
+            </StackPanel>
         </Border>
 
         <Border x:Name="NavigationPane" Grid.Row="2" Grid.Column="0" BorderBrush="#2B3445" BorderThickness="0,0,1,0" Background="#0E1219">
@@ -102,18 +98,16 @@
                                 <Button HorizontalContentAlignment="Left" Click="OpenToolInventoryClick"><TextBlock Text="Legacy-tool coverage" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenCliGuideClick"><TextBlock Text="CLI guide" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenLogsClick"><TextBlock Text="Logs" TextWrapping="Wrap" /></Button>
-                                <Button x:Name="NavigationPaneButton" HorizontalContentAlignment="Left" Content="Hide workspace pane" Click="ToggleNavigationPaneClick" />
-                                <Button x:Name="InspectorPaneButton" HorizontalContentAlignment="Left" Content="Hide inspector pane" Click="ToggleInspectorPaneClick" />
                             </StackPanel>
                         </Expander>
                     </StackPanel>
                 </ScrollViewer>
-                <Border Grid.Row="2" Margin="0,8,0,0" Padding="10" CornerRadius="6" Background="#131925" BorderBrush="#273044" BorderThickness="1">
+                <Expander Grid.Row="2" Header="Diagnostics" Margin="0,8,0,0">
                     <StackPanel Spacing="5">
-                        <TextBlock Text="Performance mode" FontWeight="SemiBold" />
-                        <TextBlock Text="No animations · direct-rendered tables · background file I/O · Devbug optional" TextWrapping="Wrap" Foreground="#8E99AD" FontSize="11" />
+                        <ToggleSwitch x:Name="DevbugModeToggle" OnContent="Devbug on" OffContent="Devbug off" IsCheckedChanged="DevbugModeChanged" />
+                        <TextBlock x:Name="BuildIdentityText" Foreground="#7F8A9F" FontSize="10" />
                     </StackPanel>
-                </Border>
+                </Expander>
             </Grid>
         </Border>
 
@@ -127,9 +121,9 @@
                     </ScrollViewer>
                     <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                         <WrapPanel Margin="6,4" Orientation="Horizontal">
-                            <Button Margin="0,0,4,0" Content="Undo" Padding="8,4" Click="UndoClick" />
-                            <Button Margin="0,0,4,0" Content="Redo" Padding="8,4" Click="RedoClick" />
-                            <Button Margin="0,0,4,0" Content="+ Row" Padding="8,4" Click="AddRowClick" />
+                            <Button Margin="0,0,4,0" Content="↶" Padding="8,4" Click="UndoClick" AutomationProperties.Name="Undo" ToolTip.Tip="Undo (Ctrl+Z)" />
+                            <Button Margin="0,0,4,0" Content="↷" Padding="8,4" Click="RedoClick" AutomationProperties.Name="Redo" ToolTip.Tip="Redo (Ctrl+Y)" />
+                            <Button Margin="0,0,4,0" Content="Add row" Padding="8,4" Click="AddRowClick" />
                             <Button Margin="0,0,4,0" Content="Clone" Padding="8,4" Click="CloneRowClick" />
                             <Button Margin="0,0,4,0" Content="Clone ×…" Padding="8,4" Click="CloneMultipleClick" />
                             <Button Margin="0,0,4,0" Content="Delete" Padding="8,4" Click="DeleteRowClick" />
@@ -143,74 +137,11 @@
             </Border>
             <Grid Grid.Row="1">
                 <Grid x:Name="WelcomePanel">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                        <StackPanel Margin="18" Spacing="12">
-                            <Border CornerRadius="12" Padding="24" BorderBrush="#2A3447" BorderThickness="1">
-                                <Border.Background>
-                                    <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,100%">
-                                        <GradientStop Color="#182233" Offset="0" />
-                                        <GradientStop Color="#0E131C" Offset="1" />
-                                    </LinearGradientBrush>
-                                </Border.Background>
-                                <StackPanel Spacing="8">
-                                    <TextBlock Text="What do you want to work on?" FontSize="26" FontWeight="SemiBold" />
-                                    <TextBlock Text="Start with a guided editor. Raw tables, conversion, and diagnostic tools remain available under the grouped workspace pane when you need them." Foreground="#A7B0C0" TextWrapping="Wrap" LineHeight="20" />
-                                </StackPanel>
-                            </Border>
-                            <Border Padding="18" BorderBrush="#293347" BorderThickness="1" CornerRadius="9">
-                                <Grid ColumnDefinitions="2*,3*" ColumnSpacing="18">
-                                    <StackPanel Spacing="4">
-                                        <TextBlock Text="Create or change gameplay" FontSize="18" FontWeight="SemiBold" />
-                                        <TextBlock Text="Friendly editors that coordinate readable fields with complete SQL and client data." TextWrapping="Wrap" Foreground="#9AA5B7" />
-                                    </StackPanel>
-                                    <WrapPanel Grid.Column="1" VerticalAlignment="Center">
-                                        <Button Classes="accent" Content="Items &amp; sets" Click="OpenItemWorkbenchClick" />
-                                        <Button Content="Creatures &amp; NPCs" Click="OpenCreatureWorkspaceClick" />
-                                        <Button Content="Quests" Click="OpenQuestWorkspaceClick" />
-                                    </WrapPanel>
-                                </Grid>
-                            </Border>
-                            <Border Padding="18" BorderBrush="#293347" BorderThickness="1" CornerRadius="9">
-                                <Grid ColumnDefinitions="2*,3*" ColumnSpacing="18">
-                                    <StackPanel Spacing="4">
-                                        <TextBlock Text="Edit client data and build a patch" FontSize="18" FontWeight="SemiBold" />
-                                        <TextBlock Text="Use this for raw DBC work, client archives, and the final MPQ sent to players." TextWrapping="Wrap" Foreground="#9AA5B7" />
-                                    </StackPanel>
-                                    <WrapPanel Grid.Column="1" VerticalAlignment="Center">
-                                        <Button Classes="accent" Content="Open DBC" Click="OpenDbcClick" />
-                                        <Button Content="MPQ patches" Click="OpenMpqWorkspaceClick" />
-                                        <Button Content="Client workshop" Click="OpenClientWorkspaceClick" />
-                                    </WrapPanel>
-                                </Grid>
-                            </Border>
-                            <Border Padding="18" BorderBrush="#293347" BorderThickness="1" CornerRadius="9">
-                                <Grid ColumnDefinitions="2*,3*" ColumnSpacing="18">
-                                    <StackPanel Spacing="4">
-                                        <TextBlock Text="Manage the server and database" FontSize="18" FontWeight="SemiBold" />
-                                        <TextBlock Text="Check the configured install, control services, browse every live table, or edit exact rows." TextWrapping="Wrap" Foreground="#9AA5B7" />
-                                    </StackPanel>
-                                    <WrapPanel Grid.Column="1" VerticalAlignment="Center">
-                                        <Button Classes="accent" Content="SQL Studio" Click="OpenSqlWorkspaceClick" />
-                                        <Button Content="Connection &amp; controls" Click="OpenServerSqlClick" />
-                                        <Button Content="Workspace setup" Click="OpenWorkspaceSetupClick" />
-                                    </WrapPanel>
-                                </Grid>
-                            </Border>
-                            <Border Padding="18" BorderBrush="#293347" BorderThickness="1" CornerRadius="9">
-                                <Grid ColumnDefinitions="2*,3*" ColumnSpacing="18">
-                                    <StackPanel Spacing="4">
-                                        <TextBlock Text="Visual assets and world editing" FontSize="18" FontWeight="SemiBold" />
-                                        <TextBlock Text="Advanced texture, model, comparison, conversion, and extracted-map workflows." TextWrapping="Wrap" Foreground="#9AA5B7" />
-                                    </StackPanel>
-                                    <WrapPanel Grid.Column="1" VerticalAlignment="Center">
-                                        <Button Content="Assets &amp; models" Click="OpenAssetComparisonClick" />
-                                        <Button Content="Textures" Click="OpenTextureWorkspaceClick" />
-                                        <Button Content="Maps &amp; world" Click="OpenMapWorkspaceClick" />
-                                    </WrapPanel>
-                                </Grid>
-                            </Border>
-                        </StackPanel>
-                    </ScrollViewer>
+                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12" Margin="24">
+                        <TextBlock Text="DBC / DB2" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                        <TextBlock Text="No file selected" Foreground="#9FA4AA" HorizontalAlignment="Center" />
+                        <Button Content="Open DBC / DB2" Click="OpenDbcClick" HorizontalAlignment="Center" />
+                    </StackPanel>
                 </Grid>
                 <Grid x:Name="DbcHost" IsVisible="False" ColumnDefinitions="*,Auto,0*">
                     <Border x:Name="PrimaryDbcPane" BorderBrush="#C58A2B" BorderThickness="1">
@@ -224,11 +155,11 @@
                                      VerticalAlignment="Top"
                                      Padding="7,1"
                                      FontFamily="Inter"
-                                     FontSize="11"
+                                     FontSize="13"
                                      Background="#0A0F17"
                                      BorderBrush="#E0A33C"
                                      BorderThickness="2" />
-                            <ScrollBar x:Name="VerticalDbcScroll" Grid.Row="1" Grid.Column="1" Orientation="Vertical" SmallChange="25" LargeChange="500" ValueChanged="DbcScrollChanged" />
+                            <ScrollBar x:Name="VerticalDbcScroll" Grid.Row="1" Grid.Column="1" Orientation="Vertical" SmallChange="27" LargeChange="500" ValueChanged="DbcScrollChanged" />
                             <ScrollBar x:Name="HorizontalDbcScroll" Grid.Row="2" Orientation="Horizontal" SmallChange="156" LargeChange="624" ValueChanged="DbcScrollChanged" />
                         </Grid>
                     </Border>
@@ -244,11 +175,11 @@
                                      VerticalAlignment="Top"
                                      Padding="7,1"
                                      FontFamily="Inter"
-                                     FontSize="11"
+                                     FontSize="13"
                                      Background="#0A0F17"
                                      BorderBrush="#E0A33C"
                                      BorderThickness="2" />
-                            <ScrollBar x:Name="SecondaryVerticalDbcScroll" Grid.Row="1" Grid.Column="1" Orientation="Vertical" SmallChange="25" LargeChange="500" ValueChanged="SecondaryDbcScrollChanged" />
+                            <ScrollBar x:Name="SecondaryVerticalDbcScroll" Grid.Row="1" Grid.Column="1" Orientation="Vertical" SmallChange="27" LargeChange="500" ValueChanged="SecondaryDbcScrollChanged" />
                             <ScrollBar x:Name="SecondaryHorizontalDbcScroll" Grid.Row="2" Orientation="Horizontal" SmallChange="156" LargeChange="624" ValueChanged="SecondaryDbcScrollChanged" />
                         </Grid>
                     </Border>
@@ -259,19 +190,21 @@
 
         <GridSplitter x:Name="InspectorSplitter" Grid.Row="2" Grid.Column="3" ResizeDirection="Columns" Background="#2B3445" />
 
-        <Border x:Name="InspectorPane" Grid.Row="2" Grid.Column="4" BorderBrush="#2B3445" BorderThickness="1,0,0,0" Background="#0E1219">
-            <Grid RowDefinitions="Auto,Auto,*" Margin="14">
-                <TextBlock Text="INSPECTOR" Foreground="#7F8A9F" FontSize="10" FontWeight="Bold" Margin="2,4,0,12" />
-                <StackPanel Grid.Row="1" Spacing="8">
-                    <TextBlock x:Name="InspectorTitle" Text="Nothing selected" FontSize="17" FontWeight="SemiBold" />
-                    <TextBlock x:Name="InspectorSummary" Text="Open a table or model to begin." TextWrapping="Wrap" Foreground="#939EB1" />
-                </StackPanel>
-                <Border Grid.Row="2" Margin="0,18,0,0" CornerRadius="7" BorderBrush="#283247" BorderThickness="1" Background="#0A0E15">
+        <Border x:Name="InspectorPane" Grid.Row="2" Grid.Column="4" BorderBrush="#36393E" BorderThickness="1,0,0,0" Background="#1B1D20">
+            <TabControl x:Name="InspectorTabs">
+                <TabItem x:Name="RowEditorTab" Header="Row" FontSize="14">
+                    <local:DbcRowEditorView x:Name="RowEditor" />
+                </TabItem>
+                <TabItem Header="Details" FontSize="14">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                        <TextBlock x:Name="InspectorDetail" Text="Table metadata and selection details appear here." Margin="14" TextWrapping="Wrap" Foreground="#7F8A9F" FontFamily="Cascadia Mono,Consolas" FontSize="11" />
+                        <StackPanel Margin="12" Spacing="12">
+                            <TextBlock x:Name="InspectorTitle" Text="Nothing selected" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap" />
+                            <TextBlock x:Name="InspectorSummary" Text="No file open" TextWrapping="Wrap" Foreground="#B0B5BC" />
+                            <TextBlock x:Name="InspectorDetail" TextWrapping="Wrap" Foreground="#939AA4" FontSize="12" />
+                        </StackPanel>
                     </ScrollViewer>
-                </Border>
-            </Grid>
+                </TabItem>
+            </TabControl>
         </Border>
 
         <Border x:Name="MainStatusBar" Grid.Row="3" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,1,0,0" Background="#0B0F16">

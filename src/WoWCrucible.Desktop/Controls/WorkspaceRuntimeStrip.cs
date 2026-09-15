@@ -112,10 +112,14 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             VerticalAlignment = VerticalAlignment.Center,
             Items =
             {
+                DomainMenu("FILE",
+                    ("Open DBC / DB2...", "action.open-dbc"),
+                    ("Save", "action.save"),
+                    ("Save As...", "action.save-as")),
                 DomainMenu("CRUCIBLE",
                     ("Workspace setup", "workspace.setup"),
                     ("Projects & shared IDs", "workspace.projects"),
-                    ("DBC tables", "workspace.dbc"),
+                    ("DBC / DB2 editor", "workspace.dbc"),
                     ("All commands…", "ui.commands")),
                 DomainMenu("CREATE",
                     ("Items & sets", "workspace.items"),

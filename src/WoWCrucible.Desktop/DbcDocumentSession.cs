@@ -8,6 +8,7 @@ internal sealed class DbcDocumentSession(WdbcFile file, DbcSchemaResolution sche
     public DbcSchemaResolution Schema { get; } = schema;
     public string SchemaSource { get; } = schemaSource;
     public DesktopEditHistory History { get; } = new();
+    public string FilterText { get; set; } = string.Empty;
     public string FullPath => Path.GetFullPath(File.SourcePath);
     public string DisplayName => Path.GetFileName(File.SourcePath) + (File.IsDirty ? " *" : string.Empty);
     public DbcColumn? IdColumn => DbcRecordIdentity.PhysicalColumn(Schema.Columns, Schema.KeyStrategy);
@@ -24,7 +25,7 @@ internal sealed class DesktopEditHistory
     public string? UndoDescription => _undo.TryPeek(out var edit) ? edit.Description : null;
     public string? RedoDescription => _redo.TryPeek(out var edit) ? edit.Description : null;
 
-    public void Record(int row, DbcColumn column, uint before, uint after)
+    public void Record(int row, DbcColumn column, ulong before, ulong after)
     {
         if (before == after) return;
         _undo.Push(new(row, column, before, after));
@@ -38,7 +39,7 @@ internal sealed class DesktopEditHistory
     public CellEdit? Undo(WdbcFile file)
     {
         if (!_undo.TryPop(out var edit)) return null;
-        file.SetRaw(edit.Row, edit.Column, edit.Before);
+        file.SetRaw64(edit.Row, edit.Column, edit.Before);
         _redo.Push(edit);
         return edit;
     }
@@ -46,7 +47,7 @@ internal sealed class DesktopEditHistory
     public CellEdit? Redo(WdbcFile file)
     {
         if (!_redo.TryPop(out var edit)) return null;
-        file.SetRaw(edit.Row, edit.Column, edit.After);
+        file.SetRaw64(edit.Row, edit.Column, edit.After);
         _undo.Push(edit);
         return edit;
     }
@@ -57,7 +58,7 @@ internal sealed class DesktopEditHistory
         _redo.Clear();
     }
 
-    internal sealed record CellEdit(int Row, DbcColumn Column, uint Before, uint After)
+    internal sealed record CellEdit(int Row, DbcColumn Column, ulong Before, ulong After)
     {
         public string Description => $"row {Row + 1:N0}, {Column.Name}";
     }

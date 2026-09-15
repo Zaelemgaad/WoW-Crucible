@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
@@ -75,18 +76,31 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
 
         var dropTarget = new Border
         {
-            BorderBrush = Brush.Parse("#35506F"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(10), Margin = new Thickness(12, 9, 12, 0),
+            Background = Brushes.Transparent, BorderBrush = Brush.Parse("#35506F"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(10), Margin = new Thickness(12, 9, 12, 0),
             Child = new TextBlock { Text = "DROP M2 / WMO FILES, FOLDERS, OR conversion-report.json", HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#94B9E4") }
         };
-        DragDrop.SetAllowDrop(dropTarget, true);
-        DragDrop.AddDragOverHandler(dropTarget, (_, args) => { args.DragEffects = args.DataTransfer.TryGetFiles()?.Any() == true ? DragDropEffects.Copy : DragDropEffects.None; args.Handled = true; });
-        DragDrop.AddDropHandler(dropTarget, async (_, args) =>
+        DragDrop.SetAllowDrop(this, true);
+        AddHandler(DragDrop.DragOverEvent, (_, args) =>
+        {
+            args.DragEffects = args.DataTransfer.TryGetFiles()?.Any(item => AcceptsDropPath(item.TryGetLocalPath())) == true ? DragDropEffects.Copy : DragDropEffects.None;
+            args.Handled = true;
+        }, RoutingStrategies.Bubble, handledEventsToo: true);
+        AddHandler(DragDrop.DropEvent, async (_, args) =>
         {
             var paths = args.DataTransfer.TryGetFiles()?.Select(item => item.TryGetLocalPath()).OfType<string>().ToArray() ?? [];
-            if (paths.Length == 1 && Path.GetFileName(paths[0]).Equals("conversion-report.json", StringComparison.OrdinalIgnoreCase)) await LoadReportAsync(paths[0]);
-            else await AnalyzeAsync(paths);
             args.Handled = true;
-        });
+            args.DragEffects = paths.Any(AcceptsDropPath) ? DragDropEffects.Copy : DragDropEffects.None;
+            try
+            {
+                if (paths.Length == 1 && Path.GetFileName(paths[0]).Equals("conversion-report.json", StringComparison.OrdinalIgnoreCase)) await LoadReportAsync(paths[0]);
+                else await AnalyzeAsync(paths);
+            }
+            catch (Exception exception)
+            {
+                _summary.Text = $"Could not open dropped files: {exception.Message}";
+                DesktopCrashLogger.Log("Conversion file drop failed", exception);
+            }
+        }, RoutingStrategies.Bubble, handledEventsToo: true);
 
         var listfileStrip = new Grid
         {
@@ -110,8 +124,13 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             }
         };
         var body = new ResponsiveSplitGrid(left, right, 1, 2) { Margin = new Thickness(12, 9, 12, 12) };
-        Content = new Grid { RowDefinitions = new("Auto,Auto,Auto,*"), Children = { header, WithRow(listfileStrip, 1), WithRow(dropTarget, 2), WithRow(body, 3) } };
+        Content = new Grid { Background = Brushes.Transparent, RowDefinitions = new("Auto,Auto,Auto,*"), Children = { header, WithRow(listfileStrip, 1), WithRow(dropTarget, 2), WithRow(body, 3) } };
     }
+
+    private static bool AcceptsDropPath(string? path) => path is not null && (Directory.Exists(path) ||
+        File.Exists(path) && (Path.GetExtension(path).Equals(".m2", StringComparison.OrdinalIgnoreCase) ||
+                             Path.GetExtension(path).Equals(".wmo", StringComparison.OrdinalIgnoreCase) ||
+                             Path.GetFileName(path).Equals("conversion-report.json", StringComparison.OrdinalIgnoreCase)));
 
     public Task OpenAsync(string path) => AnalyzeAsync([path]);
 

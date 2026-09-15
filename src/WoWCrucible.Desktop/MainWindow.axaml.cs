@@ -36,7 +36,9 @@ public partial class MainWindow : Window
     private Controls.DbcSelectionEventArgs? _dbcEditingSelection;
     private VirtualDbcView? _dbcEditingView;
     private TextBox? _dbcEditingEditor;
+    private DbcDocumentSession? _dbcEditingDocument;
     private bool _dbcEditorClosing;
+    private bool _savingDbc;
     private readonly DesktopWorkspaceSession _workspaceSession = new(DesktopSettings.Load());
     private AssetComparisonView? _assetComparisonView;
     private NativeConversionWorkspaceView? _nativeConversionWorkspaceView;
@@ -102,6 +104,7 @@ public partial class MainWindow : Window
         DesktopCrashLogger.Debug("UI", "main-window-created", ("devbug", DesktopCrashLogger.IsDevbugEnabled), ("build", buildIdentity.FullVersion), ("base_directory", AppContext.BaseDirectory));
         AttachDbcPane(DbcView, DbcInlineEditor);
         AttachDbcPane(SecondaryDbcView, SecondaryDbcInlineEditor);
+        RowEditor.CommitValue = ApplyRowFieldEdit;
         DbcView.RenderMeasured += (_, measurement) =>
         {
             var now = Stopwatch.GetTimestamp();
@@ -122,13 +125,17 @@ public partial class MainWindow : Window
     private void AttachDbcPane(VirtualDbcView view, TextBox editor)
     {
         view.GotFocus += (_, _) => ActivateDbcPane(view);
-        view.SelectionChanged += (_, selection) => { ActivateDbcPane(view); ShowSelection(selection); };
-        view.CellEditRequested += async (_, request) => { ActivateDbcPane(view); if (await EnsureBackupChoiceAsync()) BeginInlineCellEdit(view, editor, request); };
+        view.SelectionChanged += (_, selection) => { if (ActivateDbcPane(view)) ShowSelection(selection); };
+        view.CellEditRequested += (_, request) =>
+        {
+            if (!CommitPendingDbcEdits() || !ActivateDbcPane(view)) return;
+            BeginInlineCellEdit(view, editor, request);
+        };
         view.RangeDragRequested += async (_, request) => await StartDbcRangeDragAsync(view, request);
         editor.KeyDown += DbcInlineEditorKeyDown;
         editor.LostFocus += (_, _) =>
         {
-            if (editor.IsVisible && !_dbcEditorClosing) _ = CommitInlineCellEdit(null);
+            if (editor.IsVisible && !_dbcEditorClosing) _ = CommitInlineCellEdit(null, focusOnError: false);
         };
         DragDrop.SetAllowDrop(view, true);
         DragDrop.AddDragOverHandler(view, (_, e) =>
@@ -147,15 +154,19 @@ public partial class MainWindow : Window
         });
     }
 
-    private void ActivateDbcPane(VirtualDbcView view)
+    private bool ActivateDbcPane(VirtualDbcView view)
     {
+        if (!ReferenceEquals(ActiveDbcView, view) && !CommitPendingDbcEdits()) return false;
+        var changed = !ReferenceEquals(ActiveDbcView, view);
         _secondaryPaneActive = ReferenceEquals(view, SecondaryDbcView) && SecondaryDbcPane.IsVisible;
         var active = ActiveDocumentIndex;
-        if (active < 0 || active >= _documents.Count) return;
+        if (active < 0 || active >= _documents.Count) return false;
         PrimaryDbcPane.BorderBrush = Brush.Parse(_secondaryPaneActive ? "#39455A" : "#C58A2B");
         SecondaryDbcPane.BorderBrush = Brush.Parse(_secondaryPaneActive ? "#C58A2B" : "#39455A");
         ShowDocumentSummary(_documents[active]);
+        if (changed) RestoreDbcFilter(_documents[active]);
         RefreshTabs();
+        return true;
     }
 
     private DbcDocumentSession? DocumentForView(VirtualDbcView view)
@@ -224,33 +235,36 @@ public partial class MainWindow : Window
 
     private void ToggleNavigationPaneClick(object? sender, RoutedEventArgs e)
     {
-        _workspaceSession.Settings.NavigationPaneOpen = !_workspaceSession.Settings.NavigationPaneOpen;
+        if (!M2View.IsVisible) _workspaceSession.Settings.DbcToolsPaneOpen = !_workspaceSession.Settings.DbcToolsPaneOpen;
+        else _workspaceSession.Settings.NavigationPaneOpen = !_workspaceSession.Settings.NavigationPaneOpen;
         ApplyShellPaneState();
         _workspaceSession.Settings.Save();
-        StatusText.Text = _workspaceSession.Settings.NavigationPaneOpen ? "Workspace pane restored · drag its divider to choose any width" : "Workspace pane hidden · the editor now owns that space";
     }
 
     private void ToggleInspectorPaneClick(object? sender, RoutedEventArgs e)
     {
-        _workspaceSession.Settings.InspectorPaneOpen = !_workspaceSession.Settings.InspectorPaneOpen;
+        if (!M2View.IsVisible) _workspaceSession.Settings.DbcRowEditorOpen = !_workspaceSession.Settings.DbcRowEditorOpen;
+        else _workspaceSession.Settings.InspectorPaneOpen = !_workspaceSession.Settings.InspectorPaneOpen;
         ApplyShellPaneState();
         _workspaceSession.Settings.Save();
-        StatusText.Text = _workspaceSession.Settings.InspectorPaneOpen ? "Inspector pane restored · drag its divider to choose any width" : "Inspector pane hidden · the editor now owns that space";
     }
 
     private void ApplyShellPaneState()
     {
         var shellVisible = !FeatureWorkspaceHost.IsVisible;
-        var navigationVisible = shellVisible && _workspaceSession.Settings.NavigationPaneOpen;
-        var inspectorVisible = shellVisible && _workspaceSession.Settings.InspectorPaneOpen && !WelcomePanel.IsVisible;
+        var navigationVisible = shellVisible && (M2View.IsVisible ? _workspaceSession.Settings.NavigationPaneOpen : _workspaceSession.Settings.DbcToolsPaneOpen);
+        var inspectorVisible = shellVisible && !WelcomePanel.IsVisible && (M2View.IsVisible ? _workspaceSession.Settings.InspectorPaneOpen : _workspaceSession.Settings.DbcRowEditorOpen);
+        if (navigationVisible && !NavigationPane.IsVisible) RootLayout.ColumnDefinitions[0].Width = new GridLength(240);
+        if (inspectorVisible && !InspectorPane.IsVisible) RootLayout.ColumnDefinitions[4].Width = new GridLength(370);
         NavigationPane.IsVisible = NavigationSplitter.IsVisible = navigationVisible;
         InspectorPane.IsVisible = InspectorSplitter.IsVisible = inspectorVisible;
-        RootLayout.ColumnDefinitions[0].Width = navigationVisible ? new GridLength(1.1, GridUnitType.Star) : new GridLength(0);
+        if (!navigationVisible) RootLayout.ColumnDefinitions[0].Width = new GridLength(0);
         RootLayout.ColumnDefinitions[1].Width = navigationVisible ? GridLength.Auto : new GridLength(0);
         RootLayout.ColumnDefinitions[3].Width = inspectorVisible ? GridLength.Auto : new GridLength(0);
-        RootLayout.ColumnDefinitions[4].Width = inspectorVisible ? new GridLength(1.5, GridUnitType.Star) : new GridLength(0);
-        NavigationPaneButton.Content = _workspaceSession.Settings.NavigationPaneOpen ? "Hide workspace pane" : "Show workspace pane";
-        InspectorPaneButton.Content = _workspaceSession.Settings.InspectorPaneOpen ? "Hide inspector pane" : "Show inspector pane";
+        if (!inspectorVisible) RootLayout.ColumnDefinitions[4].Width = new GridLength(0);
+        ToolsPaneToggle.IsChecked = navigationVisible;
+        DetailsPaneToggle.IsChecked = inspectorVisible;
+        DetailsPaneToggle.IsEnabled = !WelcomePanel.IsVisible;
     }
 
     private void RefreshShellContext()
@@ -258,11 +272,18 @@ public partial class MainWindow : Window
         var editingDbc = DbcHost.IsVisible && Current is not null;
         DbcQuickActions.IsVisible = editingDbc;
         DbcDocumentToolbar.IsVisible = editingDbc;
+        RowEditorTab.IsVisible = editingDbc;
+        if (!editingDbc) InspectorTabs.SelectedIndex = 1;
+        else if (InspectorTabs.SelectedIndex < 0) InspectorTabs.SelectedIndex = 0;
+        FindReplaceBar.IsVisible = editingDbc;
+        GoToIdBox.IsEnabled = GoToIdButton.IsEnabled = editingDbc && Current!.Schema.KeyStrategy.Kind != DbcRecordKeyKind.NoStableKey;
         ApplyShellPaneState();
     }
 
     private void ShowHome()
     {
+        if (!CommitPendingDbcEdits()) return;
+        RowEditor.SelectRow(null, -1);
         CloseAllFeatureWorkspaces();
         DbcHost.IsVisible = false;
         M2View.IsVisible = false;
@@ -271,7 +292,7 @@ public partial class MainWindow : Window
         InspectorSummary.Text = "Choose a job from the start page.";
         InspectorDetail.Text = "Specialized tools are grouped in the workspace pane, and staged DBC tabs remain open.";
         RefreshShellContext();
-        StatusText.Text = _documents.Count == 0 ? "Ready" : $"Home · {_documents.Count:N0} staged DBC tab(s) remain open";
+        StatusText.Text = _documents.Count == 0 ? "Ready" : $"{_documents.Count:N0} open file(s)";
     }
 
     public Task LoadPathAsync(string path)
@@ -293,15 +314,23 @@ public partial class MainWindow : Window
 
     private async void OpenDbcClick(object? sender, RoutedEventArgs e)
     {
-        var start = Directory.Exists(_workspaceSession.Settings.CoreDbcPath)
-            ? await StorageProvider.TryGetFolderFromPathAsync(_workspaceSession.Settings.CoreDbcPath)
+        if (!CommitPendingDbcEdits()) return;
+        var directory = Directory.Exists(_workspaceSession.Settings.LastDbcDirectory)
+            ? _workspaceSession.Settings.LastDbcDirectory : _workspaceSession.Settings.CoreDbcPath;
+        var start = Directory.Exists(directory)
+            ? await StorageProvider.TryGetFolderFromPathAsync(directory)
             : null;
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Open one or more WDBC, WDB2, or WDC1 client tables",
+            Title = "Open DBC / DB2",
             AllowMultiple = true,
             SuggestedStartLocation = start,
-            FileTypeFilter = [new FilePickerFileType("WoW client tables") { Patterns = ["*.dbc", "*.db2"] }]
+            FileTypeFilter =
+            [
+                new FilePickerFileType("DBC / DB2 files (*.dbc; *.db2)") { Patterns = ["*.dbc", "*.db2"] },
+                new FilePickerFileType("DBC files (*.dbc)") { Patterns = ["*.dbc"] },
+                new FilePickerFileType("DB2 files (*.db2)") { Patterns = ["*.db2"] }
+            ]
         });
         foreach (var file in files)
         {
@@ -312,6 +341,7 @@ public partial class MainWindow : Window
 
     private async Task LoadDbcAsync(string path)
     {
+        if (!CommitPendingDbcEdits()) return;
         path = Path.GetFullPath(path);
         var existing = _documents.FindIndex(document => document.FullPath.Equals(path, StringComparison.OrdinalIgnoreCase));
         if (existing >= 0) { DesktopCrashLogger.Debug("DBC", "open-reused-staged-document", ("path", path), ("tab", existing)); ActivateDocument(existing); return; }
@@ -339,31 +369,35 @@ public partial class MainWindow : Window
             });
             _documents.Add(session);
             ActivateDocument(_documents.Count - 1);
-            StatusText.Text = $"Loaded {session.File.RowCount:N0} records in {stopwatch.Elapsed.TotalMilliseconds:0} ms · {_documents.Count:N0} staged file(s)";
+            RememberDbcDirectory(path);
+            StatusText.Text = $"{Path.GetFileName(path)} · {session.File.RowCount:N0} records · {session.File.FieldCount:N0} fields · loaded in {stopwatch.Elapsed.TotalMilliseconds:0} ms";
             DesktopCrashLogger.Debug("DBC", "open-success", ("path", path), ("rows", session.File.RowCount), ("fields", session.File.FieldCount), ("schema", session.Schema.MatchKind), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
         catch (Exception exception)
         {
             DesktopCrashLogger.Log("DBC open failed", exception);
             StatusText.Text = "Open failed";
-            await ShowErrorAsync("Could not open client table", exception.Message);
+            await ShowErrorAsync("Could not open DBC / DB2", exception.Message);
         }
     }
 
     private void ActivateDocument(int index)
     {
         if (index < 0 || index >= _documents.Count) return;
-        CancelInlineCellEdit();
+        if (!CommitPendingDbcEdits()) return;
+        if (FeatureWorkspaceHost.IsVisible) CloseAllFeatureWorkspaces();
         if (SecondaryDbcPane.IsVisible && _secondaryPaneActive) _secondaryDocument = index;
         else { _primaryDocument = index; _secondaryPaneActive = false; }
         var document = _documents[index];
         DesktopCrashLogger.Debug("DBC", "document-activated", ("path", document.FullPath), ("tab", index), ("dirty", document.File.IsDirty));
-        SearchBox.Text = string.Empty;
         ActiveDbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, document.File.LogicalTableName, DecodedToggle.IsChecked == true);
         UpdateDbcPaneTitles();
         WelcomePanel.IsVisible = false;
         M2View.IsVisible = false;
         DbcHost.IsVisible = true;
+        RowEditor.SelectRow(document, -1);
+        InspectorTabs.SelectedIndex = 0;
+        RestoreDbcFilter(document);
         ShowDocumentSummary(document);
         RefreshTabs();
         RefreshShellContext();
@@ -375,30 +409,33 @@ public partial class MainWindow : Window
         for (var index = 0; index < _documents.Count; index++)
         {
             var captured = index;
-            var locations = (index == _primaryDocument ? "L" : string.Empty) + (SecondaryDbcPane.IsVisible && index == _secondaryDocument ? "R" : string.Empty);
+            var locations = SecondaryDbcPane.IsVisible ? (index == _primaryDocument ? "L" : string.Empty) + (index == _secondaryDocument ? "R" : string.Empty) : string.Empty;
             var active = index == ActiveDocumentIndex;
             var button = new Button
             {
                 Content = locations.Length == 0 ? _documents[index].DisplayName : $"{locations} · {_documents[index].DisplayName}",
-                Padding = new Thickness(14, 9),
+                Padding = new Thickness(12, 6),
                 CornerRadius = new CornerRadius(0),
                 Background = active ? new SolidColorBrush(Color.Parse("#202B3C")) : Brushes.Transparent,
                 BorderBrush = active ? new SolidColorBrush(Color.Parse("#C58A2B")) : Brushes.Transparent,
                 BorderThickness = new Thickness(0, 0, 0, active ? 2 : 0)
             };
             button.Click += (_, _) => ActivateDocument(captured);
+            ToolTip.SetTip(button, _documents[index].FullPath);
             DocumentTabsPanel.Children.Add(button);
         }
     }
 
     private void UpdateDbcPaneTitles()
     {
+        PrimaryDbcPaneTitle.IsVisible = SecondaryDbcPane.IsVisible;
         PrimaryDbcPaneTitle.Text = _primaryDocument >= 0 && _primaryDocument < _documents.Count ? $"LEFT · {_documents[_primaryDocument].DisplayName}" : "LEFT · choose an open tab";
         SecondaryDbcPaneTitle.Text = _secondaryDocument >= 0 && _secondaryDocument < _documents.Count ? $"RIGHT · {_documents[_secondaryDocument].DisplayName}" : "RIGHT · click here, then choose an open tab";
     }
 
     private void SplitDbcClick(object? sender, RoutedEventArgs e)
     {
+        if (!CommitPendingDbcEdits()) { SplitDbcToggle.IsChecked = SecondaryDbcPane.IsVisible; return; }
         var enabled = SplitDbcToggle.IsChecked == true;
         SecondaryDbcPane.IsVisible = DbcSplitDivider.IsVisible = enabled;
         DbcHost.ColumnDefinitions[2].Width = enabled ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
@@ -416,7 +453,6 @@ public partial class MainWindow : Window
         else
         {
             _secondaryPaneActive = false;
-            CancelInlineCellEdit();
             StatusText.Text = "Single DBC view restored · both staged documents remain open";
         }
         UpdateDbcPaneTitles(); RefreshTabs(); ActivateDbcPane(ActiveDbcView); SyncScrollbars(); SyncSecondaryScrollbars();
@@ -458,52 +494,65 @@ public partial class MainWindow : Window
 
     private async Task<bool> SaveCurrentAsync(bool saveAs)
     {
+        if (_savingDbc || !CommitPendingDbcEdits()) return false;
         var document = Current;
         if (document is null) return false;
         if (!await EnsureBackupChoiceAsync()) return false;
         var path = document.File.SourcePath;
         if (saveAs)
         {
+            var extension = document.File.ContainerKind == ClientTableContainerKind.Wdbc ? "dbc" : "db2";
             var destination = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
             {
-                Title = "Save DBC as",
+                Title = $"Save {extension.ToUpperInvariant()} As",
                 SuggestedFileName = Path.GetFileName(path),
-                FileTypeChoices = [new FilePickerFileType("WoW client table") { Patterns = [Path.GetExtension(path)] }]
+                SuggestedStartLocation = await StorageProvider.TryGetFolderFromPathAsync(Path.GetDirectoryName(path)!),
+                DefaultExtension = extension,
+                FileTypeChoices = [new FilePickerFileType($"{extension.ToUpperInvariant()} files (*.{extension})") { Patterns = [$"*.{extension}"] }]
             });
             path = destination?.TryGetLocalPath();
             if (path is null) return false;
             var fullDestination = Path.GetFullPath(path);
             if (_documents.Any(other => !ReferenceEquals(other, document) && other.FullPath.Equals(fullDestination, StringComparison.OrdinalIgnoreCase)))
             {
-                await ShowErrorAsync("DBC already staged", "Another open document already uses that destination. Close it or choose a different path before Save As.");
+                await ShowErrorAsync("File already open", "Another open document already uses that destination. Close it or choose a different path before Save As.");
                 return false;
             }
         }
-        SetBusy(CrucibleBackupService.Enabled ? "Saving table atomically with a bounded safety backup…" : "Saving table atomically · retained backups are disabled…");
+        SetBusy($"Saving {Path.GetFileName(path)}…");
         var stopwatch = Stopwatch.StartNew();
         DesktopCrashLogger.Debug("DBC", "save-start", ("source", document.FullPath), ("destination", path), ("save_as", saveAs), ("dirty", document.File.IsDirty));
         try
         {
+            _savingDbc = true;
+            RootLayout.IsEnabled = false;
             if (saveAs) await Task.Run(() => document.File.SaveAs(path, true));
             else await Task.Run(() => document.File.Save(path, true));
+            RememberDbcDirectory(path);
+            UpdateDbcPaneTitles();
+            ShowDocumentSummary(document);
             RefreshTabs();
             var backup = document.File.LastBackupPath;
-            StatusText.Text = backup is null ? $"Saved {path} · no retained backup · {CrucibleBackupService.LastDecision}" : $"Saved {path} · backup {backup}";
+            StatusText.Text = $"Saved {path}";
+            ToolTip.SetTip(StatusText, backup is null ? $"{path}\n{CrucibleBackupService.LastDecision}" : $"{path}\nBackup: {backup}");
             DesktopCrashLogger.Debug("DBC", "save-success", ("path", path), ("rows", document.File.RowCount), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds), ("backup", backup));
             return true;
         }
         catch (Exception exception)
         {
+            RootLayout.IsEnabled = true;
             DesktopCrashLogger.Log("DBC save failed", exception);
-            await ShowErrorAsync("Could not save DBC", exception.Message);
+            await ShowErrorAsync("Could not save DBC / DB2", exception.Message);
             return false;
         }
+        finally { _savingDbc = false; RootLayout.IsEnabled = true; }
     }
 
     private async void CloseDocumentClick(object? sender, RoutedEventArgs e) => await CloseCurrentDocumentAsync();
 
     private async Task CloseCurrentDocumentAsync()
     {
+        if (_savingDbc || !CommitPendingDbcEdits()) return;
         var document = Current;
         if (document is null) return;
         if (document.File.IsDirty)
@@ -526,6 +575,7 @@ public partial class MainWindow : Window
         else
         {
             _primaryDocument = _secondaryDocument = -1;
+            RowEditor.SelectRow(null, -1);
             SplitDbcToggle.IsChecked = false;
             SecondaryDbcPane.IsVisible = DbcSplitDivider.IsVisible = false;
             DbcHost.ColumnDefinitions[2].Width = new GridLength(0);
@@ -547,6 +597,11 @@ public partial class MainWindow : Window
     {
         var document = Current;
         if (document is null) return;
+        if (!RowEditor.SelectRow(document, selection.Row))
+        {
+            ActiveDbcView.SelectSourceRow(RowEditor.RowIndex);
+            return;
+        }
         var semantic = DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(document.File.SourcePath), selection.Column.Index, document.File, selection.Row);
         string recordId;
         try { recordId = document.Schema.KeyStrategy.Kind == DbcRecordKeyKind.NoStableKey ? "Unavailable (schema has no stable key)" : DbcRecordIdentity.GetKey(document.File, selection.Row, document.Schema.Columns, document.Schema.KeyStrategy).ToString("N0", CultureInfo.InvariantCulture); }
@@ -558,24 +613,24 @@ public partial class MainWindow : Window
         _knowledgeContext = $"{Path.GetFileNameWithoutExtension(document.File.SourcePath)} {selection.Column.Name}";
     }
 
-    private void CommitCellEdit(Controls.DbcCellEditCommitEventArgs edit)
+    private void CommitCellEdit(DbcDocumentSession document, VirtualDbcView view, Controls.DbcCellEditCommitEventArgs edit, bool refreshSelection = true)
     {
-        var document = Current;
-        if (document is null) { edit.Error = "No DBC document is active."; return; }
-        var before = document.File.GetRaw(edit.Row, edit.Column);
         try
         {
-            var semantic = DbcSemanticCatalog.Get(Path.GetFileNameWithoutExtension(document.File.SourcePath), edit.Column.Index, document.File, edit.Row);
+            var before = document.File.GetRaw64(edit.Row, edit.Column);
+            var semantic = edit.Column.EffectiveBitWidth <= 32 ? DbcSemanticCatalog.Get(document.File.LogicalTableName, edit.Column.Index, document.File, edit.Row) : null;
             if (semantic is null) document.File.SetDisplayValue(edit.Row, edit.Column, edit.Value);
             else document.File.SetRaw(edit.Row, edit.Column, semantic.Parse(edit.Value));
-            var after = document.File.GetRaw(edit.Row, edit.Column);
+            var after = document.File.GetRaw64(edit.Row, edit.Column);
             document.History.Record(edit.Row, edit.Column, before, after);
             edit.Accepted = true;
-            ActiveDbcView.RefreshDocument();
+            view.RefreshDocument();
+            var otherView = ReferenceEquals(view, DbcView) ? SecondaryDbcView : DbcView;
+            if (ReferenceEquals(DocumentForView(otherView), document)) otherView.RefreshDocument();
             RefreshTabs();
-            var display = semantic?.Format(after) ?? Convert.ToString(document.File.GetDisplayValue(edit.Row, edit.Column), CultureInfo.InvariantCulture) ?? string.Empty;
-            ShowSelection(new(edit.Row, edit.ColumnIndex, edit.Column, display));
-            StatusText.Text = before == after ? "Value was unchanged · Tab continues across the row" : $"Modified {edit.Column.Name} · Ctrl+Z to undo · Tab continues across the row";
+            var display = semantic?.Format(checked((uint)after)) ?? Convert.ToString(document.File.GetDisplayValue(edit.Row, edit.Column), CultureInfo.InvariantCulture) ?? string.Empty;
+            if (refreshSelection && ReferenceEquals(document, Current)) { ShowSelection(new(edit.Row, edit.ColumnIndex, edit.Column, display)); RowEditor.RefreshValues(); }
+            StatusText.Text = before == after ? "Value unchanged" : $"Modified {edit.Column.Name} · not saved";
             DesktopCrashLogger.Debug("DBC", "inline-cell-edit", ("path", document.FullPath), ("row", edit.Row), ("column", edit.Column.Name), ("before_raw", before), ("after_raw", after), ("changed", before != after));
         }
         catch (Exception exception)
@@ -588,6 +643,8 @@ public partial class MainWindow : Window
 
     private void BeginInlineCellEdit(VirtualDbcView view, TextBox editor, Controls.DbcCellEditRequestEventArgs request)
     {
+        _dbcEditingDocument = DocumentForView(view);
+        if (_dbcEditingDocument is null) return;
         _dbcEditingSelection = request.Selection;
         _dbcEditingView = view;
         _dbcEditingEditor = editor;
@@ -628,8 +685,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool CommitInlineCellEdit(Controls.DbcCellMove? move)
+    private bool CommitInlineCellEdit(Controls.DbcCellMove? move, bool focusOnError = true)
     {
+        if (_dbcEditorClosing) return true;
         if (_dbcEditingEditor is null || !_dbcEditingEditor.IsVisible || _dbcEditingSelection is null) return true;
         var selection = _dbcEditingSelection;
         var editor = _dbcEditingEditor;
@@ -638,18 +696,29 @@ public partial class MainWindow : Window
         _dbcEditorClosing = true;
         try
         {
-            CommitCellEdit(edit);
+            if (_dbcEditingDocument is null) edit.Error = "The edited file is no longer open.";
+            else CommitCellEdit(_dbcEditingDocument, view, edit);
             if (!edit.Accepted)
             {
                 ToolTip.SetTip(editor, edit.Error ?? "The value was rejected.");
-                editor.Focus();
-                editor.SelectAll();
+                if (focusOnError)
+                {
+                    var rejected = editor.Text;
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        if (!IsActive || !ReferenceEquals(_dbcEditingEditor, editor) ||
+                            !ReferenceEquals(_dbcEditingSelection, selection) || !editor.IsVisible || editor.Text != rejected) return;
+                        editor.Focus();
+                        editor.SelectAll();
+                    }, DispatcherPriority.Input);
+                }
                 return false;
             }
             editor.IsVisible = false;
             _dbcEditingSelection = null;
             _dbcEditingEditor = null;
             _dbcEditingView = null;
+            _dbcEditingDocument = null;
             if (move is not null)
             {
                 view.MoveSelection(move.Value);
@@ -669,6 +738,7 @@ public partial class MainWindow : Window
         _dbcEditingSelection = null;
         _dbcEditingEditor = null;
         _dbcEditingView = null;
+        _dbcEditingDocument = null;
         _dbcEditorClosing = false;
     }
 
@@ -677,21 +747,25 @@ public partial class MainWindow : Window
 
     private void Undo()
     {
+        if (!CommitPendingDbcEdits()) return;
         var document = Current;
         if (document is null) return;
         var edit = document.History.Undo(document.File);
         if (edit is null) { StatusText.Text = "Nothing to undo in this DBC"; return; }
         ActiveDbcView.RefreshDocument(edit.Row); RefreshTabs(); StatusText.Text = $"Undid {edit.Description}";
+        RowEditor.SelectRow(document, edit.Row); RowEditor.RefreshValues();
         DesktopCrashLogger.Debug("DBC", "undo", ("path", document.FullPath), ("row", edit.Row), ("description", edit.Description));
     }
 
     private void Redo()
     {
+        if (!CommitPendingDbcEdits()) return;
         var document = Current;
         if (document is null) return;
         var edit = document.History.Redo(document.File);
         if (edit is null) { StatusText.Text = "Nothing to redo in this DBC"; return; }
         ActiveDbcView.RefreshDocument(edit.Row); RefreshTabs(); StatusText.Text = $"Redid {edit.Description}";
+        RowEditor.SelectRow(document, edit.Row); RowEditor.RefreshValues();
         DesktopCrashLogger.Debug("DBC", "redo", ("path", document.FullPath), ("row", edit.Row), ("description", edit.Description));
     }
 
@@ -705,6 +779,7 @@ public partial class MainWindow : Window
 
     private async Task AddRowAsync()
     {
+        if (!CommitPendingDbcEdits()) return;
         var document = Current;
         if (document is null) return;
         if (!await EnsureBackupChoiceAsync()) return;
@@ -715,6 +790,7 @@ public partial class MainWindow : Window
             var row = document.File.AddBlankRow(document.IdColumn);
             document.History.Clear();
             ActiveDbcView.RefreshDocument(row); RefreshTabs();
+            RowEditor.SelectRow(document, row);
             StatusText.Text = $"Created row {row + 1:N0} with the next available identity";
             DesktopCrashLogger.Debug("DBC", "row-added", ("path", document.FullPath), ("row", row), ("new_row_count", document.File.RowCount));
         }
@@ -723,6 +799,7 @@ public partial class MainWindow : Window
 
     private async Task CloneRowsAsync(int count)
     {
+        if (!CommitPendingDbcEdits()) return;
         var document = Current;
         var source = ActiveDbcView.SelectedSourceRow;
         if (document is null || source < 0) { StatusText.Text = "Select a source row first"; return; }
@@ -734,6 +811,7 @@ public partial class MainWindow : Window
             var first = document.File.CloneRows(source, count, document.IdColumn);
             document.History.Clear();
             ActiveDbcView.RefreshDocument(first); RefreshTabs();
+            RowEditor.SelectRow(document, first);
             StatusText.Text = $"Created {count:N0} clone(s) in one batch, starting at row {first + 1:N0}";
             DesktopCrashLogger.Debug("DBC", "rows-cloned", ("path", document.FullPath), ("source_row", source), ("count", count), ("first_new_row", first), ("new_row_count", document.File.RowCount));
         }
@@ -742,6 +820,7 @@ public partial class MainWindow : Window
 
     private async void DeleteRowClick(object? sender, RoutedEventArgs e)
     {
+        if (!CommitPendingDbcEdits()) return;
         var document = Current;
         var row = ActiveDbcView.SelectedSourceRow;
         if (document is null || row < 0) { StatusText.Text = "Select a row first"; return; }
@@ -753,6 +832,7 @@ public partial class MainWindow : Window
         document.History.Clear();
         ClearFilter();
         ActiveDbcView.RefreshDocument(Math.Min(row, Math.Max(0, document.File.RowCount - 1)));
+        RowEditor.SelectRow(document, document.File.RowCount == 0 ? -1 : Math.Min(row, document.File.RowCount - 1));
         RefreshTabs();
         StatusText.Text = $"Deleted row {row + 1:N0}";
         DesktopCrashLogger.Debug("DBC", "row-deleted", ("path", document.FullPath), ("row", row), ("new_row_count", document.File.RowCount));
@@ -918,8 +998,11 @@ public partial class MainWindow : Window
 
     private void ClearFilter()
     {
+        _searchCancellation?.Cancel();
         SearchBox.Text = string.Empty;
+        if (Current is { } document) document.FilterText = string.Empty;
         ActiveDbcView.SetFilteredRows(null);
+        RowEditor.SelectRow(Current, -1);
     }
 
     private void DecodedChanged(object? sender, RoutedEventArgs e)
@@ -932,6 +1015,7 @@ public partial class MainWindow : Window
     private void OpenFindReplace(bool focusReplacement = false)
     {
         FindReplaceBar.IsVisible = true;
+        if (focusReplacement) { ReplaceControls.IsVisible = true; ReplaceToggle.IsChecked = true; }
         Dispatcher.UIThread.Post(() =>
         {
             var target = focusReplacement ? ReplaceBox : SearchBox;
@@ -942,8 +1026,9 @@ public partial class MainWindow : Window
     private void CloseFindReplaceClick(object? sender, RoutedEventArgs e) => CloseFindReplace();
     private void CloseFindReplace()
     {
-        FindReplaceBar.IsVisible = false;
-        _searchCancellation?.Cancel();
+        ReplaceControls.IsVisible = false;
+        ReplaceToggle.IsChecked = false;
+        FindReplaceBar.IsVisible = DbcHost.IsVisible;
         ActiveDbcView.Focus();
     }
 
@@ -957,11 +1042,12 @@ public partial class MainWindow : Window
         var document = Current;
         if (DbcHost.IsVisible && document is not null)
         {
-            if (!await EnsureBackupChoiceAsync()) return;
+            if (!CommitPendingDbcEdits()) return;
             SetBusy($"Finding “{query}”…");
             var selectedRow = Math.Max(0, ActiveDbcView.SelectedSourceRow);
             var selectedColumn = Math.Max(0, ActiveDbcView.SelectedColumn);
             var match = await Task.Run(() => FindNextDbcCell(document, query, selectedRow, selectedColumn, direction));
+            if (!ReferenceEquals(document, Current)) return;
             if (match is null) { StatusText.Text = $"No DBC cell contains “{query}”"; return; }
             ActiveDbcView.SelectSourceRow(match.Value.Row, match.Value.Column);
             StatusText.Text = $"Found “{query}” at row {match.Value.Row + 1:N0}, {document.Schema.Columns[match.Value.Column].Name}";
@@ -1017,12 +1103,14 @@ public partial class MainWindow : Window
 
     private async Task ReplaceDbcAsync(bool all)
     {
+        if (!CommitPendingDbcEdits()) return;
         var find = SearchBox.Text ?? string.Empty;
         if (find.Length == 0) { OpenFindReplace(); return; }
         var replacement = ReplaceBox.Text ?? string.Empty;
         var document = Current;
         if (DbcHost.IsVisible && document is not null)
         {
+            if (!await EnsureBackupChoiceAsync()) return;
             if (all && !await ConfirmAsync("Replace every matching DBC cell?", $"Replace “{find}” with “{replacement}” throughout {Path.GetFileName(document.File.SourcePath)}? The operation is atomic, but bulk replacement clears per-cell undo history.")) return;
             try
             {
@@ -1078,9 +1166,11 @@ public partial class MainWindow : Window
             StatusText.Text = $"{_uiFindMatches.Count:N0} visible interface match(es) · Enter/Next moves through them";
             return;
         }
+        document.FilterText = query;
+        var view = ActiveDbcView;
         if (query.Length == 0)
         {
-            ActiveDbcView.SetFilteredRows(null);
+            if (view.IsFiltered) { view.SetFilteredRows(null); RowEditor.SelectRow(document, -1); }
             StatusText.Text = $"Showing all {document.File.RowCount:N0} records";
             return;
         }
@@ -1091,14 +1181,16 @@ public partial class MainWindow : Window
             await Task.Delay(180, token);
             SetBusy($"Searching {document.File.RowCount:N0} records…");
             var decoded = DecodedToggle.IsChecked == true;
-            var table = Path.GetFileNameWithoutExtension(document.File.SourcePath);
+            var table = document.File.LogicalTableName;
             var semanticColumns = decoded ? DbcSemanticCatalog.GetColumns(table).Where(index => index >= 0 && index < document.Schema.Columns.Count).ToArray() : [];
             var rows = await Task.Run(() => Enumerable.Range(0, document.File.RowCount).AsParallel().AsOrdered().WithCancellation(token)
                 .Where(row => document.File.RowContains(row, query, document.Schema.Columns) || semanticColumns.Any(index =>
                     DbcSemanticCatalog.Get(table, index, document.File, row)?.Format(document.File.GetRaw(row, document.Schema.Columns[index])).Contains(query, StringComparison.OrdinalIgnoreCase) == true))
                 .ToArray(), token);
-            if (token.IsCancellationRequested || !ReferenceEquals(document, Current)) return;
-            ActiveDbcView.SetFilteredRows(rows);
+            if (token.IsCancellationRequested || !ReferenceEquals(document, Current) || !ReferenceEquals(view, ActiveDbcView)) return;
+            if (!CommitPendingDbcEdits()) return;
+            view.SetFilteredRows(rows);
+            RowEditor.SelectRow(document, -1);
             StatusText.Text = $"{rows.Length:N0} of {document.File.RowCount:N0} records match “{query}”";
             DesktopCrashLogger.Debug("DBC", "search-success", ("path", document.FullPath), ("query", query), ("matches", rows.Length), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
@@ -1560,6 +1652,7 @@ public partial class MainWindow : Window
 
     private void OpenFeatureWorkspace(Control workspace, string title)
     {
+        if (!CommitPendingDbcEdits()) return;
         if (FeatureWorkspaceHost.IsVisible && FeatureWorkspaceHost.Child is Control current && !ReferenceEquals(current, workspace))
             _featureHistory.Push((current, _featureTitle));
         FeatureWorkspaceHost.Child = workspace;
@@ -1828,16 +1921,18 @@ public partial class MainWindow : Window
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
+        if (e.Handled || _savingDbc) return;
         if (e.KeyModifiers.HasFlag(KeyModifiers.Control) && e.Key is Key.F or Key.H)
         {
             OpenFindReplace(e.Key == Key.H);
             e.Handled = true; return;
         }
-        if (FindReplaceBar.IsVisible && e.Key == Key.Escape)
+        if (FindReplaceBar.IsVisible && e.Key == Key.Escape && (SearchBox.IsFocused || ReplaceBox.IsFocused))
         {
+            ClearFilter();
             CloseFindReplace(); e.Handled = true; return;
         }
-        if (FindReplaceBar.IsVisible && e.Key == Key.Enter && !e.KeyModifiers.HasFlag(KeyModifiers.Control))
+        if (FindReplaceBar.IsVisible && e.Key == Key.Enter && (SearchBox.IsFocused || ReplaceBox.IsFocused) && !e.KeyModifiers.HasFlag(KeyModifiers.Control))
         {
             _ = NavigateFindAsync(e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? -1 : 1);
             e.Handled = true; return;
@@ -1861,7 +1956,8 @@ public partial class MainWindow : Window
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
         if (e.Key == Key.Z) Undo();
         else if (e.Key == Key.Y) Redo();
-        else if (e.Key == Key.S) _ = SaveCurrentAsync(false);
+        else if (e.Key == Key.S) _ = SaveCurrentAsync(e.KeyModifiers.HasFlag(KeyModifiers.Shift));
+        else if (e.Key == Key.W) _ = CloseCurrentDocumentAsync();
         else if (e.Key == Key.O) OpenDbcClick(null, new RoutedEventArgs());
         else return;
         e.Handled = true;
@@ -1871,6 +1967,7 @@ public partial class MainWindow : Window
     {
         if (_closingApproved) return;
         if (_closingPromptActive) { e.Cancel = true; return; }
+        if (_savingDbc || !CommitPendingDbcEdits()) { e.Cancel = true; return; }
         var dirty = _documents.Where(document => document.File.IsDirty).ToArray();
         if (dirty.Length == 0) return;
         e.Cancel = true;
@@ -1881,6 +1978,7 @@ public partial class MainWindow : Window
             if (choice == SaveChoice.Cancel) return;
             if (choice == SaveChoice.Save)
             {
+                if (!await EnsureBackupChoiceAsync()) return;
                 foreach (var document in dirty)
                 {
                     try { await Task.Run(() => document.File.Save(document.File.SourcePath, true)); }

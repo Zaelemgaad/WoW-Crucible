@@ -5,12 +5,15 @@ namespace WoWCrucible.Core;
 public enum SemanticKind { Enum, Flags }
 
 public sealed record SemanticOption(uint Value, string Name);
-public sealed record SemanticField(string Label, SemanticKind Kind, IReadOnlyList<SemanticOption> Options)
+public sealed record SemanticField(string Label, SemanticKind Kind, IReadOnlyList<SemanticOption> Options, bool Signed = false)
 {
     public string Format(uint raw)
     {
         if (Kind == SemanticKind.Enum)
-            return Options.FirstOrDefault(option => option.Value == raw) is { } match ? $"{match.Name} [{raw}]" : $"Unknown [{raw}]";
+        {
+            var number = Signed ? unchecked((int)raw).ToString(CultureInfo.InvariantCulture) : raw.ToString(CultureInfo.InvariantCulture);
+            return Options.FirstOrDefault(option => option.Value == raw) is { } match ? $"{match.Name} [{number}]" : $"Unknown [{number}]";
+        }
         if (raw == 0) return "None [0x00000000]";
         var names = Options.Where(option => option.Value != 0 && (raw & option.Value) == option.Value).Select(option => option.Name).ToArray();
         var knownMask = Options.Aggregate(0u, (mask, option) => mask | option.Value);
@@ -27,6 +30,7 @@ public sealed record SemanticField(string Label, SemanticKind Kind, IReadOnlyLis
         if (bracket >= 0 && text.EndsWith(']')) text = text[(bracket + 1)..^1].Trim();
         if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) return uint.Parse(text.AsSpan(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
         if (uint.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var numeric)) return numeric;
+        if (Signed && int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var signed)) return unchecked((uint)signed);
         uint value = 0;
         foreach (var name in text.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         {
@@ -43,6 +47,7 @@ public static class DbcSemanticCatalog
 {
     private static readonly Dictionary<(string Table, int Column), SemanticField> Fields = new();
     private static readonly DbcColumn ItemClassColumn = new(1, 4, 4, "ClassID", DbcValueType.Int32);
+    private static readonly SemanticField ScalingStatType = new("Stat type", SemanticKind.Enum, ItemSemanticCatalog.StatTypes, Signed: true);
 
     static DbcSemanticCatalog()
     {
@@ -70,12 +75,16 @@ public static class DbcSemanticCatalog
 
     public static SemanticField? Get(string table, int column, WdbcFile? file = null, int row = -1)
     {
+        if (table.Equals("ScalingStatDistribution", StringComparison.OrdinalIgnoreCase) &&
+            file is { FieldCount: 22, RecordSize: 88 } && column is >= 1 and <= 10) return ScalingStatType;
         if (table.Equals("Item", StringComparison.OrdinalIgnoreCase) && column == 2 && file is not null && row >= 0)
             return ItemSubclass(file.GetRaw(row, ItemClassColumn));
         return Fields.GetValueOrDefault((table, column));
     }
 
-    public static IReadOnlyList<int> GetColumns(string table) => Fields.Keys.Where(key => key.Table.Equals(table, StringComparison.OrdinalIgnoreCase)).Select(key => key.Column).Distinct().ToArray();
+    public static IReadOnlyList<int> GetColumns(string table) => table.Equals("ScalingStatDistribution", StringComparison.OrdinalIgnoreCase)
+        ? Enumerable.Range(1, 10).ToArray()
+        : Fields.Keys.Where(key => key.Table.Equals(table, StringComparison.OrdinalIgnoreCase)).Select(key => key.Column).Distinct().ToArray();
 
     private static SemanticField ItemSubclass(uint itemClass) => itemClass switch
     {

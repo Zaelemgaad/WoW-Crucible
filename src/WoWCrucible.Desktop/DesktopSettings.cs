@@ -8,6 +8,9 @@ internal sealed class DesktopSettings
     public bool DevbugMode { get; set; }
     public bool NavigationPaneOpen { get; set; } = true;
     public bool InspectorPaneOpen { get; set; } = true;
+    public bool DbcToolsPaneOpen { get; set; }
+    public bool DbcRowEditorOpen { get; set; } = true;
+    public string LastDbcDirectory { get; set; } = string.Empty;
     public string WorkspaceRootPath { get; set; } = string.Empty;
     public string WorkspaceName { get; set; } = string.Empty;
     public List<string> SavedWorkspaceRoots { get; set; } = [];

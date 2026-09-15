@@ -17,6 +17,11 @@ if (args is ["--gui-cleanup-fixture", var fixtureRoot])
     ArtifactOwnershipTestSuite.CreateGuiFixture(fixtureRoot);
     return;
 }
+if (args is ["--dbc-editor", var editorCorpus])
+{
+    DbcEditorTestSuite.Run(editorCorpus);
+    return;
+}
 
 if (args.Length != 2)
 {
@@ -38,7 +43,7 @@ if (!File.Exists(requiredSchema) || !Directory.Exists(requiredCorpus))
 }
 string[] requiredCorpusFiles =
 [
-    "AnimationData.dbc", "Spell.dbc", "SpellCastTimes.dbc", "SpellDuration.dbc",
+    "AnimationData.dbc", "Spell.dbc", "SpellCastTimes.dbc", "SpellDuration.dbc", "ScalingStatDistribution.dbc",
     "Light.dbc", "LightParams.dbc", "LightSkybox.dbc", "LightIntBand.dbc", "LightFloatBand.dbc",
     "LiquidType.dbc", "GroundEffectTexture.dbc", "GroundEffectDoodad.dbc",
     "Item.dbc", "ItemDisplayInfo.dbc", "CharSections.dbc", "CharStartOutfit.dbc",
@@ -52,6 +57,7 @@ if (missingCorpusFiles.Length > 0)
     Environment.ExitCode = 2;
     return;
 }
+DbcEditorTestSuite.Run(requiredCorpus);
 
 ClientCorpusHardLinkTestSuite.Run();
 ArtifactOwnershipTestSuite.Run();
@@ -2702,7 +2708,7 @@ if (Directory.Exists(desktopSourceRoot))
         throw new InvalidOperationException("Exact SQL row totals, row-count sorting, or same-pane complete-row editing regressed.");
     if (!petAbilityGraphSource.Contains("Content = _findings", StringComparison.Ordinal) ||
         petAbilityGraphSource.Contains("Header = \"Findings\", Content = new ScrollViewer { Content = _summary", StringComparison.Ordinal) ||
-        !virtualDbcSource.Contains("RECORD ID", StringComparison.Ordinal) ||
+        !virtualDbcSource.Contains("Record ID", StringComparison.Ordinal) ||
         !virtualDbcSource.Contains("BeginSelectedEdit", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"DbcInlineEditor\"", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("CommitInlineCellEdit", StringComparison.Ordinal) ||
@@ -2779,10 +2785,11 @@ if (Directory.Exists(desktopSourceRoot))
         !mainWindowSource.Contains("RootLayout.ColumnDefinitions[4].Width", StringComparison.Ordinal) ||
         !desktopSettingsSource.Contains("NavigationPaneOpen", StringComparison.Ordinal) ||
         !desktopSettingsSource.Contains("InspectorPaneOpen", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("x:Name=\"NavigationPaneButton\"", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("x:Name=\"InspectorPaneButton\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("x:Name=\"ToolsPaneToggle\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("x:Name=\"DetailsPaneToggle\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("x:Name=\"RowEditor\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"RuntimeStrip\"", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("What do you want to work on?", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("Text=\"No file selected\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("Header=\"START HERE\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("Header=\"CREATE GAME CONTENT\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("Header=\"CLIENT TABLES &amp; PATCHES\"", StringComparison.Ordinal) ||

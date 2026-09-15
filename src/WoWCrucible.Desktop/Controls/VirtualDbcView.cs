@@ -15,20 +15,20 @@ namespace WoWCrucible.Desktop.Controls;
 public sealed class VirtualDbcView : Control
 {
     private const double HeaderHeight = 32;
-    private const double RowHeight = 25;
+    private const double RowHeight = 27;
     private const double RowNumberWidth = 58;
     private const double PinnedKeyWidth = 108;
     private const double FrozenWidth = RowNumberWidth + PinnedKeyWidth;
     private const double DefaultColumnWidth = 156;
     private const int TextCacheLimit = 4096;
 
-    private static readonly IBrush HeaderBrush = new SolidColorBrush(Color.Parse("#151C28"));
-    private static readonly IBrush RowBrush = new SolidColorBrush(Color.Parse("#0D121A"));
-    private static readonly IBrush AlternateRowBrush = new SolidColorBrush(Color.Parse("#101721"));
+    private static readonly IBrush HeaderBrush = new SolidColorBrush(Color.Parse("#272A2E"));
+    private static readonly IBrush RowBrush = new SolidColorBrush(Color.Parse("#181A1D"));
+    private static readonly IBrush AlternateRowBrush = new SolidColorBrush(Color.Parse("#202226"));
     private static readonly IBrush SelectionBrush = new SolidColorBrush(Color.Parse("#263D58"));
     private static readonly IBrush SelectionCellBrush = new SolidColorBrush(Color.Parse("#315477"));
     private static readonly IBrush EditorBorderBrush = new SolidColorBrush(Color.Parse("#E0A33C"));
-    private static readonly IBrush GridBrush = new SolidColorBrush(Color.Parse("#242D3D"));
+    private static readonly IBrush GridBrush = new SolidColorBrush(Color.Parse("#33363B"));
     private static readonly IBrush TextBrush = new SolidColorBrush(Color.Parse("#D8DEE9"));
     private static readonly IBrush MutedTextBrush = new SolidColorBrush(Color.Parse("#7E8A9F"));
     private static readonly IBrush HeaderTextBrush = new SolidColorBrush(Color.Parse("#BFC8D8"));
@@ -69,6 +69,7 @@ public sealed class VirtualDbcView : Control
     public WdbcFile? File => _file;
     public IReadOnlyList<DbcColumn> Columns => _columns;
     public int VisibleRowCount => _filteredRows?.Count ?? _file?.RowCount ?? 0;
+    public bool IsFiltered => _filteredRows is not null;
     public int SelectedSourceRow => _selectedDisplayRow < 0 ? -1 : _filteredRows is null ? _selectedDisplayRow : _filteredRows[_selectedDisplayRow];
     public int SelectedColumn => _selectedColumn;
     public double VerticalOffset => _verticalOffset;
@@ -172,20 +173,22 @@ public sealed class VirtualDbcView : Control
         var displayedColumns = Math.Min(_scrollColumnIndices.Count - firstColumn, (int)Math.Ceiling((Bounds.Width - FrozenWidth + partialX) / DefaultColumnWidth));
 
         context.FillRectangle(HeaderBrush, new Rect(0, 0, Bounds.Width, HeaderHeight));
-        DrawText(context, "ROW", 8, 8, HeaderTextBrush, HeaderTypeface, 10);
+        DrawText(context, "Row", 8, 8, HeaderTextBrush, HeaderTypeface, 12, RowNumberWidth - 16);
         context.DrawLine(_gridPen, new Point(RowNumberWidth, 0), new Point(RowNumberWidth, Bounds.Height));
-        DrawText(context, _keyStrategy.Kind == DbcRecordKeyKind.NoStableKey ? "ID UNAVAILABLE" : "RECORD ID", RowNumberWidth + 8, 8, HeaderTextBrush, HeaderTypeface, 10);
+        DrawText(context, _keyStrategy.Kind == DbcRecordKeyKind.NoStableKey ? "No record ID" : "Record ID", RowNumberWidth + 8, 8, HeaderTextBrush, HeaderTypeface, 12, PinnedKeyWidth - 16);
         context.DrawLine(_gridPen, new Point(FrozenWidth, 0), new Point(FrozenWidth, Bounds.Height));
 
+        using (context.PushClip(new Rect(FrozenWidth, 0, Bounds.Width - FrozenWidth, HeaderHeight)))
         for (var visibleColumn = 0; visibleColumn < displayedColumns; visibleColumn++)
         {
             var columnIndex = _scrollColumnIndices[firstColumn + visibleColumn];
             var x = FrozenWidth - partialX + visibleColumn * DefaultColumnWidth;
             context.DrawLine(_gridPen, new Point(x, 0), new Point(x, Bounds.Height));
-            DrawText(context, Trim(_columns[columnIndex].Name, 22), x + 8, 8, HeaderTextBrush, HeaderTypeface, 10.5);
+            DrawText(context, _columns[columnIndex].Name, x + 8, 8, HeaderTextBrush, HeaderTypeface, 12);
         }
         context.DrawLine(_gridPen, new Point(0, HeaderHeight), new Point(Bounds.Width, HeaderHeight));
 
+        using (context.PushClip(new Rect(0, HeaderHeight, Bounds.Width, Bounds.Height - HeaderHeight)))
         for (var visibleRow = 0; visibleRow < displayedRows; visibleRow++)
         {
             var displayRow = firstDisplayRow + visibleRow;
@@ -194,13 +197,14 @@ public sealed class VirtualDbcView : Control
             var wholeRowSelected = IsRangeCellSelected(displayRow, _columns.Count == 0 ? -1 : VisualColumnOrder()[0]) && SelectedColumnIndices().Count == _columns.Count;
             var background = wholeRowSelected ? SelectionBrush : (sourceRow & 1) == 0 ? RowBrush : AlternateRowBrush;
             context.FillRectangle(background, new Rect(0, y, Bounds.Width, RowHeight));
-            DrawText(context, (sourceRow + 1).ToString("N0", CultureInfo.InvariantCulture), 8, y + 6, MutedTextBrush, RegularTypeface, 10);
+            DrawText(context, (sourceRow + 1).ToString("N0", CultureInfo.InvariantCulture), 8, y + 6, MutedTextBrush, RegularTypeface, 11, RowNumberWidth - 16);
             if (IsRangeCellSelected(displayRow, _idColumnIndex))
                 context.FillRectangle(SelectionCellBrush, new Rect(RowNumberWidth, y, PinnedKeyWidth, RowHeight));
-            DrawText(context, RecordKey(sourceRow), RowNumberWidth + 8, y + 5, _keyStrategy.Kind == DbcRecordKeyKind.NoStableKey ? MutedTextBrush : TextBrush, RegularTypeface, 11);
+            DrawText(context, RecordKey(sourceRow), RowNumberWidth + 8, y + 5, _keyStrategy.Kind == DbcRecordKeyKind.NoStableKey ? MutedTextBrush : TextBrush, RegularTypeface, 13, PinnedKeyWidth - 16);
             if (displayRow == _selectedDisplayRow && _selectedPinned)
                 context.DrawRectangle(_selectionPen, new Rect(RowNumberWidth + 1, y + 1, PinnedKeyWidth - 2, RowHeight - 2));
 
+            using (context.PushClip(new Rect(FrozenWidth, y, Bounds.Width - FrozenWidth, RowHeight)))
             for (var visibleColumn = 0; visibleColumn < displayedColumns; visibleColumn++)
             {
                 var columnIndex = _scrollColumnIndices[firstColumn + visibleColumn];
@@ -208,7 +212,7 @@ public sealed class VirtualDbcView : Control
                 if (IsRangeCellSelected(displayRow, columnIndex))
                     context.FillRectangle(SelectionCellBrush, new Rect(x, y, DefaultColumnWidth, RowHeight));
                 var value = CachedValue(sourceRow, columnIndex);
-                DrawText(context, Trim(value, 25), x + 8, y + 5, TextBrush, RegularTypeface, 11);
+                DrawText(context, value, x + 8, y + 5, TextBrush, RegularTypeface, 13);
                 if (displayRow == _selectedDisplayRow && !_selectedPinned && columnIndex == _selectedColumn)
                     context.DrawRectangle(_selectionPen, new Rect(x + 1, y + 1, DefaultColumnWidth - 2, RowHeight - 2));
             }
@@ -549,13 +553,16 @@ public sealed class VirtualDbcView : Control
         _horizontalOffset = Math.Clamp(_horizontalOffset, 0, HorizontalMaximum);
     }
 
-    private static void DrawText(DrawingContext context, string text, double x, double y, IBrush brush, Typeface typeface, double size)
+    private static void DrawText(DrawingContext context, string text, double x, double y, IBrush brush, Typeface typeface, double size, double width = DefaultColumnWidth - 16)
     {
-        var formatted = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, size, brush);
+        var formatted = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, size, brush)
+        {
+            MaxTextWidth = width,
+            MaxLineCount = 1,
+            Trimming = TextTrimming.CharacterEllipsis
+        };
         context.DrawText(formatted, new Point(x, y));
     }
-
-    private static string Trim(string value, int maximum) => value.Length <= maximum ? value : string.Concat(value.AsSpan(0, maximum - 1), "…");
 
     private static int IndexOf(IReadOnlyList<int> rows, int sourceRow)
     {
