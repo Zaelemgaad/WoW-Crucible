@@ -52,4 +52,17 @@
           Condition="'%(RuntimeTargetsCopyLocalItems.Extension)' == '.pdb' and ('%(RuntimeTargetsCopyLocalItems.Filename)' == 'libSkiaSharp' or '%(RuntimeTargetsCopyLocalItems.Filename)' == 'libHarfBuzzSharp')" />
     </ItemGroup>
   </Target>
+  <PropertyGroup>
+    <CrucibleDesktopShortcutSettings Condition="'$(CrucibleDesktopShortcutSettings)' == ''">$(MSBuildProjectDirectory)/../../.local/desktop-shortcut.json</CrucibleDesktopShortcutSettings>
+    <CrucibleDesktopShortcutUpdater>$(MSBuildProjectDirectory)/../../scripts/Update-DesktopShortcut.ps1</CrucibleDesktopShortcutUpdater>
+  </PropertyGroup>
+  <!-- Opt-in, local registration. Failed builds never advance the shortcut. -->
+  <Target Name="UpdateBuiltDesktopShortcut" AfterTargets="Build"
+          Condition="'$(OS)' == 'Windows_NT' and '$(DesignTimeBuild)' != 'true' and Exists('$(CrucibleDesktopShortcutSettings)') and Exists('$(TargetDir)$(AssemblyName).exe')">
+    <Exec Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(CrucibleDesktopShortcutUpdater)&quot; -ExecutablePath &quot;$(TargetDir)$(AssemblyName).exe&quot; -SettingsPath &quot;$(CrucibleDesktopShortcutSettings)&quot;" />
+  </Target>
+  <Target Name="UpdatePublishedDesktopShortcut" AfterTargets="Publish"
+          Condition="'$(OS)' == 'Windows_NT' and '$(DesignTimeBuild)' != 'true' and Exists('$(CrucibleDesktopShortcutSettings)') and Exists('$(PublishDir)$(AssemblyName).exe')">
+    <Exec Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(CrucibleDesktopShortcutUpdater)&quot; -ExecutablePath &quot;$(PublishDir)$(AssemblyName).exe&quot; -SettingsPath &quot;$(CrucibleDesktopShortcutSettings)&quot;" />
+  </Target>
 </Project>

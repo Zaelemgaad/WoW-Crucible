@@ -341,6 +341,19 @@ dotnet run --project src/WoWCrucible.App/WoWCrucible.App.csproj -- "C:\path\to\S
 dotnet build WoWCrucible.slnx -c Release
 ```
 
+On Windows, optionally register one normal shortcut that follows successful local
+Desktop builds and publishes, including switches between Debug and Release:
+
+```powershell
+.\scripts\Update-DesktopShortcut.ps1 -ExecutablePath .\src\WoWCrucible.Desktop\bin\Release\net10.0\WoWCrucible.Desktop.exe -ShortcutPath "$env:USERPROFILE\Desktop\WoW Crucible.lnk"
+```
+
+The destination is remembered only in `.local/desktop-shortcut.json` (not Git).
+Builds without that file do not create shortcuts. Failed builds leave the existing
+link intact. No application is launched or closed by the update. Delete the local
+settings file to opt out. This uses Windows PowerShell and Windows Script Host,
+already provided by Windows; it does not install a launcher or another service.
+
 The corpus test runner accepts a WDBX 12340 definition XML and a directory containing extracted 3.3.5a DBC files. Copyrighted game data is intentionally not included.
 
 ## Roadmap
