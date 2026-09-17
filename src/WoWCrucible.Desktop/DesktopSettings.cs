@@ -11,6 +11,7 @@ internal sealed class DesktopSettings
     public bool DbcToolsPaneOpen { get; set; }
     public bool DbcRowEditorOpen { get; set; } = true;
     public string LastDbcDirectory { get; set; } = string.Empty;
+    public Dictionary<string, Dictionary<int, double>> DbcColumnWidths { get; set; } = [];
     public string WorkspaceRootPath { get; set; } = string.Empty;
     public string WorkspaceName { get; set; } = string.Empty;
     public List<string> SavedWorkspaceRoots { get; set; } = [];

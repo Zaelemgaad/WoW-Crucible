@@ -5,6 +5,7 @@ internal static class DbcEditorTestSuite
 {
     public static void Run(string corpus)
     {
+        DbcColumnLayoutTestSuite.Run(corpus);
         var file = WdbcFile.Load(Path.Combine(corpus, "ScalingStatDistribution.dbc"));
         var stat = DbcSemanticCatalog.Get("ScalingStatDistribution", 1, file)
             ?? throw new InvalidOperationException("Scaling stat types have no readable names.");

@@ -113,10 +113,8 @@ public partial class MainWindow : Window
             Dispatcher.UIThread.Post(() =>
             {
                 RenderText.Text = $"Render {measurement.Milliseconds:0.00} ms · {measurement.VisibleRows} × {measurement.VisibleColumns} visible";
-                SyncScrollbars();
             }, DispatcherPriority.Background);
         };
-        SecondaryDbcView.RenderMeasured += (_, _) => Dispatcher.UIThread.Post(SyncSecondaryScrollbars, DispatcherPriority.Background);
         Closing += WindowClosing;
         Closed += (_, _) => { RuntimeStrip.Dispose(); _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.WorkspaceRootPath) || Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
@@ -124,6 +122,18 @@ public partial class MainWindow : Window
 
     private void AttachDbcPane(VirtualDbcView view, TextBox editor)
     {
+        view.ViewportChanged += (_, _) =>
+        {
+            if (ReferenceEquals(view, DbcView)) SyncScrollbars();
+            else SyncSecondaryScrollbars();
+            PositionInlineCellEditor();
+        };
+        view.ColumnWidthsChanged += (_, _) => SaveDbcColumnWidths(view);
+        view.InteractionFailed += (_, exception) =>
+        {
+            DesktopCrashLogger.Log("DBC column operation failed", exception);
+            StatusText.Text = $"Column operation failed: {exception.Message}";
+        };
         view.GotFocus += (_, _) => ActivateDbcPane(view);
         view.SelectionChanged += (_, selection) => { if (ActivateDbcPane(view)) ShowSelection(selection); };
         view.CellEditRequested += (_, request) =>
@@ -367,6 +377,8 @@ public partial class MainWindow : Window
                 var catalog = ResolveSchemaCatalog(); var xmlResolution = catalog.ResolveColumns(tableName, file.FieldCount);
                 return new DbcDocumentSession(file, xmlResolution, _schemaSource);
             });
+            if (_workspaceSession.Settings.DbcColumnWidths.TryGetValue(session.ColumnLayoutKey, out var widths))
+                session.ColumnLayout.RestoreWidths(widths);
             _documents.Add(session);
             ActivateDocument(_documents.Count - 1);
             RememberDbcDirectory(path);
@@ -390,7 +402,7 @@ public partial class MainWindow : Window
         else { _primaryDocument = index; _secondaryPaneActive = false; }
         var document = _documents[index];
         DesktopCrashLogger.Debug("DBC", "document-activated", ("path", document.FullPath), ("tab", index), ("dirty", document.File.IsDirty));
-        ActiveDbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, document.File.LogicalTableName, DecodedToggle.IsChecked == true);
+        ActiveDbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, document.File.LogicalTableName, DecodedToggle.IsChecked == true, document.ColumnLayout);
         UpdateDbcPaneTitles();
         WelcomePanel.IsVisible = false;
         M2View.IsVisible = false;
@@ -446,7 +458,7 @@ public partial class MainWindow : Window
             if (_secondaryDocument >= 0 && _secondaryDocument < _documents.Count)
             {
                 var document = _documents[_secondaryDocument];
-                SecondaryDbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, document.File.LogicalTableName, DecodedToggle.IsChecked == true);
+                SecondaryDbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, document.File.LogicalTableName, DecodedToggle.IsChecked == true, document.ColumnLayout);
             }
             StatusText.Text = "Split DBC view enabled · click either pane to make it active, then click a staged tab · drag selected rows/cells across panes";
         }
@@ -485,7 +497,7 @@ public partial class MainWindow : Window
         view.BackRequested += (_, _) => { view.Dispose(); if (ReferenceEquals(_dbcImportWorkspaceView, view)) _dbcImportWorkspaceView = null; CloseFeatureWorkspace(); };
         view.Applied += (_, result) =>
         {
-            ActiveDbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, Path.GetFileNameWithoutExtension(document.File.SourcePath), DecodedToggle.IsChecked == true);
+            ActiveDbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, document.File.LogicalTableName, DecodedToggle.IsChecked == true, document.ColumnLayout);
             ShowDocumentSummary(document); RefreshTabs();
             StatusText.Text = $"Structured import staged · {result.UpdatedRows:N0} updated row(s) · {result.AppendedRows:N0} appended · {result.ChangedCells:N0} cells · save still required";
         };
@@ -649,9 +661,7 @@ public partial class MainWindow : Window
         _dbcEditingView = view;
         _dbcEditingEditor = editor;
         editor.Text = request.Selection.Value;
-        editor.Margin = new Thickness(request.Bounds.X, request.Bounds.Y, 0, 0);
-        editor.Width = request.Bounds.Width;
-        editor.Height = request.Bounds.Height;
+        PositionInlineCellEditor();
         editor.IsVisible = true;
         ToolTip.SetTip(editor, "Tab applies and moves right · Shift+Tab moves left · Enter moves down · Esc cancels");
         Dispatcher.UIThread.Post(() =>
@@ -1771,7 +1781,7 @@ public partial class MainWindow : Window
         VerticalDbcScroll.Maximum = DbcView.VerticalMaximum;
         HorizontalDbcScroll.Maximum = DbcView.HorizontalMaximum;
         VerticalDbcScroll.ViewportSize = Math.Max(1, DbcView.Bounds.Height - 32);
-        HorizontalDbcScroll.ViewportSize = Math.Max(1, DbcView.Bounds.Width - 58);
+        HorizontalDbcScroll.ViewportSize = Math.Max(1, DbcView.HorizontalViewportSize);
         VerticalDbcScroll.Value = Math.Min(DbcView.VerticalOffset, VerticalDbcScroll.Maximum);
         HorizontalDbcScroll.Value = Math.Min(DbcView.HorizontalOffset, HorizontalDbcScroll.Maximum);
         _syncingScrollbars = false;
@@ -1789,7 +1799,7 @@ public partial class MainWindow : Window
         SecondaryVerticalDbcScroll.Maximum = SecondaryDbcView.VerticalMaximum;
         SecondaryHorizontalDbcScroll.Maximum = SecondaryDbcView.HorizontalMaximum;
         SecondaryVerticalDbcScroll.ViewportSize = Math.Max(1, SecondaryDbcView.Bounds.Height - 32);
-        SecondaryHorizontalDbcScroll.ViewportSize = Math.Max(1, SecondaryDbcView.Bounds.Width - 58);
+        SecondaryHorizontalDbcScroll.ViewportSize = Math.Max(1, SecondaryDbcView.HorizontalViewportSize);
         SecondaryVerticalDbcScroll.Value = Math.Min(SecondaryDbcView.VerticalOffset, SecondaryVerticalDbcScroll.Maximum);
         SecondaryHorizontalDbcScroll.Value = Math.Min(SecondaryDbcView.HorizontalOffset, SecondaryHorizontalDbcScroll.Maximum);
         _syncingScrollbars = false;

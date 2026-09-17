@@ -1,4 +1,8 @@
 using WoWCrucible.Core;
+using WoWCrucible.Desktop.Controls;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace WoWCrucible.Desktop;
 
@@ -9,6 +13,10 @@ internal sealed class DbcDocumentSession(WdbcFile file, DbcSchemaResolution sche
     public string SchemaSource { get; } = schemaSource;
     public DesktopEditHistory History { get; } = new();
     public string FilterText { get; set; } = string.Empty;
+    public DbcColumnLayout ColumnLayout { get; } = new(schema.Columns.Count,
+        schema.KeyStrategy.Kind == DbcRecordKeyKind.PhysicalColumn ? schema.KeyStrategy.ColumnIndex ?? -1 : -1);
+    public string ColumnLayoutKey { get; } = file.LogicalTableName + ":" +
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { schema.Columns, schema.KeyStrategy }))));
     public string FullPath => Path.GetFullPath(File.SourcePath);
     public string DisplayName => Path.GetFileName(File.SourcePath) + (File.IsDirty ? " *" : string.Empty);
     public DbcColumn? IdColumn => DbcRecordIdentity.PhysicalColumn(Schema.Columns, Schema.KeyStrategy);

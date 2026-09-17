@@ -12,14 +12,10 @@ namespace WoWCrucible.Desktop.Controls;
 /// A direct-rendered WDBC viewport. It creates no control per row or cell and
 /// therefore keeps UI cost proportional to the visible rectangle, not the file.
 /// </summary>
-public sealed class VirtualDbcView : Control
+public sealed partial class VirtualDbcView : Control
 {
     private const double HeaderHeight = 32;
     private const double RowHeight = 27;
-    private const double RowNumberWidth = 58;
-    private const double PinnedKeyWidth = 108;
-    private const double FrozenWidth = RowNumberWidth + PinnedKeyWidth;
-    private const double DefaultColumnWidth = 156;
     private const int TextCacheLimit = 4096;
 
     private static readonly IBrush HeaderBrush = new SolidColorBrush(Color.Parse("#272A2E"));
@@ -60,11 +56,25 @@ public sealed class VirtualDbcView : Control
     private bool _selectingWholeRows;
     private Point _pressPoint;
     private PointerPressedEventArgs? _dragPress;
+    private DbcColumnLayout _layout = new(0);
+    private int? _resizingColumn;
+    private double _resizeStartWidth;
+    private IPointer? _resizePointer;
+    private int _autoFitRevision;
+
+    private double RowNumberWidth => _layout.RowHeaderWidth;
+    private double PinnedKeyWidth => _layout.KeyWidth;
+    public double FrozenWidth => _layout.FrozenWidth;
+    public DbcColumnLayout ColumnLayout => _layout;
+    public double HorizontalViewportSize => _layout.ViewportWidth(Bounds.Width);
 
     public event EventHandler<DbcSelectionEventArgs>? SelectionChanged;
     public event EventHandler<DbcCellEditRequestEventArgs>? CellEditRequested;
     public event EventHandler<DbcRangeDragRequestEventArgs>? RangeDragRequested;
     public event EventHandler<ViewportPerformanceEventArgs>? RenderMeasured;
+    public event EventHandler? ViewportChanged;
+    public event EventHandler? ColumnWidthsChanged;
+    public event EventHandler<Exception>? InteractionFailed;
 
     public WdbcFile? File => _file;
     public IReadOnlyList<DbcColumn> Columns => _columns;
@@ -75,7 +85,7 @@ public sealed class VirtualDbcView : Control
     public double VerticalOffset => _verticalOffset;
     public double HorizontalOffset => _horizontalOffset;
     public double VerticalMaximum => Math.Max(0, VisibleRowCount * RowHeight - Math.Max(0, Bounds.Height - HeaderHeight));
-    public double HorizontalMaximum => Math.Max(0, _scrollColumnIndices.Count * DefaultColumnWidth - Math.Max(0, Bounds.Width - FrozenWidth));
+    public double HorizontalMaximum => _layout.MaximumOffset(Bounds.Width);
 
     public VirtualDbcView()
     {
@@ -83,14 +93,20 @@ public sealed class VirtualDbcView : Control
         ClipToBounds = true;
     }
 
-    public void SetDocument(WdbcFile file, IReadOnlyList<DbcColumn> columns, DbcRecordKeyStrategy keyStrategy, string tableName, bool decoded)
+    public void SetDocument(WdbcFile file, IReadOnlyList<DbcColumn> columns, DbcRecordKeyStrategy keyStrategy, string tableName, bool decoded, DbcColumnLayout? layout = null)
     {
+        FinishColumnResize();
+        ContextMenu?.Close();
+        _autoFitRevision++;
+        _layout.Changed -= ColumnLayoutChanged;
         _file = file;
         _columns = columns;
         _keyStrategy = keyStrategy;
         _idColumnIndex = keyStrategy.Kind == DbcRecordKeyKind.PhysicalColumn && keyStrategy.ColumnIndex is >= 0 &&
                          keyStrategy.ColumnIndex < columns.Count ? keyStrategy.ColumnIndex.Value : -1;
-        _scrollColumnIndices = Enumerable.Range(0, columns.Count).Where(index => index != _idColumnIndex).ToArray();
+        _layout = layout ?? new(columns.Count, _idColumnIndex);
+        _layout.Changed += ColumnLayoutChanged;
+        _scrollColumnIndices = _layout.ScrollColumns;
         _tableName = tableName;
         _decoded = decoded;
         _filteredRows = null;
@@ -101,12 +117,13 @@ public sealed class VirtualDbcView : Control
         _selectedPinned = false;
         ClearRangeSelection();
         _displayCache.Clear();
-        InvalidateVisual();
+        UpdateViewport();
     }
 
     public void SetDecoded(bool decoded)
     {
         if (_decoded == decoded) return;
+        _autoFitRevision++;
         _decoded = decoded;
         _displayCache.Clear();
         InvalidateVisual();
@@ -114,6 +131,7 @@ public sealed class VirtualDbcView : Control
 
     public void RefreshDocument(int selectedSourceRow = -1)
     {
+        _autoFitRevision++;
         _displayCache.Clear();
         if (selectedSourceRow >= 0)
         {
@@ -121,8 +139,7 @@ public sealed class VirtualDbcView : Control
             if (_selectedDisplayRow >= 0)
                 _verticalOffset = Math.Max(0, _selectedDisplayRow * RowHeight - Math.Max(0, Bounds.Height - HeaderHeight) * 0.45);
         }
-        ClampOffsets();
-        InvalidateVisual();
+        UpdateViewport();
     }
 
     public void SelectSourceRow(int sourceRow, int column = 0)
@@ -134,26 +151,26 @@ public sealed class VirtualDbcView : Control
         _selectedPinned = _selectedColumn == _idColumnIndex;
         SetSingleCellRange(_selectedDisplayRow, _selectedColumn);
         _verticalOffset = Math.Max(0, _selectedDisplayRow * RowHeight - Math.Max(0, Bounds.Height - HeaderHeight) * 0.45);
-        EnsureSelectionVisible(); ClampOffsets(); InvalidateVisual();
+        EnsureSelectionVisible(); UpdateViewport();
         if (_selectedColumn >= 0) SelectionChanged?.Invoke(this, new(sourceRow, _selectedColumn, _columns[_selectedColumn], CachedValue(sourceRow, _selectedColumn)));
     }
 
     public void SetFilteredRows(IReadOnlyList<int>? rows)
     {
+        _autoFitRevision++;
         _filteredRows = rows;
         _verticalOffset = 0;
         _selectedDisplayRow = -1;
         ClearRangeSelection();
         _displayCache.Clear();
-        InvalidateVisual();
+        UpdateViewport();
     }
 
     public void SetScrollOffsets(double horizontal, double vertical)
     {
         _horizontalOffset = horizontal;
         _verticalOffset = vertical;
-        ClampOffsets();
-        InvalidateVisual();
+        UpdateViewport();
     }
 
     public override void Render(DrawingContext context)
@@ -161,16 +178,14 @@ public sealed class VirtualDbcView : Control
         var started = Stopwatch.GetTimestamp();
         base.Render(context);
         context.FillRectangle(RowBrush, Bounds);
-        if (_file is null || _columns.Count == 0 || Bounds.Width <= FrozenWidth || Bounds.Height <= HeaderHeight)
+        if (_file is null || _columns.Count == 0 || Bounds.Width <= 0 || Bounds.Height <= HeaderHeight)
             return;
 
         ClampOffsets();
         var firstDisplayRow = Math.Max(0, (int)(_verticalOffset / RowHeight));
         var partialY = _verticalOffset % RowHeight;
         var displayedRows = Math.Min(VisibleRowCount - firstDisplayRow, (int)Math.Ceiling((Bounds.Height - HeaderHeight + partialY) / RowHeight));
-        var firstColumn = Math.Max(0, (int)(_horizontalOffset / DefaultColumnWidth));
-        var partialX = _horizontalOffset % DefaultColumnWidth;
-        var displayedColumns = Math.Min(_scrollColumnIndices.Count - firstColumn, (int)Math.Ceiling((Bounds.Width - FrozenWidth + partialX) / DefaultColumnWidth));
+        var visibleColumns = _layout.VisibleColumns(_horizontalOffset, Bounds.Width).ToArray();
 
         context.FillRectangle(HeaderBrush, new Rect(0, 0, Bounds.Width, HeaderHeight));
         DrawText(context, "Row", 8, 8, HeaderTextBrush, HeaderTypeface, 12, RowNumberWidth - 16);
@@ -178,13 +193,11 @@ public sealed class VirtualDbcView : Control
         DrawText(context, _keyStrategy.Kind == DbcRecordKeyKind.NoStableKey ? "No record ID" : "Record ID", RowNumberWidth + 8, 8, HeaderTextBrush, HeaderTypeface, 12, PinnedKeyWidth - 16);
         context.DrawLine(_gridPen, new Point(FrozenWidth, 0), new Point(FrozenWidth, Bounds.Height));
 
-        using (context.PushClip(new Rect(FrozenWidth, 0, Bounds.Width - FrozenWidth, HeaderHeight)))
-        for (var visibleColumn = 0; visibleColumn < displayedColumns; visibleColumn++)
+        using (context.PushClip(new Rect(FrozenWidth, 0, HorizontalViewportSize, HeaderHeight)))
+        foreach (var span in visibleColumns)
         {
-            var columnIndex = _scrollColumnIndices[firstColumn + visibleColumn];
-            var x = FrozenWidth - partialX + visibleColumn * DefaultColumnWidth;
-            context.DrawLine(_gridPen, new Point(x, 0), new Point(x, Bounds.Height));
-            DrawText(context, _columns[columnIndex].Name, x + 8, 8, HeaderTextBrush, HeaderTypeface, 12);
+            context.DrawLine(_gridPen, new Point(span.Right, 0), new Point(span.Right, HeaderHeight));
+            DrawText(context, _columns[span.Column].Name, span.Left + 8, 8, HeaderTextBrush, HeaderTypeface, 12, span.Width - 16);
         }
         context.DrawLine(_gridPen, new Point(0, HeaderHeight), new Point(Bounds.Width, HeaderHeight));
 
@@ -204,34 +217,32 @@ public sealed class VirtualDbcView : Control
             if (displayRow == _selectedDisplayRow && _selectedPinned)
                 context.DrawRectangle(_selectionPen, new Rect(RowNumberWidth + 1, y + 1, PinnedKeyWidth - 2, RowHeight - 2));
 
-            using (context.PushClip(new Rect(FrozenWidth, y, Bounds.Width - FrozenWidth, RowHeight)))
-            for (var visibleColumn = 0; visibleColumn < displayedColumns; visibleColumn++)
+            using (context.PushClip(new Rect(FrozenWidth, y, HorizontalViewportSize, RowHeight)))
+            foreach (var span in visibleColumns)
             {
-                var columnIndex = _scrollColumnIndices[firstColumn + visibleColumn];
-                var x = FrozenWidth - partialX + visibleColumn * DefaultColumnWidth;
-                if (IsRangeCellSelected(displayRow, columnIndex))
-                    context.FillRectangle(SelectionCellBrush, new Rect(x, y, DefaultColumnWidth, RowHeight));
-                var value = CachedValue(sourceRow, columnIndex);
-                DrawText(context, value, x + 8, y + 5, TextBrush, RegularTypeface, 13);
-                if (displayRow == _selectedDisplayRow && !_selectedPinned && columnIndex == _selectedColumn)
-                    context.DrawRectangle(_selectionPen, new Rect(x + 1, y + 1, DefaultColumnWidth - 2, RowHeight - 2));
+                if (IsRangeCellSelected(displayRow, span.Column))
+                    context.FillRectangle(SelectionCellBrush, new Rect(span.Left, y, span.Width, RowHeight));
+                var value = CachedValue(sourceRow, span.Column);
+                DrawText(context, value, span.Left + 8, y + 5, TextBrush, RegularTypeface, 13, span.Width - 16);
+                context.DrawLine(_gridPen, new Point(span.Right, y), new Point(span.Right, y + RowHeight));
+                if (displayRow == _selectedDisplayRow && !_selectedPinned && span.Column == _selectedColumn)
+                    context.DrawRectangle(_selectionPen, new Rect(span.Left + 1, y + 1, span.Width - 2, RowHeight - 2));
             }
             context.DrawLine(_gridPen, new Point(0, y + RowHeight), new Point(Bounds.Width, y + RowHeight));
         }
 
         var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-        RenderMeasured?.Invoke(this, new(elapsed, displayedRows, displayedColumns + 1));
+        RenderMeasured?.Invoke(this, new(elapsed, displayedRows, visibleColumns.Length + 1));
     }
 
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
         base.OnPointerWheelChanged(e);
         if (e.KeyModifiers.HasFlag(KeyModifiers.Shift))
-            _horizontalOffset -= e.Delta.Y * DefaultColumnWidth * 0.8;
+            _horizontalOffset -= e.Delta.Y * DbcColumnLayout.DefaultFieldWidth * 0.8;
         else
             _verticalOffset -= e.Delta.Y * RowHeight * 3;
-        ClampOffsets();
-        InvalidateVisual();
+        UpdateViewport();
         e.Handled = true;
     }
 
@@ -241,6 +252,8 @@ public sealed class VirtualDbcView : Control
         if (_file is null) return;
         Focus();
         var position = e.GetPosition(this);
+        if (HandleColumnHeaderPressed(e, position)) return;
+        if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
         if (!TryHit(position, out var displayRow, out var column, out var pinned, out var rowHeader)) return;
         var order = VisualColumnOrder();
         var orderIndex = rowHeader ? 0 : Array.IndexOf(order, column);
@@ -283,12 +296,20 @@ public sealed class VirtualDbcView : Control
         base.OnPointerMoved(e);
         if (_file is null) return;
         var position = e.GetPosition(this);
+        if (_resizingColumn is { } resizing)
+        {
+            _layout.SetWidth(resizing, _resizeStartWidth + position.X - _pressPoint.X);
+            e.Handled = true;
+            return;
+        }
+        UpdateResizeCursor(position);
         if (_pendingRangeDrag && _dragPress is not null && Math.Abs(position.X - _pressPoint.X) + Math.Abs(position.Y - _pressPoint.Y) >= 6)
         {
+            var trigger = _dragPress;
+            var selection = GetRangeSelection();
             _pendingRangeDrag = false;
             e.Pointer.Capture(null);
-            var selection = GetRangeSelection();
-            if (selection is not null) RangeDragRequested?.Invoke(this, new(_dragPress, selection));
+            if (selection is not null) RangeDragRequested?.Invoke(this, new(trigger, selection));
             e.Handled = true;
             return;
         }
@@ -306,6 +327,7 @@ public sealed class VirtualDbcView : Control
     protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
         base.OnPointerReleased(e);
+        if (_resizingColumn is not null) { FinishColumnResize(); e.Handled = true; return; }
         _selectingRange = false;
         _pendingRangeDrag = false;
         _dragPress = null;
@@ -316,6 +338,11 @@ public sealed class VirtualDbcView : Control
     {
         base.OnKeyDown(e);
         if (_file is null) return;
+        if (e.Key == Key.Escape)
+        {
+            _autoFitRevision++;
+            if (_resizingColumn is not null) { FinishColumnResize(cancel: true); e.Handled = true; return; }
+        }
         if (e.Key is Key.Enter or Key.F2 && _selectedDisplayRow >= 0 && _selectedColumn >= 0)
         {
             RequestEdit(SelectedSourceRow, _selectedColumn, _selectedPinned);
@@ -347,8 +374,7 @@ public sealed class VirtualDbcView : Control
         };
         if (delta == 0) return;
         _verticalOffset += delta;
-        ClampOffsets();
-        InvalidateVisual();
+        UpdateViewport();
         e.Handled = true;
     }
 
@@ -381,8 +407,8 @@ public sealed class VirtualDbcView : Control
         _selectedColumn = column;
         _selectedPinned = pinned && column == _idColumnIndex;
         EnsureSelectionVisible();
-        InvalidateVisual();
-        var bounds = CellBounds(sourceRow, column, _selectedPinned);
+        UpdateViewport();
+        var bounds = GetCellBounds(sourceRow, column);
         CellEditRequested?.Invoke(this, new(new(sourceRow, column, _columns[column], CachedValue(sourceRow, column)), bounds));
     }
 
@@ -418,7 +444,7 @@ public sealed class VirtualDbcView : Control
         EnsureSelectionVisible();
         var sourceRow = SelectedSourceRow;
         SelectionChanged?.Invoke(this, new(sourceRow, _selectedColumn, _columns[_selectedColumn], CachedValue(sourceRow, _selectedColumn)));
-        InvalidateVisual();
+        UpdateViewport();
     }
 
     private void EnsureSelectionVisible()
@@ -428,41 +454,31 @@ public sealed class VirtualDbcView : Control
         var rowTop = _selectedDisplayRow * RowHeight;
         if (rowTop < _verticalOffset) _verticalOffset = rowTop;
         else if (rowTop + RowHeight > _verticalOffset + visibleHeight) _verticalOffset = rowTop + RowHeight - visibleHeight;
-        if (!_selectedPinned)
-        {
-            var scrollIndex = IndexOf(_scrollColumnIndices, _selectedColumn);
-            if (scrollIndex >= 0)
-            {
-                var visibleWidth = Math.Max(DefaultColumnWidth, Bounds.Width - FrozenWidth);
-                var columnLeft = scrollIndex * DefaultColumnWidth;
-                if (columnLeft < _horizontalOffset) _horizontalOffset = columnLeft;
-                else if (columnLeft + DefaultColumnWidth > _horizontalOffset + visibleWidth) _horizontalOffset = columnLeft + DefaultColumnWidth - visibleWidth;
-            }
-        }
+        _horizontalOffset = _layout.OffsetToReveal(_selectedColumn, _horizontalOffset, Bounds.Width);
         ClampOffsets();
     }
 
     private bool TryHit(Point position, out int displayRow, out int column, out bool pinned, out bool rowHeader)
     {
         displayRow = -1; column = -1; pinned = false; rowHeader = false;
-        if (position.Y < HeaderHeight) return false;
+        if (position.Y < HeaderHeight || position.X < 0 || position.X >= Bounds.Width || position.Y >= Bounds.Height) return false;
         displayRow = (int)((position.Y - HeaderHeight + _verticalOffset) / RowHeight);
         if (displayRow < 0 || displayRow >= VisibleRowCount) return false;
-        if (position.X < RowNumberWidth)
+        var hit = _layout.HitColumn(position.X, _horizontalOffset);
+        if (hit == DbcColumnLayout.RowHeader)
         {
             var order = VisualColumnOrder();
             if (order.Length == 0) return false;
             column = order[0]; rowHeader = true; return true;
         }
-        pinned = position.X < FrozenWidth;
+        pinned = hit == DbcColumnLayout.RecordKey;
         if (pinned)
         {
             if (_idColumnIndex < 0) return false;
             column = _idColumnIndex; return true;
         }
-        var scrollColumn = (int)((position.X - FrozenWidth + _horizontalOffset) / DefaultColumnWidth);
-        if (scrollColumn < 0 || scrollColumn >= _scrollColumnIndices.Count) return false;
-        column = _scrollColumnIndices[scrollColumn]; return true;
+        if (hit is not >= 0) return false;
+        column = hit.Value; return true;
     }
 
     private int[] VisualColumnOrder() => _idColumnIndex >= 0
@@ -504,26 +520,13 @@ public sealed class VirtualDbcView : Control
         _dragPress = null;
     }
 
-    private Rect CellBounds(int sourceRow, int column, bool pinned)
+    public Rect GetCellBounds(int sourceRow, int column)
     {
         var displayRow = _filteredRows is null ? sourceRow : IndexOf(_filteredRows, sourceRow);
         if (displayRow < 0) return default;
         var y = HeaderHeight + displayRow * RowHeight - _verticalOffset;
-        double x;
-        double width;
-        if (pinned)
-        {
-            x = RowNumberWidth;
-            width = PinnedKeyWidth;
-        }
-        else
-        {
-            var scrollIndex = IndexOf(_scrollColumnIndices, column);
-            if (scrollIndex < 0) return default;
-            x = FrozenWidth + scrollIndex * DefaultColumnWidth - _horizontalOffset;
-            width = DefaultColumnWidth;
-        }
-        return new Rect(x, y, width, RowHeight);
+        var span = _layout.Bounds(column, _horizontalOffset);
+        return new Rect(span.Left, y, span.Width, RowHeight);
     }
 
     private string RecordKey(int sourceRow)
@@ -553,8 +556,9 @@ public sealed class VirtualDbcView : Control
         _horizontalOffset = Math.Clamp(_horizontalOffset, 0, HorizontalMaximum);
     }
 
-    private static void DrawText(DrawingContext context, string text, double x, double y, IBrush brush, Typeface typeface, double size, double width = DefaultColumnWidth - 16)
+    private static void DrawText(DrawingContext context, string text, double x, double y, IBrush brush, Typeface typeface, double size, double width)
     {
+        if (width <= 0) return;
         var formatted = new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, typeface, size, brush)
         {
             MaxTextWidth = width,

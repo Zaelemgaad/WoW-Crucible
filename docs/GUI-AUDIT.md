@@ -45,6 +45,32 @@ stat semantics, including 64-bit values and unknown IDs:
 dotnet tests/WoWCrucible.Core.Tests/bin/Release/net10.0/WoWCrucible.Core.Tests.dll --dbc-editor <stock-dbc-folder>
 ```
 
+## Resize DBC / DB2 Columns
+
+1. Open a DBC or DB2 using **File > Open DBC / DB2...**. Drag the right edge of
+   any column header, including **Row** and **Record ID**. Expect a horizontal
+   resize cursor, continuously updated rows, and no dirty-file marker.
+2. Make adjacent columns noticeably different widths, then scroll horizontally.
+   Click and edit a cell near a boundary: selection and the text box must match
+   that cell. Tab between cells and check that navigation reveals the right field.
+3. Double-click a header boundary. Expect that column to fit its header and the
+   displayed values in all matching rows, not only the rows currently on screen.
+   Apply a filter and repeat; auto-fit must use those matching rows. Large tables
+   must stay responsive; Escape cancels an in-progress fit or restores a drag.
+4. Right-click a header and choose **Reset column width**, then **Reset all column
+   widths**. Expect only the chosen scope to reset and the scrollbar to adjust.
+5. Enable **Split** on the same document. Resize in either pane; both panes
+   must share widths while retaining their own scroll positions. Switch file tabs,
+   close/reopen the file, and restart Crucible: adjusted widths must be restored
+   for the same table/schema without leaking into an unrelated table layout.
+6. Narrow the window or right pane while editing. The text box must stay aligned,
+   clipped out of the header/pinned columns, and retain any uncommitted value.
+
+The `--dbc-editor` checks above also cover the actual shared column geometry,
+boundary hit tests, variable-width scrolling/navigation, virtual/physical record
+IDs, JSON width round-trips, schema isolation, and unchanged DBC data/history.
+They do not replace the operating-system pointer and visual checks in this section.
+
 ## Drop a Model
 
 1. Open **World & Assets > Modern asset conversion** (or use Commands).
