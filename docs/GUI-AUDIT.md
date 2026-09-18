@@ -71,6 +71,35 @@ boundary hit tests, variable-width scrolling/navigation, virtual/physical record
 IDs, JSON width round-trips, schema isolation, and unchanged DBC data/history.
 They do not replace the operating-system pointer and visual checks in this section.
 
+## Creature Appearance Catalog
+
+2026-09-17 regression: build `3162c82` dereferenced an empty template item while
+Avalonia recycled a list container. The test below reproduced that exception
+before the fix and passed 300 clear/rebind cycles afterward. Interactive scrolling
+and filtering still require the manual check below.
+
+1. Open **Creatures & NPCs > DBC appearance catalog** with a configured target
+   DBC folder. Click **Target DBC catalog** if the catalog has not loaded yet.
+2. Scroll far down and back up repeatedly. Resize the catalog pane while partway
+   down the list, switch to **Identity & appearance**, then return to the catalog.
+   Expect no crash and the correct display ID, model, scale, and texture details.
+3. Search for a known display ID, then text with no matches, then clear the search.
+   Reload the catalog. Expect the matching rows to replace the previous results,
+   with no stale cards, missing entries, or fatal errors in the Devbug log.
+4. Entries missing a model must remain visible with their diagnostic text. The
+   lifecycle fix must not filter out problematic data or disable virtualization.
+
+The no-window regression exercises the real built view/template and Avalonia
+ContentPresenter through 300 populated/cleared row cycles, including usable and
+missing-model entries. It does not operate the mouse or modify saved settings.
+Run in a fresh PowerShell 7.6+ process on Windows after a Desktop build:
+
+```powershell
+pwsh -NoProfile -File scripts/Test-CreatureAppearanceTemplate.ps1 -DesktopDirectory src/WoWCrucible.Desktop/bin/Debug/net10.0
+```
+
+This is a template lifecycle regression, not a full interactive scrolling test.
+
 ## Drop a Model
 
 1. Open **World & Assets > Modern asset conversion** (or use Commands).

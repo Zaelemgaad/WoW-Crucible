@@ -106,7 +106,8 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
     {
         _session = session; _session.Changed += SessionChanged;
         HookPreviewEvents();
-        _appearanceResults.ItemTemplate = new FuncDataTemplate<CreatureDisplayCatalogEntry>((entry, _) => AppearanceCard(entry));
+        // Avalonia clears the item while recycling an off-screen list container.
+        _appearanceResults.ItemTemplate = new FuncDataTemplate<CreatureDisplayCatalogEntry>((entry, _) => entry is null ? new Grid() : AppearanceCard(entry));
         _appearanceSearch.TextChanged += async (_, _) => await FilterAppearancesAsync();
         _appearanceResults.SelectionChanged += (_, _) => DescribeSelectedAppearance();
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
