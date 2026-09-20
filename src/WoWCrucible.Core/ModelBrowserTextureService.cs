@@ -4,8 +4,11 @@ public static class ModelBrowserTextureService
 {
     public static string SlotName(uint type) => type switch
     {
-        0 => "Fixed texture", 1 => "Body", 2 => "Object skin", 6 => "Hair", 8 => "Fur", 9 => "Cape",
-        11 => "Creature skin 1", 12 => "Creature skin 2", 13 => "Creature skin 3", _ => $"Texture type {type}"
+        0 => "Model texture", 1 => "Body and clothing", 2 => "Item / cape", 3 => "Weapon blade", 4 => "Weapon handle",
+        5 => "Environment reflection", 6 => "Hair", 7 => "Facial hair", 8 => "Skin details", 9 => "Inventory artwork", 10 => "Mane",
+        11 => "Creature skin 1", 12 => "Creature skin 2", 13 => "Creature skin 3", 14 => "Item icon",
+        15 => "Guild background", 16 => "Guild emblem color", 17 => "Guild border", 18 => "Guild emblem",
+        19 => "Eyes", 20 => "Jewelry / accessories", _ => $"Unidentified material ({type})"
     };
 
     public static IReadOnlyDictionary<int, string> SuggestBindings(ModelBrowserSource source, M2PreviewGeometry geometry)

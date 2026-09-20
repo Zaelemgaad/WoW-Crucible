@@ -11,14 +11,14 @@ public sealed record M2PreviewRenderFlag(int Index, ushort Flags, ushort BlendMo
     public bool Unlit => (Flags & 0x1) != 0;
     public bool Unfogged => (Flags & 0x2) != 0;
     public bool TwoSided => (Flags & 0x4) != 0;
-    public bool NoDepthTest => (Flags & 0x10) != 0;
+    public bool NoDepthWrite => (Flags & 0x10) != 0;
 }
 public sealed record M2PreviewBone(int Index, uint Flags, short ParentIndex, ushort SubmeshId, Vector3 Pivot);
 public sealed record M2PreviewSequence(int Index, ushort AnimationId, ushort SubAnimationId, uint DurationMilliseconds, float MoveSpeed, uint Flags, short Probability, uint MinimumRepetitions, uint MaximumRepetitions, uint BlendMilliseconds, short NextSequence, ushort AliasSequence)
 {
     public bool Loops => (Flags & 0x20) != 0;
     public bool IsAlias => (Flags & 0x40) != 0;
-    public override string ToString() => $"{AnimationId:N0}:{SubAnimationId:N0} · {DurationMilliseconds:N0} ms";
+    public override string ToString() => M2AnimationNames.Label(this);
 }
 public sealed record M2PreviewAttachment(int Index, uint Id, string Name, int BoneIndex, Vector3 Position, IReadOnlyList<int> LookupSlots)
 {
@@ -183,8 +183,7 @@ public static class M2PreviewGeometryService
             TriangleIndices = triangles, Submeshes = sections, Batches = batches,
             Minimum = triangles.Count == 0 ? allGeosets.Minimum : minimum,
             Maximum = triangles.Count == 0 ? allGeosets.Maximum : maximum,
-            UsedTextureDefinitionIndices = batches.SelectMany(batch => batch.TextureStages).Where(stage => stage.TextureDefinitionIndex >= 0)
-                .Select(stage => stage.TextureDefinitionIndex).Distinct().Order().ToArray(),
+            UsedTextureDefinitionIndices = UsedTextures(batches, allGeosets.ParticleEmitters, allGeosets.RibbonEmitters),
             VisibilityMode = M2PreviewVisibilityMode.BaseAppearance
         };
     }
@@ -265,9 +264,7 @@ public static class M2PreviewGeometryService
             Lights = animationRig.PreviewLights,
             ParticleEmitters = particleRig?.Emitters ?? [],
             RibbonEmitters = ribbonRig.Emitters,
-            UsedTextureDefinitionIndices = batches.SelectMany(batch => batch.TextureStages).Where(stage => stage.TextureDefinitionIndex >= 0).Select(stage => stage.TextureDefinitionIndex)
-                .Concat(batches.Where(batch => batch.TextureStages.Count == 0 && batch.TextureDefinitionIndex is not null).Select(batch => batch.TextureDefinitionIndex!.Value))
-                .Concat((particleRig?.Emitters ?? []).SelectMany(emitter => emitter.TextureDefinitionIndices)).Concat(ribbonRig.Emitters.Where(emitter => emitter.TextureDefinitionIndex >= 0).Select(emitter => emitter.TextureDefinitionIndex)).Distinct().Order().ToArray(),
+            UsedTextureDefinitionIndices = UsedTextures(batches, particleRig?.Emitters ?? [], ribbonRig.Emitters),
             Sequences = animationRig.Sequences,
             SecondaryTextureCoordinates = secondaryTextureCoordinates,
             TotalTriangleIndices = allTriangles.Length,
@@ -288,6 +285,12 @@ public static class M2PreviewGeometryService
             throw new InvalidDataException("Texture-slot inspection requires an unwrapped Wrath version 264 or MoP version 272 MD20 model.");
         return ReadTextureSlots(model);
     }
+
+    private static int[] UsedTextures(IReadOnlyList<M2PreviewBatch> batches, IReadOnlyList<M2PreviewParticleEmitter> particles, IReadOnlyList<M2PreviewRibbonEmitter> ribbons) =>
+        batches.SelectMany(batch => batch.TextureStages).Select(stage => stage.TextureDefinitionIndex)
+            .Concat(batches.Where(batch => batch.TextureStages.Count == 0 && batch.TextureDefinitionIndex is not null).Select(batch => batch.TextureDefinitionIndex!.Value))
+            .Concat(particles.SelectMany(emitter => emitter.TextureDefinitionIndices)).Concat(ribbons.Select(emitter => emitter.TextureDefinitionIndex))
+            .Where(index => index >= 0).Distinct().Order().ToArray();
 
     public static M2PreviewVisibilityMode ResolveVisibilityMode(string modelPath, M2PreviewVisibilityMode requested, M2GeosetSelection? geosetSelection = null)
     {

@@ -10,6 +10,7 @@ internal sealed class PreviewBitmap : IDisposable
     private sealed class Storage(SKBitmap bitmap)
     {
         public SKBitmap Bitmap { get; } = bitmap;
+        public Lazy<SKColor[]> Pixels { get; } = new(() => bitmap.Pixels);
         public int References = 1;
     }
 
@@ -23,6 +24,7 @@ internal sealed class PreviewBitmap : IDisposable
     }
 
     public SKBitmap Bitmap => (Volatile.Read(ref _storage) ?? throw new ObjectDisposedException(nameof(PreviewBitmap))).Bitmap;
+    public SKColor[] Pixels => (Volatile.Read(ref _storage) ?? throw new ObjectDisposedException(nameof(PreviewBitmap))).Pixels.Value;
 
     public PreviewBitmap Retain()
     {

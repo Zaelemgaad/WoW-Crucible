@@ -18,24 +18,27 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     private readonly ListBox _models = new();
     private readonly TextBox _search = new() { PlaceholderText = "Search models and folders" };
     private readonly TextBox _root = new() { IsReadOnly = true };
-    private readonly ComboBox _filter = new() { ItemsSource = new[] { "All models", "Loose files", "Inside ZIPs", "Unreviewed", "Keep", "Skip" }, SelectedIndex = 0 };
+    private readonly ComboBox _filter = new() { ItemsSource = new[] { "All models", "Loose files", "Inside ZIPs", "Unreviewed", "Keep", "Marked for deletion" }, SelectedIndex = 0 };
     private readonly TextBlock _summary = Label("No folder opened.");
     private readonly TextBlock _status = Label("No model selected.");
     private readonly TextBlock _modelTitle = Label(string.Empty);
     private readonly TextBox _details = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
     private readonly StackPanel _geosets = new() { Spacing = 4 };
-    private readonly StackPanel _textures = new() { Spacing = 9 };
+    private readonly ModelBrowserTextures _textures = new();
     private readonly M2PreviewView _preview = new();
     private readonly Dictionary<int, RgbaTexture> _decoded = [];
     private readonly Dictionary<int, string> _bindings = [];
     private readonly Dictionary<int, int> _textureRequests = [];
     private readonly HashSet<int> _selectedGeosets = [];
     private readonly List<CheckBox> _geosetChecks = [];
-    private readonly ComboBox _review = new() { ItemsSource = new[] { "Unreviewed", "Keep", "Skip" }, SelectedIndex = 0 };
+    private sealed record FaceChoice(ushort GeosetId, string Name) { public override string ToString() => Name; }
+    private readonly ComboBox _faces = new() { HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly ComboBox _review = new() { ItemsSource = new[] { "Unreviewed", "Keep", "Mark for deletion" }, SelectedIndex = 0 };
     private ModelBrowserCatalog? _catalog;
     private ModelBrowserSource? _source;
     private ModelBrowserEntry? _current;
     private M2PreviewGeometry? _fullGeometry;
+    private M2PreviewGeometry? _visibleGeometry;
     private CancellationTokenSource? _scan;
     private int _generation;
     private bool _updating;
@@ -44,6 +47,8 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     public ModelBrowserView(DesktopSettings settings)
     {
         _settings = settings;
+        _textures.BindingChanged = SetTextureAsync;
+        _faces.SelectionChanged += (_, _) => { if (!_updating) { ApplyFace(); ShowGeometry(); } };
         var folder = new Button { Content = "Open model folder" }; folder.Click += async (_, _) => await ChooseFolderAsync();
         var refresh = new Button { Content = "Rescan" }; refresh.Click += async (_, _) => { if (_catalog is not null) await OpenAsync(_catalog.Root); };
         var cancel = new Button { Content = "Cancel scan" }; cancel.Click += (_, _) => _scan?.Cancel();
@@ -70,11 +75,15 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
         Put(modelPane, _preview, 1); Put(modelPane, _status, 2);
         var tabs = new TabControl { ItemsSource = new[]
         {
-            new TabItem { Header = "Textures", Foreground = Brush.Parse("#E8EBF2"), FontSize = 13, Padding = new Thickness(8), Content = new ScrollViewer { Content = _textures, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled } },
+            new TabItem { Header = "Textures", Foreground = Brush.Parse("#E8EBF2"), FontSize = 13, Padding = new Thickness(8), Content = _textures },
             new TabItem { Header = "Geosets", Foreground = Brush.Parse("#E8EBF2"), FontSize = 13, Padding = new Thickness(8), Content = GeosetPane() },
             new TabItem { Header = "Details", Foreground = Brush.Parse("#E8EBF2"), FontSize = 13, Padding = new Thickness(8), Content = _details }
         }};
-        var previewAndDetails = new ResponsiveSplitGrid(modelPane, tabs, 2.6, 1, wideAspect: 1.05, compactFirstWeight: 3, compactSecondWeight: 1);
+        var saveDefaults = new Button { Content = "Save defaults" }; saveDefaults.Click += (_, _) => SaveDefaults();
+        var resetDefaults = new Button { Content = "Reset defaults" }; resetDefaults.Click += async (_, _) => await ResetDefaultsAsync();
+        var settingsPane = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 5 };
+        settingsPane.Children.Add(new WrapPanel { Children = { saveDefaults, resetDefaults } }); Put(settingsPane, tabs, 1);
+        var previewAndDetails = new ResponsiveSplitGrid(modelPane, settingsPane, 2.6, 1, wideAspect: 1.05, compactFirstWeight: 3, compactSecondWeight: 1);
         var body = new ResponsiveSplitGrid(filePane, previewAndDetails, 0.8, 3.2, wideAspect: 1.3, compactFirstWeight: 1, compactSecondWeight: 3) { Margin = new Thickness(10) };
         var toolbar = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto"), ColumnSpacing = 7, Margin = new Thickness(10, 7) };
         toolbar.Children.Add(folder); PutColumn(toolbar, _root, 1); PutColumn(toolbar, refresh, 2); PutColumn(toolbar, cancel, 3);
@@ -94,7 +103,7 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     {
         var all = new Button { Content = "All" }; all.Click += (_, _) => SetGeosets(_ => true);
         var body = new Button { Content = "Body only" }; body.Click += (_, _) => SetGeosets(section => section.GeosetId == 0);
-        var defaults = new Button { Content = "Default" }; defaults.Click += (_, _) => SetGeosets(DefaultGeoset);
+        var defaults = new Button { Content = "Defaults" }; defaults.Click += (_, _) => RestoreGeosets();
         return new DockPanel { LastChildFill = true, Children =
         {
             DockTop(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Children = { defaults, body, all } }),
@@ -148,7 +157,7 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
         var entries = _catalog.Models.Where(entry => entry.RelativePath.Contains(query, StringComparison.OrdinalIgnoreCase) && (mode switch
         {
             1 => entry.ArchiveEntry is null, 2 => entry.ArchiveEntry is not null,
-            3 => Review(entry) == "Unreviewed", 4 => Review(entry) == "Keep", 5 => Review(entry) == "Skip", _ => true
+            3 => Review(entry) == "Unreviewed", 4 => Review(entry) == "Keep", 5 => Review(entry) == "Mark for deletion", _ => true
         })).ToArray();
         var selected = _models.SelectedItem;
         _updating = true; _models.ItemsSource = entries; _models.SelectedItem = entries.Contains(selected) ? selected : null; _updating = false;
@@ -162,17 +171,19 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
         _modelTitle.Text = entry.Name; _status.Text = "Loading model, skeleton and textures...";
         _updating = true; _review.SelectedItem = Review(entry); _updating = false;
         ModelBrowserSource? source = null;
+        var preset = _settings.ModelBrowserPresets.GetValueOrDefault(entry.Identity);
         try
         {
             var loaded = await Task.Run(() =>
             {
                 source = new ModelBrowserSource(entry, _catalog);
                 var geometry = M2PreviewGeometryService.LoadForViewing(source, visibilityMode: M2PreviewVisibilityMode.AllGeosets);
-                var bindings = ModelBrowserTextureService.SuggestBindings(source, geometry);
+                var bindings = preset is null ? ModelBrowserTextureService.SuggestBindings(source, geometry)
+                    : preset.Textures.Where(pair => geometry.TextureSlots.Any(slot => slot.Index == pair.Key)).ToDictionary();
                 var textures = new Dictionary<int, RgbaTexture>(); var errors = new List<string>();
                 foreach (var pair in bindings)
                 {
-                    try { textures[pair.Key] = ModelBrowserTextureService.Decode(source, pair.Value); }
+                    try { textures[pair.Key] = Path.IsPathFullyQualified(pair.Value) ? BlpTextureService.Decode(pair.Value) : ModelBrowserTextureService.Decode(source, pair.Value); }
                     catch (Exception exception) { errors.Add($"Texture {pair.Key}: {exception.Message}"); }
                 }
                 return (Geometry: geometry, Bindings: bindings, Textures: textures, Errors: errors);
@@ -182,8 +193,9 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
             foreach (var pair in loaded.Bindings) _bindings[pair.Key] = pair.Value;
             foreach (var pair in loaded.Textures) _decoded[pair.Key] = pair.Value;
             _selectedGeosets.Clear();
-            foreach (var section in loaded.Geometry.Submeshes.Where(DefaultGeoset)) _selectedGeosets.Add(section.Index);
-            BuildGeosets(); BuildTextures(); ShowGeometry();
+            _selectedGeosets.UnionWith(preset is null ? M2GeosetCatalog.BrowserDefaults(loaded.Geometry.Submeshes)
+                : loaded.Geometry.Submeshes.Where(section => preset.GeosetIds.Contains(section.GeosetId)).Select(section => section.Index));
+            BuildGeosets(); BuildTextures(); ShowGeometry(); _preview.SetDecodedTextures(_decoded);
             _details.Text = $"{entry.RelativePath}\n\n{entry.FormatLabel}\nVertices: {loaded.Geometry.Vertices.Count:N0}\nBones: {loaded.Geometry.Bones.Count:N0}\nAnimations: {loaded.Geometry.Sequences.Count:N0}\n\n"
                 + string.Join('\n', loaded.Geometry.PreviewWarnings.Concat(loaded.Errors))
                 + "\n\nClient rendering has not been tested. This viewer does not convert or modify the source model.";
@@ -198,25 +210,39 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
         }
     }
 
-    private static bool DefaultGeoset(M2PreviewSubmesh section) => section.GeosetId is 0 or 1 || section.GeosetId % 100 == 1 && section.GeosetId >= 100;
-
     private void ClearModel()
     {
-        _preview.ClearGeometry(); _source?.Dispose(); _source = null; _current = null; _fullGeometry = null; _modelTitle.Text = string.Empty;
-        _textures.Children.Clear(); _geosets.Children.Clear(); _geosetChecks.Clear(); _decoded.Clear(); _bindings.Clear(); _textureRequests.Clear(); _selectedGeosets.Clear();
+        _preview.ClearGeometry(); _source?.Dispose(); _source = null; _current = null; _fullGeometry = null; _visibleGeometry = null; _modelTitle.Text = string.Empty;
+        _textures.Clear(); _geosets.Children.Clear(); _geosetChecks.Clear(); _decoded.Clear(); _bindings.Clear(); _textureRequests.Clear(); _selectedGeosets.Clear();
     }
 
     private static bool CanOpen(string? path) => Directory.Exists(path) || File.Exists(path) && Path.GetExtension(path).ToLowerInvariant() is ".m2" or ".zip";
 
     private void BuildGeosets()
     {
-        foreach (var section in _fullGeometry!.Submeshes)
+        _geosets.Children.Clear(); _geosetChecks.Clear();
+        _updating = true; _faces.ItemsSource = null; _updating = false;
+        var choices = _fullGeometry!.Submeshes.Where(section => section.GeosetGroup == 32 && section.GeosetVariant > 1)
+            .GroupBy(section => section.GeosetId).OrderBy(group => group.Key)
+            .Select((group, index) => new FaceChoice(group.Key, $"Face {index + 1} ({group.Sum(section => section.TriangleIndexCount) / 3:N0} triangles)")).ToArray();
+        if (choices.Length > 0)
         {
-            var check = new CheckBox { Content = $"{section.GeosetId}  {section.GeosetGroupName} ({section.TriangleIndexCount / 3:N0})", IsChecked = _selectedGeosets.Contains(section.Index), Tag = section.Index };
+            _updating = true; _faces.ItemsSource = choices;
+            _faces.SelectedItem = choices.FirstOrDefault(choice => _fullGeometry.Submeshes.Any(section => section.GeosetId == choice.GeosetId && _selectedGeosets.Contains(section.Index))) ?? choices[0];
+            _updating = false;
+            _geosets.Children.Add(Label("Face")); _geosets.Children.Add(_faces);
+        }
+        foreach (var sections in _fullGeometry!.Submeshes.GroupBy(section => section.GeosetId))
+        {
+            var section = sections.First();
+            if (section.GeosetGroup == 32 && section.GeosetVariant > 1) continue;
+            var neck = section.GeosetId == 3201 && choices.Length > 0;
+            if (neck) _selectedGeosets.UnionWith(sections.Select(part => part.Index));
+            var check = new CheckBox { Content = Label(neck ? "Neck cover" : $"{section.GeosetId}  {section.GeosetGroupName} ({sections.Sum(part => part.TriangleIndexCount) / 3:N0})"), IsChecked = neck || sections.Any(part => _selectedGeosets.Contains(part.Index)), IsEnabled = !neck, Tag = sections.Select(part => part.Index).ToArray() };
             check.IsCheckedChanged += (_, _) =>
             {
                 if (_updating) return;
-                if (check.IsChecked == true) _selectedGeosets.Add(section.Index); else _selectedGeosets.Remove(section.Index);
+                foreach (var part in sections) if (check.IsChecked == true) _selectedGeosets.Add(part.Index); else _selectedGeosets.Remove(part.Index);
                 ShowGeometry();
             };
             _geosets.Children.Add(check); _geosetChecks.Add(check);
@@ -227,44 +253,33 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     {
         if (_fullGeometry is null) return;
         _selectedGeosets.Clear(); foreach (var section in _fullGeometry.Submeshes.Where(predicate)) _selectedGeosets.Add(section.Index);
-        _updating = true; foreach (var check in _geosetChecks) check.IsChecked = _selectedGeosets.Contains((int)check.Tag!); _updating = false;
+        ApplyFace();
+        _updating = true; foreach (var check in _geosetChecks) check.IsChecked = ((int[])check.Tag!).Any(_selectedGeosets.Contains); _updating = false;
         ShowGeometry();
     }
 
     private void ShowGeometry()
     {
         if (_fullGeometry is null) return;
-        var geometry = M2PreviewGeometryService.SelectGeosets(_fullGeometry, _selectedGeosets);
-        _preview.SetGeometry(geometry); _preview.SetDecodedTextures(_decoded);
+        var geometry = _visibleGeometry = M2PreviewGeometryService.SelectGeosets(_fullGeometry, _selectedGeosets);
+        _preview.SetGeometry(geometry);
+        _textures.UpdateVisibleGeometry(geometry);
+        UpdateStatus();
+    }
+
+    private void UpdateStatus()
+    {
+        if (_visibleGeometry is not { } geometry) return;
         _status.Text = $"{geometry.TriangleIndices.Count / 3:N0} triangles | {geometry.Sequences.Count:N0} animations | {geometry.UsedTextureDefinitionIndices.Count(_decoded.ContainsKey)}/{geometry.UsedTextureDefinitionIndices.Count} visible textures";
         if (geometry.PreviewWarnings.Count > 0) _status.Text += $" | {geometry.PreviewWarnings.Count} rendering limitation(s), see Details";
     }
 
     private void BuildTextures()
     {
-        var choices = new[] { "(Unassigned)" }.Concat(_source!.Nearby(".blp")).ToArray();
-        foreach (var slot in _fullGeometry!.TextureSlots)
-        {
-            _textures.Children.Add(Label($"{slot.Index}: {ModelBrowserTextureService.SlotName(slot.Type)}" + (slot.FileDataId == 0 ? "" : $" | ID {slot.FileDataId}")));
-            var selected = _bindings.GetValueOrDefault(slot.Index);
-            var values = selected is not null && !choices.Contains(selected) ? choices.Append(selected).ToArray() : choices;
-            var picker = new ComboBox { ItemsSource = values, MaxDropDownHeight = 330, HorizontalAlignment = HorizontalAlignment.Stretch, SelectedItem = selected ?? "(Unassigned)" };
-            picker.ItemTemplate = new FuncDataTemplate<string>((path, _) => new TextBlock { Text = path is null ? string.Empty : Path.GetFileName(path), TextTrimming = TextTrimming.CharacterEllipsis });
-            picker.SelectionChanged += async (_, _) => await SetTextureAsync(slot.Index, picker.SelectedItem as string);
-            var browse = new Button { Content = "...", Width = 32, Padding = new Thickness(3) }; ToolTip.SetTip(browse, "Choose a BLP texture");
-            browse.Click += async (_, _) =>
-            {
-                var provider = TopLevel.GetTopLevel(this)?.StorageProvider; if (provider is null) return;
-                var generation = _generation;
-                var path = (await provider.OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Choose BLP texture", AllowMultiple = false,
-                    FileTypeFilter = [new FilePickerFileType("BLP textures") { Patterns = ["*.blp"] }] })).FirstOrDefault()?.TryGetLocalPath();
-                if (path is null || _disposed || generation != _generation) return;
-                var updated = ((IEnumerable<string>)picker.ItemsSource!).Append(path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                picker.ItemsSource = updated; picker.SelectedItem = path;
-            };
-            var row = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 4 }; row.Children.Add(picker); PutColumn(row, browse, 1);
-            _textures.Children.Add(row);
-        }
+        var paths = _source!.Files.Where(path => path.EndsWith(".blp", StringComparison.OrdinalIgnoreCase));
+        if (_current?.ArchiveEntry is not null && _catalog is not null)
+            paths = paths.Concat(_catalog.Files.Where(path => path.EndsWith(".blp", StringComparison.OrdinalIgnoreCase)));
+        _textures.Load(_fullGeometry!, _bindings, _decoded.Keys, paths);
     }
 
     private async Task SetTextureAsync(int slot, string? path)
@@ -282,19 +297,64 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
                 _bindings[slot] = path; _decoded[slot] = texture;
             }
             _preview.SetDecodedTextures(_decoded);
+            _textures.UpdateBindings(_bindings, _decoded.Keys); UpdateStatus();
         }
         catch (Exception exception)
         {
             if (_disposed || generation != _generation || _textureRequests.GetValueOrDefault(slot) != request) return;
+            _textures.UpdateBindings(_bindings, _decoded.Keys);
             _status.Text = "Texture failed: " + exception.Message; DesktopCrashLogger.Log("Model browser texture failed", exception);
         }
     }
 
     private string Review(ModelBrowserEntry entry) => _settings.ModelBrowserReviews.GetValueOrDefault(entry.Identity) ?? "Unreviewed";
+    private void RestoreGeosets()
+    {
+        if (_fullGeometry is null) return;
+        var preset = _current is null ? null : _settings.ModelBrowserPresets.GetValueOrDefault(_current.Identity);
+        _selectedGeosets.Clear();
+        _selectedGeosets.UnionWith(preset is null ? M2GeosetCatalog.BrowserDefaults(_fullGeometry.Submeshes)
+            : _fullGeometry.Submeshes.Where(section => preset.GeosetIds.Contains(section.GeosetId)).Select(section => section.Index));
+        BuildGeosets(); ShowGeometry();
+    }
+
+    private void SaveDefaults()
+    {
+        if (_current is null || _fullGeometry is null) return;
+        try
+        {
+            _settings.ModelBrowserPresets[_current.Identity] = new(_fullGeometry.Submeshes.Where(section => _selectedGeosets.Contains(section.Index)).Select(section => (int)section.GeosetId).Distinct().ToArray(), new(_bindings));
+            _settings.Save(); _status.Text = "Defaults saved for " + _current.Name;
+        }
+        catch (Exception exception) { _status.Text = "Could not save defaults: " + exception.Message; DesktopCrashLogger.Log("Model defaults save failed", exception); }
+    }
+
+    private async Task ResetDefaultsAsync()
+    {
+        if (_current is null || _fullGeometry is null || _source is null) return;
+        try
+        {
+            _settings.ModelBrowserPresets.Remove(_current.Identity); _settings.Save(); RestoreGeosets();
+            var suggested = ModelBrowserTextureService.SuggestBindings(_source, _fullGeometry); var generation = _generation;
+            foreach (var slot in _fullGeometry.TextureSlots)
+            {
+                await SetTextureAsync(slot.Index, suggested.GetValueOrDefault(slot.Index));
+                if (generation != _generation || _disposed) return;
+            }
+            _status.Text = "Saved defaults cleared for " + _current.Name;
+        }
+        catch (Exception exception) { _status.Text = "Could not reset defaults: " + exception.Message; DesktopCrashLogger.Log("Model defaults reset failed", exception); }
+    }
+    private void ApplyFace()
+    {
+        if (_fullGeometry is null || _faces.SelectedItem is not FaceChoice face) return;
+        foreach (var section in _fullGeometry.Submeshes.Where(section => section.GeosetGroup == 32))
+            if (section.GeosetVariant == 1 || section.GeosetId == face.GeosetId) _selectedGeosets.Add(section.Index); else _selectedGeosets.Remove(section.Index);
+    }
     private void SaveReview()
     {
         if (_updating || _current is null || _review.SelectedItem is not string review) return;
-        try { if (review == "Unreviewed") _settings.ModelBrowserReviews.Remove(_current.Identity); else _settings.ModelBrowserReviews[_current.Identity] = review; _settings.Save(); }
+        try { if (review == "Unreviewed") _settings.ModelBrowserReviews.Remove(_current.Identity); else _settings.ModelBrowserReviews[_current.Identity] = review; _settings.Save(); Filter(); }
         catch (Exception exception) { _status.Text = "Could not save review: " + exception.Message; DesktopCrashLogger.Log("Model review save failed", exception); }
     }
 

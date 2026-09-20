@@ -48,15 +48,20 @@ try {
         (Field '_decoded').Add($pair.Key, [WoWCrucible.Core.ModelBrowserTextureService]::Decode($source, $pair.Value))
     }
     if ((Field '_decoded').Count -eq 0) { throw 'No real model textures resolved.' }
-    foreach ($section in $geometry.Submeshes) {
-        if ($section.GeosetId -in @(0, 1) -or ($section.GeosetId -ge 100 -and $section.GeosetId % 100 -eq 1)) { [void](Field '_selectedGeosets').Add($section.Index) }
-    }
+    foreach ($index in [WoWCrucible.Core.M2GeosetCatalog]::BrowserDefaults($geometry.Submeshes)) { [void](Field '_selectedGeosets').Add($index) }
     (Field '_root').Text = $catalog.Root
     (Field '_modelTitle').Text = $entry.Name
     InvokeView 'Filter'
     InvokeView 'BuildGeosets'
     InvokeView 'BuildTextures'
     InvokeView 'ShowGeometry'
+    (Field '_preview').SetDecodedTextures((Field '_decoded'))
+    $texturePane = Field '_textures'
+    $materialList = $texturePane.GetType().GetField('_materials', $flags).GetValue($texturePane)
+    $visibleTextures = (Field '_preview').GetType().GetField('_geometry', $flags).GetValue((Field '_preview')).UsedTextureDefinitionIndices.Count
+    if ($materialList.ItemCount -lt $visibleTextures) { throw "Visible unassigned materials are missing from the texture picker: $($materialList.ItemCount) / $visibleTextures." }
+    foreach ($row in $materialList.ItemsSource) { [void]$materialList.ItemTemplate.Build($row) }
+    [void]$materialList.ItemTemplate.Build($null)
     $list = Field '_models'
     [void]$list.ItemTemplate.Build($null)
     [void]$list.ItemTemplate.Build($entry)
@@ -65,6 +70,9 @@ try {
     $window.Measure([Avalonia.Size]::new(1440, 900))
     $window.Arrange([Avalonia.Rect]::new(0, 0, 1440, 900))
     $view.Width = 1440; $view.Height = 900
+    $view.Measure([Avalonia.Size]::new(1440, 900))
+    $view.Arrange([Avalonia.Rect]::new(0, 0, 1440, 900))
+    [Avalonia.Threading.Dispatcher]::UIThread.RunJobs()
     $view.Measure([Avalonia.Size]::new(1440, 900))
     $view.Arrange([Avalonia.Rect]::new(0, 0, 1440, 900))
     $bitmap = [Avalonia.Media.Imaging.RenderTargetBitmap]::new([Avalonia.PixelSize]::new(1440, 900), [Avalonia.Vector]::new(96, 96))
@@ -76,6 +84,13 @@ try {
     $bitmap.Render($view)
     $bitmap.Save($ScreenshotPath)
     if ((Get-FileHash -LiteralPath $ScreenshotPath -Algorithm SHA256).Hash -eq $firstFrame) { throw 'Animation did not change the rendered frame.' }
+    $renderWatch = [Diagnostics.Stopwatch]::StartNew()
+    for ($frame = 0; $frame -lt 10; $frame++) {
+        $preview.GetType().GetMethod('Scrub', $flags).Invoke($preview, [object[]]@([double](500 + $frame * 33)))
+        $bitmap.Render($view)
+    }
+    $renderWatch.Stop()
+    Write-Output "Render timing: $([math]::Round($renderWatch.Elapsed.TotalMilliseconds / 10, 1)) ms per full browser animation frame."
     $pixels = [SkiaSharp.SKBitmap]::Decode($ScreenshotPath)
     try {
         $colors = [Collections.Generic.HashSet[uint32]]::new()

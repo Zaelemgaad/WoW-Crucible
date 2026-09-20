@@ -3,6 +3,8 @@ using WoWCrucible.Core;
 
 namespace WoWCrucible.Desktop;
 
+internal sealed record ModelBrowserDefaults(int[] GeosetIds, Dictionary<int, string> Textures);
+
 internal sealed class DesktopSettings
 {
     public bool DevbugMode { get; set; }
@@ -41,6 +43,7 @@ internal sealed class DesktopSettings
     public string ModernFileDataIdListfilePath { get; set; } = string.Empty;
     public string ModelBrowserRootPath { get; set; } = string.Empty;
     public Dictionary<string, string> ModelBrowserReviews { get; set; } = [];
+    public Dictionary<string, ModelBrowserDefaults> ModelBrowserPresets { get; set; } = [];
     public string CompatibilityLabRequestPath { get; set; } = string.Empty;
     public string ClientHardLinkRequestPath { get; set; } = string.Empty;
     public string ClientHardLinkPlanPath { get; set; } = string.Empty;
@@ -72,6 +75,9 @@ internal sealed class DesktopSettings
                     if (root.TryGetProperty("DatabasePort", out var port) && port.TryGetUInt32(out var value)) settings.DatabasePort = value;
                 }
             }
+            // Old skip decisions were not deletion requests.
+            foreach (var key in settings.ModelBrowserReviews.Where(pair => pair.Value == "Skip").Select(pair => pair.Key).ToArray())
+                settings.ModelBrowserReviews.Remove(key);
             return settings;
         }
         catch { return new(); }

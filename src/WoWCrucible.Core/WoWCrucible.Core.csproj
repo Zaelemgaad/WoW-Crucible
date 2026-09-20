@@ -13,6 +13,7 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="WoWCrucible.Core.Tests" />
+    <EmbeddedResource Include="Resources\AnimationNames.csv" LogicalName="WoWCrucible.Core.AnimationNames.csv" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\third_party\TACTSharp\TACTSharp.csproj" />

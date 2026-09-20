@@ -52,9 +52,14 @@ internal static class ModelBrowserTestSuite
             File.WriteAllBytes(Path.Combine(root, "Large00.skin"), LargeSkin());
             Require(M2PreviewGeometryService.Load(largePath).TriangleIndices.SequenceEqual(new[] { 0, 1, 2 }), "HD section triangle offsets retain their high 16 bits.");
             CheckParentSkeleton(root);
+            CheckViewerDefaults();
+            CheckCamera();
+            Require(M2AnimationNames.Get(0) == "Stand" && M2AnimationNames.Get(5) == "Run", "Named basic animations.");
+            Require(M2AnimationNames.Get(811) == "Fly Combat Ability 2H Big 01", "Extended animation names are available offline.");
+            Require(M2AnimationNames.Get(ushort.MaxValue).StartsWith("Unknown animation"), "Unknown animation IDs are not mislabelled.");
             var beforeCancel = new CancellationToken(true);
             Expect<OperationCanceledException>(() => ModelBrowserCatalogService.Scan(root, beforeCancel));
-            Console.WriteLine("PASS model browser: folder/ZIP discovery, read-only preview, external skeleton animation, geosets, malformed input, traversal, cancellation.");
+            Console.WriteLine("PASS model browser: folder/ZIP discovery, read-only preview, external skeleton animation, grouped face/neck/ear defaults, camera target/model movement, animation names, malformed input, traversal, cancellation.");
             if (corpus is not null) AuditCorpus(corpus);
         }
         finally
@@ -86,6 +91,29 @@ internal static class ModelBrowserTestSuite
         }
         Console.WriteLine($"CORPUS {catalog.Models.Count} models; {loaded} geometry loaded; {animated} animation sampled; {failed} load/animation failures; {catalog.UnopenedArchives.Count} unopened archives; {catalog.Errors.Count} scan errors.");
         Require(loaded > 0 && animated > 0, "No real corpus models could be viewed/animated.");
+    }
+
+    private static void CheckViewerDefaults()
+    {
+        M2PreviewSubmesh[] sections = [Section(0, 0, 100), Section(1, 3201, 112), Section(2, 3202, 114), Section(3, 3202, 1780),
+            Section(4, 3203, 114), Section(5, 3203, 1780), Section(6, 702, 204), Section(7, 703, 204), Section(8, 3501, 500), Section(9, 3601, 500)];
+        var defaults = M2GeosetCatalog.BrowserDefaults(sections);
+        Require(defaults.SetEquals(new HashSet<int> { 0, 1, 2, 3, 6 }), "Full paired face, neck, available ears; accessories excluded.");
+        Require(M2GeosetCatalog.BrowserDefaults(sections.Where(s => s.GeosetId != 3201).ToArray()).SetEquals(new HashSet<int> { 0, 2, 3, 6 }), "Missing neck does not select two faces.");
+        static M2PreviewSubmesh Section(int index, ushort id, int triangles) => new(index, id, 0, 0, 0, 0, triangles * 3, true);
+    }
+
+    private static void CheckCamera()
+    {
+        var camera = new ModelPreviewCamera(); camera.Frame(new(-1, -1, -2), new(1, 1, 2));
+        camera.PanTarget(70, -50, 800, 600, Matrix4x4.Identity); var target = camera.State.Target;
+        camera.Orbit(30, 25); camera.Zoom(8);
+        Require(camera.State.Target == target, "Orbit and zoom preserve the user's chosen target.");
+        camera.MoveModel(20, 10, 800, 600, Matrix4x4.Identity);
+        Require(camera.State.Target == target && camera.State.ModelOffset != Vector3.Zero, "Model dragging is independent of camera target.");
+        var offset = camera.State.ModelOffset;
+        camera.Focus(new(-0.2f, -0.2f, 1.5f), new(0.2f, 0.2f, 2));
+        Require(camera.State.ModelOffset == offset && camera.State.Zoom > 5 && camera.State.Target == new Vector3(0, 0, 1.75f) + offset, "Face framing keeps model placement and zooms to the face bounds.");
     }
 
     private static string WriteTruncated(string root)

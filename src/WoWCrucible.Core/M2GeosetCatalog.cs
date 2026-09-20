@@ -13,6 +13,21 @@ public sealed record M2GeosetGroup(int Group, string Name, IReadOnlyList<M2Geose
 
 public static class M2GeosetCatalog
 {
+    public static IReadOnlySet<int> BrowserDefaults(IReadOnlyList<M2PreviewSubmesh> submeshes)
+    {
+        var selected = submeshes.Where(section => section.GeosetId is 0 or 1).Select(section => section.Index).ToHashSet();
+        foreach (var group in submeshes.Where(section => section.GeosetGroup > 0 && section.GeosetGroup is not 32 and not 35 and not 36).GroupBy(section => section.GeosetGroup))
+        {
+            var variant = group.Where(section => section.TriangleIndexCount > 0).MinBy(section => section.GeosetVariant)?.GeosetVariant;
+            selected.UnionWith(group.Where(section => section.GeosetVariant == variant).Select(section => section.Index));
+        }
+        selected.UnionWith(submeshes.Where(section => section.GeosetId == 3201).Select(section => section.Index));
+        var face = submeshes.Where(section => section.GeosetGroup == 32 && section.GeosetVariant > 1)
+            .GroupBy(section => section.GeosetId).OrderByDescending(group => group.Sum(section => section.TriangleIndexCount)).ThenBy(group => group.Key).FirstOrDefault();
+        if (face is not null) selected.UnionWith(face.Select(section => section.Index));
+        return selected;
+    }
+
     private static readonly IReadOnlyDictionary<int, string> Names = new Dictionary<int, string>
     {
         [0] = "Hair (ID 0 remains base body)", [1] = "Facial feature 1", [2] = "Facial feature 2", [3] = "Facial feature 3",

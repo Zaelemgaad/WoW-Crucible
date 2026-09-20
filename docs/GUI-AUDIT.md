@@ -12,6 +12,25 @@ Leave manual keyboard/drag checks for the user when the desktop is shared.
 
 ## Browse Loose Models
 
+### Viewer Usability Work Queue
+
+2026-09-19 follow-up, implemented and locally verified:
+- [x] Left-drag orbit, right-drag orbit-target pan, middle-drag model translation;
+      face framing, stable zoom target, direct camera controls.
+- [x] Named animations, persistent playback when switching clips, duration beside
+      the timeline rather than in animation names.
+- [x] Face variants grouped by geoset ID, keeping the separate neck cover active.
+      Available ears enabled; earrings and necklaces initially disabled.
+- [x] Saved per-model geoset/texture defaults override initial selections.
+- [x] Texture role labels and visible usage/missing-binding state; one searchable
+      picker includes BLPs throughout the opened folder, not just model siblings.
+- [x] Non-destructive deletion marks replace Skip; previous Skip records are not
+      automatically treated as requests to delete anything.
+- [x] Depth-tested mesh rendering, opaque versus alpha-cutout material behavior,
+      and no skipped triangles in large models.
+- [x] Regression checks and updated build/shortcut. Manual mouse checks remain
+      separate from the automated controller/view tests below.
+
 Open **Visuals & World > Model browser**, or **Commands > Preview an M2**.
 The browser reads loose M2/SKIN/SKEL/ANIM/BLP files and models inside ZIPs in
 place. It does not extract the collection, modify source files, or build MPQs.
@@ -22,13 +41,22 @@ place. It does not extract the collection, modify source files, or build MPQs.
 2. Select a model with its companions present. Rotate/zoom the preview, choose
    an animation, press **Play**, and scrub the timeline. Opening another model
    must replace both geometry and texture controls, without a stale frame.
-3. In **Textures**, select an available BLP or use its browse button. Change the
+3. In **Textures**, select a named material, then an available BLP or its browse button. Change the
    choice several times quickly. The last choice must win. Unresolved textures
    remain explicitly unassigned; these are not a complete character appearance.
-4. Toggle **Geosets**, then restore **Default**. Resize both pane dividers and
-   narrow the window. The same panes must reflow and remain resizable.
-5. Mark a model **Keep** or **Skip**, restart Crucible, and filter by that review.
+4. Move the orbit target with right-drag, reposition the model with middle-drag,
+   orbit with left-drag, and zoom. Toggle **Geosets** and change faces. The camera,
+   zoom, selected animation, playback state and timeline must not reset. Only
+   opening a different model, **Frame model**, or **Focus face** should reframe.
+   Resize the pane dividers and narrow the window; panes must remain resizable.
+5. Mark a model **Keep** or **Mark for deletion**, restart Crucible, and filter by that review.
    The classification must persist without moving/deleting the source model.
+6. Pick a face, accessory visibility and a texture from another folder. Choose
+   **Save defaults**, then open another model and return. Those choices must be
+   restored together. **Defaults** restores saved geosets; **Reset defaults**
+   clears the saved override and restores initial geosets and texture bindings.
+7. Switch animations while playing: playback must continue. Duration belongs
+   beside the seek bar. Pause, seek and switch geosets: the model stays paused.
 
 Automated checks:
 
@@ -37,6 +65,25 @@ dotnet run --project tests/WoWCrucible.Core.Tests -- --model-browser
 pwsh -NoProfile -File scripts/Test-ModelBrowserPreview.ps1 -DesktopDirectory src/WoWCrucible.Desktop/bin/Debug/net10.0 -ModelPath <model.m2> -ScreenshotPath <preview.png>
 pwsh -NoProfile -File scripts/Test-PreviewFrameLifetime.ps1 -DesktopDirectory src/WoWCrucible.Desktop/bin/Debug/net10.0
 ```
+
+Viewer follow-up verification: grouped Human face sections, neck covers, absent
+variant-1 ears, accessory exclusion, fixed orbit targets and animation names pass
+the focused core suite. The native-frame regression also checks camera/model
+placement, animation switching, timeline retention, paused seeks, saved defaults
+and deletion-mark JSON round trips. Pixel assertions cover intersecting opaque
+triangles across materials, ignored opaque texture alpha and cutout holes.
+All 500 texture lifetime cycles still pass, as does the 300-cycle creature-template
+regression. No global mouse/keyboard automation or user settings writes were used.
+
+Both Human Female (44,027 vertices) and Blood Elf Female (33,588 vertices) render
+and animate with their available body textures. The build used
+`dotnet build src/WoWCrucible.Desktop -c Debug -p:Optimize=true --no-restore`
+in the existing output directory: no extra client or versioned output copy.
+Ten-frame 1440x900 headless samples took approximately 29 ms/Human and 15 ms/Blood
+Elf per complete browser render. These small local measurements are not a general
+performance guarantee. Meshes have per-pixel depth; particles/ribbons still use
+the existing composited effect path, and unsupported modern shader approximations
+remain documented limitations rather than claims of full client-render parity.
 
 2026-09-19: synthetic folder/ZIP discovery, separate model/skeleton global and
 track address spaces, animated vertices, 32-bit triangle offsets, source hashes,
