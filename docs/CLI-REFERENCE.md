@@ -137,6 +137,17 @@ The **Playable race bundle** tab and `race-plan` command apply the same stale-sa
 
 ### Model Collection Cleanup
 
+`asset model-embed-skeleton <split-model.m2> <new-model.m2> [--listfile=file]`
+embeds a standalone modern SKEL and its referenced AFM2/AFSB/AFSA animation
+payloads into the MD21 model. Nested tracks keep their correct address spaces;
+all sequence keys become embedded. Geometry, SKIN material data, UVs and the
+modern format remain unchanged. An optional FileDataID listfile supplies inline
+names for hardcoded textures. The output must not exist. SKINs and textures still
+need packaging beside the model, and replaceable character textures still need
+client appearance bindings. Parent skeletons and particle-track embedding are
+outside this profile and are rejected without writing an output. This prepares
+assets for a modern-model runtime such as WXL, not an unmodified Wrath client.
+
 `asset model-catalog <folder> [--format=json]` scans loose files and ZIPs and
 groups identical M2/skin/skeleton/animation bundles. Different companion bytes
 remain separate, including external AFID/SFID/BFID references. A missing reference

@@ -56,6 +56,7 @@ internal static class ModelBrowserTestSuite
             File.WriteAllBytes(Path.Combine(root, "Large00.skin"), LargeSkin());
             Require(M2PreviewGeometryService.Load(largePath).TriangleIndices.SequenceEqual(new[] { 0, 1, 2 }), "HD section triangle offsets retain their high 16 bits.");
             CheckParentSkeleton(root);
+            CheckSkeletonEmbedding(root);
             CheckViewerDefaults();
             CheckTextureChoices();
             CheckCamera();
@@ -295,6 +296,61 @@ internal static class ModelBrowserTestSuite
         var pose = M2AnimationService.CreatePose(geometry); M2AnimationService.SampleInto(geometry, 0, 0, pose);
         Require(Math.Abs(pose.Cameras[0].Position.X - 15) < 0.001f, "Camera tracks use the child's sequence index and globals while bones use the parent skeleton.");
     }
+    private static void CheckSkeletonEmbedding(string root)
+    {
+        var model = Model();
+        var skeleton = Skeleton();
+        var path = Path.Combine(root, "Embed.m2");
+        File.WriteAllBytes(path, Chunk("MD21", model).Concat(Chunk("SKID", UInt(987))).ToArray());
+        File.WriteAllBytes(Path.Combine(root, "Embed.skel"), skeleton);
+        File.WriteAllBytes(Path.Combine(root, "Embed00.skin"), Skin());
+        using var source = new ModelBrowserSource(new(path, null, "Embed.m2", new FileInfo(path).Length, "MD21", 274, null));
+        var result = M2SkeletonEmbeddingService.Embed(source);
+        Require(result.Bones == 1 && result.Sequences == 1 && result.ExternalAnimationPayloads == 0, "Embedded skeleton metadata.");
+        var output = Path.Combine(root, "Baked.m2");
+        File.WriteAllBytes(output, result.ModelData);
+        File.WriteAllBytes(Path.Combine(root, "Baked00.skin"), Skin());
+        using var bakedSource = new ModelBrowserSource(new(output, null, "Baked.m2", result.ModelData.Length, "MD21", 274, null));
+        var geometry = M2PreviewGeometryService.LoadForViewing(bakedSource);
+        var pose = M2AnimationService.CreatePose(geometry);
+        M2AnimationService.SampleInto(geometry, 0, 500, pose);
+        Require(Math.Abs(pose.Vertices[0].X - 1) < 0.001f, "Embedded SKB1 nested pointers retain animation values.");
+
+        // Equal numeric offsets refer to different bytes in AFM2 and AFSB.
+        U32(skeleton, 8 + 36, 0);
+        const int bonePayload = 8 + 96 + 8;
+        U32(skeleton, bonePayload + 148, 0); U32(skeleton, bonePayload + 156, 8);
+        var weightTrack = model.Length; Array.Resize(ref model, weightTrack + 36);
+        U32(model, 0x58, 1); U32(model, 0x5C, (uint)weightTrack);
+        U16(model, weightTrack + 2, ushort.MaxValue);
+        U32(model, weightTrack + 4, 1); U32(model, weightTrack + 8, (uint)weightTrack + 20);
+        U32(model, weightTrack + 12, 1); U32(model, weightTrack + 16, (uint)weightTrack + 28);
+        U32(model, weightTrack + 20, 2); U32(model, weightTrack + 24, 0);
+        U32(model, weightTrack + 28, 2); U32(model, weightTrack + 32, 8);
+        var afsb = new byte[32]; U32(afsb, 4, 1000); Float(afsb, 20, 6);
+        var afm2 = new byte[12]; U32(afm2, 4, 1000); U16(afm2, 8, 1234); U16(afm2, 10, 2345);
+        File.WriteAllBytes(path, Chunk("MD21", model).Concat(Chunk("SKID", UInt(987))).ToArray());
+        File.WriteAllBytes(Path.Combine(root, "Embed.skel"), skeleton);
+        var animation = Path.Combine(root, "Embed0000-00.anim");
+        File.WriteAllBytes(animation, Chunk("AFM2", afm2).Concat(Chunk("AFSB", afsb)).ToArray());
+        using var externalSource = new ModelBrowserSource(new(path, null, "Embed.m2", new FileInfo(path).Length, "MD21", 274, null));
+        result = M2SkeletonEmbeddingService.Embed(externalSource);
+        Require(result.ExternalAnimationPayloads == 2, "Both AFM2 and AFSB must survive embedding.");
+        File.WriteAllBytes(output, result.ModelData);
+        using var externalBaked = new ModelBrowserSource(new(output, null, "Baked.m2", result.ModelData.Length, "MD21", 274, null));
+        geometry = M2PreviewGeometryService.LoadForViewing(externalBaked); pose = M2AnimationService.CreatePose(geometry);
+        M2AnimationService.SampleInto(geometry, 0, 500, pose);
+        Require(Math.Abs(pose.Vertices[0].X - 3) < 0.001f, "External bone keys preserve their address space.");
+        var body = result.ModelData.AsSpan(8);
+        var series = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(body[(weightTrack + 16)..]));
+        var values = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(body[(series + 4)..]));
+        Require(BinaryPrimitives.ReadUInt16LittleEndian(body[values..]) == 1234, "Non-bone keys use AFM2, not AFSB.");
+        File.WriteAllBytes(animation, Chunk("AFM2", afm2));
+        Expect<InvalidDataException>(() => M2SkeletonEmbeddingService.Embed(externalSource));
+        Expect<OperationCanceledException>(() => M2SkeletonEmbeddingService.Embed(externalSource, cancellationToken: new(true)));
+        Console.WriteLine("PASS skeleton embedding: nested offsets, embedded animation poses, separate AFM2/AFSB address spaces, missing payload rejection, cancellation.");
+    }
+
     private static byte[] LargeSkin()
     {
         const int triangles = 65541;

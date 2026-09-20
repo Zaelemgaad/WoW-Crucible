@@ -128,7 +128,7 @@ internal sealed class M2ModelSource
         return result;
     }
 
-    private static IReadOnlyDictionary<(ushort, ushort), uint> AnimationIds(Dictionary<string, byte[]> chunks)
+    internal static IReadOnlyDictionary<(ushort, ushort), uint> AnimationIds(Dictionary<string, byte[]> chunks)
     {
         var result = new Dictionary<(ushort, ushort), uint>();
         if (!chunks.TryGetValue("AFID", out var data)) return result;

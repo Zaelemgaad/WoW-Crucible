@@ -1298,6 +1298,23 @@ static int Asset(string[] args, CancellationToken cancellationToken)
         Console.Error.WriteLine($"Asset library complete: {result.CompletedArchives:N0} archive(s), {result.CopiedLooseBlps:N0} loose BLP copy/copies, {result.ConvertedPngs:N0} PNG conversion(s), {result.FailedArchives:N0} archive failure(s), {result.ConversionFailures:N0} conversion failure(s).\nCatalog: {result.CatalogPath}\nCheckpoint: {result.CheckpointPath}");
         return result.FailedArchives == 0 && result.ConversionFailures == 0 ? 0 : 3;
     }
+    if (args is ["model-embed-skeleton", var splitModel, var embeddedModel, .. var embedOptions])
+    {
+        if (embedOptions.Any(option => !option.StartsWith("--listfile=", StringComparison.OrdinalIgnoreCase)))
+            return Fail("model-embed-skeleton accepts only --listfile=<file>.");
+        var input = Path.GetFullPath(splitModel); var output = Path.GetFullPath(embeddedModel);
+        if (File.Exists(output)) return Fail("The output model already exists; choose a new path.");
+        var catalog = ModelBrowserCatalogService.Scan(Path.GetDirectoryName(input)!, cancellationToken);
+        var entry = catalog.Models.SelectMany(value => value.Locations).Single(value => value.FilePath.Equals(input, StringComparison.OrdinalIgnoreCase) && value.ArchiveEntry is null);
+        using var source = new ModelBrowserSource(entry, catalog);
+        var listfile = Option(embedOptions, "--listfile=");
+        var textures = listfile is null ? null : StaticM2DownportService.PrepareListfile(listfile, [input], cancellationToken).ResolvedById;
+        var result = M2SkeletonEmbeddingService.Embed(source, textures, cancellationToken);
+        Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+        using (var file = new FileStream(output, FileMode.CreateNew, FileAccess.Write)) file.Write(result.ModelData);
+        Console.WriteLine($"Embedded {result.Bones:N0} bones, {result.Sequences:N0} sequences and {result.ExternalAnimationPayloads:N0} animation payloads: {output}\nModern MD21 retained; SKINs and textures remain companion assets. This is not a stock-Wrath downport.");
+        return 0;
+    }
     if (args is ["model-catalog", var modelRoot, .. var modelOptions])
     {
         if (modelOptions.Any(option => option != "--format=json")) return Fail("model-catalog accepts only --format=json.");
@@ -1969,6 +1986,7 @@ static int AssetHelp(int code = 0) => GroupHelp("""
 Usage:
   wowcrucible asset library-unpack <root> <state-folder> --7zip=<7z.exe> --apply [--delete-verified-archives]
   wowcrucible asset model-catalog <root> [--format=json]
+  wowcrucible asset model-embed-skeleton <split-model.m2> <new-model.m2> [--listfile=file]
   wowcrucible asset layer-stack-index <index.sqlite> <source-content-root> --layer="stack|order|name|root" [...] [--exclude=client-glob] [--format=text|json]
   wowcrucible asset layer-stack-query <index.sqlite> [--search=text] [--kind=classification] [--limit=N] [--format=text|json]
   wowcrucible asset extracted-overlap-index <index.sqlite> --stack="name|extracted-root" [...] [--exclude=client-glob] [--format=text|json]
