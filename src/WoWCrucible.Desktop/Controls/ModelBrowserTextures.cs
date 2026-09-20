@@ -20,12 +20,14 @@ internal sealed class ModelBrowserTextures : UserControl
     private readonly Dictionary<int, TextureRow> _rows = [];
     private readonly TextBox _search = new() { PlaceholderText = "Filter texture choices" };
     private readonly CheckBox _inactive = new() { Content = "Show unused materials", IsChecked = true };
+    private readonly CheckBox _otherModels = new() { Content = "Include other models" };
     private M2PreviewGeometry? _geometry;
     private IReadOnlyDictionary<int, string> _bindings = new Dictionary<int, string>();
     private IReadOnlySet<int> _resolved = new HashSet<int>();
     private Dictionary<int, int> _usage = [];
     private HashSet<int> _effectTextures = [];
     private string[] _paths = [];
+    private IReadOnlyDictionary<int, IReadOnlyList<string>> _choices = new Dictionary<int, IReadOnlyList<string>>();
     private bool _synchronizing;
     private int _generation;
     public Func<int, string?, Task>? BindingChanged { get; set; }
@@ -34,15 +36,22 @@ internal sealed class ModelBrowserTextures : UserControl
     {
         _search.TextChanged += (_, _) => RefreshChoices();
         _inactive.IsCheckedChanged += (_, _) => RefreshUsage();
+        _otherModels.IsCheckedChanged += (_, _) =>
+        {
+            if (_geometry is null) return;
+            _choices = ModelBrowserTextureService.BuildChoices(_geometry, _paths, _otherModels.IsChecked == true);
+            RefreshChoices();
+        };
         var scroll = new ScrollViewer { Content = _materials, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
-        var layout = new Grid { RowDefinitions = new("Auto,Auto,*"), RowSpacing = 5, Margin = new Thickness(4), Children = { _search, _inactive, scroll } };
-        Grid.SetRow(_inactive, 1); Grid.SetRow(scroll, 2); Content = layout;
+        var layout = new Grid { RowDefinitions = new("Auto,Auto,Auto,*"), RowSpacing = 5, Margin = new Thickness(4), Children = { _search, _otherModels, _inactive, scroll } };
+        Grid.SetRow(_otherModels, 1); Grid.SetRow(_inactive, 2); Grid.SetRow(scroll, 3); Content = layout;
     }
 
     public void Load(M2PreviewGeometry geometry, IReadOnlyDictionary<int, string> bindings, IEnumerable<int> resolved, IEnumerable<string> paths)
     {
         _generation++; _geometry = geometry; _bindings = bindings; _resolved = resolved.ToHashSet();
         _paths = paths.Concat(bindings.Values).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        _choices = ModelBrowserTextureService.BuildChoices(geometry, _paths, _otherModels.IsChecked == true);
         _rows.Clear(); _materials.Children.Clear();
         foreach (var slot in geometry.TextureSlots) AddRow(slot);
         UpdateVisibleGeometry(geometry); RefreshChoices();
@@ -52,6 +61,7 @@ internal sealed class ModelBrowserTextures : UserControl
     {
         _generation++; _geometry = null; _paths = []; _bindings = new Dictionary<int, string>(); _resolved = new HashSet<int>();
         _usage.Clear(); _effectTextures.Clear(); _rows.Clear(); _materials.Children.Clear();
+        _choices = new Dictionary<int, IReadOnlyList<string>>();
     }
 
     private void AddRow(M2TextureSlot slot)
@@ -60,10 +70,20 @@ internal sealed class ModelBrowserTextures : UserControl
         var title = new TextBlock { Text = $"{ModelBrowserTextureService.SlotName(slot.Type)} [{slot.Index}]", FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap };
         ToolTip.SetTip(title, $"Material slot {slot.Index}" + (slot.FileDataId == 0 ? "" : $", FileDataID {slot.FileDataId}"));
         var picker = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 0, MaxDropDownHeight = 330 };
-        picker.ItemTemplate = new FuncDataTemplate<TextureChoice>((choice, _) =>
+        picker.SelectionBoxItemTemplate = new FuncDataTemplate<TextureChoice>((choice, _) =>
         {
             var label = new TextBlock { Text = choice?.ToString() ?? "", TextTrimming = TextTrimming.CharacterEllipsis };
             ToolTip.SetTip(label, choice?.Path); return label;
+        });
+        picker.ItemTemplate = new FuncDataTemplate<TextureChoice>((choice, _) =>
+        {
+            var row = new StackPanel { Spacing = 2, Children =
+            {
+                new TextBlock { Text = choice?.ToString() ?? "", TextTrimming = TextTrimming.CharacterEllipsis }
+            }};
+            if (choice?.Path is { } path)
+                row.Children.Add(new TextBlock { Text = Path.GetDirectoryName(path), FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis });
+            ToolTip.SetTip(row, choice?.Path); return row;
         });
         picker.SelectionChanged += async (_, _) =>
         {
@@ -82,6 +102,7 @@ internal sealed class ModelBrowserTextures : UserControl
                 FileTypeFilter = [new FilePickerFileType("BLP textures") { Patterns = ["*.blp"] }] })).FirstOrDefault()?.TryGetLocalPath();
             if (path is null || generation != _generation || BindingChanged is null) return;
             _paths = _paths.Append(path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            _choices = ModelBrowserTextureService.BuildChoices(_geometry!, _paths, _otherModels.IsChecked == true);
             await BindingChanged(slot.Index, path);
         };
         var controls = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 4, Children = { picker, browse, clear } };
@@ -120,16 +141,15 @@ internal sealed class ModelBrowserTextures : UserControl
     {
         if (_geometry is null) return;
         var query = (_search.Text ?? "").Trim();
-        var matches = _paths.Concat(_bindings.Values).Distinct(StringComparer.OrdinalIgnoreCase)
-            .Where(path => path.Contains(query, StringComparison.OrdinalIgnoreCase)).Select(path => new TextureChoice(path)).ToArray();
         var unassigned = new TextureChoice(null);
-        var choices = new[] { unassigned }.Concat(matches).ToArray();
-        var byPath = matches.ToDictionary(choice => choice.Path!, StringComparer.OrdinalIgnoreCase);
         _synchronizing = true;
         try
         {
             foreach (var (slot, row) in _rows)
             {
+                var matches = _choices[slot].Where(path => path.Contains(query, StringComparison.OrdinalIgnoreCase)).Select(path => new TextureChoice(path)).ToArray();
+                var choices = new[] { unassigned }.Concat(matches).ToArray();
+                var byPath = matches.ToDictionary(choice => choice.Path!, StringComparer.OrdinalIgnoreCase);
                 var path = _bindings.GetValueOrDefault(slot);
                 var selected = path is null ? unassigned : byPath.GetValueOrDefault(path) ?? new TextureChoice(path);
                 // Filtering choices must not unassign a texture already on the model.

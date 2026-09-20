@@ -53,6 +53,7 @@ internal static class ModelBrowserTestSuite
             Require(M2PreviewGeometryService.Load(largePath).TriangleIndices.SequenceEqual(new[] { 0, 1, 2 }), "HD section triangle offsets retain their high 16 bits.");
             CheckParentSkeleton(root);
             CheckViewerDefaults();
+            CheckTextureChoices();
             CheckCamera();
             Require(M2AnimationNames.Get(0) == "Stand" && M2AnimationNames.Get(5) == "Run", "Named basic animations.");
             Require(M2AnimationNames.Get(811) == "Fly Combat Ability 2H Big 01", "Extended animation names are available offline.");
@@ -121,6 +122,60 @@ internal static class ModelBrowserTestSuite
         var offset = camera.State.ModelOffset;
         camera.Focus(new(-0.2f, -0.2f, 1.5f), new(0.2f, 0.2f, 2));
         Require(camera.State.ModelOffset == offset && camera.State.Zoom > 5 && camera.State.Target == new Vector3(0, 0, 1.75f) + offset, "Face framing keeps model placement and zooms to the face bounds.");
+    }
+
+    private static void CheckTextureChoices()
+    {
+        const string local = "PackA/Character/Human/Female/";
+        var body = local + "HumanFemaleSkin00_00.blp";
+        var otherBody = "PackB/Character/Human/Female/HumanFemaleSkin00_00.blp";
+        var modernBody = local + "humanfemale_hd_skin_color_123.blp";
+        var hair = local + "HumanFemaleHair00_00.blp";
+        var upper = local + "HumanFemaleFaceUpper00_00.blp";
+        var lower = local + "HumanFemaleFaceLower00_00.blp";
+        var eyes = local + "humanfemale_eye_color_456.blp";
+        string[] paths = [body, otherBody, modernBody, hair, upper, lower, eyes,
+            local + "HumanFemaleNakedTorsoSkin00_00.blp", local + "ScalpUpperHair00_00.blp", local + "HumanFemaleSkin00_00_normal.blp",
+            local + "humanfemale_hd_skin_normal_124.blp", local + "HumanFemaleSkin00_00_extra.blp", local + "HumanFemaleFacialHair00_00.blp",
+            local + "HumanFemale_Jewelry_Color_22.blp", local + "HumanFemaleEyebrow00.blp", local + "HumanFemaleTattoo00.blp",
+            "Other/Character/Orc/Female/OrcFemaleSkin00_00.blp", "Other/Character/Nightborne/Female/NightborneHair00_00.blp",
+            "Item/ObjectComponents/Cape/Cloak01.blp", "Item/ObjectComponents/Weapon/Sword01.blp",
+            "Item/ObjectComponents/Weapon/Sword_blade01.blp", "Item/ObjectComponents/Weapon/Sword_handle01.blp",
+            "Creature/Wolf/WolfSkinBlack.blp", "Creature/Wolf/Fire.blp", "Creature/Lion/Lion_mane01.blp",
+            "Textures/Reflect.blp", "Textures/GuildEmblems/Background_01.blp", "Textures/GuildEmblems/Border_01.blp",
+            "Textures/GuildEmblems/Emblem_01.blp", "Textures/GuildEmblems/EmblemColor_01.blp", "Interface/Icons/INV_Sword_01.blp",
+            "World/Furniture/Chair00.blp", "World/Landscape.blp", "World/Permanent01.blp", "Unknown/987654.blp",
+            "Effects/Spark01.blp", "Effects/Spark02.blp", "Unknown/654321.blp", "NotATexture/HumanFemaleSkin00_00.txt"];
+        var slots = Enumerable.Range(1, 20).Select(type => new M2TextureSlot(type, (uint)type, 0, null)).Concat(new[]
+        {
+            new M2TextureSlot(21, 0, 0, "Character\\Human\\Female\\HumanFemaleFaceUpper00_00.blp"),
+            new M2TextureSlot(22, 0, 0, null) { FileDataId = 987654 },
+            new M2TextureSlot(23, 0, 0, "Effects/Spark01.blp"), new M2TextureSlot(24, 0, 0, null),
+            new M2TextureSlot(25, 0, 0, null) { FileDataId = 123 }
+        }).ToArray();
+        var geometry = new M2PreviewGeometry("E:/Collection/" + local + "HumanFemale_HD.m2", "fixture.skin", [], [], [], [], Vector3.Zero, Vector3.One, slots);
+        var choices = ModelBrowserTextureService.BuildChoices(geometry, paths.Concat([body.ToUpperInvariant()]), includeOtherModels: true);
+        Require(choices[1].ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals([body, otherBody, modernBody, "Other/Character/Orc/Female/OrcFemaleSkin00_00.blp"]), "Body choices exclude hair, partial face/underwear overlays, normal maps, extra skin pieces and other materials.");
+        var bodyChoices = choices[1].ToList();
+        Require(bodyChoices.IndexOf(body) < bodyChoices.IndexOf(otherBody) && bodyChoices.IndexOf(otherBody) < bodyChoices.IndexOf("Other/Character/Orc/Female/OrcFemaleSkin00_00.blp"), "Same-folder and same-model body matches sort before unrelated models; alternate pack copies stay distinct.");
+        Require(choices[6].ToHashSet().SetEquals([hair, "Other/Character/Nightborne/Female/NightborneHair00_00.blp"]), "Hair choices exclude scalp overlays, facial hair, body atlases and chair textures.");
+        Require(choices[19].SequenceEqual([eyes]), "Eye choices exclude skin and brows.");
+        Require(choices[21].SequenceEqual([upper]), "Embedded face-upper reference does not admit full bodies or lower-face overlays.");
+        Require(choices[22].SequenceEqual(["Unknown/987654.blp"]) && choices[24].Count == 0, "Opaque FileDataID is matched exactly; unknown material is not a catch-all.");
+        Require(choices[23].ToHashSet().SetEquals(["Effects/Spark01.blp", "Effects/Spark02.blp"]), "Literal model texture families remain available without admitting arbitrary effects.");
+        Require(choices[25].Contains(modernBody) && choices[25].Contains(otherBody) && !choices[25].Contains(hair), "A named FileDataID match establishes the role of an otherwise unnamed slot.");
+        foreach (var (slot, expected) in new (int, string)[] { (3, "Item/ObjectComponents/Weapon/Sword_blade01.blp"), (4, "Item/ObjectComponents/Weapon/Sword_handle01.blp"),
+            (5, "Textures/Reflect.blp"), (7, local + "HumanFemaleFacialHair00_00.blp"), (9, "Interface/Icons/INV_Sword_01.blp"),
+            (10, "Creature/Lion/Lion_mane01.blp"), (11, "Creature/Wolf/WolfSkinBlack.blp"), (12, "Creature/Wolf/WolfSkinBlack.blp"), (13, "Creature/Wolf/WolfSkinBlack.blp"),
+            (14, "Interface/Icons/INV_Sword_01.blp"), (15, "Textures/GuildEmblems/Background_01.blp"), (16, "Textures/GuildEmblems/EmblemColor_01.blp"),
+            (17, "Textures/GuildEmblems/Border_01.blp"), (18, "Textures/GuildEmblems/Emblem_01.blp"), (20, local + "HumanFemale_Jewelry_Color_22.blp") })
+            Require(choices[slot].SequenceEqual([expected]), $"Material {slot} contains unrelated textures.");
+        Require(choices[2].Count == 4 && choices[2].Contains("Item/ObjectComponents/Cape/Cloak01.blp") && !choices[2].Contains("World/Landscape.blp"), "Item/cape choices contain equipment, not scenery.");
+        Require(choices[8].Contains(upper) && choices[8].Contains(lower) && !choices[8].Contains(body), "Skin-detail choices are separate from full-body atlases.");
+        var localChoices = ModelBrowserTextureService.BuildChoices(geometry, paths);
+        Require(localChoices[1].ToHashSet().SetEquals([body, otherBody, modernBody]) && localChoices[6].SequenceEqual([hair]), "Default choices retain matching character textures across packs, excluding other races/sexes.");
+        Require(localChoices[5].SequenceEqual(choices[5]) && localChoices[2].SequenceEqual(choices[2]), "Shared reflection and equipment textures remain available without character ownership.");
+        Console.WriteLine("PASS role-specific texture choices: body/hair/eyes/overlays/equipment/guild/effects, exact file IDs, duplicate pack paths and local-first ordering.");
     }
 
     private static string WriteTruncated(string root)

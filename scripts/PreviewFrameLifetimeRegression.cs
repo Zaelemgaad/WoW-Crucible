@@ -247,8 +247,9 @@ public static class PreviewFrameLifetimeRegression
     {
         var type = typeof(M2PreviewView).Assembly.GetType("WoWCrucible.Desktop.Controls.ModelBrowserTextures", true);
         var pane = Activator.CreateInstance(type);
-        var model = Model with { TextureSlots = [new(0, 1, 0, null), new(1, 6, 0, null), new(2, 19, 0, null)] };
-        var bindings = new Dictionary<int, string> { [0] = "Body/red.blp", [1] = "Hair/red.blp" };
+        var model = Model with { ModelPath = "Character/Human/Female/HumanFemale.m2", TextureSlots = [new(0, 1, 0, null), new(1, 6, 0, null), new(2, 19, 0, null)] };
+        const string body = "Body/HumanFemaleSkin00_00.blp", hair = "Hair/HumanFemaleHair00_00.blp", alternate = "OtherFolder/HumanFemaleSkin00_01_blue.blp";
+        var bindings = new Dictionary<int, string> { [0] = body, [1] = hair, [2] = "Unsorted/custom.blp" };
         var changes = new List<(int Slot, string Path)>();
         type.GetProperty("BindingChanged").SetValue(pane, (Func<int, string, Task>)((slot, path) =>
         {
@@ -257,32 +258,48 @@ public static class PreviewFrameLifetimeRegression
             Invoke(pane, "UpdateBindings", bindings, bindings.Keys);
             return Task.CompletedTask;
         }));
-        Invoke(pane, "Load", model, bindings, new[] { 0 }, new[] { "Body/red.blp", "Hair/red.blp", "OtherFolder/blue.blp" });
+        Invoke(pane, "Load", model, bindings, new[] { 0 }, new[] { body, hair, alternate, "Cape/cloak.blp", "World/chair.blp", "Other/OrcFemaleSkin00_00.blp" });
         var rows = (IDictionary)Get(pane, "_rows");
         if (rows.Count != 3 || changes.Count != 0) throw new InvalidOperationException("Texture loading changed a binding or omitted a material row.");
         foreach (var row in rows.Values)
         {
             var picker = Picker(row);
-            if (!Panel(row).IsVisible || !picker.IsEnabled || picker.ItemTemplate.Build(null) is null || picker.ItemTemplate.Build(picker.SelectedItem) is null)
+            if (!Panel(row).IsVisible || !picker.IsEnabled || picker.ItemTemplate.Build(null) is null || picker.ItemTemplate.Build(picker.SelectedItem) is null
+                || picker.SelectionBoxItemTemplate.Build(null) is null)
                 throw new InvalidOperationException("A per-material dropdown is hidden, disabled or cannot render an empty item.");
         }
         if (!((TextBlock)rows[1].GetType().GetProperty("Usage").GetValue(rows[1])).Text.Contains("Unresolved"))
             throw new InvalidOperationException("An unresolved saved texture is not identified.");
         var first = Picker(rows[0]);
+        if (!first.ItemsSource.Cast<object>().Select(Path).ToHashSet().SetEquals([null, body, alternate])
+            || !Picker(rows[1]).ItemsSource.Cast<object>().Select(Path).ToHashSet().SetEquals([null, hair]))
+            throw new InvalidOperationException("A dropdown contains textures for unrelated material roles.");
+        if (Path(Picker(rows[2]).SelectedItem) != "Unsorted/custom.blp")
+            throw new InvalidOperationException("Role filtering discarded an explicit saved override.");
+        var otherModels = (CheckBox)Get(pane, "_otherModels"); otherModels.IsChecked = true;
+        if (!first.ItemsSource.Cast<object>().Any(choice => Path(choice) == "Other/OrcFemaleSkin00_00.blp")
+            || first.ItemsSource.Cast<object>().Any(choice => Path(choice) == hair))
+            throw new InvalidOperationException("Including other models lost role filtering or failed to expand model choices.");
+        otherModels.IsChecked = false;
+        if (changes.Count != 0 || Path(first.SelectedItem) != body)
+            throw new InvalidOperationException("Changing model scope modified the assigned texture.");
+        var item = (StackPanel)first.ItemTemplate.Build(first.SelectedItem);
+        if (item.Children.OfType<TextBlock>().Last().Text != "Body")
+            throw new InvalidOperationException("A texture choice is missing its source folder.");
         ((TextBox)Get(pane, "_search")).Text = "blue";
-        if (changes.Count != 0 || Path(first.SelectedItem) != "Body/red.blp")
+        if (changes.Count != 0 || Path(first.SelectedItem) != body)
             throw new InvalidOperationException("Filtering texture choices altered the current binding.");
-        first.SelectedItem = first.ItemsSource.Cast<object>().Single(choice => Path(choice) == "OtherFolder/blue.blp");
-        if (changes.Count != 1 || changes[0] != (0, "OtherFolder/blue.blp") || bindings[1] != "Hair/red.blp")
+        first.SelectedItem = first.ItemsSource.Cast<object>().Single(choice => Path(choice) == alternate);
+        if (changes.Count != 1 || changes[0] != (0, alternate) || bindings[1] != hair)
             throw new InvalidOperationException("A row texture selection updated the wrong material or fired duplicate changes.");
         ((CheckBox)Get(pane, "_inactive")).IsChecked = false;
         if (!Panel(rows[0]).IsVisible || Panel(rows[1]).IsVisible) throw new InvalidOperationException("Unused material filtering is incorrect.");
         Invoke(pane, "UpdateVisibleGeometry", model with { Batches = [] });
-        if (!ReferenceEquals(first, Picker(rows[0])) || Panel(rows[0]).IsVisible || bindings[0] != "OtherFolder/blue.blp")
+        if (!ReferenceEquals(first, Picker(rows[0])) || Panel(rows[0]).IsVisible || bindings[0] != alternate)
             throw new InvalidOperationException("Changing geosets rebuilt texture controls or changed a binding.");
         Invoke(pane, "Clear"); first.SelectedIndex = 0;
         if (changes.Count != 1 || rows.Count != 0) throw new InvalidOperationException("An old texture row changed a binding after unloading its model.");
-        Console.WriteLine("PASS per-material dropdowns, cross-folder assignment, filtered selection retention, unused/unresolved state, null templates and stale-row rejection.");
+        Console.WriteLine("PASS role-filtered dropdowns, source folders, cross-folder assignment, explicit overrides, filtered selection retention, unused/unresolved state, null templates and stale-row rejection.");
 
         static ComboBox Picker(object row) => (ComboBox)row.GetType().GetProperty("Picker").GetValue(row);
         static StackPanel Panel(object row) => (StackPanel)row.GetType().GetProperty("Panel").GetValue(row);

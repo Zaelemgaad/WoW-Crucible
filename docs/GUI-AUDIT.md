@@ -26,8 +26,9 @@ Leave manual keyboard/drag checks for the user when the desktop is shared.
       No geoset checkbox is locked; saved choices override these defaults.
 - [x] Saved per-model geoset/texture defaults override initial selections.
 - [x] Texture role labels and visible usage/missing-binding state; each material
-      has its own dropdown and browse control. Shared search filters available
-      BLPs throughout the opened folder without changing assigned textures.
+      has its own dropdown and browse control. Choices are filtered by material
+      role and character, retaining matching textures from other packs. Shared
+      search narrows those choices without changing assigned textures.
 - [x] Non-destructive deletion marks replace Skip; previous Skip records are not
       automatically treated as requests to delete anything.
 - [x] Depth-tested mesh rendering, opaque versus alpha-cutout material behavior,
@@ -48,6 +49,12 @@ place. It does not extract the collection, modify source files, or build MPQs.
 3. In **Textures**, use the dropdown or browse button beside a material. Change the
    choice several times quickly. The last choice must win. Unresolved textures
    remain explicitly unassigned; these are not a complete character appearance.
+   Body choices must exclude hair, eyes, icons and partial face/underwear overlays.
+   The default scope includes matching characters across packs; **Include other
+   models** expands that scope without removing role filtering. Local files sort
+   first, and dropdown options show their source folder. Browse is an explicit
+   override, including for unknown/numerically named textures. Changing search
+   or scope must not clear an existing choice, even an override outside the list.
 4. Move the orbit target with right-drag, reposition the model with middle-drag,
    orbit with left-drag, and zoom. Toggle **Geosets** and change faces. The camera,
    zoom, selected animation, playback state and timeline must not reset. Only
@@ -77,6 +84,18 @@ Human and Blood Elf previews passed animated-pixel/nonblank checks; the restored
 Human texture layout was inspected in a headless screenshot. Ten-frame local
 render samples measured 15.1 ms/Human and 14.0 ms/Blood Elf. No global input was
 sent; interactive mouse/dropdown use remains a manual check.
+
+Texture-role follow-up: optimized Debug build, focused core suite, native-frame
+regressions and Human animated/nonblank preview all passed. The full read-only
+`final_bench` catalog contains 44,051 BLPs (the earlier `rg` listing omitted
+ignored folders). The Human model now offers 315 body, 561 hair, 322 eye and 20
+item/cape choices by default, not 44,051 in every row. The model's own folder
+sorts first. Role indexing of that catalog took 467 ms in a local sample.
+The UI regression covers same-character scope, cross-model opt-in, saved manual
+overrides, source-folder labels and null/recycled dropdown templates. Classification
+uses declared M2 paths/FileDataIDs plus recognizable filename/path roles; it is
+candidate filtering, not proof of matching UV layouts. Unclassified files are
+not inserted into every slot, but remain manually selectable with Browse.
 
 ```powershell
 dotnet run --project tests/WoWCrucible.Core.Tests -- --model-browser
