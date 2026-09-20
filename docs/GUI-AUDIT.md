@@ -10,6 +10,52 @@ an exclusive test interval. Use background tests and control-specific inspection
 mark focus-dependent results inconclusive if another application received input.
 Leave manual keyboard/drag checks for the user when the desktop is shared.
 
+## Browse Loose Models
+
+Open **Visuals & World > Model browser**, or **Commands > Preview an M2**.
+The browser reads loose M2/SKIN/SKEL/ANIM/BLP files and models inside ZIPs in
+place. It does not extract the collection, modify source files, or build MPQs.
+
+1. Open a model folder. Search for a model or relative folder name, and switch
+   between **Loose files**, **Inside ZIPs**, and the review filters. The results
+   must remain scrollable and the scan cancellable.
+2. Select a model with its companions present. Rotate/zoom the preview, choose
+   an animation, press **Play**, and scrub the timeline. Opening another model
+   must replace both geometry and texture controls, without a stale frame.
+3. In **Textures**, select an available BLP or use its browse button. Change the
+   choice several times quickly. The last choice must win. Unresolved textures
+   remain explicitly unassigned; these are not a complete character appearance.
+4. Toggle **Geosets**, then restore **Default**. Resize both pane dividers and
+   narrow the window. The same panes must reflow and remain resizable.
+5. Mark a model **Keep** or **Skip**, restart Crucible, and filter by that review.
+   The classification must persist without moving/deleting the source model.
+
+Automated checks:
+
+```powershell
+dotnet run --project tests/WoWCrucible.Core.Tests -- --model-browser
+pwsh -NoProfile -File scripts/Test-ModelBrowserPreview.ps1 -DesktopDirectory src/WoWCrucible.Desktop/bin/Debug/net10.0 -ModelPath <model.m2> -ScreenshotPath <preview.png>
+```
+
+2026-09-19: synthetic folder/ZIP discovery, separate model/skeleton global and
+track address spaces, animated vertices, 32-bit triangle offsets, source hashes,
+geoset selection, malformed input, and cancellation passed. The real Blood Elf
+model rendered with its available body texture; pixel checks distinguished the
+idle frames at 0 and 500 ms. Recycled empty/populated list templates passed.
+These do not claim manual pointer testing or WoW Model Viewer visual parity.
+The final folder pass discovered 506 models: 468 loaded geometry, 465 also
+sampled an animation, and 41 reported a load/animation failure. The scan found
+96 unopened archives and no scan errors. Parent-skeleton globals and reordered
+child camera sequences also have a synthetic regression fixture.
+
+Known gaps remain visible: missing/ambiguous companions, incomplete character
+texture composition, unsupported modern material combiners and particle layouts,
+and RAR/7z/MPQ containers (counted but not opened). Header versions are format
+information, not a verdict about a patched game's ability to render a model.
+The broad corpus suite passed its M2 and desktop-layout checks, then stopped at
+the race-12-to-22 customization-promotion assertion using the local Tempest DBC
+corpus. That suite is not reported as a full pass.
+
 ## Edit a DBC Record
 
 Use disposable copies of `ScalingStatDistribution.dbc` and `ScalingStatValues.dbc`

@@ -84,6 +84,7 @@
                         <Expander Header="VISUALS &amp; WORLD · ADVANCED">
                             <StackPanel Spacing="4" Margin="8,4,0,4">
                                 <Button HorizontalContentAlignment="Left" Click="OpenAssetComparisonClick" ToolTip.Tip="Compare provenance layers and preview compatible M2/SKIN models."><TextBlock Text="Assets, models &amp; compare" TextWrapping="Wrap" /></Button>
+                                <Button HorizontalContentAlignment="Left" Click="OpenModelBrowserClick" ToolTip.Tip="Browse loose and ZIP-contained M2 models with textures, geosets, and animations."><TextBlock Text="Model browser" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenTextureWorkspaceClick" ToolTip.Tip="Inspect, convert, edit, compose, and trace BLP textures."><TextBlock Text="Texture lab" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenMapWorkspaceClick" ToolTip.Tip="Inspect and edit extracted ADT/WDT/WDL terrain and placements."><TextBlock Text="Maps &amp; world" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenNativeConversionClick" ToolTip.Tip="Review and down-port supported modern model and world-asset profiles."><TextBlock Text="Modern asset conversion" TextWrapping="Wrap" /></Button>
@@ -184,7 +185,6 @@
                         </Grid>
                     </Border>
                 </Grid>
-                <local:M2PreviewView x:Name="M2View" IsVisible="False" />
             </Grid>
         </Grid>
 

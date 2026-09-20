@@ -42,6 +42,7 @@ public partial class MainWindow : Window
     private readonly DesktopWorkspaceSession _workspaceSession = new(DesktopSettings.Load());
     private AssetComparisonView? _assetComparisonView;
     private NativeConversionWorkspaceView? _nativeConversionWorkspaceView;
+    private ModelBrowserView? _modelBrowserView;
     private KnowledgeWorkspaceView? _knowledgeWorkspaceView;
     private ToolInventoryView? _toolInventoryView;
     private CompatibilityLabView? _compatibilityLabView;
@@ -245,16 +246,14 @@ public partial class MainWindow : Window
 
     private void ToggleNavigationPaneClick(object? sender, RoutedEventArgs e)
     {
-        if (!M2View.IsVisible) _workspaceSession.Settings.DbcToolsPaneOpen = !_workspaceSession.Settings.DbcToolsPaneOpen;
-        else _workspaceSession.Settings.NavigationPaneOpen = !_workspaceSession.Settings.NavigationPaneOpen;
+        _workspaceSession.Settings.DbcToolsPaneOpen = !_workspaceSession.Settings.DbcToolsPaneOpen;
         ApplyShellPaneState();
         _workspaceSession.Settings.Save();
     }
 
     private void ToggleInspectorPaneClick(object? sender, RoutedEventArgs e)
     {
-        if (!M2View.IsVisible) _workspaceSession.Settings.DbcRowEditorOpen = !_workspaceSession.Settings.DbcRowEditorOpen;
-        else _workspaceSession.Settings.InspectorPaneOpen = !_workspaceSession.Settings.InspectorPaneOpen;
+        _workspaceSession.Settings.DbcRowEditorOpen = !_workspaceSession.Settings.DbcRowEditorOpen;
         ApplyShellPaneState();
         _workspaceSession.Settings.Save();
     }
@@ -262,8 +261,8 @@ public partial class MainWindow : Window
     private void ApplyShellPaneState()
     {
         var shellVisible = !FeatureWorkspaceHost.IsVisible;
-        var navigationVisible = shellVisible && (M2View.IsVisible ? _workspaceSession.Settings.NavigationPaneOpen : _workspaceSession.Settings.DbcToolsPaneOpen);
-        var inspectorVisible = shellVisible && !WelcomePanel.IsVisible && (M2View.IsVisible ? _workspaceSession.Settings.InspectorPaneOpen : _workspaceSession.Settings.DbcRowEditorOpen);
+        var navigationVisible = shellVisible && _workspaceSession.Settings.DbcToolsPaneOpen;
+        var inspectorVisible = shellVisible && !WelcomePanel.IsVisible && _workspaceSession.Settings.DbcRowEditorOpen;
         if (navigationVisible && !NavigationPane.IsVisible) RootLayout.ColumnDefinitions[0].Width = new GridLength(240);
         if (inspectorVisible && !InspectorPane.IsVisible) RootLayout.ColumnDefinitions[4].Width = new GridLength(370);
         NavigationPane.IsVisible = NavigationSplitter.IsVisible = navigationVisible;
@@ -296,7 +295,6 @@ public partial class MainWindow : Window
         RowEditor.SelectRow(null, -1);
         CloseAllFeatureWorkspaces();
         DbcHost.IsVisible = false;
-        M2View.IsVisible = false;
         WelcomePanel.IsVisible = true;
         InspectorTitle.Text = "Nothing selected";
         InspectorSummary.Text = "Choose a job from the start page.";
@@ -405,7 +403,6 @@ public partial class MainWindow : Window
         ActiveDbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, document.File.LogicalTableName, DecodedToggle.IsChecked == true, document.ColumnLayout);
         UpdateDbcPaneTitles();
         WelcomePanel.IsVisible = false;
-        M2View.IsVisible = false;
         DbcHost.IsVisible = true;
         RowEditor.SelectRow(document, -1);
         InspectorTabs.SelectedIndex = 0;
@@ -592,7 +589,6 @@ public partial class MainWindow : Window
             SecondaryDbcPane.IsVisible = DbcSplitDivider.IsVisible = false;
             DbcHost.ColumnDefinitions[2].Width = new GridLength(0);
             DbcHost.IsVisible = false;
-            M2View.IsVisible = false;
             WelcomePanel.IsVisible = true;
             SearchBox.Text = string.Empty;
             RefreshTabs();
@@ -1211,8 +1207,8 @@ public partial class MainWindow : Window
     {
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Inspect a WotLK M2 model", AllowMultiple = false,
-            FileTypeFilter = [new FilePickerFileType("WotLK M2 models") { Patterns = ["*.m2"] }]
+            Title = "Open M2 model", AllowMultiple = false,
+            FileTypeFilter = [new FilePickerFileType("M2 models") { Patterns = ["*.m2"] }]
         });
         var path = files.FirstOrDefault()?.TryGetLocalPath();
         if (path is not null) await LoadM2Async(path);
@@ -1220,26 +1216,7 @@ public partial class MainWindow : Window
 
     private async Task LoadM2Async(string path)
     {
-        SetBusy($"Reading {Path.GetFileName(path)}…");
-        var stopwatch = Stopwatch.StartNew();
-        DesktopCrashLogger.Debug("MODEL", "preview-start", ("path", path), ("bytes", new FileInfo(path).Length));
-        try
-        {
-            var geometry = await Task.Run(() => M2PreviewGeometryService.Load(path));
-            WelcomePanel.IsVisible = false; DbcHost.IsVisible = false; M2View.IsVisible = true;
-            M2View.SetGeometry(geometry);
-            RefreshShellContext();
-            InspectorTitle.Text = Path.GetFileName(path);
-            InspectorSummary.Text = $"{geometry.Vertices.Count:N0} vertices · {geometry.TriangleIndices.Count / 3:N0} triangles";
-            InspectorDetail.Text = $"Model     {geometry.ModelPath}\nSkin      {geometry.SkinPath}\nMinimum   {geometry.Minimum}\nMaximum   {geometry.Maximum}";
-            StatusText.Text = "Native model ready · drag to rotate · wheel to zoom";
-            DesktopCrashLogger.Debug("MODEL", "preview-success", ("path", path), ("skin", geometry.SkinPath), ("vertices", geometry.Vertices.Count), ("triangles", geometry.TriangleIndices.Count / 3), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
-        }
-        catch (Exception exception)
-        {
-            DesktopCrashLogger.Log("M2 preview failed", exception);
-            await ShowErrorAsync("Could not inspect model", exception.Message);
-        }
+        await OpenModelBrowserAsync(Path.GetDirectoryName(Path.GetFullPath(path)), path);
     }
 
     private void OpenLogsClick(object? sender, RoutedEventArgs e) => DesktopCrashLogger.OpenDirectory();
@@ -1343,6 +1320,18 @@ public partial class MainWindow : Window
     }
     private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
     private void OpenNativeConversionClick(object? sender, RoutedEventArgs e) => OpenNativeConversionWorkspace();
+    private async void OpenModelBrowserClick(object? sender, RoutedEventArgs e) => await OpenModelBrowserAsync();
+    public async Task OpenModelBrowserAsync(string? folder = null, string? selectedPath = null)
+    {
+        var created = _modelBrowserView is null;
+        if (created)
+        {
+            _modelBrowserView = new ModelBrowserView(_workspaceSession.Settings);
+            Closed += (_, _) => _modelBrowserView.Dispose();
+        }
+        OpenFeatureWorkspace(_modelBrowserView!, "Model Browser");
+        if (created || folder is not null) await _modelBrowserView!.OpenAsync(folder, selectedPath);
+    }
     public void OpenNativeConversionWorkspace()
     {
         if (_nativeConversionWorkspaceView is null)
@@ -1889,6 +1878,7 @@ public partial class MainWindow : Window
             ["workspace.lighting"] = Done(() => OpenLightingWorkspace()),
             ["workspace.textures"] = Done(() => OpenTextureWorkspace()),
             ["workspace.assets"] = Done(() => OpenAssetComparison()),
+            ["workspace.models"] = async () => await OpenModelBrowserAsync(),
             ["workspace.conversion"] = Done(OpenNativeConversionWorkspace),
             ["workspace.compatibility-lab"] = Done(OpenCompatibilityLab),
             ["workspace.knowledge"] = () => OpenKnowledgeAsync(_knowledgeContext),

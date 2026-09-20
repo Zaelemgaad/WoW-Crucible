@@ -2,7 +2,10 @@ using System.Numerics;
 
 namespace WoWCrucible.Core;
 
-public sealed record M2TextureSlot(int Index, uint Type, uint Flags, string? EmbeddedPath);
+public sealed record M2TextureSlot(int Index, uint Type, uint Flags, string? EmbeddedPath)
+{
+    public uint FileDataId { get; init; }
+}
 public sealed record M2PreviewRenderFlag(int Index, ushort Flags, ushort BlendMode)
 {
     public bool Unlit => (Flags & 0x1) != 0;
@@ -103,6 +106,8 @@ public sealed record M2PreviewBatch(int SubmeshIndex, ushort GeosetId, int Trian
 }
 public sealed record M2PreviewGeometry(string ModelPath, string SkinPath, IReadOnlyList<Vector3> Vertices, IReadOnlyList<Vector3> Normals, IReadOnlyList<Vector2> TextureCoordinates, IReadOnlyList<int> TriangleIndices, Vector3 Minimum, Vector3 Maximum, IReadOnlyList<M2TextureSlot> TextureSlots)
 {
+    public uint SourceVersion { get; init; } = 264;
+    public IReadOnlyList<string> PreviewWarnings { get; init; } = [];
     public IReadOnlyList<M2PreviewSubmesh> Submeshes { get; init; } = [];
     public IReadOnlyList<M2PreviewMaterialUnit> MaterialUnits { get; init; } = [];
     public IReadOnlyList<M2PreviewRenderFlag> RenderFlags { get; init; } = [];
@@ -136,11 +141,60 @@ public static class M2PreviewGeometryService
     {
         modelPath = Path.GetFullPath(modelPath);
         if (!File.Exists(modelPath)) throw new FileNotFoundException("The M2 model does not exist.", modelPath);
-        visibilityMode = ResolveVisibilityMode(modelPath, visibilityMode, geosetSelection);
         var model = File.ReadAllBytes(modelPath);
         if (model.Length < 0x130 || FourCc(model, 0) != "MD20") throw new InvalidDataException("Embedded preview currently requires a complete unwrapped MD20 model header.");
         var version = ReadUInt(model, 4);
         if (version != 264) throw new NotSupportedException($"Embedded preview currently supports Wrath M2 version 264; this model is version {version}.");
+        skinPath = ResolveSkin(modelPath, skinPath);
+        return LoadGeometry(modelPath, model, skinPath, File.ReadAllBytes(skinPath), visibilityMode, geosetSelection, null);
+    }
+
+    public static M2PreviewGeometry LoadForViewing(ModelBrowserSource source, string? skinName = null,
+        M2PreviewVisibilityMode visibilityMode = M2PreviewVisibilityMode.Automatic, M2GeosetSelection? geosetSelection = null)
+    {
+        var container = new M2ModelSource(source, skinName);
+        var name = source.Entry.ArchiveEntry is null ? source.Entry.FilePath : Path.Combine(Path.GetDirectoryName(source.Entry.FilePath)!, source.ModelName);
+        return LoadGeometry(name, container.Model, container.SkinName, container.Skin, visibilityMode, geosetSelection, container);
+    }
+
+    public static M2PreviewGeometry SelectGeosets(M2PreviewGeometry allGeosets, IReadOnlySet<int> selected)
+    {
+        if (allGeosets.VisibilityMode != M2PreviewVisibilityMode.AllGeosets)
+            throw new ArgumentException("Geoset selection requires the complete geometry.", nameof(allGeosets));
+        if (selected.Any(index => index < 0 || index >= allGeosets.Submeshes.Count)) throw new ArgumentOutOfRangeException(nameof(selected));
+        var triangles = new List<int>(); var sections = new List<M2PreviewSubmesh>(); var batches = new List<M2PreviewBatch>();
+        var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity);
+        foreach (var section in allGeosets.Submeshes)
+        {
+            var start = triangles.Count; var visible = selected.Contains(section.Index);
+            if (visible)
+            {
+                for (var index = section.TriangleStart; index < section.TriangleStart + section.TriangleIndexCount; index++)
+                {
+                    var vertex = allGeosets.TriangleIndices[index]; triangles.Add(vertex);
+                    minimum = Vector3.Min(minimum, allGeosets.Vertices[vertex]); maximum = Vector3.Max(maximum, allGeosets.Vertices[vertex]);
+                }
+                batches.AddRange(allGeosets.Batches.Where(batch => batch.SubmeshIndex == section.Index).Select(batch => batch with { TriangleStart = start }));
+            }
+            sections.Add(section with { Visible = visible, TriangleStart = start, TriangleIndexCount = visible ? section.TriangleIndexCount : 0 });
+        }
+        return allGeosets with
+        {
+            TriangleIndices = triangles, Submeshes = sections, Batches = batches,
+            Minimum = triangles.Count == 0 ? allGeosets.Minimum : minimum,
+            Maximum = triangles.Count == 0 ? allGeosets.Maximum : maximum,
+            UsedTextureDefinitionIndices = batches.SelectMany(batch => batch.TextureStages).Where(stage => stage.TextureDefinitionIndex >= 0)
+                .Select(stage => stage.TextureDefinitionIndex).Distinct().Order().ToArray(),
+            VisibilityMode = M2PreviewVisibilityMode.BaseAppearance
+        };
+    }
+
+    private static M2PreviewGeometry LoadGeometry(string modelPath, byte[] model, string skinPath, byte[] skin,
+        M2PreviewVisibilityMode visibilityMode, M2GeosetSelection? geosetSelection, M2ModelSource? source)
+    {
+        visibilityMode = ResolveVisibilityMode(modelPath, visibilityMode, geosetSelection);
+        var version = ReadUInt(model, 4);
+        var warnings = new List<string>();
         var vertexCount = CheckedCount(ReadUInt(model, 0x3C), MaximumVertices, "M2 vertex");
         var vertexOffset = CheckedOffset(ReadUInt(model, 0x40), "M2 vertex");
         RequireRange(model, vertexOffset, vertexCount, VertexStride, "M2 vertices");
@@ -156,11 +210,14 @@ public static class M2PreviewGeometryService
             vertices[index] = vertex; normals[index] = normal; textureCoordinates[index] = Finite(uv) ? uv : Vector2.Zero; secondaryTextureCoordinates[index] = Finite(secondaryUv) ? secondaryUv : Vector2.Zero; minimum = Vector3.Min(minimum, vertex); maximum = Vector3.Max(maximum, vertex);
         }
 
-        var bones = ReadBones(model);
-        var animationRig = M2AnimationService.ParseRig(modelPath, model, vertexOffset, vertexCount, bones);
-        var attachments = ReadAttachments(model, bones.Count);
+        var bones = source?.Skeleton is { } skeleton ? ReadBones(skeleton.Bones, 0, 4) : ReadBones(model);
+        var animationRig = M2AnimationService.ParseRig(modelPath, model, vertexOffset, vertexCount, bones, source);
+        var attachments = source?.Skeleton?.Attachments is { } attachmentData
+            ? ReadAttachments(attachmentData, bones.Count, 0, 4, 8, 12) : ReadAttachments(model, bones.Count);
         var textureSlots = ReadTextureSlots(model);
-        var particleRig = M2ParticlePreviewService.Parse(model, animationRig, bones.Count, textureSlots.Count);
+        if (source is not null) textureSlots = textureSlots.Select(slot => slot with { FileDataId = slot.Index < source.TextureIds.Length ? source.TextureIds[slot.Index] : 0 }).ToArray();
+        var particleRig = version == 264 ? M2ParticlePreviewService.Parse(model, animationRig, bones.Count, textureSlots.Count) : null;
+        if (version != 264 && ReadUInt(model, 0x128) > 0) warnings.Add("Modern particle emitters are not rendered yet.");
         var renderFlags = ReadRenderFlags(model);
         var ribbonRig = M2RibbonPreviewService.Parse(model, animationRig, bones.Count, textureSlots.Count, renderFlags);
         var textureLookup = ReadTextureLookup(model, textureSlots.Count);
@@ -170,8 +227,6 @@ public static class M2PreviewGeometryService
         var usesBlendOverrides = (ReadUInt(model, 0x10) & 0x8) != 0;
         if (usesBlendOverrides && model.Length < 0x138) throw new InvalidDataException("M2 declares blend overrides but its extended header is truncated.");
         var blendOverrides = usesBlendOverrides ? ReadUnsignedLookup(model, 0x130, 0x134, "M2 blend override") : [];
-        skinPath = ResolveSkin(modelPath, skinPath);
-        var skin = File.ReadAllBytes(skinPath);
         if (skin.Length < 48 || FourCc(skin, 0) != "SKIN") throw new InvalidDataException("The companion file is not a valid SKIN container.");
         var lookupCount = CheckedCount(ReadUInt(skin, 4), MaximumVertices, "skin vertex lookup"); var lookupOffset = CheckedOffset(ReadUInt(skin, 8), "skin vertex lookup");
         var triangleIndexCount = CheckedCount(ReadUInt(skin, 12), MaximumTriangleIndices, "skin triangle index"); var triangleOffset = CheckedOffset(ReadUInt(skin, 16), "skin triangle");
@@ -187,7 +242,9 @@ public static class M2PreviewGeometryService
             if (vertexIndex >= vertices.Length) throw new InvalidDataException($"SKIN lookup {lookupIndex:N0} references M2 vertex {vertexIndex:N0}, but only {vertices.Length:N0} vertices exist.");
             allTriangles[index] = vertexIndex;
         }
-        var materialUnits = ReadMaterialUnits(skin, textureLookup, textureCoordinateLookup, transparencyLookup, textureAnimationLookup, blendOverrides, usesBlendOverrides, textureSlots.Count, renderFlags.Count);
+        var materialUnits = ReadMaterialUnits(skin, textureLookup, textureCoordinateLookup, transparencyLookup, textureAnimationLookup, blendOverrides, usesBlendOverrides, textureSlots.Count, renderFlags.Count, version != 264);
+        var unsupported = materialUnits.Where(unit => !unit.Combiner.Supported).Select(unit => unit.Combiner.Name).Distinct().ToArray();
+        if (unsupported.Length > 0) warnings.Add("Unsupported material combiners: " + string.Join(", ", unsupported));
         var (submeshes, triangles, batches, geosetSelectionFindings) = ReadVisibleSubmeshes(skin, allTriangles, materialUnits, renderFlags, visibilityMode, geosetSelection);
         if (triangles.Length > 0)
         {
@@ -196,6 +253,8 @@ public static class M2PreviewGeometryService
         }
         return new(modelPath, skinPath, vertices, normals, textureCoordinates, triangles, minimum, maximum, textureSlots)
         {
+            SourceVersion = version,
+            PreviewWarnings = warnings,
             Submeshes = submeshes,
             MaterialUnits = materialUnits,
             RenderFlags = renderFlags,
@@ -204,11 +263,11 @@ public static class M2PreviewGeometryService
             Attachments = attachments,
             Cameras = animationRig.PreviewCameras,
             Lights = animationRig.PreviewLights,
-            ParticleEmitters = particleRig.Emitters,
+            ParticleEmitters = particleRig?.Emitters ?? [],
             RibbonEmitters = ribbonRig.Emitters,
             UsedTextureDefinitionIndices = batches.SelectMany(batch => batch.TextureStages).Where(stage => stage.TextureDefinitionIndex >= 0).Select(stage => stage.TextureDefinitionIndex)
                 .Concat(batches.Where(batch => batch.TextureStages.Count == 0 && batch.TextureDefinitionIndex is not null).Select(batch => batch.TextureDefinitionIndex!.Value))
-                .Concat(particleRig.Emitters.SelectMany(emitter => emitter.TextureDefinitionIndices)).Concat(ribbonRig.Emitters.Where(emitter => emitter.TextureDefinitionIndex >= 0).Select(emitter => emitter.TextureDefinitionIndex)).Distinct().Order().ToArray(),
+                .Concat((particleRig?.Emitters ?? []).SelectMany(emitter => emitter.TextureDefinitionIndices)).Concat(ribbonRig.Emitters.Where(emitter => emitter.TextureDefinitionIndex >= 0).Select(emitter => emitter.TextureDefinitionIndex)).Distinct().Order().ToArray(),
             Sequences = animationRig.Sequences,
             SecondaryTextureCoordinates = secondaryTextureCoordinates,
             TotalTriangleIndices = allTriangles.Length,
@@ -274,9 +333,9 @@ public static class M2PreviewGeometryService
         return result;
     }
 
-    private static IReadOnlyList<M2PreviewBone> ReadBones(byte[] model)
+    private static IReadOnlyList<M2PreviewBone> ReadBones(byte[] model, int CountOffset = 0x2C, int DataOffset = 0x30)
     {
-        const int CountOffset = 0x2C; const int DataOffset = 0x30; const int BoneStride = 88; const int MaximumBones = 65_536;
+        const int BoneStride = 88; const int MaximumBones = 65_536;
         if (model.Length < DataOffset + 4) return [];
         var count = CheckedCount(ReadUInt(model, CountOffset), MaximumBones, "M2 bone");
         var offset = CheckedOffset(ReadUInt(model, DataOffset), "M2 bone");
@@ -294,10 +353,10 @@ public static class M2PreviewGeometryService
         return result;
     }
 
-    private static IReadOnlyList<M2PreviewAttachment> ReadAttachments(byte[] model, int boneCount)
+    private static IReadOnlyList<M2PreviewAttachment> ReadAttachments(byte[] model, int boneCount,
+        int CountOffset = 0xF0, int DataOffset = 0xF4, int LookupCountOffset = 0xF8, int LookupDataOffset = 0xFC)
     {
-        const int CountOffset = 0xF0; const int DataOffset = 0xF4; const int AttachmentStride = 40; const int MaximumAttachments = 4096;
-        const int LookupCountOffset = 0xF8; const int LookupDataOffset = 0xFC; const int MaximumLookups = 65_536;
+        const int AttachmentStride = 40; const int MaximumAttachments = 4096; const int MaximumLookups = 65_536;
         if (model.Length < LookupDataOffset + 4) return [];
         var count = CheckedCount(ReadUInt(model, CountOffset), MaximumAttachments, "M2 attachment");
         var offset = CheckedOffset(ReadUInt(model, DataOffset), "M2 attachment");
@@ -370,7 +429,7 @@ public static class M2PreviewGeometryService
 
     private static IReadOnlyList<M2PreviewMaterialUnit> ReadMaterialUnits(byte[] skin, IReadOnlyList<ushort> textureLookup,
         IReadOnlyList<short> textureCoordinateLookup, IReadOnlyList<ushort> transparencyLookup,
-        IReadOnlyList<ushort> textureAnimationLookup, IReadOnlyList<ushort> blendOverrides, bool usesBlendOverrides, int textureCount, int renderFlagCount)
+        IReadOnlyList<ushort> textureAnimationLookup, IReadOnlyList<ushort> blendOverrides, bool usesBlendOverrides, int textureCount, int renderFlagCount, bool modern = false)
     {
         const int CountOffset = 36; const int DataOffset = 40; const int MaterialStride = 24; const int MaximumMaterials = 131_072;
         if (skin.Length < DataOffset + 4) return [];
@@ -397,7 +456,8 @@ public static class M2PreviewGeometryService
                 var lookupIndex = textureLookupIndex + stage;
                 var definitionIndex = lookupIndex < textureLookup.Count ? textureLookup[lookupIndex] : textureLookup.Count == 0 && lookupIndex < textureCount ? lookupIndex : -1;
                 var coordinateIndex = textureCoordinateLookupIndex + stage;
-                var coordinate = coordinateIndex < textureCoordinateLookup.Count ? textureCoordinateLookup[coordinateIndex] : short.MinValue;
+                var coordinate = coordinateIndex < textureCoordinateLookup.Count ? textureCoordinateLookup[coordinateIndex]
+                    : modern && textureCoordinateLookup.Count == 0 ? (short)(stage == 0 ? ((shaderId & 0x80) != 0 ? -1 : 0) : ((shaderId & 8) != 0 ? -1 : (shaderId & 0x4000) != 0 ? 1 : 0)) : short.MinValue;
                 var source = coordinate switch
                 {
                     0 => M2PreviewTextureCoordinateSource.Primary,
@@ -533,7 +593,7 @@ public static class M2PreviewGeometryService
         for (var index = 0; index < count; index++)
         {
             var item = offset + index * SubmeshStride;
-            var triangleStart = ReadUShort(skin, item + 8); var triangleCount = ReadUShort(skin, item + 10);
+            var triangleStart = checked(ReadUShort(skin, item + 8) + (ReadUShort(skin, item + 2) << 16)); var triangleCount = ReadUShort(skin, item + 10);
             if (triangleStart + triangleCount > allTriangles.Length)
                 throw new InvalidDataException($"SKIN submesh {index:N0} triangle range ({triangleStart:N0}..{triangleStart + triangleCount:N0}) exceeds the {allTriangles.Length:N0}-index triangle array.");
             if (triangleCount % 3 != 0) throw new InvalidDataException($"SKIN submesh {index:N0} triangle index count {triangleCount:N0} is not divisible by three.");

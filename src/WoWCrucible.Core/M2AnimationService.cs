@@ -21,6 +21,9 @@ internal sealed class M2AnimationRig(byte[] modelData, IReadOnlyList<M2PreviewSe
     public IReadOnlyList<M2PreviewCamera> PreviewCameras { get; } = previewCameras;
     public IReadOnlyList<M2PreviewLight> PreviewLights { get; } = previewLights;
     public Dictionary<int, M2AnimationClip> ClipCache { get; } = [];
+    public M2AnimationRig? BoneTrackRig { get; init; }
+    public Func<M2PreviewSequence, byte[]>? SequenceReader { get; init; }
+    public Func<M2PreviewSequence, int>? ModelSequenceIndex { get; init; }
 }
 
 internal sealed record M2AnimationClip(int SequenceIndex, M2BoneClip[] Bones, M2CameraClip[] Cameras, M2LightClip[] Lights);
@@ -75,39 +78,42 @@ public static class M2AnimationService
     private const int MaximumKeysPerTrack = 5_000_000;
     private const int MaximumCachedClips = 8;
 
-    internal static M2AnimationRig ParseRig(string modelPath, byte[] model, int vertexOffset, int vertexCount, IReadOnlyList<M2PreviewBone> previewBones)
+    internal static M2AnimationRig ParseRig(string modelPath, byte[] model, int vertexOffset, int vertexCount, IReadOnlyList<M2PreviewBone> previewBones, M2ModelSource? source = null)
     {
-        var sequenceCount = Count(model, 0x1C, MaximumSequences, "M2 animation sequence");
-        var sequenceOffset = Offset(model, 0x20, "M2 animation sequence");
-        Require(model, sequenceOffset, sequenceCount, SequenceStride, "M2 animation sequences");
+        var sequenceData = source?.Skeleton?.Sequences ?? model;
+        var boneData = source?.Skeleton?.Bones ?? model;
+        var hasSkeleton = source?.Skeleton is not null;
+        var sequenceCount = Count(sequenceData, hasSkeleton ? 8 : 0x1C, MaximumSequences, "M2 animation sequence");
+        var sequenceOffset = Offset(sequenceData, hasSkeleton ? 12 : 0x20, "M2 animation sequence");
+        Require(sequenceData, sequenceOffset, sequenceCount, SequenceStride, "M2 animation sequences");
         var sequences = new M2PreviewSequence[sequenceCount];
         for (var index = 0; index < sequenceCount; index++)
         {
             var item = sequenceOffset + index * SequenceStride;
-            var speed = Single(model, item + 8);
+            var speed = Single(sequenceData, item + 8);
             if (!float.IsFinite(speed)) throw new InvalidDataException($"M2 animation sequence {index:N0} has a non-finite move speed.");
-            sequences[index] = new(index, UShort(model, item), UShort(model, item + 2), UInt(model, item + 4), speed, UInt(model, item + 12), Short(model, item + 16),
-                UInt(model, item + 20), UInt(model, item + 24), UInt(model, item + 28), Short(model, item + 60), UShort(model, item + 62));
+            sequences[index] = new(index, UShort(sequenceData, item), UShort(sequenceData, item + 2), UInt(sequenceData, item + 4), speed, UInt(sequenceData, item + 12), Short(sequenceData, item + 16),
+                UInt(sequenceData, item + 20), UInt(sequenceData, item + 24), UInt(sequenceData, item + 28), Short(sequenceData, item + 60), UShort(sequenceData, item + 62));
         }
 
-        var globalCount = Count(model, 0x14, MaximumGlobalSequences, "M2 global sequence");
-        var globalOffset = Offset(model, 0x18, "M2 global sequence");
-        Require(model, globalOffset, globalCount, 4, "M2 global sequences");
+        var globalCount = Count(sequenceData, hasSkeleton ? 0 : 0x14, MaximumGlobalSequences, "M2 global sequence");
+        var globalOffset = Offset(sequenceData, hasSkeleton ? 4 : 0x18, "M2 global sequence");
+        Require(sequenceData, globalOffset, globalCount, 4, "M2 global sequences");
         var globals = new uint[globalCount];
-        for (var index = 0; index < globals.Length; index++) globals[index] = UInt(model, globalOffset + index * 4);
+        for (var index = 0; index < globals.Length; index++) globals[index] = UInt(sequenceData, globalOffset + index * 4);
 
-        var boneCount = Count(model, 0x2C, 65_536, "M2 bone");
-        var boneOffset = Offset(model, 0x30, "M2 bone");
+        var boneCount = Count(boneData, hasSkeleton ? 0 : 0x2C, 65_536, "M2 bone");
+        var boneOffset = Offset(boneData, hasSkeleton ? 4 : 0x30, "M2 bone");
         if (boneCount != previewBones.Count) throw new InvalidDataException("M2 bone metadata changed while the animation rig was being loaded.");
-        Require(model, boneOffset, boneCount, BoneStride, "M2 bones");
+        Require(boneData, boneOffset, boneCount, BoneStride, "M2 bones");
         ValidateHierarchy(previewBones);
         var bones = new M2BoneAnimation[boneCount];
         for (var index = 0; index < boneCount; index++)
         {
             var item = boneOffset + index * BoneStride;
-            bones[index] = new(ReadTrack(model, item + 16, globals.Length, $"bone {index:N0} translation"),
-                ReadTrack(model, item + 36, globals.Length, $"bone {index:N0} rotation"),
-                ReadTrack(model, item + 56, globals.Length, $"bone {index:N0} scale"));
+            bones[index] = new(ReadTrack(boneData, item + 16, globals.Length, $"bone {index:N0} translation"),
+                ReadTrack(boneData, item + 36, globals.Length, $"bone {index:N0} rotation"),
+                ReadTrack(boneData, item + 56, globals.Length, $"bone {index:N0} scale"));
         }
 
         Require(model, vertexOffset, vertexCount, VertexStride, "M2 vertices");
@@ -120,9 +126,25 @@ public static class M2AnimationService
             ValidateInfluence(index, value.Weight2, value.Bone2); ValidateInfluence(index, value.Weight3, value.Bone3);
             skin[index] = value;
         }
-        var (cameras, previewCameras) = ParseCameras(model, globals.Length);
-        var (lights, previewLights) = ParseLights(model, globals.Length, boneCount);
-        return new(model, sequences, globals, bones, skin, cameras, lights, previewCameras, previewLights);
+        var modelGlobals = globals;
+        if (hasSkeleton)
+        {
+            var local = source!.ModelSequences!;
+            var count = Count(local, 0, MaximumGlobalSequences, "M2 model global sequence");
+            var offset = Offset(local, 4, "M2 model global sequence");
+            Require(local, offset, count, 4, "M2 model global sequences");
+            modelGlobals = Enumerable.Range(0, count).Select(index => UInt(local, offset + index * 4)).ToArray();
+        }
+        var (cameras, previewCameras) = ParseCameras(model, modelGlobals.Length, source?.Version is 272 or 274);
+        var (lights, previewLights) = ParseLights(model, modelGlobals.Length, boneCount);
+        var boneRig = hasSkeleton ? new M2AnimationRig(boneData, sequences, globals, bones, skin, [], [], [], [])
+        { SequenceReader = sequence => source!.Animation(sequence, true) } : null;
+        return new(model, sequences, modelGlobals, bones, skin, cameras, lights, previewCameras, previewLights)
+        {
+            BoneTrackRig = boneRig,
+            SequenceReader = source is null ? null : sequence => source.Animation(sequence, false),
+            ModelSequenceIndex = source is null ? null : source.ModelSequenceIndex
+        };
 
         void ValidateInfluence(int vertex, byte weight, byte bone)
         {
@@ -279,24 +301,27 @@ public static class M2AnimationService
     {
         if (rig.ClipCache.TryGetValue(sequenceIndex, out var cached)) return cached;
         var sequence = rig.Sequences[sequenceIndex];
+        var modelSequenceIndex = rig.ModelSequenceIndex?.Invoke(sequence) ?? sequenceIndex;
         var sequenceData = ResolveSequenceData(modelPath, rig, sequence);
+        var boneRig = rig.BoneTrackRig ?? rig;
+        var boneSequenceData = ReferenceEquals(boneRig, rig) ? sequenceData : ResolveSequenceData(modelPath, boneRig, sequence);
         var bones = new M2BoneClip[rig.Bones.Length];
         for (var index = 0; index < bones.Length; index++)
         {
             var bone = rig.Bones[index];
-            bones[index] = new(ParseVectorTrack(rig, bone.Translation, sequenceIndex, sequenceData, $"bone {index:N0} translation"),
-                ParseQuaternionTrack(rig, bone.Rotation, sequenceIndex, sequenceData, $"bone {index:N0} rotation"),
-                ParseVectorTrack(rig, bone.Scale, sequenceIndex, sequenceData, $"bone {index:N0} scale"));
+            bones[index] = new(ParseVectorTrack(boneRig, bone.Translation, sequenceIndex, boneSequenceData, $"bone {index:N0} translation"),
+                ParseQuaternionTrack(boneRig, bone.Rotation, sequenceIndex, boneSequenceData, $"bone {index:N0} rotation"),
+                ParseVectorTrack(boneRig, bone.Scale, sequenceIndex, boneSequenceData, $"bone {index:N0} scale"));
         }
         var cameras = new M2CameraClip[rig.Cameras.Length];
         for (var index = 0; index < cameras.Length; index++)
         {
-            var camera = rig.Cameras[index]; cameras[index] = new(ParseVectorTrack(rig, camera.PositionTranslation, sequenceIndex, sequenceData, $"camera {index:N0} position"), ParseVectorTrack(rig, camera.TargetTranslation, sequenceIndex, sequenceData, $"camera {index:N0} target"), ParseScalarTrack(rig, camera.Roll, sequenceIndex, sequenceData, $"camera {index:N0} roll"));
+            var camera = rig.Cameras[index]; cameras[index] = new(ParseVectorTrack(rig, camera.PositionTranslation, modelSequenceIndex, sequenceData, $"camera {index:N0} position"), ParseVectorTrack(rig, camera.TargetTranslation, modelSequenceIndex, sequenceData, $"camera {index:N0} target"), ParseScalarTrack(rig, camera.Roll, modelSequenceIndex, sequenceData, $"camera {index:N0} roll"));
         }
         var lights = new M2LightClip[rig.Lights.Length];
         for (var index = 0; index < lights.Length; index++)
         {
-            var light = rig.Lights[index]; lights[index] = new(ParseVectorTrack(rig, light.AmbientColor, sequenceIndex, sequenceData, $"light {index:N0} ambient color"), ParseScalarTrack(rig, light.AmbientIntensity, sequenceIndex, sequenceData, $"light {index:N0} ambient intensity"), ParseVectorTrack(rig, light.DiffuseColor, sequenceIndex, sequenceData, $"light {index:N0} diffuse color"), ParseScalarTrack(rig, light.DiffuseIntensity, sequenceIndex, sequenceData, $"light {index:N0} diffuse intensity"), ParseScalarTrack(rig, light.AttenuationStart, sequenceIndex, sequenceData, $"light {index:N0} attenuation start"), ParseScalarTrack(rig, light.AttenuationEnd, sequenceIndex, sequenceData, $"light {index:N0} attenuation end"), ParseIntegerTrack(rig, light.UseAttenuation, sequenceIndex, sequenceData, $"light {index:N0} attenuation flag"));
+            var light = rig.Lights[index]; lights[index] = new(ParseVectorTrack(rig, light.AmbientColor, modelSequenceIndex, sequenceData, $"light {index:N0} ambient color"), ParseScalarTrack(rig, light.AmbientIntensity, modelSequenceIndex, sequenceData, $"light {index:N0} ambient intensity"), ParseVectorTrack(rig, light.DiffuseColor, modelSequenceIndex, sequenceData, $"light {index:N0} diffuse color"), ParseScalarTrack(rig, light.DiffuseIntensity, modelSequenceIndex, sequenceData, $"light {index:N0} diffuse intensity"), ParseScalarTrack(rig, light.AttenuationStart, modelSequenceIndex, sequenceData, $"light {index:N0} attenuation start"), ParseScalarTrack(rig, light.AttenuationEnd, modelSequenceIndex, sequenceData, $"light {index:N0} attenuation end"), ParseIntegerTrack(rig, light.UseAttenuation, modelSequenceIndex, sequenceData, $"light {index:N0} attenuation flag"));
         }
         var clip = new M2AnimationClip(sequenceIndex, bones, cameras, lights);
         if (rig.ClipCache.Count >= MaximumCachedClips) rig.ClipCache.Remove(rig.ClipCache.Keys.First());
@@ -306,14 +331,16 @@ public static class M2AnimationService
 
     internal static byte[] ResolveSequenceData(string modelPath, M2AnimationRig rig, M2PreviewSequence sequence)
     {
+        if (rig.SequenceReader is not null) return rig.SequenceReader(sequence);
         var externalPath = Path.Combine(Path.GetDirectoryName(modelPath)!, $"{Path.GetFileNameWithoutExtension(modelPath)}{sequence.AnimationId:D4}-{sequence.SubAnimationId:D2}.anim");
         return File.Exists(externalPath) ? File.ReadAllBytes(externalPath) : rig.ModelData;
     }
 
-    private static (M2CameraAnimation[] Animations, IReadOnlyList<M2PreviewCamera> Preview) ParseCameras(byte[] model, int globalCount)
+    private static (M2CameraAnimation[] Animations, IReadOnlyList<M2PreviewCamera> Preview) ParseCameras(byte[] model, int globalCount, bool modern = false)
     {
+        var stride = modern ? 116 : 100;
         var count = Count(model, 0x110, MaximumCameras, "M2 camera"); var offset = Offset(model, 0x114, "M2 camera");
-        Require(model, offset, count, 100, "M2 cameras");
+        Require(model, offset, count, stride, "M2 cameras");
         var lookupCount = Count(model, 0x118, MaximumCameras * 16, "M2 camera lookup"); var lookupOffset = Offset(model, 0x11C, "M2 camera lookup");
         Require(model, lookupOffset, lookupCount, 2, "M2 camera lookup");
         var slots = Enumerable.Range(0, count).Select(_ => new List<int>()).ToArray();
@@ -326,13 +353,24 @@ public static class M2AnimationService
         var animations = new M2CameraAnimation[count]; var preview = new M2PreviewCamera[count];
         for (var index = 0; index < count; index++)
         {
-            var item = offset + index * 100; var fov = Single(model, item + 4); var far = Single(model, item + 8); var near = Single(model, item + 12); var position = Vector(model, item + 36); var target = Vector(model, item + 68);
+            var item = offset + index * stride; var shift = modern ? -4 : 0;
+            var fov = modern ? ModernCameraFov(model, item + 96) : Single(model, item + 4);
+            var far = Single(model, item + 8 + shift); var near = Single(model, item + 12 + shift); var position = Vector(model, item + 36 + shift); var target = Vector(model, item + 68 + shift);
             if (!float.IsFinite(fov) || !float.IsFinite(far) || !float.IsFinite(near) || fov <= 0 || fov >= MathF.PI || near <= 0 || far <= near || !Finite(position) || !Finite(target))
                 throw new InvalidDataException($"M2 camera {index:N0} has an invalid field of view, clipping range, position, or target.");
-            animations[index] = new(ReadTrack(model, item + 16, globalCount, $"camera {index:N0} position"), ReadTrack(model, item + 48, globalCount, $"camera {index:N0} target"), ReadTrack(model, item + 80, globalCount, $"camera {index:N0} roll"));
+            animations[index] = new(ReadTrack(model, item + 16 + shift, globalCount, $"camera {index:N0} position"), ReadTrack(model, item + 48 + shift, globalCount, $"camera {index:N0} target"), ReadTrack(model, item + 80 + shift, globalCount, $"camera {index:N0} roll"));
             preview[index] = new(index, BitConverter.ToInt32(model, item), fov, far, near, position, target, slots[index].ToArray());
         }
         return (animations, preview);
+    }
+
+    private static float ModernCameraFov(byte[] model, int track)
+    {
+        if (UInt(model, track + 12) == 0) return 1;
+        var series = checked((int)UInt(model, track + 16)); Require(model, series, 1, 8, "camera FOV series");
+        if (UInt(model, series) == 0) return 1;
+        var value = checked((int)UInt(model, series + 4)); Require(model, value, 1, 4, "camera FOV");
+        return Single(model, value) * 180 / MathF.PI / 35;
     }
 
     private static (M2LightAnimation[] Animations, IReadOnlyList<M2PreviewLight> Preview) ParseLights(byte[] model, int globalCount, int boneCount)

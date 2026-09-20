@@ -20,6 +20,13 @@ public partial class App : Application
             var window = new MainWindow();
             desktop.MainWindow = window;
             var arguments = desktop.Args ?? [];
+            if (arguments.FirstOrDefault(argument => IsOption(argument, "--model-browser")) is { } modelBrowser)
+            {
+                var separator = modelBrowser.IndexOf('=');
+                var folder = separator < 0 ? null : modelBrowser[(separator + 1)..].Trim('"');
+                var selected = arguments.FirstOrDefault(argument => argument.StartsWith("--model-select=", StringComparison.OrdinalIgnoreCase))?["--model-select=".Length..].Trim('"');
+                window.Opened += async (_, _) => await window.OpenModelBrowserAsync(folder, selected);
+            }
             var assetComparisonIndex = Array.FindIndex(arguments, argument =>
                 IsOption(argument, "--asset-compare") || IsOption(argument, "--asset-library"));
             if (assetComparisonIndex >= 0)

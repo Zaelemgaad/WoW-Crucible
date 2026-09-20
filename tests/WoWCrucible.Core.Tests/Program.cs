@@ -7,6 +7,12 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+if (args.Length is 1 or 2 && args[0] == "--model-browser")
+{
+    ModelBrowserTestSuite.Run(args.Length == 2 ? args[1] : null);
+    return;
+}
+
 if (args is ["--artifact-ownership"])
 {
     ArtifactOwnershipTestSuite.Run();
@@ -157,7 +163,7 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("gruulmewdt create tile grid").FirstOrDefault()?.Command.Id != "workspace.maps" ||
     CrucibleCommandCatalog.Search("groundeffects doodad assignment").FirstOrDefault()?.Command.Id != "workspace.maps" ||
     CrucibleCommandCatalog.Search("mh2o liquidtype water height").FirstOrDefault()?.Command.Id != "workspace.maps" ||
-    CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.assets" ||
+    CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.models" ||
     CrucibleCommandCatalog.Search("texture luminance mask").FirstOrDefault()?.Command.Id != "workspace.textures" ||
     CrucibleCommandCatalog.Search("wiki field help").FirstOrDefault()?.Command.Id != "workspace.knowledge" ||
     CrucibleCommandCatalog.Search("wdb cache parser").FirstOrDefault()?.Command.Id != "workspace.cache" ||

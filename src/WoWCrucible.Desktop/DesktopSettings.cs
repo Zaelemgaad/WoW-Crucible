@@ -6,8 +6,6 @@ namespace WoWCrucible.Desktop;
 internal sealed class DesktopSettings
 {
     public bool DevbugMode { get; set; }
-    public bool NavigationPaneOpen { get; set; } = true;
-    public bool InspectorPaneOpen { get; set; } = true;
     public bool DbcToolsPaneOpen { get; set; }
     public bool DbcRowEditorOpen { get; set; } = true;
     public string LastDbcDirectory { get; set; } = string.Empty;
@@ -41,6 +39,8 @@ internal sealed class DesktopSettings
     public string SchemaDefinitionPath { get; set; } = string.Empty;
     public string DbdDefinitionsPath { get; set; } = string.Empty;
     public string ModernFileDataIdListfilePath { get; set; } = string.Empty;
+    public string ModelBrowserRootPath { get; set; } = string.Empty;
+    public Dictionary<string, string> ModelBrowserReviews { get; set; } = [];
     public string CompatibilityLabRequestPath { get; set; } = string.Empty;
     public string ClientHardLinkRequestPath { get; set; } = string.Empty;
     public string ClientHardLinkPlanPath { get; set; } = string.Empty;

@@ -65,7 +65,7 @@ public sealed class M2PreviewView : UserControl, IDisposable
         _cameras.SelectedIndex = 0; _cameraBar.IsVisible = geometry.Cameras.Count > 0;
         _sequences.ItemsSource = geometry.Sequences;
         _playback.IsVisible = geometry.Sequences.Count > 0;
-        _sequences.SelectedIndex = geometry.Sequences.Count > 0 ? 0 : -1;
+        _sequences.SelectedItem = geometry.Sequences.FirstOrDefault(sequence => sequence.AnimationId == 0 && sequence.SubAnimationId == 0) ?? geometry.Sequences.FirstOrDefault();
         UpdatePlaybackAvailability();
     }
 
@@ -146,8 +146,8 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
     private readonly Dictionary<int, SKBitmap> _materialTextures = [];
     private readonly Dictionary<string, SKBitmap> _particleCompositeTextures = new(StringComparer.Ordinal);
     private readonly List<MountedModel> _mountedModels = [];
-    private float _yaw = -0.65f;
-    private float _pitch = 0.35f;
+    private float _yaw = -MathF.PI / 2;
+    private float _pitch = 0.08f;
     private float _zoom = 1;
     private Avalonia.Point? _dragStart;
     private bool _showAttachments;
@@ -165,8 +165,8 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         _pose = null;
         ClearMaterialTextures();
         ClearMountedModels();
-        _yaw = -0.65f;
-        _pitch = 0.35f;
+        _yaw = -MathF.PI / 2;
+        _pitch = 0.08f;
         _zoom = 1;
         _sceneTransform = Matrix4x4.Identity;
         _sceneTransformLabel = null;
@@ -377,7 +377,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             var largest = Math.Max(extent.X, Math.Max(extent.Y, extent.Z));
             if (!float.IsFinite(largest) || largest <= 0.00001f) return;
 
-            var orbitScale = Math.Min(width, height) * 0.42f / largest * zoom;
+            var orbitScale = Math.Min(width, height) * 0.82f / largest * zoom;
             var orbitRotation = sceneTransform * Matrix4x4.CreateRotationZ(yaw) * Matrix4x4.CreateRotationX(pitch);
             var useNativeCamera = nativeCameraIndex is { } requestedCamera && (uint)requestedCamera < (uint)geometry.Cameras.Count;
             M2PreviewCamera? nativeCamera = useNativeCamera ? geometry.Cameras[nativeCameraIndex!.Value] : null;
@@ -441,9 +441,11 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                         var cx = width * 0.5f + c.X * scale; var cy = height * 0.5f - c.Z * scale;
                         var area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
                         if (Math.Abs(area) < 0.02f) continue;
-                        var viewA = viewVertices[ia]; var viewB = viewVertices[ib]; var viewC = viewVertices[ic]; var normal = Vector3.Cross(viewB - viewA, viewC - viewA);
-                        if (normal.LengthSquared() > 0.000001f) normal = Vector3.Normalize(normal);
-                        var lighting = (batch.RenderFlags & 0x1) != 0 ? Vector3.One : SceneLighting(normal, (viewA + viewB + viewC) / 3f, activeLights);
+                        if (area >= 0 && (batch.RenderFlags & 0x4) == 0) continue;
+                        var viewA = viewVertices[ia]; var viewB = viewVertices[ib]; var viewC = viewVertices[ic];
+                        var lightingA = (batch.RenderFlags & 0x1) != 0 ? Vector3.One : SceneLighting(transformedNormals[ia], viewA, activeLights);
+                        var lightingB = (batch.RenderFlags & 0x1) != 0 ? Vector3.One : SceneLighting(transformedNormals[ib], viewB, activeLights);
+                        var lightingC = (batch.RenderFlags & 0x1) != 0 ? Vector3.One : SceneLighting(transformedNormals[ic], viewC, activeLights);
                         var edgeFadeA = 1f; var edgeFadeB = 1f; var edgeFadeC = 1f;
                         if (batch.Combiner.Kind == M2PreviewTextureCombinerKind.ExplicitModModEdgeFade)
                         {
@@ -452,7 +454,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                         faces.Add(new((a.Y + b.Y + c.Y) / 3f, passOrder, sourceIndex, batch.MaterialUnitIndex ?? -1, ia, ib, ic, ax, ay, bx, by, cx, cy,
                             M2EnvironmentMapService.Coordinate(transformedNormals[ia]), M2EnvironmentMapService.Coordinate(transformedNormals[ib]), M2EnvironmentMapService.Coordinate(transformedNormals[ic]),
                             edgeFadeA, edgeFadeB, edgeFadeC,
-                            lighting, activeStages, batch.Combiner.Kind, batch.BlendMode));
+                            lightingA, lightingB, lightingC, activeStages, batch.Combiner.Kind, batch.BlendMode));
                     }
                 }
             }
@@ -466,7 +468,8 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             using var path = new SKPath();
             foreach (var face in faces.Where(face => face.TextureStages.Count == 0))
             {
-                fill.Color = new SKColor(Channel(face.Lighting.X * 150), Channel(face.Lighting.Y * 190), Channel(face.Lighting.Z * 220));
+                var lighting = (face.LightingA + face.LightingB + face.LightingC) / 3;
+                fill.Color = new SKColor(Channel(lighting.X * 150), Channel(lighting.Y * 190), Channel(lighting.Z * 220));
                 path.Rewind(); path.MoveTo(face.Ax, face.Ay); path.LineTo(face.Bx, face.By); path.LineTo(face.Cx, face.Cy); path.Close();
                 canvas.DrawPath(path, fill); canvas.DrawPath(path, edge);
             }
@@ -481,11 +484,11 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                 {
                     var face = groupFaces[index]; var offset = index * 3;
                     positions[offset] = new(face.Ax, face.Ay); positions[offset + 1] = new(face.Bx, face.By); positions[offset + 2] = new(face.Cx, face.Cy);
-                    var shade = new SKColor(Channel(face.Lighting.X * 255), Channel(face.Lighting.Y * 255), Channel(face.Lighting.Z * 255), 255); shadedColors[offset] = shadedColors[offset + 1] = shadedColors[offset + 2] = shade;
+                    shadedColors[offset] = Shade(face.LightingA); shadedColors[offset + 1] = Shade(face.LightingB); shadedColors[offset + 2] = Shade(face.LightingC);
                     whiteColors[offset] = whiteColors[offset + 1] = whiteColors[offset + 2] = SKColors.White;
                     if (usesEdgeFade)
                     {
-                        edgeShadedColors![offset] = shade.WithAlpha(Channel(face.EdgeFadeA * 255)); edgeShadedColors[offset + 1] = shade.WithAlpha(Channel(face.EdgeFadeB * 255)); edgeShadedColors[offset + 2] = shade.WithAlpha(Channel(face.EdgeFadeC * 255));
+                        edgeShadedColors![offset] = shadedColors[offset].WithAlpha(Channel(face.EdgeFadeA * 255)); edgeShadedColors[offset + 1] = shadedColors[offset + 1].WithAlpha(Channel(face.EdgeFadeB * 255)); edgeShadedColors[offset + 2] = shadedColors[offset + 2].WithAlpha(Channel(face.EdgeFadeC * 255));
                         edgeWhiteColors![offset] = SKColors.White.WithAlpha(Channel(face.EdgeFadeA * 255)); edgeWhiteColors[offset + 1] = SKColors.White.WithAlpha(Channel(face.EdgeFadeB * 255)); edgeWhiteColors[offset + 2] = SKColors.White.WithAlpha(Channel(face.EdgeFadeC * 255));
                     }
                 }
@@ -755,6 +758,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         }
 
         private static byte Channel(float value) => (byte)Math.Clamp(MathF.Round(value), 0, 255);
+        private static SKColor Shade(Vector3 lighting) => new(Channel(lighting.X * 255), Channel(lighting.Y * 255), Channel(lighting.Z * 255));
 
         private static SKBlendMode CanvasBlendMode(ushort blendMode) => blendMode switch
         {
@@ -768,6 +772,6 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         private readonly record struct ProjectedParticle(float Depth, float X, float Y, float RadiusX, float RadiusY, int SourceIndex, M2PreviewParticleSprite Sprite);
         private readonly record struct TextureGroup(int PassOrder, int SourceIndex, int MaterialKey, ushort BlendMode);
         private readonly record struct Face(float Depth, int PassOrder, int SourceIndex, int MaterialKey, int Ia, int Ib, int Ic, float Ax, float Ay, float Bx, float By, float Cx, float Cy,
-            Vector2 EnvironmentA, Vector2 EnvironmentB, Vector2 EnvironmentC, float EdgeFadeA, float EdgeFadeB, float EdgeFadeC, Vector3 Lighting, IReadOnlyList<ResolvedTextureStage> TextureStages, M2PreviewTextureCombinerKind CombinerKind, ushort BlendMode);
+            Vector2 EnvironmentA, Vector2 EnvironmentB, Vector2 EnvironmentC, float EdgeFadeA, float EdgeFadeB, float EdgeFadeC, Vector3 LightingA, Vector3 LightingB, Vector3 LightingC, IReadOnlyList<ResolvedTextureStage> TextureStages, M2PreviewTextureCombinerKind CombinerKind, ushort BlendMode);
     }
 }
