@@ -1315,6 +1315,23 @@ static int Asset(string[] args, CancellationToken cancellationToken)
         Console.WriteLine($"Embedded {result.Bones:N0} bones, {result.Sequences:N0} sequences and {result.ExternalAnimationPayloads:N0} animation payloads: {output}\nModern MD21 retained; SKINs and textures remain companion assets. This is not a stock-Wrath downport.");
         return 0;
     }
+    if (args is ["model-geosets", var sourceSkin, var targetSkin, var profilePath])
+    {
+        var output = Path.GetFullPath(targetSkin);
+        if (File.Exists(output)) return Fail("The output SKIN already exists; choose a new path.");
+        var options = new System.Text.Json.JsonSerializerOptions
+        {
+            UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow,
+            Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter<M2SkinLayout>(allowIntegerValues: false) }
+        };
+        var profile = System.Text.Json.JsonSerializer.Deserialize<M2SkinGeosetProfile>(File.ReadAllText(profilePath), options)
+            ?? throw new InvalidDataException("The geoset profile is empty.");
+        var result = M2SkinGeosetService.Rewrite(File.ReadAllBytes(sourceSkin), profile, cancellationToken);
+        Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+        using (var file = new FileStream(output, FileMode.CreateNew, FileAccess.Write)) file.Write(result.SkinData);
+        Console.WriteLine($"Retained {result.Sections.Count(section => section.OutputIndex.HasValue)}/{result.Sections.Count} sections, {result.TriangleIndices / 3:N0} triangles, {result.Batches} render batches and {result.ShadowBatches} shadow batches: {output}");
+        return 0;
+    }
     if (args is ["model-catalog", var modelRoot, .. var modelOptions])
     {
         if (modelOptions.Any(option => option != "--format=json")) return Fail("model-catalog accepts only --format=json.");
@@ -1987,6 +2004,7 @@ Usage:
   wowcrucible asset library-unpack <root> <state-folder> --7zip=<7z.exe> --apply [--delete-verified-archives]
   wowcrucible asset model-catalog <root> [--format=json]
   wowcrucible asset model-embed-skeleton <split-model.m2> <new-model.m2> [--listfile=file]
+  wowcrucible asset model-geosets <source.skin> <new.skin> <profile.json>
   wowcrucible asset layer-stack-index <index.sqlite> <source-content-root> --layer="stack|order|name|root" [...] [--exclude=client-glob] [--format=text|json]
   wowcrucible asset layer-stack-query <index.sqlite> [--search=text] [--kind=classification] [--limit=N] [--format=text|json]
   wowcrucible asset extracted-overlap-index <index.sqlite> --stack="name|extracted-root" [...] [--exclude=client-glob] [--format=text|json]

@@ -57,6 +57,7 @@ internal static class ModelBrowserTestSuite
             Require(M2PreviewGeometryService.Load(largePath).TriangleIndices.SequenceEqual(new[] { 0, 1, 2 }), "HD section triangle offsets retain their high 16 bits.");
             CheckParentSkeleton(root);
             CheckSkeletonEmbedding(root);
+            M2SkinGeosetTestSuite.Run();
             CheckViewerDefaults();
             CheckTextureChoices();
             CheckCamera();

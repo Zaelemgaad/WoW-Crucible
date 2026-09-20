@@ -148,6 +148,27 @@ client appearance bindings. Parent skeletons and particle-track embedding are
 outside this profile and are rejected without writing an output. This prepares
 assets for a modern-model runtime such as WXL, not an unmodified Wrath client.
 
+`asset model-geosets <source.skin> <new.skin> <profile.json>` authors an explicit
+geoset selection into a new SKIN file. Run it on each companion SKIN/LOD. It does
+not change the M2, textures, skeleton, animations, or model-browser defaults.
+The output must not exist. Profile example:
+
+```json
+{"Layout":"Modern","Geosets":{"0":0,"2001":2001,"3201":0,"3202":0}}
+```
+
+Keys are retained source geoset IDs; values are their output IDs. Unlisted IDs
+are removed, including their triangles and render/shadow batches. Multiple
+sections belonging to one ID are all retained. Choose the layout explicitly:
+`Wrath` (48-byte header), `CataclysmToLegion` (56-byte header and legacy secondary
+section indices), or `Modern` (56-byte header and BfA+ batch flags). The format
+cannot be reliably guessed from the `SKIN` signature. Modern flags are not
+mistaken for section indices. Retained legacy batches referencing a removed
+secondary section fail instead of silently changing their material bindings.
+Choose character-specific IDs from the actual source and target models; this
+is not a universal race customization preset or a stock-Wrath downport.
+Binary layout reference: [wowlib SKIN records](https://skarndev.github.io/wowlib/python/m2/records/#skin-records).
+
 `asset model-catalog <folder> [--format=json]` scans loose files and ZIPs and
 groups identical M2/skin/skeleton/animation bundles. Different companion bytes
 remain separate, including external AFID/SFID/BFID references. A missing reference
