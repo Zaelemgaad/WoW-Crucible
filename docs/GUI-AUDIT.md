@@ -35,6 +35,7 @@ Automated checks:
 ```powershell
 dotnet run --project tests/WoWCrucible.Core.Tests -- --model-browser
 pwsh -NoProfile -File scripts/Test-ModelBrowserPreview.ps1 -DesktopDirectory src/WoWCrucible.Desktop/bin/Debug/net10.0 -ModelPath <model.m2> -ScreenshotPath <preview.png>
+pwsh -NoProfile -File scripts/Test-PreviewFrameLifetime.ps1 -DesktopDirectory src/WoWCrucible.Desktop/bin/Debug/net10.0
 ```
 
 2026-09-19: synthetic folder/ZIP discovery, separate model/skeleton global and
@@ -55,6 +56,33 @@ information, not a verdict about a patched game's ability to render a model.
 The broad corpus suite passed its M2 and desktop-layout checks, then stopped at
 the race-12-to-22 customization-promotion assertion using the local Tempest DBC
 corpus. That suite is not reported as a full pass.
+
+### Texture Change Crash
+
+2026-09-19, reported against `abf0cc7`: changing a texture in Model Browser
+terminated the process. The Devbug trace showed rapid texture selections;
+Windows Application event 1026 recorded `SKBitmap.ToShader` /
+`sk_bitmap_make_shader` in `M2DrawOperation.DrawStage`. No managed crash file
+was produced. This was a native render-resource lifetime error, not an M2
+format rejection or a recycled list row.
+
+Root cause: deferred render operations borrowed the UI's mutable texture maps
+and native bitmaps. Replacing textures disposed bitmaps while older frames
+could still use them. Mounted models and the WMO viewer shared that pattern.
+Render operations now retain immutable bitmap leases and their own collection
+snapshots until Avalonia retires them. Animation poses are copied at frame
+capture instead of sharing the UI's next animation sample. Native textures
+are released after the final owner finishes; pixel data is not copied per frame.
+
+Verification: the lifetime regression failed on the old build before entering
+the unsafe native call. The fixed build passes 100 replacement/clear/disposal
+cycles each for M2 material, manual, mounted and particle-composite textures,
+plus WMO textures. Each cycle holds two old frames, checks changed pixels for
+the new texture, renders old frames on a worker thread, and verifies final
+native-handle release. Sampled-pose isolation also passes. The real-model
+pixel/animation check, focused model-browser core suite, and creature-template
+regression pass. Manual rapid texture selection in the visible app remains a
+user check; these tests do not claim complete renderer fidelity.
 
 ## Edit a DBC Record
 

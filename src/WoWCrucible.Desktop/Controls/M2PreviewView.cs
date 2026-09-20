@@ -1,5 +1,4 @@
 using System.Numerics;
-using System.Runtime.InteropServices;
 using System.Collections.Concurrent;
 using Avalonia;
 using Avalonia.Controls;
@@ -140,11 +139,11 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
 {
     private static readonly ConcurrentDictionary<string, byte> LoggedParticleFailures = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, byte> LoggedRibbonFailures = new(StringComparer.Ordinal);
-    private sealed record MountedModel(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? Texture, string Label, int? ParentAttachmentIndex);
+    private sealed record MountedModel(M2PreviewGeometry Geometry, Matrix4x4 Transform, PreviewBitmap? Texture, string Label, int? ParentAttachmentIndex);
     private M2PreviewGeometry? _geometry;
-    private SKBitmap? _texture;
-    private readonly Dictionary<int, SKBitmap> _materialTextures = [];
-    private readonly Dictionary<string, SKBitmap> _particleCompositeTextures = new(StringComparer.Ordinal);
+    private PreviewBitmap? _texture;
+    private readonly Dictionary<int, PreviewBitmap> _materialTextures = [];
+    private readonly Dictionary<string, PreviewBitmap> _particleCompositeTextures = new(StringComparer.Ordinal);
     private readonly List<MountedModel> _mountedModels = [];
     private float _yaw = -MathF.PI / 2;
     private float _pitch = 0.08f;
@@ -185,7 +184,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
     public void SetTexture(string? previewPath)
     {
         _texture?.Dispose(); _texture = null;
-        if (!string.IsNullOrWhiteSpace(previewPath) && File.Exists(previewPath)) _texture = SKBitmap.Decode(previewPath);
+        if (!string.IsNullOrWhiteSpace(previewPath) && File.Exists(previewPath)) _texture = PreviewBitmap.Decode(previewPath);
         InvalidateVisual();
     }
 
@@ -193,13 +192,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
     {
         ClearMaterialTextures();
         _texture?.Dispose(); _texture = null;
-        if (texture is not null)
-        {
-            var bitmap = new SKBitmap(new SKImageInfo(texture.Width, texture.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
-            var rowBytes = checked(texture.Width * 4); var address = bitmap.GetPixels();
-            for (var row = 0; row < texture.Height; row++) Marshal.Copy(texture.Pixels, row * rowBytes, IntPtr.Add(address, row * bitmap.RowBytes), rowBytes);
-            _texture = bitmap;
-        }
+        if (texture is not null) _texture = PreviewBitmap.Create(texture);
         InvalidateVisual();
     }
 
@@ -207,12 +200,12 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
     {
         _texture?.Dispose(); _texture = null;
         ClearMaterialTextures();
-        foreach (var (textureDefinitionIndex, texture) in textures) _materialTextures[textureDefinitionIndex] = CreateBitmap(texture);
+        foreach (var (textureDefinitionIndex, texture) in textures) _materialTextures[textureDefinitionIndex] = PreviewBitmap.Create(texture);
         if (_geometry is not null)
             foreach (var indices in _geometry.ParticleEmitters.Where(emitter => emitter.UsesMultipleTextures).Select(emitter => emitter.TextureDefinitionIndices).DistinctBy(ParticleTextureKey))
             {
                 if (indices.Any(index => !textures.ContainsKey(index))) continue;
-                try { _particleCompositeTextures[ParticleTextureKey(indices)] = CreateBitmap(M2ParticleTextureCompositionService.Compose(indices.Select(index => textures[index]).ToArray())); }
+                try { _particleCompositeTextures[ParticleTextureKey(indices)] = PreviewBitmap.Create(M2ParticleTextureCompositionService.Compose(indices.Select(index => textures[index]).ToArray())); }
                 catch (Exception exception) when (exception is InvalidDataException or ArgumentException or OverflowException)
                 {
                     DesktopCrashLogger.Log($"M2 multi-texture particle composition unavailable: {_geometry.ModelPath} [{ParticleTextureKey(indices)}]", exception);
@@ -245,7 +238,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             if (!Finite(model.Transform)) throw new ArgumentException($"Mounted model '{model.Label}' has a non-finite transform.", nameof(models));
             if (model.ParentAttachmentIndex is { } attachmentIndex && (_geometry is null || (uint)attachmentIndex >= (uint)_geometry.Attachments.Count))
                 throw new ArgumentException($"Mounted model '{model.Label}' references missing parent attachment record {attachmentIndex:N0}.", nameof(models));
-            _mountedModels.Add(new(model.Geometry, model.Transform, model.Texture is null ? null : CreateBitmap(model.Texture), model.Label, model.ParentAttachmentIndex));
+            _mountedModels.Add(new(model.Geometry, model.Transform, model.Texture is null ? null : PreviewBitmap.Create(model.Texture), model.Label, model.ParentAttachmentIndex));
         }
         InvalidateVisual();
     }
@@ -262,14 +255,6 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
     {
         if (cameraIndex is { } index && (_geometry is null || (uint)index >= (uint)_geometry.Cameras.Count)) throw new ArgumentOutOfRangeException(nameof(cameraIndex));
         _nativeCameraIndex = cameraIndex; InvalidateVisual();
-    }
-
-    private static SKBitmap CreateBitmap(RgbaTexture texture)
-    {
-        var bitmap = new SKBitmap(new SKImageInfo(texture.Width, texture.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul));
-        var rowBytes = checked(texture.Width * 4); var address = bitmap.GetPixels();
-        for (var row = 0; row < texture.Height; row++) Marshal.Copy(texture.Pixels, row * rowBytes, IntPtr.Add(address, row * bitmap.RowBytes), rowBytes);
-        return bitmap;
     }
 
     private void ClearMaterialTextures()
@@ -339,18 +324,31 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
         e.Handled = true;
     }
 
-    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, M2AnimationPose? pose, SKBitmap? texture, IReadOnlyDictionary<int, SKBitmap> materialTextures, IReadOnlyDictionary<string, SKBitmap> particleCompositeTextures, IReadOnlyList<MountedModel> mountedModels, Matrix4x4 sceneTransform, string? sceneTransformLabel, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex, int? nativeCameraIndex) : ICustomDrawOperation
+    private sealed class M2DrawOperation(Rect bounds, M2PreviewGeometry geometry, M2AnimationPose? sourcePose, PreviewBitmap? sourceTexture, IReadOnlyDictionary<int, PreviewBitmap> sourceMaterialTextures, IReadOnlyDictionary<string, PreviewBitmap> sourceParticleCompositeTextures, IReadOnlyList<MountedModel> sourceMountedModels, Matrix4x4 sceneTransform, string? sceneTransformLabel, float yaw, float pitch, float zoom, bool showAttachments, int? highlightedAttachmentIndex, int? nativeCameraIndex) : ICustomDrawOperation
     {
-        private sealed record SceneSource(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? ManualTexture, IReadOnlyDictionary<int, SKBitmap>? MaterialTextures, string Label, IReadOnlyList<Vector3>? PosedVertices, IReadOnlyList<Vector3>? PosedNormals, Vector3 Minimum, Vector3 Maximum);
+        private readonly M2AnimationPose? _pose = sourcePose is null ? null : M2AnimationService.SnapshotPose(geometry, sourcePose);
+        private readonly PreviewBitmap? _texture = sourceTexture?.Retain();
+        private readonly IReadOnlyDictionary<int, PreviewBitmap> _materialTextures = sourceMaterialTextures.ToDictionary(pair => pair.Key, pair => pair.Value.Retain());
+        private readonly IReadOnlyDictionary<string, PreviewBitmap> _particleCompositeTextures = sourceParticleCompositeTextures.ToDictionary(pair => pair.Key, pair => pair.Value.Retain(), StringComparer.Ordinal);
+        private readonly IReadOnlyList<MountedModel> _mountedModels = sourceMountedModels.Select(model => model with { Texture = model.Texture?.Retain() }).ToArray();
+        private sealed record SceneSource(M2PreviewGeometry Geometry, Matrix4x4 Transform, SKBitmap? ManualTexture, IReadOnlyDictionary<int, PreviewBitmap>? MaterialTextures, string Label, IReadOnlyList<Vector3>? PosedVertices, IReadOnlyList<Vector3>? PosedNormals, Vector3 Minimum, Vector3 Maximum);
         public Rect Bounds => bounds;
         public bool HitTest(Avalonia.Point point) => Bounds.Contains(point);
         public bool Equals(ICustomDrawOperation? other) => false;
-        public void Dispose() { }
+        public void Dispose()
+        {
+            _texture?.Dispose();
+            foreach (var texture in _materialTextures.Values) texture.Dispose();
+            foreach (var texture in _particleCompositeTextures.Values) texture.Dispose();
+            foreach (var model in _mountedModels) model.Texture?.Dispose();
+        }
 
         public void Render(ImmediateDrawingContext context)
         {
             var feature = context.TryGetFeature<ISkiaSharpApiLeaseFeature>();
             if (feature is null) return;
+            var pose = _pose; var texture = _texture?.Bitmap;
+            var materialTextures = _materialTextures; var particleCompositeTextures = _particleCompositeTextures; var mountedModels = _mountedModels;
             using var lease = feature.Lease();
             var canvas = lease.SkCanvas;
             var width = (float)bounds.Width;
@@ -364,7 +362,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                     var attachment = geometry.Attachments[attachmentIndex];
                     transform = model.Transform * pose.BoneTransforms[attachment.BoneIndex];
                 }
-                sources.Add(new SceneSource(model.Geometry, transform, model.Texture, null, model.Label, null, null, model.Geometry.Minimum, model.Geometry.Maximum));
+                sources.Add(new SceneSource(model.Geometry, transform, model.Texture?.Bitmap, null, model.Label, null, null, model.Geometry.Minimum, model.Geometry.Maximum));
             }
             var minimum = new Vector3(float.PositiveInfinity); var maximum = new Vector3(float.NegativeInfinity);
             foreach (var source in sources)
@@ -561,7 +559,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                     var blend = trail.BlendMode switch { 3 or 4 => SKBlendMode.Plus, 5 or 6 => SKBlendMode.Modulate, _ => SKBlendMode.SrcOver };
                     using var ribbonPaint = new SKPaint { IsAntialias = true, BlendMode = blend, Color = tint };
                     var ribbonTexture = effectSource.ManualTexture;
-                    if (ribbonTexture is null) effectSource.MaterialTextures?.TryGetValue(trail.TextureDefinitionIndex, out ribbonTexture);
+                    if (ribbonTexture is null && effectSource.MaterialTextures?.TryGetValue(trail.TextureDefinitionIndex, out var ribbonBitmap) == true) ribbonTexture = ribbonBitmap.Bitmap;
                     if (ribbonTexture is not null)
                     {
                         for (var index = 0; index < coordinates.Length; index++) coordinates[index] = new(coordinates[index].X * ribbonTexture.Width, coordinates[index].Y * ribbonTexture.Height);
@@ -619,10 +617,10 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                 var particleSource = sources[keySource]; var particleTexture = particleSource.ManualTexture;
                 if (particleTexture is null && projectedParticles[start].Sprite.TextureDefinitionIndices.Count > 1)
                 {
-                    if (keySource == 0) particleCompositeTextures.TryGetValue(keyTextures, out particleTexture);
+                    if (keySource == 0 && particleCompositeTextures.TryGetValue(keyTextures, out var compositeBitmap)) particleTexture = compositeBitmap.Bitmap;
                     if (particleTexture is null) particleFailure ??= $"Multi-texture particle {projectedParticles[start].Sprite.EmitterIndex:N0} requires texture definitions {keyTextures}; at least one decoded layer is unavailable.";
                 }
-                if (particleTexture is null) particleSource.MaterialTextures?.TryGetValue(keyTexture, out particleTexture);
+                if (particleTexture is null && particleSource.MaterialTextures?.TryGetValue(keyTexture, out var particleBitmap) == true) particleTexture = particleBitmap.Bitmap;
                 if (particleTexture is not null)
                 {
                     var count = end - start; var positions = new SKPoint[count * 6]; var coordinates = new SKPoint[count * 6]; var colors = new SKColor[count * 6];
@@ -711,7 +709,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
             if (source.ManualTexture is not null) return [new(source.ManualTexture, M2PreviewTextureCoordinateSource.Primary, M2PreviewTextureStageBlend.Source)];
             if (batch.TextureStages.Count == 0)
                 return batch.TextureDefinitionIndex is { } index && source.MaterialTextures?.TryGetValue(index, out var texture) == true
-                    ? [new(texture, M2PreviewTextureCoordinateSource.Primary, M2PreviewTextureStageBlend.Source)]
+                    ? [new(texture.Bitmap, M2PreviewTextureCoordinateSource.Primary, M2PreviewTextureStageBlend.Source)]
                     : [];
             var result = new List<ResolvedTextureStage>(batch.TextureStages.Count);
             foreach (var stage in batch.TextureStages)
@@ -719,7 +717,7 @@ internal sealed class M2PreviewCanvas : Control, IDisposable
                 if (stage.TextureDefinitionIndex < 0 || source.MaterialTextures is not { } textures || !textures.TryGetValue(stage.TextureDefinitionIndex, out var texture)) return result.Count == 0 ? [] : [result[0]];
                 if (stage.CoordinateSource == M2PreviewTextureCoordinateSource.Unsupported || stage.Blend == M2PreviewTextureStageBlend.Unsupported)
                     return result.Count == 0 ? [] : [result[0]];
-                result.Add(new(texture, stage.CoordinateSource, stage.Blend));
+                result.Add(new(texture.Bitmap, stage.CoordinateSource, stage.Blend));
             }
             return batch.Combiner.Supported ? result : result.Count == 0 ? [] : [result[0]];
         }
