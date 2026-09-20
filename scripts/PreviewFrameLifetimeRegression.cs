@@ -240,6 +240,29 @@ public static class PreviewFrameLifetimeRegression
         var preset = presets[entry.Identity]; var bindings = (Dictionary<int, string>)preset.GetType().GetProperty("Textures").GetValue(preset);
         if (bindings[0] != "OtherFolder/alternate.blp" || bindings[2] != "C:/Textures/pick.blp")
             throw new InvalidOperationException("Cross-folder texture choices did not survive settings serialization.");
+        var alias = new ModelBrowserEntry("other.zip", "Models/fixture.m2", "other.zip :: Models/fixture.m2", 0, "MD20", 264, null);
+        var group = entry with { Copies = new[] { alias } };
+        viewType.GetField("_catalog", Fields).SetValue(view, new ModelBrowserCatalog("E:/fixture", new[] { group }, Array.Empty<string>(), Array.Empty<string>()));
+        ((TextBox)Get(view, "_search")).Text = "other.zip";
+        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
+        var list = (ListBox)Get(view, "_models");
+        if (list.ItemCount != 1)
+            throw new InvalidOperationException($"Grouped source search returned {list.ItemCount} rows instead of one.");
+        if (list.ItemTemplate.Build(null) == null || list.ItemTemplate.Build(group) == null)
+            throw new InvalidOperationException("Recycled model template failed.");
+        var locations = (ComboBox)Get(view, "_locations");
+        if (locations.ItemTemplate.Build(null) == null || locations.ItemTemplate.Build(alias) == null)
+            throw new InvalidOperationException("Recycled source-location template failed.");
+        if ((string)viewType.GetMethod("Review", Fields).Invoke(view, [group]) != "Unreviewed")
+            throw new InvalidOperationException("An unreviewed duplicate inherited a deletion mark silently.");
+        viewType.GetField("_updating", Fields).SetValue(view, true);
+        viewType.GetField("_currentGroup", Fields).SetValue(view, group);
+        locations.ItemsSource = group.Locations.ToArray(); locations.SelectedItem = alias;
+        viewType.GetField("_updating", Fields).SetValue(view, false);
+        Invoke(view, "ClearModel");
+        if (Get(view, "_currentGroup") != null || locations.ItemCount != 0 || locations.IsVisible)
+            throw new InvalidOperationException("Clearing a model retained an old source-location selector.");
+        Console.WriteLine("PASS grouped model search covers original locations; model/source templates tolerate recycling; mixed reviews remain unreviewed.");
         Console.WriteLine("PASS geoset 3201 toggles freely and stays off through face changes/rebuilds; saved armor overrides, textures and deletion marks survive JSON round trips; no user settings or source files written.");
     }
 

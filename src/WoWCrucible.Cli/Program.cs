@@ -1298,6 +1298,24 @@ static int Asset(string[] args, CancellationToken cancellationToken)
         Console.Error.WriteLine($"Asset library complete: {result.CompletedArchives:N0} archive(s), {result.CopiedLooseBlps:N0} loose BLP copy/copies, {result.ConvertedPngs:N0} PNG conversion(s), {result.FailedArchives:N0} archive failure(s), {result.ConversionFailures:N0} conversion failure(s).\nCatalog: {result.CatalogPath}\nCheckpoint: {result.CheckpointPath}");
         return result.FailedArchives == 0 && result.ConversionFailures == 0 ? 0 : 3;
     }
+    if (args is ["model-catalog", var modelRoot, .. var modelOptions])
+    {
+        if (modelOptions.Any(option => option != "--format=json")) return Fail("model-catalog accepts only --format=json.");
+        var catalog = ModelBrowserCatalogService.Scan(modelRoot, cancellationToken);
+        if (modelOptions.Contains("--format=json")) Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(catalog));
+        else Console.WriteLine($"{catalog.Models.Count:N0} distinct model bundles; {catalog.SourceModelCount:N0} source models; {catalog.SourceModelCount - catalog.Models.Count:N0} duplicate copies grouped; {catalog.UnopenedArchives.Count:N0} unopened archives; {catalog.Errors.Count:N0} scan errors.");
+        return catalog.Errors.Count == 0 ? 0 : 3;
+    }
+    if (args is ["library-unpack", var unpackRoot, var unpackState, .. var unpackOptions])
+    {
+        var sevenZip = Option(unpackOptions, "--7zip=");
+        if (sevenZip is null || !unpackOptions.Contains("--apply")) return Fail("library-unpack requires --7zip=<7z.exe> and --apply. It extracts archives and replaces exact duplicate storage with hardlinks.");
+        var unknown = unpackOptions.Where(option => option is not "--apply" and not "--delete-verified-archives" && !option.StartsWith("--7zip=", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (unknown.Length > 0) return Fail($"Unknown library-unpack option: {unknown[0]}");
+        var result = new ModelArchiveLibraryService(Console.WriteLine, cancellationToken).Expand(unpackRoot, unpackState, sevenZip, unpackOptions.Contains("--delete-verified-archives"));
+        Console.WriteLine($"{result.ExtractedArchives:N0} archives extracted; {result.ReusedArchives:N0} reused; {result.LinkedFiles:N0} duplicate files hardlinked; {result.Errors.Count:N0} need review. Report: {Path.Combine(unpackState, "result.json")}");
+        return result.Errors.Count == 0 ? 0 : 3;
+    }
     if (args is ["library-import", var extractedRoot, var importLibraryRoot, var provenance, .. var importOptions])
     {
         var workersText = Option(importOptions, "--workers=") ?? "6";
@@ -1949,6 +1967,8 @@ static int Asset(string[] args, CancellationToken cancellationToken)
 
 static int AssetHelp(int code = 0) => GroupHelp("""
 Usage:
+  wowcrucible asset library-unpack <root> <state-folder> --7zip=<7z.exe> --apply [--delete-verified-archives]
+  wowcrucible asset model-catalog <root> [--format=json]
   wowcrucible asset layer-stack-index <index.sqlite> <source-content-root> --layer="stack|order|name|root" [...] [--exclude=client-glob] [--format=text|json]
   wowcrucible asset layer-stack-query <index.sqlite> [--search=text] [--kind=classification] [--limit=N] [--format=text|json]
   wowcrucible asset extracted-overlap-index <index.sqlite> --stack="name|extracted-root" [...] [--exclude=client-glob] [--format=text|json]

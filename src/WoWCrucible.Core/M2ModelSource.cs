@@ -16,6 +16,8 @@ internal sealed class M2ModelSource
     public M2SkeletonSource? Skeleton { get; }
     public byte[]? ModelSequences { get; }
     public uint[] TextureIds { get; }
+    public HashSet<string> CompanionFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<(uint Id, string Extension, string? AlternateName)> _companionIds = [];
     private readonly ModelBrowserSource _source;
     private readonly IReadOnlyDictionary<(ushort Animation, ushort Variation), uint> _animationIds;
     private readonly Dictionary<(ushort Animation, ushort Variation), (int Index, uint Flags)> _modelSequences = [];
@@ -32,11 +34,14 @@ internal sealed class M2ModelSource
         TextureIds = chunks.TryGetValue("TXID", out var txid) ? UInts(txid, "TXID") : [];
         _animationIds = AnimationIds(chunks);
         var stem = Path.GetFileNameWithoutExtension(source.ModelName);
+        AddReferences(chunks);
         if (chunks.TryGetValue("SKID", out var skid) && U32(skid, 0) is var skeletonId && skeletonId != 0)
         {
             var skeletonName = source.Find(stem + ".skel") ?? source.FindFileDataId(skeletonId, ".skel")
                 ?? throw new FileNotFoundException($"Could not resolve skeleton {skeletonId} ({stem}.skel).");
             var skeleton = Chunks(source.Read(skeletonName));
+            AddReferences(skeleton);
+            CompanionFiles.Add(skeletonName);
             ModelSequences = Required(skeleton, "SKS1");
             var sequenceCount = U32(ModelSequences, 8); var sequenceOffset = U32(ModelSequences, 12);
             if (sequenceCount > 65536 || (ulong)sequenceOffset + sequenceCount * 64UL > (ulong)ModelSequences.Length)
@@ -54,6 +59,8 @@ internal sealed class M2ModelSource
                 var parentName = source.FindFileDataId(parentId, ".skel")
                     ?? throw new FileNotFoundException($"Could not resolve parent skeleton {parentId} referenced by {skeletonName}.");
                 skeleton = Chunks(source.Read(parentName));
+                AddReferences(skeleton);
+                CompanionFiles.Add(parentName);
                 attachments ??= skeleton.GetValueOrDefault("SKA1");
             }
             Skeleton = new(Required(skeleton, "SKS1"), Required(skeleton, "SKB1"), attachments, AnimationIds(skeleton));
@@ -63,6 +70,26 @@ internal sealed class M2ModelSource
             ?? (sfid.Length > 0 ? source.FindFileDataId(sfid[0], ".skin") : null)
             ?? throw new FileNotFoundException($"Missing companion {stem}00.skin.");
         Skin = source.Read(SkinName);
+        CompanionFiles.Add(SkinName);
+
+        void AddReferences(Dictionary<string, byte[]> owner)
+        {
+            foreach (var pair in AnimationIds(owner))
+                if (pair.Value != 0) _companionIds.Add((pair.Value, ".anim", $"{stem}{pair.Key.Item1:D4}-{pair.Key.Item2:D2}.anim"));
+            if (owner.TryGetValue("SFID", out var skins))
+                foreach (var pair in UInts(skins, "SFID").Select((id, index) => (id, index)))
+                    if (pair.id != 0) _companionIds.Add((pair.id, ".skin", $"{stem}{pair.index:D2}.skin"));
+            if (owner.TryGetValue("BFID", out var bones))
+                foreach (var id in UInts(bones, "BFID"))
+                    if (id != 0) _companionIds.Add((id, ".bone", null));
+        }
+    }
+
+    public IEnumerable<(uint FileDataId, string Extension, string? File)> ReferencedCompanions()
+    {
+        foreach (var reference in _companionIds.Distinct())
+            yield return (reference.Id, reference.Extension, _source.FindFileDataId(reference.Id, reference.Extension)
+                ?? (reference.AlternateName is { } alternate ? _source.Find(alternate) : null));
     }
 
     public byte[] Animation(M2PreviewSequence sequence, bool skeleton)

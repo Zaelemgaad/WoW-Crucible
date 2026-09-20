@@ -135,6 +135,34 @@ The **Playable race bundle** tab and `race-plan` command apply the same stale-sa
 
 ## Asset inspection and libraries
 
+### Model Collection Cleanup
+
+`asset model-catalog <folder> [--format=json]` scans loose files and ZIPs and
+groups identical M2/skin/skeleton/animation bundles. Different companion bytes
+remain separate, including external AFID/SFID/BFID references. A missing reference
+does not match a resolved one. Every original location is retained. This is
+read-only and does not certify client compatibility.
+
+`asset library-unpack <folder> <state-folder> --7zip=<7z.exe> --apply`
+extracts ZIP/RAR/7z and supported nested archives into archive-named folders.
+It uses an existing 7-Zip-compatible executable; it does not install one. MPQs use
+Crucible's existing StormLib extractor. Conflicting files are never overwritten;
+they go into a hash-suffixed extraction folder. Same-path MPQ locale variants
+require the normal MPQ extraction workflow with locale preservation.
+
+Exact duplicate file contents and NTFS alternate streams are verified before
+sharing storage through hardlinks. Extracted data must fit within storage
+recovered by the operation. Put resumable receipts and the storage budget in
+a separate state folder outside the collection. Oversized archives are deferred
+and retried when later cleanup releases enough space. Source archives remain unless
+`--delete-verified-archives` is supplied; that option rechecks all extracted
+hashes and the source archive before removing it. MPQ patch files are retained
+even with that option. Never edit a shared hardlink in place without first
+making an independent working copy.
+
+The desktop **Model browser** uses the same catalog, collapses repeated bundles,
+and retains source selection in **Details**. Texture alternatives remain usable.
+
 ```text
 wowcrucible asset texture-info <file.blp>
 wowcrucible asset map-info <file.adt|wdt|wdl> [--cells] [--placements] [--scene] [--materials --library=processed-assets [--provenance=name]] [--format=text|json]

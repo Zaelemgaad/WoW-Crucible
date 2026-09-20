@@ -71,8 +71,29 @@ place. It does not extract the collection, modify source files, or build MPQs.
    deliberately saved armor choices must still be restored.
 7. Switch animations while playing: playback must continue. Duration belongs
    beside the seek bar. Pause, seek and switch geosets: the model stays paused.
+8. Open a folder containing a loose model and an identical ZIP/extracted copy.
+   There must be one result, with a copy count. Search by either source folder;
+   both searches must find that result. In **Details**, choose either original
+   location and verify its textures and saved defaults are still available.
+   Different SKIN or animation data must remain separate results. Marking the
+   group for deletion must persist for all its copies without deleting files.
 
 Automated checks:
+
+2026-09-20 archive/catalog follow-up: focused core tests cover loose/ZIP bundle
+grouping, distinct SKIN/ANIM variants (including external AFID/SFID references),
+missing-versus-resolved dependencies, JSON round trips, archive traversal/link
+rejection, read-only 7z directories, byte-verified hardlinks, existing-file
+collisions, resume, deferred space-budget retries, and opt-in removal of verified
+archives. Folder, filename, FileDataID and skeleton-ownership indexes are shared
+across models. A real 116,403-file collection scanned in 9.16 seconds: 832 source
+models, 739 grouped results, 93 duplicate copies, no scan errors. These counts
+do not assert that every model renders or works in a client.
+
+Native headless preview regressions passed, including grouped-source search,
+null/recycled templates, clearing the old source selector, saved defaults,
+camera/playback retention and rendered depth/alpha checks. Manual source-selector
+and whole-collection visual checks remain pending.
 
 Latest follow-up: per-material texture layout restored; blind first-variant
 selection for every geoset group removed; 3201 no longer forced on by rebuilding

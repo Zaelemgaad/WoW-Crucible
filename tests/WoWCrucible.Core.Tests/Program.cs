@@ -9,6 +9,7 @@ using System.Text.RegularExpressions;
 
 if (args.Length is 1 or 2 && args[0] == "--model-browser")
 {
+    ModelArchiveLibraryTestSuite.Run();
     ModelBrowserTestSuite.Run(args.Length == 2 ? args[1] : null);
     return;
 }

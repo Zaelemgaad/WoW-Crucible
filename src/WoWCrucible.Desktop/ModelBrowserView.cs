@@ -23,6 +23,7 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     private readonly TextBlock _status = Label("No model selected.");
     private readonly TextBlock _modelTitle = Label(string.Empty);
     private readonly TextBox _details = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
+    private readonly ComboBox _locations = new() { HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly StackPanel _geosets = new() { Spacing = 4 };
     private readonly ModelBrowserTextures _textures = new();
     private readonly M2PreviewView _preview = new();
@@ -37,6 +38,7 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     private ModelBrowserCatalog? _catalog;
     private ModelBrowserSource? _source;
     private ModelBrowserEntry? _current;
+    private ModelBrowserEntry? _currentGroup;
     private M2PreviewGeometry? _fullGeometry;
     private M2PreviewGeometry? _visibleGeometry;
     private CancellationTokenSource? _scan;
@@ -47,6 +49,12 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     public ModelBrowserView(DesktopSettings settings)
     {
         _settings = settings;
+        _locations.ItemTemplate = new FuncDataTemplate<ModelBrowserEntry>((entry, _) => new TextBlock { Text = entry?.RelativePath, TextWrapping = TextWrapping.Wrap });
+        _locations.SelectionChanged += async (_, _) =>
+        {
+            if (!_updating && _currentGroup is { } group && _locations.SelectedItem is ModelBrowserEntry location)
+                await SelectAsync(group, location);
+        };
         _textures.BindingChanged = SetTextureAsync;
         _faces.SelectionChanged += (_, _) => { if (!_updating) { ApplyFace(); ShowGeometry(); } };
         var folder = new Button { Content = "Open model folder" }; folder.Click += async (_, _) => await ChooseFolderAsync();
@@ -63,7 +71,7 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
             Children =
             {
                 new TextBlock { Text = entry.Name, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap },
-                new TextBlock { Text = entry.FormatLabel + " | " + entry.Container, FontSize = 11, Foreground = Brush.Parse("#A8B7C5") },
+                new TextBlock { Text = entry.FormatLabel + " | " + entry.Container + (entry.Copies.Count > 0 ? $" | {entry.Copies.Count + 1} copies" : ""), FontSize = 11, Foreground = Brush.Parse("#A8B7C5") },
                 new TextBlock { Text = entry.RelativePath, FontSize = 11, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#A8B7C5") }
             }
         });
@@ -77,7 +85,7 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
         {
             new TabItem { Header = "Textures", Foreground = Brush.Parse("#E8EBF2"), FontSize = 13, Padding = new Thickness(8), Content = _textures },
             new TabItem { Header = "Geosets", Foreground = Brush.Parse("#E8EBF2"), FontSize = 13, Padding = new Thickness(8), Content = GeosetPane() },
-            new TabItem { Header = "Details", Foreground = Brush.Parse("#E8EBF2"), FontSize = 13, Padding = new Thickness(8), Content = _details }
+            new TabItem { Header = "Details", Foreground = Brush.Parse("#E8EBF2"), FontSize = 13, Padding = new Thickness(8), Content = new DockPanel { Children = { DockTop(_locations), _details } } }
         }};
         var saveDefaults = new Button { Content = "Save defaults" }; saveDefaults.Click += (_, _) => SaveDefaults();
         var resetDefaults = new Button { Content = "Reset defaults" }; resetDefaults.Click += async (_, _) => await ResetDefaultsAsync();
@@ -133,11 +141,11 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
             if (selectedPath is not null) { _search.Text = string.Empty; _filter.SelectedIndex = 0; }
             Filter();
             _details.Text = string.Join('\n', catalog.Errors.Concat(catalog.UnopenedArchives.Select(archive => "Unopened archive: " + archive)));
-            var selected = catalog.Models.FirstOrDefault(entry => entry.FilePath.Equals(selectedPath, StringComparison.OrdinalIgnoreCase)) ?? catalog.Models.FirstOrDefault();
+            var selected = catalog.Models.FirstOrDefault(entry => entry.Locations.Any(copy => copy.FilePath.Equals(selectedPath, StringComparison.OrdinalIgnoreCase))) ?? catalog.Models.FirstOrDefault();
             if (selected is not null)
             {
                 _updating = true; _models.SelectedItem = selected; _models.ScrollIntoView(selected); _updating = false;
-                await SelectAsync(selected);
+                await SelectAsync(selected, selected.Locations.FirstOrDefault(copy => copy.FilePath.Equals(selectedPath, StringComparison.OrdinalIgnoreCase)));
             }
             else { _generation++; ClearModel(); _status.Text = "No M2 models found in this folder or its ZIPs."; }
         }
@@ -154,22 +162,23 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     {
         if (_catalog is null) return;
         var query = (_search.Text ?? string.Empty).Trim(); var mode = _filter.SelectedIndex;
-        var entries = _catalog.Models.Where(entry => entry.RelativePath.Contains(query, StringComparison.OrdinalIgnoreCase) && (mode switch
+        var entries = _catalog.Models.Where(entry => entry.Locations.Any(copy => copy.RelativePath.Contains(query, StringComparison.OrdinalIgnoreCase)) && (mode switch
         {
-            1 => entry.ArchiveEntry is null, 2 => entry.ArchiveEntry is not null,
+            1 => entry.Locations.Any(copy => copy.ArchiveEntry is null), 2 => entry.Locations.Any(copy => copy.ArchiveEntry is not null),
             3 => Review(entry) == "Unreviewed", 4 => Review(entry) == "Keep", 5 => Review(entry) == "Mark for deletion", _ => true
         })).ToArray();
         var selected = _models.SelectedItem;
         _updating = true; _models.ItemsSource = entries; _models.SelectedItem = entries.Contains(selected) ? selected : null; _updating = false;
-        _summary.Text = $"{entries.Length:N0} / {_catalog.Models.Count:N0} models | {_catalog.UnopenedArchives.Count:N0} unopened archives | {_catalog.Errors.Count:N0} scan errors";
+        _summary.Text = $"{entries.Length:N0} / {_catalog.Models.Count:N0} models | {_catalog.SourceModelCount - _catalog.Models.Count:N0} duplicate copies grouped | {_catalog.UnopenedArchives.Count:N0} unopened archives | {_catalog.Errors.Count:N0} scan errors";
     }
 
-    private async Task SelectAsync(ModelBrowserEntry entry)
+    private async Task SelectAsync(ModelBrowserEntry group, ModelBrowserEntry? location = null)
     {
+        var entry = location ?? group.Locations.FirstOrDefault(copy => _settings.ModelBrowserPresets.ContainsKey(copy.Identity)) ?? group;
         var generation = ++_generation;
-        ClearModel(); _current = entry;
+        ClearModel(); _current = entry; _currentGroup = group;
         _modelTitle.Text = entry.Name; _status.Text = "Loading model, skeleton and textures...";
-        _updating = true; _review.SelectedItem = Review(entry); _updating = false;
+        _updating = true; _review.SelectedItem = Review(group); _locations.ItemsSource = group.Locations.ToArray(); _locations.SelectedItem = entry; _locations.IsVisible = group.Copies.Count > 0; _updating = false;
         ModelBrowserSource? source = null;
         var preset = _settings.ModelBrowserPresets.GetValueOrDefault(entry.Identity);
         try
@@ -198,6 +207,7 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
             BuildGeosets(); BuildTextures(); ShowGeometry(); _preview.SetDecodedTextures(_decoded);
             _details.Text = $"{entry.RelativePath}\n\n{entry.FormatLabel}\nVertices: {loaded.Geometry.Vertices.Count:N0}\nBones: {loaded.Geometry.Bones.Count:N0}\nAnimations: {loaded.Geometry.Sequences.Count:N0}\n\n"
                 + string.Join('\n', loaded.Geometry.PreviewWarnings.Concat(loaded.Errors))
+                + (group.Copies.Count > 0 ? "\n\nIdentical model locations:\n" + string.Join('\n', group.Locations.Select(copy => copy.RelativePath)) : "")
                 + "\n\nClient rendering has not been tested. This viewer does not convert or modify the source model.";
             DesktopCrashLogger.Debug("MODEL", "browser-model-loaded", ("path", entry.RelativePath), ("vertices", loaded.Geometry.Vertices.Count), ("bones", loaded.Geometry.Bones.Count), ("animations", loaded.Geometry.Sequences.Count));
         }
@@ -212,7 +222,8 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
 
     private void ClearModel()
     {
-        _preview.ClearGeometry(); _source?.Dispose(); _source = null; _current = null; _fullGeometry = null; _visibleGeometry = null; _modelTitle.Text = string.Empty;
+        _preview.ClearGeometry(); _source?.Dispose(); _source = null; _current = null; _currentGroup = null; _fullGeometry = null; _visibleGeometry = null; _modelTitle.Text = string.Empty;
+        _locations.ItemsSource = null; _locations.IsVisible = false;
         _textures.Clear(); _geosets.Children.Clear(); _geosetChecks.Clear(); _decoded.Clear(); _bindings.Clear(); _textureRequests.Clear(); _selectedGeosets.Clear();
     }
 
@@ -305,7 +316,11 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
         }
     }
 
-    private string Review(ModelBrowserEntry entry) => _settings.ModelBrowserReviews.GetValueOrDefault(entry.Identity) ?? "Unreviewed";
+    private string Review(ModelBrowserEntry entry)
+    {
+        var reviews = entry.Locations.Select(copy => _settings.ModelBrowserReviews.GetValueOrDefault(copy.Identity) ?? "Unreviewed").Distinct().ToArray();
+        return reviews.Length == 1 ? reviews[0] : reviews.Contains("Keep") ? "Keep" : "Unreviewed";
+    }
     private void RestoreGeosets()
     {
         if (_fullGeometry is null) return;
@@ -352,7 +367,12 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     private void SaveReview()
     {
         if (_updating || _current is null || _review.SelectedItem is not string review) return;
-        try { if (review == "Unreviewed") _settings.ModelBrowserReviews.Remove(_current.Identity); else _settings.ModelBrowserReviews[_current.Identity] = review; _settings.Save(); Filter(); }
+        try
+        {
+            foreach (var copy in (_currentGroup ?? _current).Locations)
+                if (review == "Unreviewed") _settings.ModelBrowserReviews.Remove(copy.Identity); else _settings.ModelBrowserReviews[copy.Identity] = review;
+            _settings.Save(); Filter();
+        }
         catch (Exception exception) { _status.Text = "Could not save review: " + exception.Message; DesktopCrashLogger.Log("Model review save failed", exception); }
     }
 

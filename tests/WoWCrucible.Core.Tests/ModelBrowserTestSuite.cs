@@ -22,8 +22,10 @@ internal static class ModelBrowserTestSuite
                 foreach (var file in Directory.GetFiles(root).Where(file => !file.EndsWith(".zip")))
                 { using var stream = zip.CreateEntry("Character/Test/" + Path.GetFileName(file)).Open(); stream.Write(File.ReadAllBytes(file)); }
             var catalog = ModelBrowserCatalogService.Scan(root);
-            Require(catalog.Models.Count == 2 && catalog.Errors.Count == 0, "Loose and ZIP model discovery.");
-            foreach (var entry in catalog.Models)
+            Require(catalog.Models.Count == 1 && catalog.SourceModelCount == 2 && catalog.Errors.Count == 0, "Loose and ZIP copies share one browser row.");
+            var roundTrip = System.Text.Json.JsonSerializer.Deserialize<ModelBrowserCatalog>(System.Text.Json.JsonSerializer.Serialize(catalog))!;
+            Require(roundTrip.Models.Count == 1 && roundTrip.SourceModelCount == 2 && roundTrip.Models[0].Locations.Count() == 2, "Grouped catalog JSON preserves copies without recursive locations.");
+            foreach (var entry in catalog.Models.SelectMany(entry => entry.Locations))
             {
                 using var source = new ModelBrowserSource(entry, catalog);
                 var geometry = M2PreviewGeometryService.LoadForViewing(source, visibilityMode: M2PreviewVisibilityMode.AllGeosets);
@@ -40,6 +42,8 @@ internal static class ModelBrowserTestSuite
             }
             foreach (var pair in hashes) Require(pair.Value.SequenceEqual(SHA256.HashData(File.ReadAllBytes(pair.Key))), "Preview mutated a source file.");
             Require(Directory.GetFiles(root).Length == 4, "ZIP preview extracted files.");
+            CheckDuplicateVariants(root, model, skin, skeleton);
+            CheckExternalDuplicateVariants(root, model, skin, skeleton);
             Expect<InvalidDataException>(() => ModelBrowserSource.Normalize("../outside.blp"));
             using (var broken = new ModelBrowserSource(new ModelBrowserEntry(WriteTruncated(root), null, "broken.m2", 8, "MD21", null, null)))
                 Expect<InvalidDataException>(() => M2PreviewGeometryService.LoadForViewing(broken));
@@ -72,6 +76,24 @@ internal static class ModelBrowserTestSuite
         }
     }
 
+    private static void CheckDuplicateVariants(string root, byte[] model, byte[] skin, byte[] skeleton)
+    {
+        var variant = Path.Combine(root, "variant"); Directory.CreateDirectory(variant);
+        File.WriteAllBytes(Path.Combine(variant, "Model.m2"), Chunk("MD21", model).Concat(Chunk("SKID", UInt(123))).ToArray());
+        var differentSkin = skin.ToArray(); differentSkin[^1] = 1;
+        File.WriteAllBytes(Path.Combine(variant, "Model00.skin"), differentSkin);
+        File.WriteAllBytes(Path.Combine(variant, "Model.skel"), skeleton);
+        var catalog = ModelBrowserCatalogService.Scan(root);
+        Require(catalog.Models.Count == 2 && catalog.SourceModelCount == 3, "Same M2 with different SKIN remains a separate variant.");
+        File.WriteAllBytes(Path.Combine(variant, "Model00.skin"), skin);
+        File.WriteAllBytes(Path.Combine(variant, "Model0000-00.anim"), [1, 2, 3]);
+        catalog = ModelBrowserCatalogService.Scan(root);
+        Require(catalog.Models.Count == 2, "Additional external animation data cannot collapse into another model bundle.");
+        File.Delete(Path.Combine(variant, "Model0000-00.anim"));
+        catalog = ModelBrowserCatalogService.Scan(root);
+        Require(catalog.Models.Count == 1 && catalog.Models[0].Copies.Count == 2, "Identical variants collapse without deleting paths.");
+    }
+
     private static void AuditCorpus(string root)
     {
         var catalog = ModelBrowserCatalogService.Scan(root); var loaded = 0; var animated = 0; var failed = 0;
@@ -92,6 +114,37 @@ internal static class ModelBrowserTestSuite
         }
         Console.WriteLine($"CORPUS {catalog.Models.Count} models; {loaded} geometry loaded; {animated} animation sampled; {failed} load/animation failures; {catalog.UnopenedArchives.Count} unopened archives; {catalog.Errors.Count} scan errors.");
         Require(loaded > 0 && animated > 0, "No real corpus models could be viewed/animated.");
+    }
+
+    private static void CheckExternalDuplicateVariants(string root, byte[] model, byte[] skin, byte[] skeleton)
+    {
+        var folder = Path.Combine(root, "external-variants"); Directory.CreateDirectory(folder);
+        var afid = new byte[8]; U32(afid, 4, 777);
+        var payload = Chunk("MD21", model).Concat(Chunk("SKID", UInt(123))).Concat(Chunk("AFID", afid))
+            .Concat(Chunk("SFID", UInt(888).Concat(UInt(889)).ToArray())).ToArray();
+        Write("a.zip", [1, 2, 3], skin);
+        Write("b.zip", [1, 2, 4], skin);
+        Require(ModelBrowserCatalogService.Scan(folder).Models.Count == 2, "Different AFID animation bytes outside the model folder remain distinct.");
+        File.Delete(Path.Combine(folder, "b.zip"));
+        var differentSkin = skin.ToArray(); differentSkin[^1] = 1;
+        Write("b.zip", [1, 2, 3], differentSkin);
+        Require(ModelBrowserCatalogService.Scan(folder).Models.Count == 2, "Different SFID LOD bytes outside the model folder remain distinct.");
+        File.Delete(Path.Combine(folder, "b.zip")); Write("b.zip", [1, 2, 3], skin);
+        Require(ModelBrowserCatalogService.Scan(folder).Models.Count == 1, "Matching externally referenced bundles group correctly.");
+        File.Delete(Path.Combine(folder, "a.zip")); File.Delete(Path.Combine(folder, "b.zip"));
+        Write("a.zip", null, skin); Write("b.zip", null, skin);
+        Require(ModelBrowserCatalogService.Scan(folder).Models.Count == 1, "Identical missing references do not create duplicate rows.");
+        File.Delete(Path.Combine(folder, "b.zip")); Write("b.zip", [1, 2, 3], skin);
+        Require(ModelBrowserCatalogService.Scan(folder).Models.Count == 2, "A resolved animation is not equivalent to a missing one.");
+
+        void Write(string name, byte[]? animation, byte[] lod)
+        {
+            using var zip = ZipFile.Open(Path.Combine(folder, name), ZipArchiveMode.Create);
+            Add("Models/Model.m2", payload); Add("Models/Model.skel", skeleton); Add("Models/Model00.skin", skin);
+            if (animation is not null) Add("Other/777.anim", animation);
+            Add("Other/888.skin", skin); Add("Other/889.skin", lod);
+            void Add(string path, byte[] bytes) { using var stream = zip.CreateEntry(path).Open(); stream.Write(bytes); }
+        }
     }
 
     private static void CheckViewerDefaults()
