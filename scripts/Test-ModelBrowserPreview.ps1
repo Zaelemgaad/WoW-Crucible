@@ -57,11 +57,12 @@ try {
     InvokeView 'ShowGeometry'
     (Field '_preview').SetDecodedTextures((Field '_decoded'))
     $texturePane = Field '_textures'
-    $materialList = $texturePane.GetType().GetField('_materials', $flags).GetValue($texturePane)
-    $visibleTextures = (Field '_preview').GetType().GetField('_geometry', $flags).GetValue((Field '_preview')).UsedTextureDefinitionIndices.Count
-    if ($materialList.ItemCount -lt $visibleTextures) { throw "Visible unassigned materials are missing from the texture picker: $($materialList.ItemCount) / $visibleTextures." }
-    foreach ($row in $materialList.ItemsSource) { [void]$materialList.ItemTemplate.Build($row) }
-    [void]$materialList.ItemTemplate.Build($null)
+    $textureRows = $texturePane.GetType().GetField('_rows', $flags).GetValue($texturePane)
+    if ($textureRows.Count -ne $geometry.TextureSlots.Count) { throw 'A material is missing its texture dropdown.' }
+    foreach ($row in $textureRows.Values) {
+        [void]$row.Picker.ItemTemplate.Build($row.Picker.SelectedItem)
+        [void]$row.Picker.ItemTemplate.Build($null)
+    }
     $list = Field '_models'
     [void]$list.ItemTemplate.Build($null)
     [void]$list.ItemTemplate.Build($entry)

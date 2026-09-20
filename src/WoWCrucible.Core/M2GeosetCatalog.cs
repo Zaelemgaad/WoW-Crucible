@@ -15,12 +15,17 @@ public static class M2GeosetCatalog
 {
     public static IReadOnlySet<int> BrowserDefaults(IReadOnlyList<M2PreviewSubmesh> submeshes)
     {
-        var selected = submeshes.Where(section => section.GeosetId is 0 or 1).Select(section => section.Index).ToHashSet();
-        foreach (var group in submeshes.Where(section => section.GeosetGroup > 0 && section.GeosetGroup is not 32 and not 35 and not 36).GroupBy(section => section.GeosetGroup))
+        var selected = submeshes.Where(section => section.GeosetId == 0).Select(section => section.Index).ToHashSet();
+        // Seed only the requested base-body parts, not the first armor variant in
+        // every group. Bare feet (20) are separate from feet/boots (5).
+        foreach (var group in submeshes.Where(section => section.GeosetGroup is 4 or 20 or 23 or 33 or 34).GroupBy(section => section.GeosetGroup))
         {
             var variant = group.Where(section => section.TriangleIndexCount > 0).MinBy(section => section.GeosetVariant)?.GeosetVariant;
             selected.UnionWith(group.Where(section => section.GeosetVariant == variant).Select(section => section.Index));
         }
+        var ears = submeshes.Where(section => section.GeosetGroup == 7 && section.TriangleIndexCount > 0)
+            .Select(section => section.GeosetId).Distinct().Order().Take(2).ToHashSet();
+        selected.UnionWith(submeshes.Where(section => ears.Contains(section.GeosetId)).Select(section => section.Index));
         selected.UnionWith(submeshes.Where(section => section.GeosetId == 3201).Select(section => section.Index));
         var face = submeshes.Where(section => section.GeosetGroup == 32 && section.GeosetVariant > 1)
             .GroupBy(section => section.GeosetId).OrderByDescending(group => group.Sum(section => section.TriangleIndexCount)).ThenBy(group => group.Key).FirstOrDefault();

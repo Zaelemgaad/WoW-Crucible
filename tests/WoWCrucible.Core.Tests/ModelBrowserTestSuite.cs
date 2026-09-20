@@ -59,7 +59,7 @@ internal static class ModelBrowserTestSuite
             Require(M2AnimationNames.Get(ushort.MaxValue).StartsWith("Unknown animation"), "Unknown animation IDs are not mislabelled.");
             var beforeCancel = new CancellationToken(true);
             Expect<OperationCanceledException>(() => ModelBrowserCatalogService.Scan(root, beforeCancel));
-            Console.WriteLine("PASS model browser: folder/ZIP discovery, read-only preview, external skeleton animation, grouped face/neck/ear defaults, camera target/model movement, animation names, malformed input, traversal, cancellation.");
+            Console.WriteLine("PASS model browser: folder/ZIP discovery, read-only preview, external skeleton animation, unarmored face/body/ear defaults, camera target/model movement, animation names, malformed input, traversal, cancellation.");
             if (corpus is not null) AuditCorpus(corpus);
         }
         finally
@@ -95,11 +95,18 @@ internal static class ModelBrowserTestSuite
 
     private static void CheckViewerDefaults()
     {
-        M2PreviewSubmesh[] sections = [Section(0, 0, 100), Section(1, 3201, 112), Section(2, 3202, 114), Section(3, 3202, 1780),
-            Section(4, 3203, 114), Section(5, 3203, 1780), Section(6, 702, 204), Section(7, 703, 204), Section(8, 3501, 500), Section(9, 3601, 500)];
+        var sections = new List<M2PreviewSubmesh> { Section(0, 0, 100), Section(1, 3201, 112), Section(2, 3202, 114), Section(3, 3202, 1780),
+            Section(4, 3203, 114), Section(5, 3203, 1780), Section(6, 702, 204), Section(7, 703, 204), Section(8, 3501, 500), Section(9, 3601, 500),
+            Section(10, 401, 240), Section(11, 2001, 1430), Section(12, 2301, 120), Section(13, 3301, 256), Section(14, 3401, 128) };
+        // Include both absent-01 armor groups and arbitrary customization groups.
+        foreach (var id in new ushort[] { 1, 2, 402, 2002, 2302, 3302, 3402, 502, 802, 902, 1502, 704, 5101 })
+            sections.Add(Section(sections.Count, id, 300));
+        foreach (var group in Enumerable.Range(1, 43).Except(new[] { 4, 7, 20, 23, 32, 33, 34, 35, 36 }))
+            sections.Add(Section(sections.Count, (ushort)(group * 100 + 1), 300));
         var defaults = M2GeosetCatalog.BrowserDefaults(sections);
-        Require(defaults.SetEquals(new HashSet<int> { 0, 1, 2, 3, 6 }), "Full paired face, neck, available ears; accessories excluded.");
-        Require(M2GeosetCatalog.BrowserDefaults(sections.Where(s => s.GeosetId != 3201).ToArray()).SetEquals(new HashSet<int> { 0, 2, 3, 6 }), "Missing neck does not select two faces.");
+        Require(defaults.SetEquals(new HashSet<int> { 0, 1, 2, 3, 6, 7, 10, 11, 12, 13, 14 }), "Only base body, first hands/bare feet/hand attachments, two ears, eyes/brows, full paired face and neck start visible.");
+        Require(M2GeosetCatalog.BrowserDefaults(sections.Where(s => s.GeosetId != 3201).ToArray()).SetEquals(new HashSet<int> { 0, 2, 3, 6, 7, 10, 11, 12, 13, 14 }), "Missing neck does not select two faces or substitute armor.");
+        Require(M2GeosetCatalog.BrowserDefaults(sections.Where(s => s.GeosetGroup != 7 || s.GeosetId == 703).ToArray()).Contains(7), "A model with only one available ear variant still shows it.");
         static M2PreviewSubmesh Section(int index, ushort id, int triangles) => new(index, id, 0, 0, 0, 0, triangles * 3, true);
     }
 

@@ -39,6 +39,7 @@ public static class PreviewFrameLifetimeRegression
         CheckInteraction();
         CheckDepth();
         CheckSavedDefaults();
+        CheckTextureRows();
     }
 
     private static void Check(string mode)
@@ -201,13 +202,13 @@ public static class PreviewFrameLifetimeRegression
     {
         var assembly = typeof(M2PreviewView).Assembly;
         var settingsType = assembly.GetType("WoWCrucible.Desktop.DesktopSettings", true);
-        const string json = "{\"ModelBrowserReviews\":{\"fixture.m2|\":\"Mark for deletion\"},\"ModelBrowserPresets\":{\"fixture.m2|\":{\"GeosetIds\":[0,3201,3203,703],\"Textures\":{\"0\":\"OtherFolder/alternate.blp\",\"2\":\"C:/Textures/pick.blp\"}}}}";
+        const string json = "{\"ModelBrowserReviews\":{\"fixture.m2|\":\"Mark for deletion\"},\"ModelBrowserPresets\":{\"fixture.m2|\":{\"GeosetIds\":[0,3203,703,502],\"Textures\":{\"0\":\"OtherFolder/alternate.blp\",\"2\":\"C:/Textures/pick.blp\"}}}}";
         var settings = System.Text.Json.JsonSerializer.Deserialize(json, settingsType);
         settings = System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(settings, settingsType), settingsType);
         var viewType = assembly.GetType("WoWCrucible.Desktop.ModelBrowserView", true);
         using var view = (IDisposable)Activator.CreateInstance(viewType, [settings]);
         var entry = new ModelBrowserEntry("fixture.m2", null, "fixture.m2", 0, "MD20", 264, null);
-        ushort[] ids = [0, 3201, 3202, 3203, 703, 3501, 3601];
+        ushort[] ids = [0, 3201, 3202, 3203, 703, 3501, 3601, 502];
         var full = Model with
         {
             ModelPath = "fixture.m2", VisibilityMode = M2PreviewVisibilityMode.AllGeosets,
@@ -217,15 +218,75 @@ public static class PreviewFrameLifetimeRegression
         };
         viewType.GetField("_current", Fields).SetValue(view, entry); viewType.GetField("_fullGeometry", Fields).SetValue(view, full);
         Invoke(view, "RestoreGeosets");
-        if (!((HashSet<int>)Get(view, "_selectedGeosets")).SetEquals([0, 1, 3, 4]))
+        var selected = (HashSet<int>)Get(view, "_selectedGeosets");
+        if (!selected.SetEquals([0, 3, 4, 7]))
             throw new InvalidOperationException("Saved model choices were overridden by automatic defaults.");
+        var checks = (List<CheckBox>)Get(view, "_geosetChecks");
+        var neck = checks.Single(check => ((int[])check.Tag).Contains(1));
+        if (!neck.IsEnabled || neck.IsChecked == true) throw new InvalidOperationException("Geoset 3201 is locked or forced on.");
+        neck.IsChecked = true;
+        if (!selected.Contains(1)) throw new InvalidOperationException("Geoset 3201 could not be enabled.");
+        neck.IsChecked = false;
+        if (selected.Contains(1)) throw new InvalidOperationException("Geoset 3201 could not be disabled.");
+        var faces = (ComboBox)Get(view, "_faces"); faces.SelectedIndex = 0; faces.SelectedIndex = 1;
+        if (selected.Contains(1)) throw new InvalidOperationException("Changing faces forced geoset 3201 back on.");
+        Invoke(view, "BuildGeosets");
+        if (selected.Contains(1)) throw new InvalidOperationException("Rebuilding controls forced geoset 3201 back on.");
+        Invoke(view, "RestoreGeosets");
+        if (!selected.SetEquals([0, 3, 4, 7])) throw new InvalidOperationException("Restoring defaults forced geoset 3201 back on or discarded explicit armor choices.");
         if ((string)viewType.GetMethod("Review", Fields).Invoke(view, [entry]) != "Mark for deletion")
             throw new InvalidOperationException("Deletion mark did not survive settings serialization.");
         var presets = (IDictionary)settingsType.GetProperty("ModelBrowserPresets").GetValue(settings);
         var preset = presets[entry.Identity]; var bindings = (Dictionary<int, string>)preset.GetType().GetProperty("Textures").GetValue(preset);
         if (bindings[0] != "OtherFolder/alternate.blp" || bindings[2] != "C:/Textures/pick.blp")
             throw new InvalidOperationException("Cross-folder texture choices did not survive settings serialization.");
-        Console.WriteLine("PASS saved custom face/ear/accessory defaults, cross-folder texture bindings and deletion marks survive JSON round trips; no user settings or source files written.");
+        Console.WriteLine("PASS geoset 3201 toggles freely and stays off through face changes/rebuilds; saved armor overrides, textures and deletion marks survive JSON round trips; no user settings or source files written.");
+    }
+
+    private static void CheckTextureRows()
+    {
+        var type = typeof(M2PreviewView).Assembly.GetType("WoWCrucible.Desktop.Controls.ModelBrowserTextures", true);
+        var pane = Activator.CreateInstance(type);
+        var model = Model with { TextureSlots = [new(0, 1, 0, null), new(1, 6, 0, null), new(2, 19, 0, null)] };
+        var bindings = new Dictionary<int, string> { [0] = "Body/red.blp", [1] = "Hair/red.blp" };
+        var changes = new List<(int Slot, string Path)>();
+        type.GetProperty("BindingChanged").SetValue(pane, (Func<int, string, Task>)((slot, path) =>
+        {
+            changes.Add((slot, path));
+            if (path is null) bindings.Remove(slot); else bindings[slot] = path;
+            Invoke(pane, "UpdateBindings", bindings, bindings.Keys);
+            return Task.CompletedTask;
+        }));
+        Invoke(pane, "Load", model, bindings, new[] { 0 }, new[] { "Body/red.blp", "Hair/red.blp", "OtherFolder/blue.blp" });
+        var rows = (IDictionary)Get(pane, "_rows");
+        if (rows.Count != 3 || changes.Count != 0) throw new InvalidOperationException("Texture loading changed a binding or omitted a material row.");
+        foreach (var row in rows.Values)
+        {
+            var picker = Picker(row);
+            if (!Panel(row).IsVisible || !picker.IsEnabled || picker.ItemTemplate.Build(null) is null || picker.ItemTemplate.Build(picker.SelectedItem) is null)
+                throw new InvalidOperationException("A per-material dropdown is hidden, disabled or cannot render an empty item.");
+        }
+        if (!((TextBlock)rows[1].GetType().GetProperty("Usage").GetValue(rows[1])).Text.Contains("Unresolved"))
+            throw new InvalidOperationException("An unresolved saved texture is not identified.");
+        var first = Picker(rows[0]);
+        ((TextBox)Get(pane, "_search")).Text = "blue";
+        if (changes.Count != 0 || Path(first.SelectedItem) != "Body/red.blp")
+            throw new InvalidOperationException("Filtering texture choices altered the current binding.");
+        first.SelectedItem = first.ItemsSource.Cast<object>().Single(choice => Path(choice) == "OtherFolder/blue.blp");
+        if (changes.Count != 1 || changes[0] != (0, "OtherFolder/blue.blp") || bindings[1] != "Hair/red.blp")
+            throw new InvalidOperationException("A row texture selection updated the wrong material or fired duplicate changes.");
+        ((CheckBox)Get(pane, "_inactive")).IsChecked = false;
+        if (!Panel(rows[0]).IsVisible || Panel(rows[1]).IsVisible) throw new InvalidOperationException("Unused material filtering is incorrect.");
+        Invoke(pane, "UpdateVisibleGeometry", model with { Batches = [] });
+        if (!ReferenceEquals(first, Picker(rows[0])) || Panel(rows[0]).IsVisible || bindings[0] != "OtherFolder/blue.blp")
+            throw new InvalidOperationException("Changing geosets rebuilt texture controls or changed a binding.");
+        Invoke(pane, "Clear"); first.SelectedIndex = 0;
+        if (changes.Count != 1 || rows.Count != 0) throw new InvalidOperationException("An old texture row changed a binding after unloading its model.");
+        Console.WriteLine("PASS per-material dropdowns, cross-folder assignment, filtered selection retention, unused/unresolved state, null templates and stale-row rejection.");
+
+        static ComboBox Picker(object row) => (ComboBox)row.GetType().GetProperty("Picker").GetValue(row);
+        static StackPanel Panel(object row) => (StackPanel)row.GetType().GetProperty("Panel").GetValue(row);
+        static string Path(object choice) => (string)choice.GetType().GetProperty("Path").GetValue(choice);
     }
 
     private static SKBitmap[] Bitmaps(object operation) => Objects(operation).OfType<SKBitmap>().ToArray();

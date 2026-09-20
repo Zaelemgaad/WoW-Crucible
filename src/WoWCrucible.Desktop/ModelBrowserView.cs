@@ -236,9 +236,7 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
         {
             var section = sections.First();
             if (section.GeosetGroup == 32 && section.GeosetVariant > 1) continue;
-            var neck = section.GeosetId == 3201 && choices.Length > 0;
-            if (neck) _selectedGeosets.UnionWith(sections.Select(part => part.Index));
-            var check = new CheckBox { Content = Label(neck ? "Neck cover" : $"{section.GeosetId}  {section.GeosetGroupName} ({sections.Sum(part => part.TriangleIndexCount) / 3:N0})"), IsChecked = neck || sections.Any(part => _selectedGeosets.Contains(part.Index)), IsEnabled = !neck, Tag = sections.Select(part => part.Index).ToArray() };
+            var check = new CheckBox { Content = Label($"{section.GeosetId}  {section.GeosetGroupName} ({sections.Sum(part => part.TriangleIndexCount) / 3:N0})"), IsChecked = sections.Any(part => _selectedGeosets.Contains(part.Index)), Tag = sections.Select(part => part.Index).ToArray() };
             check.IsCheckedChanged += (_, _) =>
             {
                 if (_updating) return;
@@ -348,8 +346,8 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
     private void ApplyFace()
     {
         if (_fullGeometry is null || _faces.SelectedItem is not FaceChoice face) return;
-        foreach (var section in _fullGeometry.Submeshes.Where(section => section.GeosetGroup == 32))
-            if (section.GeosetVariant == 1 || section.GeosetId == face.GeosetId) _selectedGeosets.Add(section.Index); else _selectedGeosets.Remove(section.Index);
+        foreach (var section in _fullGeometry.Submeshes.Where(section => section.GeosetGroup == 32 && section.GeosetVariant > 1))
+            if (section.GeosetId == face.GeosetId) _selectedGeosets.Add(section.Index); else _selectedGeosets.Remove(section.Index);
     }
     private void SaveReview()
     {

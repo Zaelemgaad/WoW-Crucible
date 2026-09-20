@@ -19,11 +19,15 @@ Leave manual keyboard/drag checks for the user when the desktop is shared.
       face framing, stable zoom target, direct camera controls.
 - [x] Named animations, persistent playback when switching clips, duration beside
       the timeline rather than in animation names.
-- [x] Face variants grouped by geoset ID, keeping the separate neck cover active.
-      Available ears enabled; earrings and necklaces initially disabled.
+- [x] Face variants grouped by geoset ID. The initial selection includes base
+      body (0), first hands/gloves (4), bare feet (20), hand attachment (23), eyes
+      (33), eyebrows (34), two available ear variants (7), 3201 and one full face.
+      All other groups start off, including boots (5), sleeves, knees and cloaks.
+      No geoset checkbox is locked; saved choices override these defaults.
 - [x] Saved per-model geoset/texture defaults override initial selections.
-- [x] Texture role labels and visible usage/missing-binding state; one searchable
-      picker includes BLPs throughout the opened folder, not just model siblings.
+- [x] Texture role labels and visible usage/missing-binding state; each material
+      has its own dropdown and browse control. Shared search filters available
+      BLPs throughout the opened folder without changing assigned textures.
 - [x] Non-destructive deletion marks replace Skip; previous Skip records are not
       automatically treated as requests to delete anything.
 - [x] Depth-tested mesh rendering, opaque versus alpha-cutout material behavior,
@@ -41,7 +45,7 @@ place. It does not extract the collection, modify source files, or build MPQs.
 2. Select a model with its companions present. Rotate/zoom the preview, choose
    an animation, press **Play**, and scrub the timeline. Opening another model
    must replace both geometry and texture controls, without a stale frame.
-3. In **Textures**, select a named material, then an available BLP or its browse button. Change the
+3. In **Textures**, use the dropdown or browse button beside a material. Change the
    choice several times quickly. The last choice must win. Unresolved textures
    remain explicitly unassigned; these are not a complete character appearance.
 4. Move the orbit target with right-drag, reposition the model with middle-drag,
@@ -55,10 +59,24 @@ place. It does not extract the collection, modify source files, or build MPQs.
    **Save defaults**, then open another model and return. Those choices must be
    restored together. **Defaults** restores saved geosets; **Reset defaults**
    clears the saved override and restores initial geosets and texture bindings.
+   Turn 3201 off, change faces, save defaults and reopen the model: it must stay
+   off. Boots, sleeves and capes must start off on a model without saved defaults;
+   deliberately saved armor choices must still be restored.
 7. Switch animations while playing: playback must continue. Duration belongs
    beside the seek bar. Pause, seek and switch geosets: the model stays paused.
 
 Automated checks:
+
+Latest follow-up: per-material texture layout restored; blind first-variant
+selection for every geoset group removed; 3201 no longer forced on by rebuilding
+controls or changing faces. Optimized Debug build passed with zero warnings or
+errors. Core default-selection tests and the native-frame regression passed,
+including saved neck-off/armor-on overrides, per-row cross-folder assignment,
+search without assignment changes, unused/unresolved states and stale controls.
+Human and Blood Elf previews passed animated-pixel/nonblank checks; the restored
+Human texture layout was inspected in a headless screenshot. Ten-frame local
+render samples measured 15.1 ms/Human and 14.0 ms/Blood Elf. No global input was
+sent; interactive mouse/dropdown use remains a manual check.
 
 ```powershell
 dotnet run --project tests/WoWCrucible.Core.Tests -- --model-browser
