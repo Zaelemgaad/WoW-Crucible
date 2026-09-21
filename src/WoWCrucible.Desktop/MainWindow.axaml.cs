@@ -1343,7 +1343,7 @@ public partial class MainWindow : Window
             _compatibilityLabView = new CompatibilityLabView(_workspaceSession.Settings);
             _compatibilityLabView.BackRequested += (_, _) => CloseFeatureWorkspace();
         }
-        OpenFeatureWorkspace(_compatibilityLabView, "Compatibility Lab");
+        OpenFeatureWorkspace(_compatibilityLabView, "Client & Server File Checks");
     }
     private async void OpenKnowledgeClick(object? sender, RoutedEventArgs e) => await OpenKnowledgeAsync(_knowledgeContext);
     public async Task OpenKnowledgeAsync(string? query = null)

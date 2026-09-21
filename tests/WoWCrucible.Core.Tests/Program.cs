@@ -172,6 +172,8 @@ if (CrucibleCommandCatalog.All.Count < 25 || CrucibleCommandCatalog.All.Select(c
     CrucibleCommandCatalog.Search("groundeffects doodad assignment").FirstOrDefault()?.Command.Id != "workspace.maps" ||
     CrucibleCommandCatalog.Search("mh2o liquidtype water height").FirstOrDefault()?.Command.Id != "workspace.maps" ||
     CrucibleCommandCatalog.Search("model viewer animation").FirstOrDefault()?.Command.Id != "workspace.models" ||
+    CrucibleCommandCatalog.Search("client server file checks").FirstOrDefault()?.Command.Id != "workspace.compatibility-lab" ||
+    CrucibleCommandCatalog.All.Single(command => command.Id == "workspace.compatibility-lab").Title != "Client & Server File Checks" ||
     CrucibleCommandCatalog.Search("texture luminance mask").FirstOrDefault()?.Command.Id != "workspace.textures" ||
     CrucibleCommandCatalog.Search("wiki field help").FirstOrDefault()?.Command.Id != "workspace.knowledge" ||
     CrucibleCommandCatalog.Search("wdb cache parser").FirstOrDefault()?.Command.Id != "workspace.cache" ||

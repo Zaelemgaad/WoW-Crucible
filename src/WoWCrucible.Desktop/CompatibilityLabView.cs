@@ -15,15 +15,15 @@ internal sealed class CompatibilityLabView : UserControl
     private sealed record ResultRow(string Kind, string Name, string Result, string Detail);
 
     private readonly DesktopSettings _settings;
-    private readonly TextBox _request = new() { PlaceholderText = "Compatibility lab request JSON" };
-    private readonly Button _prepare = Accent("Prepare / verify clones");
-    private readonly Button _audit = new() { Content = "Run compatibility audit" };
+    private readonly TextBox _request = new() { PlaceholderText = "Client/server test setup (.json)" };
+    private readonly Button _prepare = Accent("Create / verify test copies");
+    private readonly Button _audit = new() { Content = "Run file checks" };
     private readonly Button _cancel = new() { Content = "Cancel", IsEnabled = false };
-    private readonly Button _reveal = new() { Content = "Reveal report", IsEnabled = false };
+    private readonly Button _reveal = new() { Content = "Open report folder", IsEnabled = false };
     private readonly ProgressBar _progress = new() { Minimum = 0, Maximum = 1, Value = 0, Height = 5 };
-    private readonly TextBlock _status = Status("No compatibility request selected.");
+    private readonly TextBlock _status = Status("No test setup selected.");
     private readonly ListBox _results = new();
-    private readonly TextBlock _detail = Status("Run clone preparation or the compatibility audit to populate results.");
+    private readonly TextBlock _detail = Status("No results yet.");
     private CancellationTokenSource? _operation;
     private string? _lastReportRoot;
 
@@ -51,13 +51,13 @@ internal sealed class CompatibilityLabView : UserControl
                 Children =
                 {
                     back,
-                    new TextBlock { Text = "COMPATIBILITY LAB", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) },
+                    new TextBlock { Text = "CLIENT & SERVER FILE CHECKS", FontSize = 18, FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0) },
                     _prepare, _audit, _cancel, _reveal
                 }
             }
         };
         var requestRow = new Grid { ColumnDefinitions = new("Auto,*,Auto"), ColumnSpacing = 8, Margin = new Thickness(12, 10, 12, 6) };
-        var requestLabel = new TextBlock { Text = "Request", VerticalAlignment = VerticalAlignment.Center };
+        var requestLabel = new TextBlock { Text = "Test setup", VerticalAlignment = VerticalAlignment.Center };
         requestRow.Children.Add(requestLabel); Grid.SetColumn(_request, 1); requestRow.Children.Add(_request); Grid.SetColumn(browse, 2); requestRow.Children.Add(browse);
         var operationState = new StackPanel { Spacing = 5, Margin = new Thickness(12, 0, 12, 8), Children = { _progress, _status } };
         var body = new Grid { RowDefinitions = new("*,Auto,*"), RowSpacing = 5, Margin = new Thickness(12, 0, 12, 10) };
@@ -71,7 +71,7 @@ internal sealed class CompatibilityLabView : UserControl
 
     private async Task PrepareAsync()
     {
-        var operation = Begin("Preparing isolated clone trees...");
+        var operation = Begin("Preparing test copies...");
         try
         {
             var requestPath = PersistRequestPath();
@@ -79,28 +79,28 @@ internal sealed class CompatibilityLabView : UserControl
             var report = await Task.Run(() => CompatibilityLabService.PrepareClones(CompatibilityLabService.LoadRequest(requestPath), progress, operation.Token), operation.Token);
             if (!ReferenceEquals(_operation, operation)) return;
             _lastReportRoot = report.ReportRoot; _reveal.IsEnabled = true;
-            _results.ItemsSource = report.Entries.Select(entry => new ResultRow("CLONE", entry.Name,
+            _results.ItemsSource = report.Entries.Select(entry => new ResultRow("TEST COPY", entry.Name,
                 entry.Passed ? entry.State.ToString() : "FAILED",
                 $"Source: {entry.SourceRoot}\nClone: {entry.CloneRoot}\nCopied: {entry.CopiedFiles:N0} files ({FormatBytes(entry.CopiedBytes)})\nConsensus hard links: {entry.LinkedFiles:N0} files ({FormatBytes(entry.LinkedBytes)})\nReused: {entry.ReusedFiles:N0} files ({FormatBytes(entry.ReusedBytes)})\nRemoved stale partial files: {entry.RemovedStaleFiles:N0}\nIdentity audit: {(entry.Audit?.Passed == true ? "PASS" : "FAIL")}\n{string.Join(Environment.NewLine, entry.Errors)}")).ToArray();
-            _status.Text = $"Clone preparation {(report.Passed ? "passed" : "failed")} - {report.Entries.Count:N0} pair(s) - {report.ReportRoot}";
+            _status.Text = $"Test copy preparation {(report.Passed ? "passed" : "failed")} - {report.Entries.Count:N0} pair(s) - {report.ReportRoot}";
             _progress.Value = report.Passed ? 1 : 0;
             DesktopCrashLogger.Debug("COMPAT", "clone-preparation-complete", ("passed", report.Passed), ("pairs", report.Entries.Count), ("report", report.ReportRoot));
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
-            if (ReferenceEquals(_operation, operation)) _status.Text = "Clone preparation cancelled. Its marked partial tree is retained and the same request resumes it.";
+            if (ReferenceEquals(_operation, operation)) _status.Text = "Copying cancelled. Incomplete test copies are retained for resuming with the same setup.";
         }
         catch (Exception exception)
         {
-            if (ReferenceEquals(_operation, operation)) { _status.Text = $"Clone preparation failed: {exception.Message}"; _progress.Value = 0; }
-            DesktopCrashLogger.Log("Compatibility clone preparation failed", exception);
+            if (ReferenceEquals(_operation, operation)) { _status.Text = $"Test copy preparation failed: {exception.Message}"; _progress.Value = 0; }
+            DesktopCrashLogger.Log("Test copy preparation failed", exception);
         }
         finally { End(operation); }
     }
 
     private async Task AuditAsync()
     {
-        var operation = Begin("Running compatibility audit...");
+        var operation = Begin("Checking client and server files...");
         try
         {
             var requestPath = PersistRequestPath();
@@ -108,33 +108,33 @@ internal sealed class CompatibilityLabView : UserControl
             var report = await Task.Run(() => CompatibilityLabService.Run(CompatibilityLabService.LoadRequest(requestPath), progress, operation.Token), operation.Token);
             if (!ReferenceEquals(_operation, operation)) return;
             _lastReportRoot = report.RunRoot; _reveal.IsEnabled = true;
-            var rows = report.CloneAudits.Select(value => new ResultRow("CLONE", value.Name, value.Passed ? "PASS" : "FAIL",
+            var rows = report.CloneAudits.Select(value => new ResultRow("TEST COPY", value.Name, value.Passed ? "PASS" : "FAIL",
                     $"Source: {value.SourceRoot}\nClone: {value.CloneRoot}\nHashed: {value.HashedPairs:N0}\nMissing: {value.MissingFiles:N0}; extra: {value.ExtraFiles:N0}; length mismatch: {value.LengthMismatches:N0}; SHA-256 mismatch: {value.HashMismatches:N0}"))
-                .Concat(report.LaneAudits.Select(value => new ResultRow("LANE", value.Name, value.Passed ? "PASS" : "FAIL",
+                .Concat(report.LaneAudits.Select(value => new ResultRow("BUILD", value.Name, value.Passed ? "PASS" : "FAIL",
                     $"Profile: {value.ProfileId}; build {value.Build:N0}; core {value.CoreFamily}\nTables: {value.TableFiles:N0}; schema failures: {value.SchemaAudit.Failures:N0}\nNative deployment: {(value.NativeDeployment.Passed ? "PASS" : "FAIL")}\n{string.Join(Environment.NewLine, value.Findings.Concat(value.Errors))}")))
-                .Concat(report.CrossTargetDeployments.Select(value => new ResultRow("CROSS", $"{value.SourceLane} -> {value.TargetLane}", value.Passed ? "PASS" : "FAIL",
+                .Concat(report.CrossTargetDeployments.Select(value => new ResultRow("CROSS-BUILD", $"{value.SourceLane} -> {value.TargetLane}", value.Passed ? "PASS" : "FAIL",
                     $"Entries: {value.Entries:N0}; client staged: {value.StagedClientFiles:N0}; server staged: {value.StagedServerFiles:N0}; blocked: {value.BlockedFiles:N0}\n{string.Join(Environment.NewLine, value.Findings)}")))
                 .ToArray();
             _results.ItemsSource = rows;
-            _status.Text = $"Compatibility audit {(report.Passed ? "passed" : "found blockers")} - {report.RunRoot}";
+            _status.Text = $"File checks {(report.Passed ? "passed" : "found problems")} - {report.RunRoot}";
             _progress.Value = report.Passed ? 1 : 0;
             DesktopCrashLogger.Debug("COMPAT", "lab-complete", ("passed", report.Passed), ("lanes", report.LaneAudits.Count), ("report", report.RunRoot));
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
-            if (ReferenceEquals(_operation, operation)) _status.Text = "Compatibility audit cancelled.";
+            if (ReferenceEquals(_operation, operation)) _status.Text = "File checks cancelled.";
         }
         catch (Exception exception)
         {
-            if (ReferenceEquals(_operation, operation)) { _status.Text = $"Compatibility audit failed: {exception.Message}"; _progress.Value = 0; }
-            DesktopCrashLogger.Log("Compatibility lab failed", exception);
+            if (ReferenceEquals(_operation, operation)) { _status.Text = $"File checks failed: {exception.Message}"; _progress.Value = 0; }
+            DesktopCrashLogger.Log("Client and server file checks failed", exception);
         }
         finally { End(operation); }
     }
 
     private CancellationTokenSource Begin(string status)
     {
-        if (_operation is not null) throw new InvalidOperationException("A compatibility operation is already running.");
+        if (_operation is not null) throw new InvalidOperationException("A file check or copy operation is already running.");
         var operation = _operation = new CancellationTokenSource();
         _prepare.IsEnabled = _audit.IsEnabled = false; _cancel.IsEnabled = true; _progress.IsIndeterminate = true; _progress.Value = 0; _status.Text = status;
         return operation;
@@ -157,18 +157,18 @@ internal sealed class CompatibilityLabView : UserControl
     private string PersistRequestPath()
     {
         var path = Path.GetFullPath(_request.Text?.Trim() ?? string.Empty);
-        if (!File.Exists(path)) throw new FileNotFoundException("Compatibility request does not exist.", path);
+        if (!File.Exists(path)) throw new FileNotFoundException("Test setup file does not exist.", path);
         _settings.CompatibilityLabRequestPath = path; _settings.Save();
         return path;
     }
 
     private async Task PickRequestAsync()
     {
-        var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The compatibility lab is not attached to the main window.");
+        var storage = TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("Client and server file checks are not attached to the main window.");
         var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Select compatibility lab request", AllowMultiple = false,
-            FileTypeFilter = [new FilePickerFileType("Compatibility request") { Patterns = ["*.json"] }]
+            Title = "Select client/server test setup", AllowMultiple = false,
+            FileTypeFilter = [new FilePickerFileType("Test setup (.json)") { Patterns = ["*.json"] }]
         });
         var path = files.FirstOrDefault()?.TryGetLocalPath();
         if (path is null) return;

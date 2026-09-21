@@ -136,7 +136,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
                     ("MPQ patches & archives", "workspace.mpq"),
                     ("Merge MPQ patches", "workspace.mpq-merge"),
                     ("Client workshop", "workspace.client"),
-                    ("Compatibility lab", "workspace.compatibility-lab")),
+                    ("Client & Server File Checks", "workspace.compatibility-lab")),
                 DomainMenu("SERVER",
                     ("Connection & controls", "workspace.server"),
                     ("SQL Studio", "workspace.sql"),

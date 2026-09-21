@@ -152,9 +152,9 @@ public static partial class CompatibilityLabService
 
     public static CompatibilityLabRequest LoadRequest(string path)
     {
-        path = RequiredFile(path, "Compatibility-lab request");
+        path = RequiredFile(path, "Client/server test setup");
         var request = JsonSerializer.Deserialize<CompatibilityLabRequest>(File.ReadAllText(path), JsonOptions)
-            ?? throw new InvalidDataException("Compatibility-lab request is empty.");
+            ?? throw new InvalidDataException("Client/server test setup is empty.");
         ValidateRequest(request);
         return request;
     }
@@ -526,7 +526,7 @@ public static partial class CompatibilityLabService
     private static string RenderMarkdown(CompatibilityLabReport report)
     {
         var text = new StringBuilder();
-        text.AppendLine("# WoW Crucible Compatibility Lab").AppendLine();
+        text.AppendLine("# WoW Crucible Client & Server File Checks").AppendLine();
         text.AppendLine($"- Result: **{(report.Passed ? "PASS" : "FAIL")}**");
         text.AppendLine($"- Started UTC: {report.StartedUtc:O}");
         text.AppendLine($"- Completed UTC: {report.CompletedUtc:O}");
@@ -591,17 +591,17 @@ public static partial class CompatibilityLabService
     private static void ValidateRequest(CompatibilityLabRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.FormatVersion != RequestFormatVersion) throw new InvalidDataException($"Unsupported compatibility-lab request version {request.FormatVersion}.");
-        if (string.IsNullOrWhiteSpace(request.OutputRoot)) throw new InvalidDataException("Compatibility-lab output root is required.");
-        if (request.Lanes.Count < 2) throw new InvalidDataException("Compatibility lab requires at least two target lanes for cross-target stress testing.");
+        if (request.FormatVersion != RequestFormatVersion) throw new InvalidDataException($"Unsupported client/server test setup version {request.FormatVersion}.");
+        if (string.IsNullOrWhiteSpace(request.OutputRoot)) throw new InvalidDataException("A report output folder is required.");
+        if (request.Lanes.Count < 2) throw new InvalidDataException("Client and server file checks require at least two builds for cross-build testing.");
         var duplicate = request.Lanes.GroupBy(lane => lane.Name, StringComparer.OrdinalIgnoreCase).FirstOrDefault(group => group.Count() > 1);
-        if (duplicate is not null) throw new InvalidDataException($"Compatibility-lab lane name is duplicated: {duplicate.Key}");
+        if (duplicate is not null) throw new InvalidDataException($"Test build name is duplicated: {duplicate.Key}");
         foreach (var lane in request.Lanes)
         {
             if (string.IsNullOrWhiteSpace(lane.Name) || string.IsNullOrWhiteSpace(lane.ProfileId) ||
                 string.IsNullOrWhiteSpace(lane.TableRoot) || string.IsNullOrWhiteSpace(lane.ServerCloneRoot) ||
                 string.IsNullOrWhiteSpace(lane.DefinitionsRoot) || lane.ClonePairs.Count == 0)
-                throw new InvalidDataException("Every compatibility-lab lane requires a name, profile ID, table root, server clone root, definitions root, and at least one clone pair.");
+                throw new InvalidDataException("Each test build requires a name, profile ID, DBC/DB2 folder, server test-copy folder, definitions folder, and at least one source/test-copy pair.");
             foreach (var pair in lane.ClonePairs)
             {
                 if (string.IsNullOrWhiteSpace(pair.Name) || string.IsNullOrWhiteSpace(pair.SourceRoot) || string.IsNullOrWhiteSpace(pair.CloneRoot))
