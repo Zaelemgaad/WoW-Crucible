@@ -41,7 +41,7 @@ A local tool is considered replaced only when Crucible can complete its worthwhi
 | `wow-model-viewer`, `wowmodelviewer`, `Tools\WoW Model Viewer*`, `Tools\Other\WMV` | Character/item/NPC/object rendering, geosets, equipment, animation, export | Native embedded renderer shared by all creators |
 | `Zips&rars` | Preserved inputs/backups | Read-only archive inventory/import planning; never destructive cleanup without proof |
 | `WowForge` | Empty local root at audit time | Retain as a watched root; rescan if content appears |
-| `WoW-Crucible-User-Copy` | Frozen user build | Deliberately excluded from development scans and never silently updated |
+| `WoW-Crucible-User-Copy` | Historical app copy | Review unique edits/settings and consolidate into the current checkout; do not maintain a second frozen installation |
 
 ## Expanded `Tools` collection
 
@@ -112,4 +112,4 @@ M2 visibility defaults are path-aware across the shared renderer: recognized pla
 
 This matrix is updated whenever a capability lands, a new local tool appears, or a previously unknown workflow is discovered.
 
-The matrix is also executable: `wowcrucible tools inventory` and the same-window **Tool inventory** workspace scan the current corpus against Crucible's native assignment catalog. The July 18, 2026 workspace has 94 tracked workspace/tool roots, zero new unassigned roots, and zero expected top-level roots missing. Any later unassigned directory is sorted first and produces CLI review exit code `3` until it receives an explicit capability and destination.
+The matrix is also executable: `wowcrucible tools inventory` and the same-window **Tool inventory** workspace scan the current corpus against Crucible's native assignment catalog. Discovery supports the original workspace and a consolidated `Tools/WoW Crucible` checkout, nested legacy/Coffee collections, loose tool packages, and `Tools/Obsolete`. Linked collections and game-client directories are not traversed. Unassigned tools are sorted first and produce CLI review exit code `3`. **Tracked means catalogued, not fully replaced**; retirement requires workflow evidence rather than a planned destination in this matrix.

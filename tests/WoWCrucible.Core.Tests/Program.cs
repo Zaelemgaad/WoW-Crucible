@@ -7,6 +7,18 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+if (args is ["--tool-inventory"])
+{
+    ToolInventoryTestSuite.Run();
+    return;
+}
+
+if (args is ["--npc-authoring", var npcSchema, var npcCorpus])
+{
+    NpcChrAppearanceTestSuite.Run(npcSchema, npcCorpus);
+    return;
+}
+
 if (args is ["--cache-discovery"])
 {
     CacheDefinitionDiscoveryTests.Run();
@@ -47,6 +59,8 @@ if (args.Length != 2)
 {
     Console.Error.WriteLine("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
     Console.Error.WriteLine("       WoWCrucible.Core.Tests --cache-discovery");
+    Console.Error.WriteLine("       WoWCrucible.Core.Tests --tool-inventory");
+    Console.Error.WriteLine("       WoWCrucible.Core.Tests --npc-authoring <schema.xml> <dbc-directory>");
     Console.Error.WriteLine("Run the repository's test.ps1 or test.cmd wrapper so build failures and corpus requirements are reported clearly.");
     Environment.ExitCode = 2;
     return;
@@ -1091,6 +1105,7 @@ if (toolInventory.Unassigned != 2 || toolInventory.Missing == 0 || !toolInventor
     !toolInventory.Entries.Any(entry => entry.RelativePath == "MysteryTool" && entry.Status == ToolInventoryStatus.Unassigned) || !toolInventory.Entries.Any(entry => entry.RelativePath == "Tools/NewNestedTool" && entry.Status == ToolInventoryStatus.Unassigned) || !discoveredToolRoot.Equals(toolInventoryFixture, StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException("Tool consolidation inventory did not distinguish assigned, missing, and newly unassigned workspace/tool roots.");
 Directory.Delete(toolInventoryFixture, true);
+ToolInventoryTestSuite.Run();
 
 var knowledgeFixture = Path.Combine(Path.GetTempPath(), $"crucible-knowledge-{Guid.NewGuid():N}");
 Directory.CreateDirectory(Path.Combine(knowledgeFixture, "docs", "es")); File.WriteAllText(Path.Combine(knowledgeFixture, "_config.yml"), "title: fixture");
@@ -3388,40 +3403,7 @@ try { _ = CreatureAppearancePortService.Apply(remappedAppearancePlan, Path.Combi
 catch (InvalidDataException exception) when (exception.Message.Contains("changed after", StringComparison.OrdinalIgnoreCase)) { }
 CreatureAppearancePatchService.Verify(appearancePatchPlan);
 
-var npcChrRoot = Path.Combine(creatureLibrary, "npc-chr"); Directory.CreateDirectory(npcChrRoot);
-var npcChrPath = Path.Combine(npcChrRoot, "human-male.chr");
-File.WriteAllLines(npcChrPath,
-[
-    @"Character/Human/Male/HumanMale.m2",
-    "1 0",
-    "2 3 4 5 6 7",
-    "1000", "777", "0", "0", "0", "0", "0", "0", "0", "0", "2000", "3000", "0", "0", "4000",
-    "preserved trailing WMV field"
-]);
-var npcTexturePath = Path.Combine(npcChrRoot, "human-male.png");
-BlpTextureService.WritePng(npcTexturePath, new RgbaTexture(4, 4, Enumerable.Repeat(new byte[] { 80, 120, 160, 255 }, 16).SelectMany(pixel => pixel).ToArray()));
-var parsedNpcChr = NpcChrAppearanceService.Parse(npcChrPath);
-if (parsedNpcChr.ModelPath != @"Character\Human\Male\HumanMale.m2" || parsedNpcChr.RaceId != 1 || parsedNpcChr.SexId != 0 || parsedNpcChr.Equipment.Head != 1000 || parsedNpcChr.Equipment.RightHand != 2000 || parsedNpcChr.Equipment.Quiver != 4000 || parsedNpcChr.TrailingLines.Count != 1)
-    throw new InvalidOperationException("Strict WMV .chr parsing lost model, identity, appearance, equipment, or trailing review data.");
-var npcPlan = NpcChrAppearanceService.CreatePlan(npcChrPath, npcTexturePath, args[1], args[0], new Dictionary<uint, uint> { [1000] = 8815 });
-if (!npcPlan.Ready || npcPlan.ModelId != 49 || npcPlan.ReusesExtra || npcPlan.ReusesDisplay || npcPlan.AddedRows != 2 || npcPlan.ItemDisplays.Single(item => item.Slot == "Head").ItemDisplayId != 8815 || npcPlan.WeaponItemEntries["RightHand"] != 2000 || !npcPlan.Findings.Any(finding => finding.Contains("creature_equip_template", StringComparison.OrdinalIgnoreCase)))
-    throw new InvalidOperationException($"WMV .chr planning did not resolve HumanMale through real CreatureModelData, preserve weapon entries, or allocate an additive display/extra pair: ready={npcPlan.Ready}, model={npcPlan.ModelId}, rows={npcPlan.AddedRows}.");
-var npcPlanPath = Path.Combine(npcChrRoot, "npc.plan.json"); NpcChrAppearanceService.SavePlan(npcPlanPath, npcPlan); var loadedNpcPlan = NpcChrAppearanceService.LoadPlan(npcPlanPath);
-var npcOutput = Path.Combine(npcChrRoot, "output"); var npcResult = NpcChrAppearanceService.Apply(loadedNpcPlan, npcOutput);
-if (!File.Exists(npcResult.PatchPath) || !File.Exists(npcResult.ManifestPath) || !File.Exists(npcResult.BakedTexturePath) || npcResult.OutputDbcFiles.Count != 2 || !npcResult.OutputDbcFiles.ContainsKey("CreatureDisplayInfo") || !npcResult.OutputDbcFiles.ContainsKey("CreatureDisplayInfoExtra") || !PatchManifestService.Validate(PatchManifestService.Load(npcResult.ManifestPath), npcResult.PatchPath).Passed)
-    throw new InvalidOperationException("WMV .chr apply did not produce both additive DBCs, a validated baked BLP, strict manifest, and ready tiny MPQ.");
-var generatedNpcDisplay = WdbcFile.Load(npcResult.OutputDbcFiles["CreatureDisplayInfo"]); var generatedNpcDisplayColumns = creatureSchemas.ResolveColumns("CreatureDisplayInfo", generatedNpcDisplay.FieldCount).Columns;
-var generatedNpcDisplayId = generatedNpcDisplayColumns.First(column => column.Name == "ID"); var generatedNpcDisplayExtra = generatedNpcDisplayColumns.First(column => column.Name == "ExtendedDisplayInfoID");
-var generatedNpcDisplayRow = Enumerable.Range(0, generatedNpcDisplay.RowCount).Single(row => generatedNpcDisplay.GetRaw(row, generatedNpcDisplayId) == npcPlan.DisplayId);
-if (generatedNpcDisplay.GetRaw(generatedNpcDisplayRow, generatedNpcDisplayExtra) != npcPlan.ExtraId)
-    throw new InvalidOperationException("Generated CreatureDisplayInfo did not reference the exact generated CreatureDisplayInfoExtra identity.");
-var generatedNpcExtra = WdbcFile.Load(npcResult.OutputDbcFiles["CreatureDisplayInfoExtra"]); var generatedNpcExtraColumns = creatureSchemas.ResolveColumns("CreatureDisplayInfoExtra", generatedNpcExtra.FieldCount).Columns;
-var generatedNpcExtraId = generatedNpcExtraColumns.First(column => column.Name == "ID"); var generatedNpcHead = generatedNpcExtraColumns.First(column => column.Name == "NPCItemDisplay[0]"); var generatedNpcBake = generatedNpcExtraColumns.First(column => column.Name == "BakeName");
-var generatedNpcExtraRow = Enumerable.Range(0, generatedNpcExtra.RowCount).Single(row => generatedNpcExtra.GetRaw(row, generatedNpcExtraId) == npcPlan.ExtraId);
-if (generatedNpcExtra.GetRaw(generatedNpcExtraRow, generatedNpcHead) != 8815 || Convert.ToString(generatedNpcExtra.GetDisplayValue(generatedNpcExtraRow, generatedNpcBake)) != npcPlan.BakedTextureName)
-    throw new InvalidOperationException("Generated CreatureDisplayInfoExtra lost the resolved armor display or content-derived baked texture name.");
-try { _ = NpcChrAppearanceService.Parse(Path.Combine(npcChrRoot, "missing.chr")); throw new InvalidOperationException("A missing .chr file was accepted."); }
-catch (FileNotFoundException) { }
+NpcChrAppearanceTestSuite.Run(args[0], args[1]);
 
 var itemSyncRoot = Path.Combine(creatureLibrary, "item-client-sync"); Directory.CreateDirectory(itemSyncRoot);
 var sourceItemDbc = Path.Combine(args[1], "Item.dbc"); var sourceItemDisplayDbc = Path.Combine(args[1], "ItemDisplayInfo.dbc");

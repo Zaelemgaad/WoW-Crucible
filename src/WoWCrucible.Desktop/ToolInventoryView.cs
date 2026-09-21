@@ -11,11 +11,11 @@ namespace WoWCrucible.Desktop;
 
 internal sealed class ToolInventoryView : UserControl
 {
-    private readonly TextBox _workspace = new() { Text = ToolConsolidationInventoryService.FindWorkspaceRoot(CruciblePaths.ApplicationDirectory), PlaceholderText = "Shared wow-edits workspace root" };
+    private readonly TextBox _workspace = new() { Text = ToolConsolidationInventoryService.FindWorkspaceRoot(CruciblePaths.ApplicationDirectory), PlaceholderText = "WoW workspace folder" };
     private readonly TextBox _search = new() { PlaceholderText = "Search tool path, capability, or Crucible destination…" };
     private readonly ComboBox _statusFilter = new() { ItemsSource = new[] { "All states", "New unassigned", "Tracked", "Missing" }, SelectedIndex = 0 };
     private readonly ListBox _entries = new();
-    private readonly TextBlock _summary = Status("Scan the local corpus to verify every tool root has an assigned Crucible replacement.");
+    private readonly TextBlock _summary = Status("Tool inventory has not been scanned.");
     private readonly TextBlock _selection = Status("Select an entry to inspect its exact source path and replacement destination.");
     private ToolInventoryReport? _report;
     private int _loadRequest;
@@ -78,7 +78,7 @@ internal sealed class ToolInventoryView : UserControl
 
     private void RevealSelected()
     {
-        if (_entries.SelectedItem is not ToolInventoryEntry { Exists: true } entry) { _selection.Text = "Choose an existing tracked or unassigned directory to reveal it."; return; }
+        if (_entries.SelectedItem is not ToolInventoryEntry { Exists: true } entry) { _selection.Text = "Choose an existing tool to reveal it."; return; }
         try { Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{entry.FullPath}\"") { UseShellExecute = true }); }
         catch (Exception exception) { _selection.Text = $"Could not reveal {entry.FullPath}: {exception.Message}"; }
     }
