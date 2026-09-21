@@ -29,9 +29,7 @@ public partial class MainWindow : Window
     private long _lastRenderReport;
     private bool _closingApproved;
     private bool _closingPromptActive;
-    private readonly object _schemaGate = new();
-    private DbcSchemaCatalog? _schemaCatalog;
-    private string _schemaSource = "Built-in 12340 definitions";
+    private readonly DesktopTableSchemaSource _tableSchemas;
     private bool _syncingScrollbars;
     private Controls.DbcSelectionEventArgs? _dbcEditingSelection;
     private VirtualDbcView? _dbcEditingView;
@@ -85,6 +83,7 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
+        _tableSchemas = new(_workspaceSession.Settings);
         InitializeComponent();
         var buildIdentity = ReadBuildIdentity();
         BuildIdentityText.Text = buildIdentity.Label;
@@ -361,19 +360,8 @@ public partial class MainWindow : Window
             var session = await Task.Run(() =>
             {
                 var file = WdbcFile.Load(path);
-                var tableName = file.LogicalTableName;
-                if (file.ContainerKind is ClientTableContainerKind.Wdb2 or ClientTableContainerKind.Wdc1)
-                {
-                    var definitions = FindDbdDefinitionsPath() ?? throw new DirectoryNotFoundException("Opening WDB2 or WDC1 requires the WoWDBDefs definitions folder. Configure it under DBD schemas & audit.");
-                    var definition = Path.Combine(definitions, tableName + ".dbd");
-                    if (!File.Exists(definition)) throw new FileNotFoundException($"No WoWDBDefs definition exists for {tableName}.db2.", definition);
-                    var build = file.Db2Metadata?.Build ?? 0;
-                    var db2Resolution = DbdSchemaService.ResolveFile(definition, build, file);
-                    var identity = file.Wdc1Metadata is { } wdc1 ? $"layout {wdc1.LayoutHash:X8}" : $"build {build}";
-                    return new DbcDocumentSession(file, db2Resolution, $"{definition} · {identity}");
-                }
-                var catalog = ResolveSchemaCatalog(); var xmlResolution = catalog.ResolveColumns(tableName, file.FieldCount);
-                return new DbcDocumentSession(file, xmlResolution, _schemaSource);
+                var resolved = _tableSchemas.Resolve(file);
+                return new DbcDocumentSession(file, resolved.Schema, resolved.Source);
             });
             if (_workspaceSession.Settings.DbcColumnWidths.TryGetValue(session.ColumnLayoutKey, out var widths))
                 session.ColumnLayout.RestoreWidths(widths);
@@ -937,7 +925,7 @@ public partial class MainWindow : Window
                         path = Path.GetFullPath(path);
                         if (!_referenceDbcCache.TryGetValue(path, out var cached))
                         {
-                            var catalog = ResolveSchemaCatalog(); var loaded = await Task.Run(() => WdbcFile.Load(path)); var resolution = catalog.ResolveColumns(dbcDefinition.TableName, loaded.FieldCount);
+                            var catalog = _tableSchemas.ResolveCatalog(); var loaded = await Task.Run(() => WdbcFile.Load(path)); var resolution = catalog.ResolveColumns(dbcDefinition.TableName, loaded.FieldCount);
                             if (resolution.MatchKind == DbcSchemaMatchKind.NamedMatch) _referenceDbcCache[path] = cached = (loaded, resolution.Columns);
                         }
                         if (cached.File is not null) request = request with { DbcSource = new(cached.File, cached.Columns, 0, dbcDefinition.NameColumn, dbcDefinition.DetailColumns) };
@@ -2054,87 +2042,6 @@ public partial class MainWindow : Window
     }
 
     private void SetBusy(string message) => StatusText.Text = message;
-
-    private DbcSchemaCatalog ResolveSchemaCatalog()
-    {
-        lock (_schemaGate)
-        {
-            if (_schemaCatalog is not null) return _schemaCatalog;
-            var path = FindSchemaDefinitionPath();
-            if (path is not null)
-            {
-                try
-                {
-                    _schemaCatalog = DbcSchemaCatalog.Load(path);
-                    _schemaSource = path;
-                    return _schemaCatalog;
-                }
-                catch (Exception exception)
-                {
-                    DesktopCrashLogger.Log($"Could not load schema {path}; using built-in definitions", exception);
-                }
-            }
-            _schemaCatalog = DbcSchemaCatalog.CreateBuiltIn12340();
-            return _schemaCatalog;
-        }
-    }
-
-    private string? FindDbdDefinitionsPath()
-    {
-        if (!string.IsNullOrWhiteSpace(_workspaceSession.Settings.DbdDefinitionsPath) && Directory.Exists(_workspaceSession.Settings.DbdDefinitionsPath))
-            return Path.GetFullPath(_workspaceSession.Settings.DbdDefinitionsPath);
-        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var start in new[] { Environment.CurrentDirectory, AppContext.BaseDirectory }.Distinct(StringComparer.OrdinalIgnoreCase))
-            for (var directory = new DirectoryInfo(start); directory is not null; directory = directory.Parent)
-            {
-                foreach (var relative in new[] { Path.Combine("Tools", "WoWDBDefs", "definitions"), Path.Combine("WoWDBDefs", "definitions"), "definitions" })
-                {
-                    var candidate = Path.Combine(directory.FullName, relative);
-                    if (Directory.Exists(candidate)) candidates.Add(candidate);
-                }
-            }
-        var selected = CrucibleWorkspaceLayoutService.SelectBestDbdDefinitionsDirectory(candidates);
-        return selected.Length == 0 ? null : selected;
-    }
-
-    private string? FindSchemaDefinitionPath()
-    {
-        if (!string.IsNullOrWhiteSpace(_workspaceSession.Settings.SchemaDefinitionPath) && File.Exists(_workspaceSession.Settings.SchemaDefinitionPath))
-            return Path.GetFullPath(_workspaceSession.Settings.SchemaDefinitionPath);
-        try
-        {
-            var settingsPath = CruciblePaths.SettingsFileForRead;
-            if (File.Exists(settingsPath))
-            {
-                using var document = JsonDocument.Parse(File.ReadAllText(settingsPath));
-                if (document.RootElement.TryGetProperty("SchemaDefinitionPath", out var configured))
-                {
-                    var path = configured.GetString();
-                    if (!string.IsNullOrWhiteSpace(path) && File.Exists(path)) return Path.GetFullPath(path);
-                }
-            }
-        }
-        catch (Exception exception) { DesktopCrashLogger.Log("Could not read configured schema path", exception); }
-
-        const string fileName = "WotLK 3.3.5 (12340).xml";
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null)
-        {
-            foreach (var relative in new[]
-            {
-                Path.Combine("Definitions", fileName),
-                Path.Combine("WDBX.Editor", "Definitions", fileName),
-                Path.Combine("WDBXEditor", "WDBXEditor", "Definitions", fileName),
-                Path.Combine("WDBX (wow edit)", "Definitions", fileName)
-            })
-            {
-                var candidate = Path.Combine(directory.FullName, relative);
-                if (File.Exists(candidate)) return candidate;
-            }
-            directory = directory.Parent;
-        }
-        return null;
-    }
 
     private async Task ShowErrorAsync(string title, string message)
     {

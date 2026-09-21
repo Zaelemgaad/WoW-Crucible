@@ -7,6 +7,12 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+if (args is ["--batch-export"])
+{
+    DbcBatchExportTestSuite.Run();
+    return;
+}
+
 if (args.Length is 1 or 2 && args[0] == "--model-browser")
 {
     ModelArchiveLibraryTestSuite.Run();
@@ -65,6 +71,7 @@ if (missingCorpusFiles.Length > 0)
     return;
 }
 DbcEditorTestSuite.Run(requiredCorpus);
+DbcBatchExportTestSuite.Run();
 
 ClientCorpusHardLinkTestSuite.Run();
 ArtifactOwnershipTestSuite.Run();
