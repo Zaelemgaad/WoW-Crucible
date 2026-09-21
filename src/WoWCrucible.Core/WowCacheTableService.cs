@@ -80,23 +80,41 @@ public sealed class WowCacheDefinitionCatalog
     {
         var names = new[] { "WDB.xml", "WotLK 3.3.5 (12340).xml", "wdb-definitions.xml", "adb-definitions.xml", "definitions.xml" };
         var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var toolRoots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var origin in new[] { start, Environment.CurrentDirectory, AppContext.BaseDirectory }.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var initial = File.Exists(origin) ? new FileInfo(origin!).Directory : new DirectoryInfo(Path.GetFullPath(origin!));
             for (var directory = initial; directory is not null; directory = directory.Parent)
             {
-                foreach (var relative in new[]
-                {
-                    Path.Combine("Tools", "Adb_Wdb_Parser 1.0.0"),
-                    Path.Combine("Tools", "ADB_WDB_Parser for 4.3.x 1.0.0"),
-                    Path.Combine("Tools", "WDB Converter 2.9"),
-                    Path.Combine("Tools", "WDBXEditor", "Definitions")
-                })
+                var tools = Path.Combine(directory.FullName, "Tools");
+                if (Directory.Exists(tools)) toolRoots.Add(tools);
+            }
+        }
+        // Tool packages can be renamed or grouped inside a working copy. Search
+        // their data files within bounded tool roots instead of pinning versions
+        // and installation folder names. Do not follow links outside the corpus.
+        var skipped = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "bin", "obj", "node_modules", "__pycache__", "Cache", "Logs", "Temp", "Backup", "Backups"
+        };
+        var options = new EnumerationOptions { AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System, IgnoreInaccessible = true };
+        foreach (var root in toolRoots.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            var rootInfo = new DirectoryInfo(root);
+            if ((rootInfo.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+            var pending = new Queue<(DirectoryInfo Directory, int Depth)>();
+            pending.Enqueue((rootInfo, 0));
+            while (pending.TryDequeue(out var current))
+            {
                 foreach (var name in names)
                 {
-                    var candidate = Path.Combine(directory.FullName, relative, name);
-                    if (File.Exists(candidate)) found.Add(candidate);
+                    var candidate = new FileInfo(Path.Combine(current.Directory.FullName, name));
+                    if (candidate.Exists && (candidate.Attributes & FileAttributes.ReparsePoint) == 0) found.Add(candidate.FullName);
                 }
+                if (current.Depth >= 5) continue;
+                foreach (var child in current.Directory.EnumerateDirectories("*", options).OrderBy(directory => directory.Name, StringComparer.OrdinalIgnoreCase))
+                    if (!child.Name.StartsWith(".", StringComparison.Ordinal) && !skipped.Contains(child.Name))
+                        pending.Enqueue((child, current.Depth + 1));
             }
         }
         return found.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();

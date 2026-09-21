@@ -7,6 +7,13 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+if (args is ["--cache-discovery"])
+{
+    CacheDefinitionDiscoveryTests.Run();
+    Console.WriteLine("Cache definition discovery checks passed.");
+    return;
+}
+
 if (args is ["--batch-export"])
 {
     DbcBatchExportTestSuite.Run();
@@ -39,6 +46,7 @@ if (args is ["--dbc-editor", var editorCorpus])
 if (args.Length != 2)
 {
     Console.Error.WriteLine("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
+    Console.Error.WriteLine("       WoWCrucible.Core.Tests --cache-discovery");
     Console.Error.WriteLine("Run the repository's test.ps1 or test.cmd wrapper so build failures and corpus requirements are reported clearly.");
     Environment.ExitCode = 2;
     return;
@@ -400,6 +408,7 @@ try
 }
 finally { Directory.Delete(lightingEditRoot, true); }
 
+CacheDefinitionDiscoveryTests.Run();
 var cacheFixtureRoot = Path.Combine(Path.GetTempPath(), $"crucible-cache-{Guid.NewGuid():N}");
 Directory.CreateDirectory(cacheFixtureRoot);
 try
