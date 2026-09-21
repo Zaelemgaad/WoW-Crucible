@@ -11,7 +11,7 @@ sealed class CliDevbugSession : IDisposable
     private readonly Stopwatch _timer = Stopwatch.StartNew();
     private readonly TextWriter _originalOut;
     private readonly TextWriter _originalError;
-    private readonly StreamWriter _log;
+    private readonly RollingTextLogWriter _log;
     private long _sequence;
     private bool _completed;
 
@@ -20,7 +20,7 @@ sealed class CliDevbugSession : IDisposable
         Directory.CreateDirectory(CruciblePaths.DebugLogDirectory);
         LogPath = UniquePath();
         RetainNewest(LogPath);
-        _log = new StreamWriter(new FileStream(LogPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read), new UTF8Encoding(false), 64 * 1024);
+        _log = new RollingTextLogWriter(LogPath, autoFlush: false);
         _originalOut = Console.Out;
         _originalError = Console.Error;
         Console.SetOut(new DevbugTeeWriter(_originalOut, this, "OUT"));
@@ -91,7 +91,7 @@ sealed class CliDevbugSession : IDisposable
         var timestamp = DateTimeOffset.Now.ToString("yyyy-MM-ddTHH:mm:ss.fffzzz", System.Globalization.CultureInfo.InvariantCulture);
         var sequence = Interlocked.Increment(ref _sequence);
         var details = string.Join(' ', fields.Select(field => $"{field.Name}={Quote(field.Value)}"));
-        lock (_gate) _log.WriteLine($"{timestamp} #{sequence:D8} [{level}] [t{Environment.CurrentManagedThreadId}] [{category}] {action}{(details.Length == 0 ? string.Empty : " " + details)}");
+        lock (_gate) _log.Write($"{timestamp} #{sequence:D8} [{level}] [t{Environment.CurrentManagedThreadId}] [{category}] {action}{(details.Length == 0 ? string.Empty : " " + details)}{Environment.NewLine}");
     }
 
     private static string Quote(object? value)
@@ -133,7 +133,7 @@ sealed class CliDevbugSession : IDisposable
                      .Where(path => !path.Equals(currentPath, StringComparison.OrdinalIgnoreCase))
                      .OrderByDescending(File.GetLastWriteTimeUtc).Skip(RetainedSessions - 1))
         {
-            try { File.Delete(old); } catch { }
+            try { RollingTextLogWriter.DeleteSession(old, RollingTextLogWriter.DefaultRetainedFiles); } catch { }
         }
     }
 

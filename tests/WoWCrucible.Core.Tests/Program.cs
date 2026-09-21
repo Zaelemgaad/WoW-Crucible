@@ -7,6 +7,12 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+if (args is ["--log-rotation"])
+{
+    RollingTextLogWriterTests.Run();
+    return;
+}
+
 if (args is ["--tool-inventory"])
 {
     ToolInventoryTestSuite.Run();
@@ -60,6 +66,7 @@ if (args.Length != 2)
     Console.Error.WriteLine("Usage: WoWCrucible.Core.Tests <schema.xml> <dbc-directory>");
     Console.Error.WriteLine("       WoWCrucible.Core.Tests --cache-discovery");
     Console.Error.WriteLine("       WoWCrucible.Core.Tests --tool-inventory");
+    Console.Error.WriteLine("       WoWCrucible.Core.Tests --log-rotation");
     Console.Error.WriteLine("       WoWCrucible.Core.Tests --npc-authoring <schema.xml> <dbc-directory>");
     Console.Error.WriteLine("Run the repository's test.ps1 or test.cmd wrapper so build failures and corpus requirements are reported clearly.");
     Environment.ExitCode = 2;
@@ -97,6 +104,7 @@ DbcBatchExportTestSuite.Run();
 
 ClientCorpusHardLinkTestSuite.Run();
 ArtifactOwnershipTestSuite.Run();
+RollingTextLogWriterTests.Run();
 
 var backupFixtureSource = Path.Combine(Path.GetTempPath(), $"wow-crucible-backup-source-{Guid.NewGuid():N}.dbc");
 File.WriteAllBytes(backupFixtureSource, [1, 2, 3, 4]);

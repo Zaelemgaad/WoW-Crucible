@@ -109,7 +109,7 @@ internal static class DesktopCrashLogger
 
     private static void DebugWriterLoop()
     {
-        StreamWriter? writer = null; string? writerPath = null;
+        RollingTextLogWriter? writer = null; string? writerPath = null;
         try
         {
             foreach (var entry in DebugQueue.GetConsumingEnumerable())
@@ -120,7 +120,7 @@ internal static class DesktopCrashLogger
                     if (path is not null && !path.Equals(writerPath, StringComparison.OrdinalIgnoreCase))
                     {
                         writer?.Dispose();
-                        writer = new StreamWriter(new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite, 64 * 1024, FileOptions.SequentialScan), new UTF8Encoding(false)) { AutoFlush = true };
+                        writer = new RollingTextLogWriter(path);
                         writerPath = path;
                     }
                     writer?.Write(entry);
@@ -175,7 +175,8 @@ internal static class DesktopCrashLogger
             {
                 Directory.CreateDirectory(CruciblePaths.CrashLogDirectory);
                 _crashLogPath ??= UniquePath(CruciblePaths.CrashLogDirectory, "WoWCrucible-Crash", ".log");
-                File.AppendAllText(_crashLogPath, entry, Encoding.UTF8);
+                using (var writer = new RollingTextLogWriter(_crashLogPath))
+                    writer.Write(entry);
                 RetainNewest(CruciblePaths.CrashLogDirectory, "WoWCrucible-Crash-*.log", RetainedSessions, _crashLogPath);
             }
         }
@@ -190,7 +191,8 @@ internal static class DesktopCrashLogger
         try
         {
             foreach (var file in Directory.EnumerateFiles(directory, pattern).Where(path => !path.Equals(current, StringComparison.OrdinalIgnoreCase))
-                         .OrderByDescending(File.GetLastWriteTimeUtc).Skip(Math.Max(0, retain - 1))) File.Delete(file);
+                         .OrderByDescending(File.GetLastWriteTimeUtc).Skip(Math.Max(0, retain - 1)))
+                RollingTextLogWriter.DeleteSession(file, RollingTextLogWriter.DefaultRetainedFiles);
         }
         catch { }
     }

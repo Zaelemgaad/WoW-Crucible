@@ -34,7 +34,7 @@ Crucible opens a live terminal and writes the same structured events to `Logs\De
 - named fields such as path, row count, duration, result count, and selected mode;
 - full exception type, message, and stack trace for failures.
 
-Logging uses a below-normal-priority background writer and a persistent file stream. Normal operations only pay for a disabled-mode branch. The newest three Devbug session logs are retained; creating a fourth deletes only the oldest matching Devbug log.
+Desktop logging uses a below-normal-priority background writer and a persistent file stream. Normal operations only pay for a disabled-mode branch. Desktop Devbug, CLI Devbug, and crash logs each retain their newest three sessions. Each session keeps at most four 32 MiB segments (128 MiB total). The current file is `.log`; `.log.1` through `.log.3` hold progressively older segments. Rotation preserves UTF-8 characters, and removing an old session also removes its segments. Terminal output is not truncated by disk-log retention.
 
 The terminal close command is disabled so closing the diagnostic console cannot accidentally terminate Crucible. Turn Devbug Mode off from the application to close it safely.
 
