@@ -43,6 +43,7 @@ public partial class MainWindow : Window
     private ModelBrowserView? _modelBrowserView;
     private KnowledgeWorkspaceView? _knowledgeWorkspaceView;
     private ToolInventoryView? _toolInventoryView;
+    private AddonAuditView? _addonAuditView;
     private CompatibilityLabView? _compatibilityLabView;
     private ItemWorkbenchView? _itemWorkbenchView;
     private MpqWorkspaceView? _mpqWorkspaceView;
@@ -1330,6 +1331,11 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(_nativeConversionWorkspaceView, "Modern Asset Conversion");
     }
     private async void OpenToolInventoryClick(object? sender, RoutedEventArgs e) => await OpenToolInventoryAsync();
+    public void OpenAddonAudit()
+    {
+        if (_addonAuditView is null) { _addonAuditView = new AddonAuditView(); _addonAuditView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
+        OpenFeatureWorkspace(_addonAuditView, "Addons");
+    }
     public async Task OpenToolInventoryAsync()
     {
         if (_toolInventoryView is null) { _toolInventoryView = new ToolInventoryView(); _toolInventoryView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
@@ -1871,6 +1877,7 @@ public partial class MainWindow : Window
             ["workspace.compatibility-lab"] = Done(OpenCompatibilityLab),
             ["workspace.knowledge"] = () => OpenKnowledgeAsync(_knowledgeContext),
             ["workspace.tools"] = OpenToolInventoryAsync,
+            ["workspace.addons"] = Done(OpenAddonAudit),
             ["workspace.server"] = Done(OpenServerSqlWorkspace),
             ["workspace.sql"] = Done(OpenSqlWorkspace),
             ["workspace.sql-favorites"] = Done(OpenSqlFavorites),

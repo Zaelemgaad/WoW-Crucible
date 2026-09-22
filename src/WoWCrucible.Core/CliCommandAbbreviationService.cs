@@ -29,7 +29,7 @@ public static class CliCommandAbbreviationService
             ["tools"] = Words("commands inventory compatibility-lab cross-build-mashup"),
             ["knowledge"] = Words("search show"),
             ["cache"] = Words("info rows export server-plan server-apply server-rollback"),
-            ["client"] = Words("install-patch clear-cache publisher-key release-create release-sign release-verify release-plan release-apply release-rollback index corpus extract show fusion fusion-dbc-plan fusion-dbc-apply fusion-dbc-remap-plan fusion-dbc-remap-apply fusion-stage"),
+            ["client"] = Words("addon-audit install-patch clear-cache publisher-key release-create release-sign release-verify release-plan release-apply release-rollback index corpus extract show fusion fusion-dbc-plan fusion-dbc-apply fusion-dbc-remap-plan fusion-dbc-remap-apply fusion-stage"),
             ["server"] = Words("detect inspect bindings dbc-audit dbc-apply dbc-rollback dbc-module-export client-plan"),
             ["project"] = Words("create status run-create artifact-register cleanup reserve-ids occupancy reserve-live class-plan class-build race-plan race-build"),
             ["mpq"] = Words("list tree extract extract-folder create update put merge"),
