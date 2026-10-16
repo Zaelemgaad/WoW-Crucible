@@ -7,9 +7,14 @@
         x:Class="WoWCrucible.Desktop.MainWindow"
         Title="WoW Crucible"
         WindowStartupLocation="CenterScreen">
-    <Grid x:Name="RootLayout" RowDefinitions="Auto,Auto,*,Auto" ColumnDefinitions="1.1*,Auto,3*,Auto,1.5*">
+    <Grid x:Name="RootLayout" RowDefinitions="Auto,Auto,Auto,*,Auto" ColumnDefinitions="260,Auto,*,Auto,340">
         <local:WorkspaceRuntimeStrip x:Name="RuntimeStrip" Grid.Row="0" Grid.ColumnSpan="5" />
-        <Border x:Name="MainHeader" Grid.Row="1" Grid.ColumnSpan="5" Background="#191B1E" BorderBrush="#36393E" BorderThickness="0,0,0,1">
+        <Grid Grid.Row="1" Grid.ColumnSpan="5" ColumnDefinitions="Auto,*,Auto" Background="#10151E">
+            <ToggleButton x:Name="ToolsPaneToggle" Content="Tools" Margin="6,3" Click="ToggleNavigationPaneClick" ToolTip.Tip="Show or hide the tool browser" />
+            <local:WorkspaceTabStrip x:Name="WorkspaceTabs" Grid.Column="1" />
+            <Button x:Name="LayoutButton" Grid.Column="2" Content="Layout ▾" Margin="6,3" />
+        </Grid>
+        <Border x:Name="MainHeader" Grid.Row="2" Grid.Column="2" Grid.ColumnSpan="3" Background="#191B1E" BorderBrush="#36393E" BorderThickness="0,0,0,1">
             <StackPanel Margin="8,4" Spacing="4">
                 <WrapPanel Orientation="Horizontal">
                     <Button Margin="0,0,6,0" Content="Open DBC / DB2" Click="OpenDbcClick" ToolTip.Tip="Open DBC or DB2 files (Ctrl+O)" />
@@ -18,7 +23,6 @@
                         <Button Margin="0,0,6,0" Content="Save As…" Click="SaveAsClick" ToolTip.Tip="Save As (Ctrl+Shift+S)" />
                         <Button Margin="0,0,12,0" Content="×" Click="CloseDocumentClick" AutomationProperties.Name="Close current file" ToolTip.Tip="Close current file (Ctrl+W)" />
                     </WrapPanel>
-                    <ToggleButton x:Name="ToolsPaneToggle" Margin="0,0,6,0" Content="Tools" Click="ToggleNavigationPaneClick" ToolTip.Tip="Show or hide the tools pane" />
                     <ToggleButton x:Name="DetailsPaneToggle" Margin="0,0,6,0" Content="Row editor" Click="ToggleInspectorPaneClick" ToolTip.Tip="Show or hide the selected record" />
                     <Button Content="Commands…" Click="OpenCommandPaletteClick" ToolTip.Tip="All commands (Ctrl+K)" />
                 </WrapPanel>
@@ -42,68 +46,14 @@
             </StackPanel>
         </Border>
 
-        <Border x:Name="NavigationPane" Grid.Row="2" Grid.Column="0" BorderBrush="#2B3445" BorderThickness="0,0,1,0" Background="#0E1219">
-            <Grid RowDefinitions="Auto,*,Auto" Margin="12">
-                <TextBlock Text="WORKSPACE" Foreground="#7F8A9F" FontSize="10" FontWeight="Bold" Margin="6,4,0,9" />
-                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                    <StackPanel Spacing="6">
-                        <Button Classes="accent" HorizontalContentAlignment="Left" Click="OpenHomeClick" ToolTip.Tip="Return to the simple start page without closing staged DBC tabs."><TextBlock Text="⌂  Home" TextWrapping="Wrap" /></Button>
-                        <Expander Header="START HERE" IsExpanded="True">
-                            <StackPanel Spacing="4" Margin="8,4,0,4">
-                                <Button HorizontalContentAlignment="Left" Click="OpenWorkspaceSetupClick" ToolTip.Tip="Remember the client, server, core, definitions, tools, projects, and staging paths once."><TextBlock Text="Workspace setup" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenProjectWorkspaceClick" ToolTip.Tip="Keep one feature's DBC, SQL, MPQ, and allocated IDs together."><TextBlock Text="Projects &amp; shared IDs" TextWrapping="Wrap" /></Button>
-                            </StackPanel>
-                        </Expander>
-                        <Expander Header="CREATE GAME CONTENT">
-                            <StackPanel Spacing="4" Margin="8,4,0,4">
-                                <Button HorizontalContentAlignment="Left" Click="OpenClassStudioClick" ToolTip.Tip="Open the shared talent and spellbook editor, connected to Crucible, in your browser."><TextBlock Text="Class Studio" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenItemWorkbenchClick" ToolTip.Tip="Create, clone, edit, and audit items and item sets."><TextBlock Text="Items &amp; item sets" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenCreatureWorkspaceClick" ToolTip.Tip="Create NPCs and creatures, appearances, spawns, vendors, loot, quests, and trainers."><TextBlock Text="Creatures &amp; NPCs" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenQuestWorkspaceClick" ToolTip.Tip="Edit complete quests, objectives, rewards, text, and giver relationships."><TextBlock Text="Quests" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenGameObjectWorkspaceClick" ToolTip.Tip="Create doors, chests, world objects, displays, spawns, and loot."><TextBlock Text="Gameobjects" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenPetWorkspaceClick" ToolTip.Tip="Work with pets, companions, level curves, families, talents, and abilities."><TextBlock Text="Pets &amp; companions" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenBehaviorWorkspaceClick" ToolTip.Tip="Author gossip, dialogue, conditions, SmartAI, vendors, trainers, and loot."><TextBlock Text="NPC behavior &amp; dialogue" TextWrapping="Wrap" /></Button>
-                            </StackPanel>
-                        </Expander>
-                        <Expander Header="CLIENT TABLES &amp; PATCHES">
-                            <StackPanel Spacing="4" Margin="8,4,0,4">
-                                <Button HorizontalContentAlignment="Left" Click="OpenEditorWorkspaceClick" ToolTip.Tip="Open and edit complete DBC/DB2 records directly."><TextBlock Text="DBC tables" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenLayeredDbcsClick" ToolTip.Tip="Compare base and override tables and promote only reviewed changes."><TextBlock Text="DBC layers &amp; promotion" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenDbdSchemasClick" ToolTip.Tip="Inspect schema definitions and validate complete DBC corpora."><TextBlock Text="Schemas &amp; validation" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenCacheTablesClick" ToolTip.Tip="Inspect WDB/ADB client cache records."><TextBlock Text="Client cache tables" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenMpqWorkspaceClick" ToolTip.Tip="Browse, extract, build, update, validate, and merge small MPQ patches."><TextBlock Text="MPQ patches &amp; merge" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenClientWorkspaceClick" ToolTip.Tip="Index clients, inspect effective archive layers, install patches, and manage releases."><TextBlock Text="Client workshop" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenCompatibilityLabClick" ToolTip.Tip="Create test copies and check file integrity, DBC/DB2 layouts, and client/server data mismatches."><TextBlock Text="Client &amp; Server File Checks" TextWrapping="Wrap" /></Button>
-                            </StackPanel>
-                        </Expander>
-                        <Expander Header="SERVER &amp; DATABASE">
-                            <StackPanel Spacing="4" Margin="8,4,0,4">
-                                <Button HorizontalContentAlignment="Left" Click="OpenServerSqlClick" ToolTip.Tip="Detect the installed core, configure SQL, and control SQL/AUTH/WORLD."><TextBlock Text="Connection &amp; server controls" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenSqlWorkspaceClick" ToolTip.Tip="Browse and edit complete live schemas, tables, rows, queries, objects, and favorites."><TextBlock Text="SQL Studio" TextWrapping="Wrap" /></Button>
-                            </StackPanel>
-                        </Expander>
-                        <Expander Header="VISUALS &amp; WORLD · ADVANCED">
-                            <StackPanel Spacing="4" Margin="8,4,0,4">
-                                <Button HorizontalContentAlignment="Left" Click="OpenAssetComparisonClick" ToolTip.Tip="Compare provenance layers and preview compatible M2/SKIN models."><TextBlock Text="Assets, models &amp; compare" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenModelBrowserClick" ToolTip.Tip="Browse loose and ZIP-contained M2 models with textures, geosets, and animations."><TextBlock Text="Model browser" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenTextureWorkspaceClick" ToolTip.Tip="Inspect, convert, edit, compose, and trace BLP textures."><TextBlock Text="Texture lab" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenMapWorkspaceClick" ToolTip.Tip="Inspect and edit extracted ADT/WDT/WDL terrain and placements."><TextBlock Text="Maps &amp; world" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenNativeConversionClick" ToolTip.Tip="Review and down-port supported modern model and world-asset profiles."><TextBlock Text="Modern asset conversion" TextWrapping="Wrap" /></Button>
-                            </StackPanel>
-                        </Expander>
-                        <Expander Header="HELP, IMPORT &amp; DIAGNOSTICS">
-                            <StackPanel Spacing="4" Margin="8,4,0,4">
-                                <Button HorizontalContentAlignment="Left" Click="OpenKnowledgeClick"><TextBlock Text="Field help &amp; offline wiki" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenDbcImportClick"><TextBlock Text="Import rows into current DBC" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenDbcExportClick"><TextBlock Text="Export current DBC rows" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="CloseDocumentClick"><TextBlock Text="Close current DBC" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenToolInventoryClick"><TextBlock Text="Legacy-tool coverage" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenCliGuideClick"><TextBlock Text="CLI guide" TextWrapping="Wrap" /></Button>
-                                <Button HorizontalContentAlignment="Left" Click="OpenLogsClick"><TextBlock Text="Logs" TextWrapping="Wrap" /></Button>
-                            </StackPanel>
-                        </Expander>
-                    </StackPanel>
-                </ScrollViewer>
+        <Border x:Name="FeatureToolbarHost" Grid.Row="2" Grid.Column="2" Grid.ColumnSpan="3" IsVisible="False" Padding="8,4" Background="#111722" />
+        <Border x:Name="NavigationPane" Grid.Row="2" Grid.RowSpan="2" Grid.Column="0" BorderBrush="#2B3445" BorderThickness="0,0,1,0" Background="#0E1219">
+            <Grid RowDefinitions="Auto,*,Auto" Margin="10">
+                <Grid ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+                    <TextBlock Text="TOOLS" Foreground="#AEB8C9" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" />
+                    <Button Grid.Column="1" Content="×" Padding="7,3" Click="ToggleNavigationPaneClick" AutomationProperties.Name="Close tool browser" ToolTip.Tip="Reopen from Layout or the Tools button." />
+                </Grid>
+                <local:WorkspaceNavigator x:Name="ToolBrowser" Grid.Row="1" />
                 <Expander Grid.Row="2" Header="Diagnostics" Margin="0,8,0,0">
                     <StackPanel Spacing="5">
                         <ToggleSwitch x:Name="DevbugModeToggle" OnContent="Devbug on" OffContent="Devbug off" IsCheckedChanged="DevbugModeChanged" />
@@ -113,9 +63,9 @@
             </Grid>
         </Border>
 
-        <GridSplitter x:Name="NavigationSplitter" Grid.Row="2" Grid.Column="1" ResizeDirection="Columns" Background="#2B3445" />
+        <GridSplitter x:Name="NavigationSplitter" Grid.Row="2" Grid.RowSpan="2" Grid.Column="1" ResizeDirection="Columns" Background="#2B3445" />
 
-        <Grid x:Name="EditorWorkspace" Grid.Row="2" Grid.Column="2" RowDefinitions="Auto,*" Background="#090C11">
+        <Grid x:Name="EditorWorkspace" Grid.Row="3" Grid.Column="2" RowDefinitions="Auto,*" Background="#090C11">
             <Border x:Name="DbcDocumentToolbar" IsVisible="False" BorderBrush="#2B3445" BorderThickness="0,0,0,1" Background="#0E131C">
                 <Grid RowDefinitions="Auto,Auto">
                     <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
@@ -139,10 +89,11 @@
             </Border>
             <Grid Grid.Row="1">
                 <Grid x:Name="WelcomePanel">
-                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12" Margin="24">
-                        <TextBlock Text="DBC / DB2" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" />
-                        <TextBlock Text="No file selected" Foreground="#9FA4AA" HorizontalAlignment="Center" />
-                        <Button Content="Open DBC / DB2" Click="OpenDbcClick" HorizontalAlignment="Center" />
+                    <local:WorkspaceStartPage x:Name="StartPage" />
+                    <StackPanel x:Name="TableStartPanel" IsVisible="False" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="12" Margin="24">
+                        <TextBlock Text="Client data tables" FontSize="22" FontWeight="SemiBold" TextWrapping="Wrap" />
+                        <TextBlock Text="Open a DBC / DB2 to inspect or edit its records." Foreground="#AEB8C9" TextWrapping="Wrap" />
+                        <Button Content="Open DBC / DB2…" Click="OpenDbcClick" HorizontalAlignment="Left" />
                     </StackPanel>
                 </Grid>
                 <Grid x:Name="DbcHost" IsVisible="False" ColumnDefinitions="*,Auto,0*">
@@ -189,9 +140,9 @@
             </Grid>
         </Grid>
 
-        <GridSplitter x:Name="InspectorSplitter" Grid.Row="2" Grid.Column="3" ResizeDirection="Columns" Background="#2B3445" />
+        <GridSplitter x:Name="InspectorSplitter" Grid.Row="3" Grid.Column="3" ResizeDirection="Columns" Background="#2B3445" />
 
-        <Border x:Name="InspectorPane" Grid.Row="2" Grid.Column="4" BorderBrush="#36393E" BorderThickness="1,0,0,0" Background="#1B1D20">
+        <Border x:Name="InspectorPane" Grid.Row="3" Grid.Column="4" BorderBrush="#36393E" BorderThickness="1,0,0,0" Background="#1B1D20">
             <TabControl x:Name="InspectorTabs">
                 <TabItem x:Name="RowEditorTab" Header="Row" FontSize="14">
                     <local:DbcRowEditorView x:Name="RowEditor" />
@@ -208,15 +159,15 @@
             </TabControl>
         </Border>
 
-        <Border x:Name="MainStatusBar" Grid.Row="3" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,1,0,0" Background="#0B0F16">
+        <Border x:Name="MainStatusBar" Grid.Row="4" Grid.ColumnSpan="5" BorderBrush="#2B3445" BorderThickness="0,1,0,0" Background="#0B0F16">
             <Grid ColumnDefinitions="*,Auto" Margin="12,0">
                 <TextBlock x:Name="StatusText" Text="Ready" VerticalAlignment="Center" Foreground="#98A2B4" FontSize="11" />
                 <TextBlock x:Name="RenderText" Grid.Column="1" Text="Viewport idle" VerticalAlignment="Center" Foreground="#758197" FontSize="11" />
             </Grid>
         </Border>
 
-        <Border x:Name="FeatureWorkspaceHost" Grid.Row="1" Grid.RowSpan="3" Grid.ColumnSpan="5" IsVisible="False" Background="#090C11" />
-        <Grid x:Name="CommandPaletteHost" Grid.Row="0" Grid.RowSpan="4" Grid.ColumnSpan="5" IsVisible="False" Background="#B805070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,6*,*">
+        <Border x:Name="FeatureWorkspaceHost" Grid.Row="3" Grid.RowSpan="2" Grid.Column="2" Grid.ColumnSpan="3" IsVisible="False" Background="#090C11" />
+        <Grid x:Name="CommandPaletteHost" Grid.Row="0" Grid.RowSpan="5" Grid.ColumnSpan="5" IsVisible="False" Background="#B805070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,6*,*">
             <Border Grid.Row="1" Grid.Column="1" Padding="16" CornerRadius="10" BorderBrush="#4A5A76" BorderThickness="1" Background="#111722">
                 <Grid RowDefinitions="Auto,Auto,*,Auto" RowSpacing="9">
                     <Grid ColumnDefinitions="*,Auto">
@@ -238,7 +189,7 @@
                 </Grid>
             </Border>
         </Grid>
-        <Grid x:Name="DialogOverlayHost" Grid.Row="0" Grid.RowSpan="4" Grid.ColumnSpan="5" IsVisible="False" Background="#CC05070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,8*,*">
+        <Grid x:Name="DialogOverlayHost" Grid.Row="0" Grid.RowSpan="5" Grid.ColumnSpan="5" IsVisible="False" Background="#CC05070A" ColumnDefinitions="*,4*,*" RowDefinitions="*,8*,*">
             <Border Grid.Row="1" Grid.Column="1" Padding="20" CornerRadius="10" BorderBrush="#39465E" BorderThickness="1" Background="#111722">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
                     <ContentControl x:Name="DialogContent" />

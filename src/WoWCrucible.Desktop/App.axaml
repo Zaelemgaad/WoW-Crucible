@@ -32,5 +32,13 @@
             <Setter Property="BorderBrush" Value="#303A4D" />
             <Setter Property="CornerRadius" Value="5" />
         </Style>
+        <Style Selector="TabItem">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Padding" Value="10,8" />
+        </Style>
+        <Style Selector="Expander">
+            <Setter Property="Background" Value="#111722" />
+            <Setter Property="BorderBrush" Value="#303A4D" />
+        </Style>
     </Application.Styles>
 </Application>

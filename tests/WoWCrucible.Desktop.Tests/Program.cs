@@ -5,6 +5,12 @@ using System.Text.Json;
 using WoWCrucible.Core;
 using WoWCrucible.Desktop;
 
+if (args.Contains("--workspace-shell"))
+{
+    WorkspaceShellTestSuite.Run();
+    return;
+}
+
 var root = Path.Combine(Path.GetTempPath(), "Crucible-Studio-Host-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
 try

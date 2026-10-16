@@ -8,7 +8,7 @@ internal sealed record ModelBrowserDefaults(int[] GeosetIds, Dictionary<int, str
 internal sealed class DesktopSettings
 {
     public bool DevbugMode { get; set; }
-    public bool DbcToolsPaneOpen { get; set; }
+    public EditorLayoutSettings EditorLayout { get; set; } = new();
     public bool DbcRowEditorOpen { get; set; } = true;
     public string LastDbcDirectory { get; set; } = string.Empty;
     public Dictionary<string, Dictionary<int, double>> DbcColumnWidths { get; set; } = [];

@@ -11,16 +11,6 @@ namespace WoWCrucible.Desktop.Controls;
 internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
 {
     private readonly Button _workspace = new() { Content = "WORKSPACE · not configured", HorizontalContentAlignment = HorizontalAlignment.Left };
-    private readonly Button _featureBack = new() { Content = "←", IsVisible = false };
-    private readonly TextBlock _featureTitle = new()
-    {
-        IsVisible = false,
-        FontSize = 13,
-        FontWeight = FontWeight.SemiBold,
-        VerticalAlignment = VerticalAlignment.Center
-    };
-    private readonly ContentControl _featureToolbar = new() { IsVisible = false, VerticalAlignment = VerticalAlignment.Center };
-    private readonly Grid _featureContext;
     private readonly TextBlock _sqlLight = Light();
     private readonly TextBlock _authLight = Light();
     private readonly TextBlock _worldLight = Light();
@@ -29,6 +19,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
     private readonly Button _world;
     private readonly Button _refresh = new() { Content = "↻" };
     private readonly TextBlock _message = new() { FontSize = 10, Foreground = new SolidColorBrush(Color.Parse("#8995A9")), VerticalAlignment = VerticalAlignment.Center };
+    private readonly Grid _operationStatus = new() { ColumnDefinitions = new("*,Auto"), IsVisible = false, Margin = new Thickness(8, 2) };
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(5) };
     private DesktopWorkspaceSession? _session;
     private ServerRuntimeStatus? _status;
@@ -36,7 +27,6 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
     private bool _refreshing;
 
     public event EventHandler? WorkspaceRequested;
-    public event EventHandler? FeatureBackRequested;
     public event EventHandler<string>? CommandRequested;
 
     public WorkspaceRuntimeStrip()
@@ -49,31 +39,20 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
         AutomationProperties.SetName(_auth, "Toggle authentication server");
         AutomationProperties.SetName(_world, "Toggle world server");
         AutomationProperties.SetName(_refresh, "Refresh server status");
-        AutomationProperties.SetName(_featureBack, "Return to the previous Crucible workspace");
         _workspace.Click += (_, _) => WorkspaceRequested?.Invoke(this, EventArgs.Empty);
-        _featureBack.Click += (_, _) => FeatureBackRequested?.Invoke(this, EventArgs.Empty);
         _sql.Click += async (_, _) => await ToggleAsync(Component.Sql);
         _auth.Click += async (_, _) => await ToggleAsync(Component.Auth);
         _world.Click += async (_, _) => await ToggleAsync(Component.World);
         _refresh.Click += async (_, _) => await RefreshAsync();
         _timer.Tick += async (_, _) => await RefreshAsync();
-        _featureContext = new Grid
-        {
-            ColumnDefinitions = new("Auto,Auto,*"),
-            ColumnSpacing = 7,
-            VerticalAlignment = VerticalAlignment.Center,
-            Children = { _featureBack, AtColumn(_featureTitle, 1), AtColumn(_featureToolbar, 2) }
-        };
-        var center = new Grid
-        {
-            ColumnDefinitions = new("*,Auto"),
-            ColumnSpacing = 8,
-            Children =
-            {
-                _featureContext,
-                AtColumn(_message, 1)
-            }
-        };
+        _workspace.Content = new TextBlock { Text = "Workspace · set up", TextTrimming = TextTrimming.CharacterEllipsis };
+        _workspace.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _workspace.HorizontalContentAlignment = HorizontalAlignment.Left;
+        var dismiss = new Button { Content = "×", Padding = new Thickness(7, 2) };
+        AutomationProperties.SetName(dismiss, "Dismiss server operation message");
+        dismiss.Click += (_, _) => { _operationStatus.IsVisible = false; _message.Text = string.Empty; };
+        _operationStatus.Children.Add(_message);
+        _operationStatus.Children.Add(AtColumn(dismiss, 1));
         var runtime = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -83,10 +62,10 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
         };
         var context = new Grid
         {
-            ColumnDefinitions = new("Auto,*,Auto"),
+            ColumnDefinitions = new("*,Auto"),
             ColumnSpacing = 8,
             Margin = new Thickness(8, 2),
-            Children = { _workspace, AtColumn(center, 1), AtColumn(runtime, 2) }
+            Children = { _workspace, AtColumn(runtime, 1) }
         };
         Content = new Border
         {
@@ -95,11 +74,12 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             BorderThickness = new Thickness(0, 0, 0, 1),
             Child = new Grid
             {
-                RowDefinitions = new("Auto,Auto"),
+                RowDefinitions = new("Auto,Auto,Auto"),
                 Children =
                 {
                     BuildApplicationMenu(),
-                    AtRow(context, 1)
+                    AtRow(context, 1),
+                    AtRow(_operationStatus, 2)
                 }
             }
         };
@@ -107,50 +87,28 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
 
     private Menu BuildApplicationMenu()
     {
+        var editors = new MenuItem { Header = "Editors" };
+        foreach (var group in WorkspaceNavigation.Groups)
+            editors.Items.Add(DomainMenu(group.Title, group.Commands.Select(id => (WorkspaceNavigation.Label(id), id)).ToArray()));
         return new Menu
         {
             VerticalAlignment = VerticalAlignment.Center,
             Items =
             {
-                DomainMenu("FILE",
-                    ("Open DBC / DB2...", "action.open-dbc"),
-                    ("Save", "action.save"),
-                    ("Save As...", "action.save-as")),
-                DomainMenu("CRUCIBLE",
-                    ("Workspace setup", "workspace.setup"),
-                    ("Projects & shared IDs", "workspace.projects"),
-                    ("DBC / DB2 editor", "workspace.dbc"),
-                    ("All commands…", "ui.commands")),
-                DomainMenu("CREATE",
-                    ("Items & sets", "workspace.items"),
-                    ("Cut / unobtainable items", "workspace.item-acquisition"),
-                    ("Creatures & NPCs", "workspace.creatures"),
-                    ("Quests", "workspace.quests"),
-                    ("Gameobjects", "workspace.gameobjects"),
-                    ("Pets & companions", "workspace.pets"),
-                    ("Behaviors & dialogue", "workspace.behaviors")),
-                DomainMenu("CLIENT",
-                    ("DBC layers & promotion", "workspace.dbc-layers"),
-                    ("Schemas & validation", "workspace.dbd"),
-                    ("Client cache tables", "workspace.cache"),
-                    ("MPQ patches & archives", "workspace.mpq"),
-                    ("Merge MPQ patches", "workspace.mpq-merge"),
-                    ("Client workshop", "workspace.client"),
-                    ("Client & Server File Checks", "workspace.compatibility-lab")),
-                DomainMenu("SERVER",
-                    ("Connection & controls", "workspace.server"),
-                    ("SQL Studio", "workspace.sql"),
-                    ("Saved SQL favorites", "workspace.sql-favorites")),
-                DomainMenu("WORLD & ASSETS",
-                    ("Assets, models & compare", "workspace.assets"),
-                    ("Texture lab", "workspace.textures"),
-                    ("Maps & world", "workspace.maps"),
-                    ("Lighting & skyboxes", "workspace.lighting"),
-                    ("Modern asset conversion", "workspace.conversion")),
-                DomainMenu("HELP",
-                    ("Field help & offline wiki", "workspace.knowledge"),
+                DomainMenu("File",
+                    ("Open DBC / DB2…", "action.open-dbc"),
+                    ("Save current table", "action.save"),
+                    ("Save current table as…", "action.save-as")),
+                DomainMenu("Workspace",
+                    ("Client & server setup", "workspace.setup"),
+                    ("Projects, classes & races", "workspace.projects")),
+                editors,
+                DomainMenu("Navigate",
+                    ("Previous workspace · Alt+Left", "action.back"),
+                    ("Find a command · Ctrl+K", "ui.commands")),
+                DomainMenu("Help",
+                    ("Field help & reference", "workspace.knowledge"),
                     ("CLI guide", "workspace.cli-guide"),
-                    ("Legacy-tool coverage", "workspace.tools"),
                     ("Logs", "action.logs"),
                     ("Toggle Devbug Mode", "action.devbug"))
             }
@@ -170,26 +128,6 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             menu.Items.Add(item);
         }
         return menu;
-    }
-
-    public void ShowFeature(string title, Control? toolbar)
-    {
-        _featureBack.IsVisible = true;
-        _featureTitle.Text = title;
-        _featureTitle.IsVisible = true;
-        _featureToolbar.Content = toolbar;
-        _featureToolbar.IsVisible = toolbar is not null;
-        _message.IsVisible = false;
-    }
-
-    public void HideFeature()
-    {
-        _featureBack.IsVisible = false;
-        _featureTitle.IsVisible = false;
-        _featureTitle.Text = string.Empty;
-        _featureToolbar.Content = null;
-        _featureToolbar.IsVisible = false;
-        _message.IsVisible = true;
     }
 
     public void Attach(DesktopWorkspaceSession session)
@@ -223,6 +161,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             };
             _status = result.Status; ShowStatus(result.Status);
             _message.Text = $"{result.Action} ready";
+            _operationStatus.IsVisible = true;
             _message.Foreground = new SolidColorBrush(Color.Parse("#54D68B"));
             ToolTip.SetTip(_message, result.Detail);
             DesktopCrashLogger.Debug("SERVER", "runtime-strip-action", ("action", result.Action), ("detail", result.Detail));
@@ -233,6 +172,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             DesktopCrashLogger.Log("Runtime strip operation failed", exception);
             ToolTip.SetTip(ComponentButton(component), exception.Message);
             _message.Text = $"{component.ToString().ToUpperInvariant()} failed · hover for details";
+            _operationStatus.IsVisible = true;
             _message.Foreground = new SolidColorBrush(Color.Parse("#E15A64"));
             ToolTip.SetTip(_message, exception.Message);
         }
@@ -248,7 +188,6 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
             _status = await _session.Lifecycle.GetStatusAsync(server, timeout.Token);
             ShowStatus(_status);
-            if (string.IsNullOrWhiteSpace(_message.Text)) _message.Text = "Click a component to start or stop it";
         }
         catch (Exception exception)
         {
@@ -267,7 +206,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
     private void ShowWorkspace()
     {
         var name = _session?.Settings.WorkspaceName;
-        _workspace.Content = string.IsNullOrWhiteSpace(name) ? "WORKSPACE · set up" : $"WORKSPACE · {name}";
+        _workspace.Content = new TextBlock { Text = string.IsNullOrWhiteSpace(name) ? "Workspace · choose client & server" : $"Workspace · {name}", TextTrimming = TextTrimming.CharacterEllipsis };
         ToolTip.SetTip(_workspace, string.IsNullOrWhiteSpace(_session?.Settings.WorkspaceRootPath)
             ? "Choose one top-level WoW workspace folder and let Crucible remember the install."
             : _session.Settings.WorkspaceRootPath);

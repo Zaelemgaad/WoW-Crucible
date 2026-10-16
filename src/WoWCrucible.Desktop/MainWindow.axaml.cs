@@ -37,7 +37,7 @@ public partial class MainWindow : Window
     private DbcDocumentSession? _dbcEditingDocument;
     private bool _dbcEditorClosing;
     private bool _savingDbc;
-    private readonly DesktopWorkspaceSession _workspaceSession = new(DesktopSettings.Load());
+    private readonly DesktopWorkspaceSession _workspaceSession;
     private AssetComparisonView? _assetComparisonView;
     private NativeConversionWorkspaceView? _nativeConversionWorkspaceView;
     private ModelBrowserView? _modelBrowserView;
@@ -65,7 +65,6 @@ public partial class MainWindow : Window
     private ServerSqlWorkspaceView? _serverSqlWorkspaceView;
     private SqlWorkspaceView? _sqlWorkspaceView;
     private WorkspaceSetupView? _workspaceSetupView;
-    private readonly Stack<(Control Workspace, string Title)> _featureHistory = new();
     private string _featureTitle = string.Empty;
     private readonly Dictionary<string, (WdbcFile File, IReadOnlyList<DbcColumn> Columns)> _referenceDbcCache = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<CrucibleCommandMatch> _commandMatches = [];
@@ -82,8 +81,11 @@ public partial class MainWindow : Window
     private WdbcFile? CurrentFile => Current?.File;
     private IReadOnlyList<DbcColumn> CurrentColumns => Current?.Schema.Columns ?? [];
 
-    public MainWindow()
+    public MainWindow() : this(DesktopSettings.Load()) { }
+
+    internal MainWindow(DesktopSettings settings)
     {
+        _workspaceSession = new(settings);
         _tableSchemas = new(_workspaceSession.Settings);
         InitializeComponent();
         var buildIdentity = ReadBuildIdentity();
@@ -93,10 +95,11 @@ public partial class MainWindow : Window
         DevbugModeToggle.IsChecked = DesktopCrashLogger.IsDevbugEnabled;
         RuntimeStrip.Attach(_workspaceSession);
         RuntimeStrip.WorkspaceRequested += (_, _) => OpenWorkspaceSetup();
-        RuntimeStrip.FeatureBackRequested += (_, _) => CloseFeatureWorkspace();
         RuntimeStrip.CommandRequested += async (_, command) => await ExecuteRuntimeCommandAsync(command);
         RefreshShellContext();
         _commandRoutes = BuildCommandRoutes();
+        InitializeWorkspaceShell();
+        SizeChanged += (_, _) => ApplyShellPaneState();
         var unrouted = CrucibleCommandCatalog.All.Where(command => !_commandRoutes.ContainsKey(command.Id)).Select(command => command.Id).ToArray();
         if (unrouted.Length > 0 || _commandRoutes.Count != CrucibleCommandCatalog.All.Count) throw new InvalidOperationException($"Desktop command routes do not exactly match the shared catalog. Missing: {string.Join(", ", unrouted)}");
         CommandPaletteResults.ItemTemplate = new FuncDataTemplate<CrucibleCommandMatch>((match, _) => match is null ? new Grid() : BuildCommandPaletteRow(match.Command));
@@ -246,7 +249,8 @@ public partial class MainWindow : Window
 
     private void ToggleNavigationPaneClick(object? sender, RoutedEventArgs e)
     {
-        _workspaceSession.Settings.DbcToolsPaneOpen = !_workspaceSession.Settings.DbcToolsPaneOpen;
+        _focusEditor = false;
+        _workspaceSession.Settings.EditorLayout.BrowserVisible = !_workspaceSession.Settings.EditorLayout.BrowserVisible;
         ApplyShellPaneState();
         _workspaceSession.Settings.Save();
     }
@@ -260,20 +264,31 @@ public partial class MainWindow : Window
 
     private void ApplyShellPaneState()
     {
-        var shellVisible = !FeatureWorkspaceHost.IsVisible;
-        var navigationVisible = shellVisible && _workspaceSession.Settings.DbcToolsPaneOpen;
-        var inspectorVisible = shellVisible && !WelcomePanel.IsVisible && _workspaceSession.Settings.DbcRowEditorOpen;
-        if (navigationVisible && !NavigationPane.IsVisible) RootLayout.ColumnDefinitions[0].Width = new GridLength(240);
-        if (inspectorVisible && !InspectorPane.IsVisible) RootLayout.ColumnDefinitions[4].Width = new GridLength(370);
+        var layout = _workspaceSession.Settings.EditorLayout;
+        var navigationVisible = !_focusEditor && layout.BrowserVisible;
+        var inspectorVisible = !_focusEditor && !FeatureWorkspaceHost.IsVisible && !WelcomePanel.IsVisible && _workspaceSession.Settings.DbcRowEditorOpen;
+        var navigationColumn = layout.BrowserOnRight ? 4 : 0;
+        var inspectorColumn = layout.BrowserOnRight ? 0 : 4;
+        Grid.SetColumn(NavigationPane, navigationColumn);
+        Grid.SetColumn(NavigationSplitter, layout.BrowserOnRight ? 3 : 1);
+        Grid.SetColumn(InspectorPane, inspectorColumn);
+        Grid.SetColumn(InspectorSplitter, layout.BrowserOnRight ? 1 : 3);
+        Grid.SetColumn(FeatureWorkspaceHost, layout.BrowserOnRight ? 0 : 2);
+        Grid.SetColumn(FeatureToolbarHost, layout.BrowserOnRight ? 0 : 2);
+        Grid.SetColumn(MainHeader, layout.BrowserOnRight ? 0 : 2);
         NavigationPane.IsVisible = NavigationSplitter.IsVisible = navigationVisible;
         InspectorPane.IsVisible = InspectorSplitter.IsVisible = inspectorVisible;
-        if (!navigationVisible) RootLayout.ColumnDefinitions[0].Width = new GridLength(0);
-        RootLayout.ColumnDefinitions[1].Width = navigationVisible ? GridLength.Auto : new GridLength(0);
-        RootLayout.ColumnDefinitions[3].Width = inspectorVisible ? GridLength.Auto : new GridLength(0);
-        if (!inspectorVisible) RootLayout.ColumnDefinitions[4].Width = new GridLength(0);
+        // Cap restored sizes to the current window, keeping the center usable after a monitor change.
+        var available = Bounds.Width > 0 ? Bounds.Width : 1440;
+        var browserWidth = double.IsFinite(layout.BrowserWidth) ? Math.Clamp(layout.BrowserWidth, 120, Math.Max(120, available * .35)) : 260;
+        var inspectorWidth = double.IsFinite(layout.InspectorWidth) ? Math.Clamp(layout.InspectorWidth, 160, Math.Max(160, available * .35)) : 340;
+        RootLayout.ColumnDefinitions[navigationColumn].Width = new GridLength(navigationVisible ? browserWidth : 0);
+        RootLayout.ColumnDefinitions[inspectorColumn].Width = new GridLength(inspectorVisible ? inspectorWidth : 0);
+        RootLayout.ColumnDefinitions[layout.BrowserOnRight ? 3 : 1].Width = navigationVisible ? GridLength.Auto : new GridLength(0);
+        RootLayout.ColumnDefinitions[layout.BrowserOnRight ? 1 : 3].Width = inspectorVisible ? GridLength.Auto : new GridLength(0);
         ToolsPaneToggle.IsChecked = navigationVisible;
         DetailsPaneToggle.IsChecked = inspectorVisible;
-        DetailsPaneToggle.IsEnabled = !WelcomePanel.IsVisible;
+        DetailsPaneToggle.IsEnabled = !WelcomePanel.IsVisible && !FeatureWorkspaceHost.IsVisible;
     }
 
     private void RefreshShellContext()
@@ -286,6 +301,12 @@ public partial class MainWindow : Window
         else if (InspectorTabs.SelectedIndex < 0) InspectorTabs.SelectedIndex = 0;
         FindReplaceBar.IsVisible = editingDbc;
         GoToIdBox.IsEnabled = GoToIdButton.IsEnabled = editingDbc && Current!.Schema.KeyStrategy.Kind != DbcRecordKeyKind.NoStableKey;
+        if (!FeatureWorkspaceHost.IsVisible)
+        {
+            if (editingDbc) _workspaceTabs.Select("tables");
+            MainHeader.IsVisible = _workspaceTabs.SelectedId == "tables";
+            WorkspaceTabs.Refresh(_workspaceTabs);
+        }
         ApplyShellPaneState();
     }
 
@@ -293,13 +314,18 @@ public partial class MainWindow : Window
     {
         if (!CommitPendingDbcEdits()) return;
         RowEditor.SelectRow(null, -1);
-        CloseAllFeatureWorkspaces();
         DbcHost.IsVisible = false;
+        _workspaceTabs.Select("home");
+        ShowTableWorkspace(selectTables: false);
+        StartPage.IsVisible = true;
+        TableStartPanel.IsVisible = false;
+        ToolBrowser.SelectCommand(null);
         WelcomePanel.IsVisible = true;
         InspectorTitle.Text = "Nothing selected";
         InspectorSummary.Text = "Choose a job from the start page.";
         InspectorDetail.Text = "Specialized tools are grouped in the workspace pane, and staged DBC tabs remain open.";
         RefreshShellContext();
+        Title = "WoW Crucible — Home";
         StatusText.Text = _documents.Count == 0 ? "Ready" : $"{_documents.Count:N0} open file(s)";
     }
 
@@ -384,7 +410,7 @@ public partial class MainWindow : Window
     {
         if (index < 0 || index >= _documents.Count) return;
         if (!CommitPendingDbcEdits()) return;
-        if (FeatureWorkspaceHost.IsVisible) CloseAllFeatureWorkspaces();
+        if (FeatureWorkspaceHost.IsVisible) ShowTableWorkspace();
         if (SecondaryDbcPane.IsVisible && _secondaryPaneActive) _secondaryDocument = index;
         else { _primaryDocument = index; _secondaryPaneActive = false; }
         var document = _documents[index];
@@ -1208,8 +1234,6 @@ public partial class MainWindow : Window
         await OpenModelBrowserAsync(Path.GetDirectoryName(Path.GetFullPath(path)), path);
     }
 
-    private void OpenLogsClick(object? sender, RoutedEventArgs e) => DesktopCrashLogger.OpenDirectory();
-    private void OpenItemWorkbenchClick(object? sender, RoutedEventArgs e) => OpenItemWorkbench();
     public void OpenItemWorkbench()
     {
         if (_itemWorkbenchView is null)
@@ -1229,7 +1253,6 @@ public partial class MainWindow : Window
         OpenItemWorkbench();
         _itemWorkbenchView!.ActivateAcquisition(exactIds);
     }
-    private void OpenCreatureWorkspaceClick(object? sender, RoutedEventArgs e) => OpenCreatureWorkspace();
     public void OpenCreatureWorkspace()
     {
         if (_creatureWorkspaceView is null)
@@ -1243,7 +1266,6 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_creatureWorkspaceView, "Creatures & NPCs");
     }
-    private void OpenGameObjectWorkspaceClick(object? sender, RoutedEventArgs e) => OpenGameObjectWorkspace();
     public void OpenGameObjectWorkspace()
     {
         if (_gameObjectWorkspaceView is null)
@@ -1255,7 +1277,6 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_gameObjectWorkspaceView, "Gameobjects");
     }
-    private void OpenQuestWorkspaceClick(object? sender, RoutedEventArgs e) => OpenQuestWorkspace();
     public void OpenQuestWorkspace()
     {
         if (_questWorkspaceView is null)
@@ -1267,12 +1288,10 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_questWorkspaceView, "Quests");
     }
-    private void OpenBehaviorWorkspaceClick(object? sender, RoutedEventArgs e) => OpenBehaviorWorkspace();
     public void OpenBehaviorWorkspace()
     {
         OpenFeatureWorkspace(EnsureWorldDataWorkspace(), "Behaviors & dialogue");
     }
-    private void OpenPetWorkspaceClick(object? sender, RoutedEventArgs e) => OpenPetWorkspace();
     public void OpenPetWorkspace()
     {
         var view = EnsureWorldDataWorkspace(); view.SelectDomain("pet-level-stats"); OpenFeatureWorkspace(view, "Pets & companions");
@@ -1307,9 +1326,6 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_petAbilityGraphView, "Pet talents & abilities");
     }
-    private void OpenAssetComparisonClick(object? sender, RoutedEventArgs e) => OpenAssetComparison();
-    private void OpenNativeConversionClick(object? sender, RoutedEventArgs e) => OpenNativeConversionWorkspace();
-    private async void OpenModelBrowserClick(object? sender, RoutedEventArgs e) => await OpenModelBrowserAsync();
     public async Task OpenModelBrowserAsync(string? folder = null, string? selectedPath = null)
     {
         var created = _modelBrowserView is null;
@@ -1330,7 +1346,6 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_nativeConversionWorkspaceView, "Modern Asset Conversion");
     }
-    private async void OpenToolInventoryClick(object? sender, RoutedEventArgs e) => await OpenToolInventoryAsync();
     public void OpenAddonAudit()
     {
         if (_addonAuditView is null) { _addonAuditView = new AddonAuditView(); _addonAuditView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
@@ -1341,7 +1356,6 @@ public partial class MainWindow : Window
         if (_toolInventoryView is null) { _toolInventoryView = new ToolInventoryView(); _toolInventoryView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
         OpenFeatureWorkspace(_toolInventoryView, "Tool Inventory"); await _toolInventoryView.ActivateAsync();
     }
-    private void OpenCompatibilityLabClick(object? sender, RoutedEventArgs e) => OpenCompatibilityLab();
     public void OpenCompatibilityLab()
     {
         if (_compatibilityLabView is null)
@@ -1351,18 +1365,23 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_compatibilityLabView, "Client & Server File Checks");
     }
-    private async void OpenKnowledgeClick(object? sender, RoutedEventArgs e) => await OpenKnowledgeAsync(_knowledgeContext);
     public async Task OpenKnowledgeAsync(string? query = null)
     {
         if (_knowledgeWorkspaceView is null) { _knowledgeWorkspaceView = new KnowledgeWorkspaceView(); _knowledgeWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); }
         OpenFeatureWorkspace(_knowledgeWorkspaceView, "Offline Knowledge & Field Reference"); await _knowledgeWorkspaceView.ActivateAsync(query);
     }
-    private void OpenHomeClick(object? sender, RoutedEventArgs e) => ShowHome();
     private void OpenEditorWorkspaceClick(object? sender, RoutedEventArgs e)
     {
-        CloseAllFeatureWorkspaces();
+        ShowTableWorkspace();
         if (Current is not null) ActivateDocument(ActiveDocumentIndex);
-        else ShowHome();
+        else
+        {
+            DbcHost.IsVisible = false;
+            WelcomePanel.IsVisible = true;
+            StartPage.IsVisible = false;
+            TableStartPanel.IsVisible = true;
+            RefreshShellContext();
+        }
     }
     private void OpenLayeredDbcsClick(object? sender, RoutedEventArgs e)
     {
@@ -1370,12 +1389,11 @@ public partial class MainWindow : Window
         {
             _layeredDbcWorkspaceView = new LayeredDbcWorkspaceView(_workspaceSession);
             _layeredDbcWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
-            _layeredDbcWorkspaceView.OpenDbcRequested += async (_, path) => { CloseAllFeatureWorkspaces(); await LoadDbcAsync(path); };
+            _layeredDbcWorkspaceView.OpenDbcRequested += async (_, path) => { ShowTableWorkspace(); await LoadDbcAsync(path); };
             _layeredDbcWorkspaceView.StageOverridesRequested += (_, paths) => OpenPatchBuilderWithPaths(paths);
         }
         OpenFeatureWorkspace(_layeredDbcWorkspaceView, "DBC Layers & Promotion");
     }
-    private void OpenDbdSchemasClick(object? sender, RoutedEventArgs e) => OpenDbdSchemaAudit();
     public void OpenDbdSchemaAudit()
     {
         if (_dbdSchemaAuditView is null)
@@ -1385,7 +1403,6 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_dbdSchemaAuditView, "DBD Schemas & Audit");
     }
-    private void OpenCacheTablesClick(object? sender, RoutedEventArgs e) => OpenCacheTableWorkspace();
     public void OpenCacheTableWorkspace()
     {
         if (_cacheTableWorkspaceView is null)
@@ -1401,7 +1418,6 @@ public partial class MainWindow : Window
         OpenCacheTableWorkspace();
         await _cacheTableWorkspaceView!.LoadAsync(path);
     }
-    private void OpenProjectWorkspaceClick(object? sender, RoutedEventArgs e) => OpenProjectWorkspace();
     public void OpenProjectWorkspace()
     {
         if (_projectWorkspaceView is null)
@@ -1412,8 +1428,6 @@ public partial class MainWindow : Window
         }
         OpenFeatureWorkspace(_projectWorkspaceView, "Projects & Shared IDs"); _projectWorkspaceView.Activate();
     }
-    private void OpenMpqWorkspaceClick(object? sender, RoutedEventArgs e)
-        => OpenMpqWorkspace();
     public void OpenMpqWorkspace()
     {
         if (_mpqWorkspaceView is null)
@@ -1440,8 +1454,6 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(_clientWorkspaceView, "Client Workshop");
     }
 
-    private void OpenTextureWorkspaceClick(object? sender, RoutedEventArgs e) => OpenTextureWorkspace();
-    private void OpenMapWorkspaceClick(object? sender, RoutedEventArgs e) => OpenMapWorkspace();
     public void OpenMapWorkspace(string? path = null)
     {
         if (_mapWorkspaceView is null) { _mapWorkspaceView = new MapWorkspaceView(_workspaceSession); _mapWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace(); _mapWorkspaceView.OpenDbcRecordRequested += async (_, request) => await OpenDbcRecordAsync(request); }
@@ -1450,7 +1462,7 @@ public partial class MainWindow : Window
     public void OpenLightingWorkspace(uint? lightId = null) { OpenMapWorkspace(); _mapWorkspaceView!.OpenLighting(lightId); }
     private async Task OpenDbcRecordAsync(DbcRecordNavigationRequest request)
     {
-        CloseAllFeatureWorkspaces(); await LoadDbcAsync(request.Path); var document = Current;
+        ShowTableWorkspace(); await LoadDbcAsync(request.Path); var document = Current;
         if (document is null || !document.FullPath.Equals(Path.GetFullPath(request.Path), StringComparison.OrdinalIgnoreCase)) return;
         var rows = DbcRecordIdentity.IndexRows(document.File, document.Schema.Columns, document.Schema.KeyStrategy);
         if (!rows.TryGetValue(request.Id, out var row)) { StatusText.Text = $"Opened {Path.GetFileName(request.Path)}, but record {request.Id:N0} is missing."; return; }
@@ -1480,7 +1492,7 @@ public partial class MainWindow : Window
     private async Task OpenTextureConsumerAsync(string path)
     {
         var extension = Path.GetExtension(path).ToLowerInvariant();
-        if (extension == ".m2") { CloseAllFeatureWorkspaces(); await LoadM2Async(path); return; }
+        if (extension == ".m2") { ShowTableWorkspace(); await LoadM2Async(path); return; }
         if (extension is ".adt" or ".wdt") { await OpenMapWorkspaceAsync(path); return; }
         if (extension == ".wmo") { OpenNativeConversionWorkspace(); await _nativeConversionWorkspaceView!.OpenAsync(path); return; }
         await ShowErrorAsync("Unsupported texture consumer", $"Crucible indexed '{extension}', but no same-window viewer route exists for it.");
@@ -1517,8 +1529,6 @@ public partial class MainWindow : Window
         _mpqWorkspaceView.StageEntries(entries);
         OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
     }
-    private void OpenServerSqlClick(object? sender, RoutedEventArgs e) => OpenServerSqlWorkspace();
-    private void OpenWorkspaceSetupClick(object? sender, RoutedEventArgs e) => OpenWorkspaceSetup();
     private void OpenWorkspaceSetup()
     {
         if (_workspaceSetupView is null)
@@ -1539,7 +1549,6 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(_serverSqlWorkspaceView, "Server & SQL");
         _serverSqlWorkspaceView.Activate();
     }
-    private void OpenSqlWorkspaceClick(object? sender, RoutedEventArgs e) => OpenSqlWorkspace();
     public void OpenSqlWorkspace()
     {
         if (_sqlWorkspaceView is null)
@@ -1548,7 +1557,7 @@ public partial class MainWindow : Window
             _sqlWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
             _sqlWorkspaceView.ConnectionRequested += (_, _) => OpenServerSqlWorkspace();
             _sqlWorkspaceView.GuidedEditRequested += (_, request) => OpenGuidedSqlRow(request);
-            _sqlWorkspaceView.OpenDbcRequested += async (_, path) => { CloseAllFeatureWorkspaces(); await LoadDbcAsync(path); };
+            _sqlWorkspaceView.OpenDbcRequested += async (_, path) => { ShowTableWorkspace(); await LoadDbcAsync(path); };
             _sqlWorkspaceView.OpenMpqRequested += async (_, path) => await OpenIndexedArchiveAsync(path);
             _sqlWorkspaceView.KnowledgeRequested += async (_, query) => await OpenKnowledgeAsync(query);
         }
@@ -1646,46 +1655,35 @@ public partial class MainWindow : Window
     private void OpenFeatureWorkspace(Control workspace, string title)
     {
         if (!CommitPendingDbcEdits()) return;
-        if (FeatureWorkspaceHost.IsVisible && FeatureWorkspaceHost.Child is Control current && !ReferenceEquals(current, workspace))
-            _featureHistory.Push((current, _featureTitle));
-        FeatureWorkspaceHost.Child = workspace;
-        FeatureWorkspaceHost.IsVisible = true;
-        MainHeader.IsVisible = EditorWorkspace.IsVisible = MainStatusBar.IsVisible = false;
-        ApplyShellPaneState();
-        _featureTitle = title;
-        RuntimeStrip.ShowFeature(title, (workspace as IFeatureWorkspaceToolbar)?.FeatureToolbar);
-        SuppressLegacyFeatureNavigation(workspace);
-        Title = $"WoW Crucible — {title}";
-        DesktopCrashLogger.Debug("UI", "feature-workspace-opened", ("title", title), ("view", workspace.GetType().Name), ("history_depth", _featureHistory.Count));
+        var id = _workspacePages.FirstOrDefault(pair => ReferenceEquals(pair.Value.View, workspace)).Key;
+        id ??= $"editor-{_workspacePages.Count}";
+        _workspacePages[id] = new(workspace, title, _openingCommand ?? _workspacePages.GetValueOrDefault(id)?.Command);
+        _workspaceTabs.Open(id, title);
+        ShowSelectedWorkspace();
+        DesktopCrashLogger.Debug("UI", "feature-workspace-opened", ("title", title), ("view", workspace.GetType().Name));
     }
 
     private void CloseFeatureWorkspace()
     {
-        if (_featureHistory.TryPop(out var previous))
-        {
-            FeatureWorkspaceHost.Child = previous.Workspace;
-            _featureTitle = previous.Title;
-            RuntimeStrip.ShowFeature(previous.Title, (previous.Workspace as IFeatureWorkspaceToolbar)?.FeatureToolbar);
-            SuppressLegacyFeatureNavigation(previous.Workspace);
-            Title = $"WoW Crucible — {previous.Title}";
-            DesktopCrashLogger.Debug("UI", "feature-workspace-back", ("title", previous.Title), ("view", previous.Workspace.GetType().Name), ("history_depth", _featureHistory.Count));
-            return;
-        }
-        CloseAllFeatureWorkspaces();
+        if (!CommitPendingDbcEdits()) return;
+        _workspaceTabs.Back();
+        ShowSelectedWorkspace();
     }
 
-    private void CloseAllFeatureWorkspaces()
+    private void ShowTableWorkspace(bool selectTables = true)
     {
-        _featureHistory.Clear();
+        if (selectTables) _workspaceTabs.Select("tables");
         _featureTitle = string.Empty;
         _assetComparisonView?.Suspend();
         FeatureWorkspaceHost.IsVisible = false;
         FeatureWorkspaceHost.Child = null;
-        RuntimeStrip.HideFeature();
+        FeatureToolbarHost.Child = null;
+        FeatureToolbarHost.IsVisible = false;
+        _editorPaneLayoutMenu.IsEnabled = false;
         MainHeader.IsVisible = EditorWorkspace.IsVisible = MainStatusBar.IsVisible = true;
+        ToolBrowser.SelectCommand("workspace.dbc");
         RefreshShellContext();
-        Title = "WoW Crucible";
-        DesktopCrashLogger.Debug("UI", "feature-workspace-closed");
+        Title = "WoW Crucible — Data tables";
     }
 
     private static void SuppressLegacyFeatureNavigation(Control workspace)
@@ -1708,7 +1706,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static IEnumerable<(Control Control, Control? Parent, Control? Wrapper)> WalkWorkspaceControls(Control root)
+    private static IEnumerable<(Control Control, Control? Parent, Control? Wrapper)> WalkWorkspaceControls(Control root, bool includeItems = false)
     {
         var stack = new Stack<(Control Control, Control? Parent, Control? Wrapper)>();
         stack.Push((root, null, null));
@@ -1718,6 +1716,7 @@ public partial class MainWindow : Window
             var children = current.Control switch
             {
                 Panel panel => panel.Children.OfType<Control>(),
+                ItemsControl items when includeItems => items.Items.OfType<Control>(),
                 Border { Child: Control child } => [child],
                 ContentControl { Content: Control child } => [child],
                 _ => []
@@ -1812,7 +1811,9 @@ public partial class MainWindow : Window
             }
             if (!_commandRoutes.TryGetValue(command, out var route))
                 throw new InvalidOperationException($"The application menu command '{command}' has no route.");
-            await route();
+            _openingCommand = command;
+            try { await route(); }
+            finally { _openingCommand = null; }
         }
         catch (Exception exception)
         {
@@ -1853,7 +1854,7 @@ public partial class MainWindow : Window
         return new Dictionary<string, Func<Task>>(StringComparer.Ordinal)
         {
             ["workspace.setup"] = Done(OpenWorkspaceSetup),
-            ["workspace.dbc"] = Done(CloseAllFeatureWorkspaces),
+            ["workspace.dbc"] = Done(() => OpenEditorWorkspaceClick(null, new RoutedEventArgs())),
             ["workspace.dbc-layers"] = Done(() => OpenLayeredDbcsClick(null, new RoutedEventArgs())),
             ["workspace.dbd"] = Done(OpenDbdSchemaAudit),
             ["workspace.cache"] = Done(OpenCacheTableWorkspace),
@@ -1885,8 +1886,8 @@ public partial class MainWindow : Window
             ["workspace.cli-guide"] = Done(() => OpenCliGuideClick(null, new RoutedEventArgs())),
             ["action.open-dbc"] = Done(() => OpenDbcClick(null, new RoutedEventArgs())),
             ["action.open-m2"] = Done(() => OpenM2Click(null, new RoutedEventArgs())),
-            ["action.save"] = () => SaveCurrentAsync(false),
-            ["action.save-as"] = () => SaveCurrentAsync(true),
+            ["action.save"] = () => SaveVisibleTableAsync(false),
+            ["action.save-as"] = () => SaveVisibleTableAsync(true),
             ["action.export-rows"] = Done(() => OpenDbcExportClick(null, new RoutedEventArgs())),
             ["action.import-rows"] = Done(() => OpenDbcImportClick(null, new RoutedEventArgs())),
             ["action.dbc-staging"] = Done(() => OpenDbcStagingClick(null, new RoutedEventArgs())),
@@ -1900,24 +1901,24 @@ public partial class MainWindow : Window
     private async Task ExecuteSelectedCommandAsync()
     {
         if (CommandPaletteResults.SelectedItem is not CrucibleCommandMatch match) return;
-        var command = match.Command; CloseCommandPalette();
-        try
+        CloseCommandPalette();
+        await ExecuteRuntimeCommandAsync(match.Command.Id);
+    }
+
+    private async Task SaveVisibleTableAsync(bool saveAs)
+    {
+        if (FeatureWorkspaceHost.IsVisible || WelcomePanel.IsVisible)
         {
-            if (!_commandRoutes.TryGetValue(command.Id, out var route)) throw new InvalidOperationException($"Command route is not implemented: {command.Id}");
-            await route();
-            DesktopCrashLogger.Debug("UI", "command-palette-executed", ("id", command.Id), ("title", command.Title));
+            await ShowErrorAsync("No active data table", "This command saves a DBC / DB2 table. Select Data tables first. Other editors have their own save, export and apply actions.");
+            return;
         }
-        catch (Exception exception)
-        {
-            DesktopCrashLogger.Log($"Command palette route failed: {command.Id}", exception);
-            await ShowErrorAsync($"Could not open {command.Title}", exception.Message);
-        }
+        await SaveCurrentAsync(saveAs);
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
-        if (e.Handled || _savingDbc) return;
+        if (e.Handled || _savingDbc || DialogOverlayHost.IsVisible) return;
         if (e.KeyModifiers.HasFlag(KeyModifiers.Control) && e.Key is Key.F or Key.H)
         {
             OpenFindReplace(e.Key == Key.H);
@@ -1948,13 +1949,27 @@ public partial class MainWindow : Window
             else return;
             e.Handled = true; return;
         }
+        if (e.Key == Key.F6) { ToggleEditorFocus(); e.Handled = true; return; }
+        if (e.KeyModifiers.HasFlag(KeyModifiers.Control) && e.Key == Key.Tab)
+        {
+            var tabs = _workspaceTabs.Tabs;
+            var current = tabs.ToList().FindIndex(tab => tab.Id == _workspaceTabs.SelectedId);
+            var delta = e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? -1 : 1;
+            SelectWorkspaceTab(tabs[(current + delta + tabs.Count) % tabs.Count].Id);
+            e.Handled = true; return;
+        }
         if (e.KeyModifiers.HasFlag(KeyModifiers.Alt) && e.Key == Key.Left) { CloseFeatureWorkspace(); e.Handled = true; return; }
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
-        if (e.Key == Key.Z) Undo();
-        else if (e.Key == Key.Y) Redo();
-        else if (e.Key == Key.S) _ = SaveCurrentAsync(e.KeyModifiers.HasFlag(KeyModifiers.Shift));
-        else if (e.Key == Key.W) _ = CloseCurrentDocumentAsync();
+        if (e.Key == Key.W && FeatureWorkspaceHost.IsVisible) CloseWorkspaceTab(_workspaceTabs.SelectedId);
         else if (e.Key == Key.O) OpenDbcClick(null, new RoutedEventArgs());
+        else if (!FeatureWorkspaceHost.IsVisible && !WelcomePanel.IsVisible)
+        {
+            if (e.Key == Key.Z) Undo();
+            else if (e.Key == Key.Y) Redo();
+            else if (e.Key == Key.S) _ = SaveCurrentAsync(e.KeyModifiers.HasFlag(KeyModifiers.Shift));
+            else if (e.Key == Key.W) _ = CloseCurrentDocumentAsync();
+            else return;
+        }
         else return;
         e.Handled = true;
     }

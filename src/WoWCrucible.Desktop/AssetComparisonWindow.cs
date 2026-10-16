@@ -89,7 +89,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
     private string _modelDiscoveryScope = string.Empty; private string? _projectPath; private DefinitiveAssetProject? _project; private AssetDependencyGraph? _modelDependencyGraph; private AssetComparisonDirectory? _selectedDirectory; private string? _resolvedModelTexturePath; private string? _geosetInspectorModel; private int _resolvedModelTextureCount; private bool _appearanceComposed; private bool _creatureAppearanceBound;
     private IReadOnlyDictionary<int, RgbaTexture> _loadedModelTextures = new Dictionary<int, RgbaTexture>();
     private Task? _modelDiscoveryTask;
-    private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _suppressModelSkinSelection; private bool _suppressAppearanceSelection; private bool _suppressCreatureAppearanceSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _initialIndexRequested; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
+    private CancellationTokenSource _workspaceCancellation = new(); private CancellationTokenSource? _directoryCancellation; private CancellationTokenSource? _thumbnailCancellation; private CancellationTokenSource? _imageSelectionCancellation; private CancellationTokenSource? _modelCancellation; private CancellationTokenSource? _duplicateScanCancellation; private int _page; private int _activeSlot; private double _zoom = 1; private bool _syncingScroll; private bool _settingSourceFilter; private bool _suppressPreviewModeChange; private bool _suppressModelSelection; private bool _suppressModelSkinSelection; private bool _suppressAppearanceSelection; private bool _suppressCreatureAppearanceSelection; private bool _modelOnlyDirectory; private bool _modelsDiscovered; private bool _directoryReady; private bool _active; private bool _disposed; private long _activityVersion; private int _indexRequest; private int _directoryRequest; private int _thumbnailRequest; private int _imageSelectionRequest; private int _modelRequest; private int _duplicateScanRequest;
 
     public event EventHandler? BackRequested;
 
@@ -138,11 +138,15 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         _directoryCancellation?.Dispose(); _directoryCancellation = CancellationTokenSource.CreateLinkedTokenSource(_workspaceCancellation.Token);
         if (!_modelsDiscovered) _modelDiscoveryTask = null;
         _active = true; _activityVersion++; _scanDuplicates.IsEnabled = true;
-        if ((!_initialIndexRequested || changedRoot) && !string.IsNullOrWhiteSpace(_library.Text) && Directory.Exists(_library.Text))
+        if ((_index is null || changedRoot) && !string.IsNullOrWhiteSpace(_library.Text) && Directory.Exists(_library.Text))
         {
-            _initialIndexRequested = true;
             _ = LoadIndexAsync();
         }
+    }
+
+    public void Resume()
+    {
+        if (!_active) Activate();
     }
 
     public void Suspend()
