@@ -1858,6 +1858,7 @@ public partial class MainWindow : Window
             ["workspace.dbd"] = Done(OpenDbdSchemaAudit),
             ["workspace.cache"] = Done(OpenCacheTableWorkspace),
             ["workspace.projects"] = Done(OpenProjectWorkspace),
+            ["workspace.class-studio"] = Done(OpenClassStudio),
             ["workspace.items"] = Done(OpenItemWorkbench),
             ["workspace.item-acquisition"] = Done(() => OpenItemAcquisition()),
             ["workspace.creatures"] = Done(OpenCreatureWorkspace),

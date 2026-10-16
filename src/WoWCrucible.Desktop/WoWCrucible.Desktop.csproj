@@ -13,6 +13,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="WoWCrucible.Desktop.Tests" />
     <PackageReference Include="Avalonia" Version="12.1.0" />
     <PackageReference Include="Avalonia.Desktop" Version="12.1.0" />
     <PackageReference Include="Avalonia.Skia" Version="12.1.0" />
@@ -22,6 +23,7 @@
 
   <ItemGroup>
     <AvaloniaResource Include="Assets\Branding\WoWCrucible.ico" />
+    <Content Include="..\WoWCrucible.ClassStudio\**\*" Link="ClassStudio\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <AvaloniaResource Include="Assets\Branding\WoWCrucible-128.png" />
     <ProjectReference Include="..\WoWCrucible.Core\WoWCrucible.Core.csproj" />
     <None Include="..\..\third_party\StormLib\win-x64\StormLib.dll"

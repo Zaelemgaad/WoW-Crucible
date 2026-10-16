@@ -38,6 +38,7 @@ public partial class App : Application
                 window.Opened += (_, _) => window.OpenAssetComparison(library);
             }
             if (arguments.Any(argument => IsOption(argument, "--server-sql"))) window.Opened += (_, _) => window.OpenServerSqlWorkspace();
+            else if (arguments.Any(argument => IsOption(argument, "--class-studio"))) window.Opened += (_, _) => window.OpenClassStudio();
             else if (arguments.Any(argument => IsOption(argument, "--sql-favorites"))) window.Opened += (_, _) => window.OpenSqlFavorites();
             else if (arguments.Any(argument => IsOption(argument, "--sql-studio"))) window.Opened += (_, _) => window.OpenSqlWorkspace();
             else if (arguments.Any(argument => IsOption(argument, "--projects"))) window.Opened += (_, _) => window.OpenProjectWorkspace();

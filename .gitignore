@@ -33,6 +33,10 @@ coverage/
 Data/
 data/
 
+# Bundled JavaScript catalogs for the existing Class Studio frontend (not DBC binaries).
+!src/WoWCrucible.ClassStudio/data/
+!src/WoWCrucible.ClassStudio/data/*.js
+
 # OS files
 Thumbs.db
 .DS_Store

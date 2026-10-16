@@ -43,6 +43,14 @@ public sealed class DbcSchemaCatalog
         AddSimple(tables, "SpellRadius", "ID:int,Radius:float,RadiusPerLevel:float,RadiusMax:float");
         AddSimple(tables, "SpellRuneCost", "ID:int,Blood:uint,Unholy:uint,Frost:uint,RunicPower:uint");
         AddSimple(tables, "SpellDifficulty", "ID:int,DifficultySpellID[0]:int,DifficultySpellID[1]:int,DifficultySpellID[2]:int,DifficultySpellID[3]:int");
+        AddSimple(tables, "SkillLineAbility", "ID:int,SkillLine:int,Spell:int,RaceMask:uint,ClassMask:uint,ExcludeRace:uint,ExcludeClass:uint,MinSkillLineRank:int,SupercededBySpell:int,AcquireMethod:int,TrivialSkillLineRankHigh:int,TrivialSkillLineRankLow:int,CharacterPoints[0]:int,CharacterPoints[1]:int");
+        AddSimple(tables, "SkillRaceClassInfo", "ID:int,SkillID:int,RaceMask:uint,ClassMask:uint,Flags:uint,MinLevel:int,SkillTierID:int,SkillCostIndex:int");
+        AddSimple(tables, "SpellIcon", "ID:int,TextureFilename:string");
+        AddSimple(tables, "Talent", "ID:int,TabID:int,TierID:int,ColumnIndex:int," + string.Join(',', Enumerable.Range(0, 9).Select(i => $"SpellRank[{i}]:int")) + "," + string.Join(',', Enumerable.Range(0, 3).Select(i => $"PrereqTalent[{i}]:int")) + "," + string.Join(',', Enumerable.Range(0, 3).Select(i => $"PrereqRank[{i}]:int")) + ",Flags:uint,RequiredSpellID:int,CategoryMask[0]:uint,CategoryMask[1]:uint");
+        string Localized(string name) => string.Join(',', Enumerable.Range(0, 16).Select(i => $"{name}[{LocaleName(i)}]:string")) + $",{name}[Flags]:uint";
+        AddSimple(tables, "TalentTab", "ID:int," + Localized("Name_Lang") + ",SpellIconID:int,RaceMask:uint,ClassMask:uint,PetTalentMask:uint,OrderIndex:int,BackgroundFile:string");
+        AddSimple(tables, "ChrClasses", "ID:int,Field01:int,DisplayPower:int,PetNameToken:int," + Localized("Name_Lang") + "," + Localized("Name_Female_Lang") + "," + Localized("Name_Male_Lang") + ",Filename:string,SpellClassSet:int,Flags:uint,CinematicSequenceID:int,Required_Expansion:int");
+        AddSimple(tables, "SkillLine", "ID:int,CategoryID:int,SkillCostsID:int," + Localized("DisplayName_Lang") + "," + Localized("Description_Lang") + ",SpellIconID:int," + Localized("AlternateVerb_Lang") + ",CanLink:int");
         return new(tables);
     }
 

@@ -13,6 +13,7 @@ public static class CrucibleCommandCatalog
     public static IReadOnlyList<CrucibleCommandDescriptor> All { get; } =
     [
         Command("workspace.setup", "Workspace setup", "Workspace", "Discover and remember one top-level server, core, client, tools, projects, and staging install.", "work dir working directory root paths configure install sql auth world status"),
+        Command("workspace.class-studio", "Class Studio", "Workspace", "Design movable talent boards and class spellbooks using live client, server and SQL sources, with JSON and CSV export.", "talents class spec sideboard spellbook learn list canvas grid"),
         Command("workspace.dbc", "DBC tables", "Workspace", "Open the multi-document decoded/raw DBC and DB2 table editor.", "client tables records wdbc db2 spreadsheet editor"),
         Command("workspace.dbc-layers", "DBC layers & promotion", "Workspace", "Compare base and override tables, promote selected changes, and stage them for a patch.", "overlay compare merge effective dbc promotion base override"),
         Command("workspace.dbd", "DBD schemas & audit", "Workspace", "Inspect WoWDBDefs layouts and validate a client-table corpus against a target build.", "schema definitions wdbx wowdbdefs validation recursive"),

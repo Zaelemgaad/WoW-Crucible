@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WoW Crucible — Class Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>Class Studio <span class="topbar-sub">· WoW Crucible</span></h1>
+
+  <div class="topbar-controls">
+    <label class="field">
+      Level
+      <input type="number" id="levelInput" min="10" max="255" value="80">
+      <span class="field-hint">(max 255)</span>
+    </label>
+    <label class="field">
+      Points/tier
+      <input type="number" id="pptInput" min="1" max="20" value="5">
+    </label>
+    <label class="field">
+      Tiers
+      <input type="number" id="tiersInput" min="1" max="30" value="11">
+    </label>
+
+    <button id="editModeBtn" class="btn btn-toggle">Edit Mode: Off</button>
+    <button id="splitViewBtn" class="btn btn-toggle">Split View: Off</button>
+    <button id="freeModeBtn" class="btn btn-toggle">Free Mode: Off</button>
+    <label class="field">Drag
+      <select id="transferMode">
+        <option value="auto">Auto (move within class)</option>
+        <option value="move">Move everywhere</option>
+        <option value="copy">Copy everywhere</option>
+      </select>
+    </label>
+    <button id="showHelp" class="btn" title="Show editing help">?</button>
+    <button id="spellbookBtn" class="btn">Spells &amp; sources</button>
+    <button id="backupStudio" class="btn">Export entire workspace</button>
+    <button id="restoreStudio" class="btn">Restore workspace</button>
+    <input type="file" id="restoreStudioFile" accept="application/json" class="hidden">
+    <button id="importBtn" class="btn">Import JSON</button>
+    <input type="file" id="importFile" accept="application/json" class="hidden">
+  </div>
+</header>
+
+<div id="editHint" class="edit-hint hidden"><button id="dismissHint" class="hint-close" aria-label="Dismiss editing help">×</button>Click a talent to edit it or an empty cell to add one. The Drag control chooses whether transfers move or copy; Auto moves within a class or workspace and copies between classes. Dropping on an occupied cell asks before replacing it. Free Mode keeps independent spec boards and a shared sideboard, saved separately from your classes.</div>
+
+<section id="freeWorkspace" class="free-workspace hidden"></section>
+
+<main id="panesContainer" class="panes-container">
+  <section class="pane" id="pane0" data-pane="0"></section>
+  <section class="pane hidden" id="pane1" data-pane="1"></section>
+</main>
+
+<div id="tooltip" class="tooltip hidden"></div>
+<section id="spellbook" class="studio-window hidden" aria-label="Spells and sources">
+  <header class="studio-title"><strong>Spells &amp; sources</strong><button id="closeSpellbook" class="hint-close" aria-label="Close spells and sources">×</button></header>
+  <div id="spellbookBody" class="studio-body"></div>
+</section>
+
+<div id="editorPanel" class="editor-panel hidden">
+  <div class="editor-panel-inner">
+    <button id="editorClose" class="editor-close">&times;</button>
+    <h2 id="editorTitle">Edit Talent</h2>
+    <div id="editorBody"></div>
+  </div>
+</div>
+
+<div id="classModal" class="editor-panel hidden">
+  <div class="editor-panel-inner">
+    <button id="classModalClose" class="editor-close">&times;</button>
+    <h2 id="classModalTitle">New Class</h2>
+    <div id="classModalBody"></div>
+  </div>
+</div>
+
+<div id="treeCopyModal" class="editor-panel hidden">
+  <div class="editor-panel-inner">
+    <button id="treeCopyModalClose" class="editor-close">&times;</button>
+    <h2 id="treeCopyModalTitle">Copy Tree From…</h2>
+    <div id="treeCopyModalBody"></div>
+  </div>
+</div>
+
+<div id="modalOverlay" class="modal-overlay hidden"></div>
+<div id="textModal" class="text-modal hidden">
+  <div class="text-modal-inner">
+    <button id="textModalClose" class="editor-close">&times;</button>
+    <h2 id="textModalTitle">Export</h2>
+    <textarea id="textModalBody" readonly></textarea>
+    <div id="textModalActions" class="text-modal-actions"></div>
+  </div>
+</div>
+
+<script src="data/talents.js"></script>
+<script src="data/icon-manifest.js"></script>
+<script src="studio-bridge.js"></script>
+<script src="window-layout.js"></script>
+<script src="board-canvas.js"></script>
+<script src="app.js"></script>
+<script src="studio-data.js"></script>
+<script src="spellbook.js"></script>
+</body>
+</html>

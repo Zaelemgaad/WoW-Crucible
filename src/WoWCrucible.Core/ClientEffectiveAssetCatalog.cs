@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 namespace WoWCrucible.Core;
 
 public enum ClientEffectiveAssetState { Missing, Effective, Ambiguous }
+public enum ClientArchiveOrderPolicy { StandardWrath, CoA }
 public sealed record ClientEffectiveAssetCandidate(string ArchiveRelativePath, ClientArchiveScope Scope, MpqFileEntry Entry,
     long? Precedence, string PrecedenceDescription);
 public sealed record ClientEffectiveAssetResolution(string ClientPath, ClientEffectiveAssetState State,
@@ -35,16 +36,21 @@ public sealed class ClientEffectiveAssetCatalog
     {
         IndexDirectory = indexDirectory; Index = index; _archives = archives; _known = known;
         var identity = string.Join('\n', archives.OrderBy(archive => archive.Summary.RelativePath, StringComparer.OrdinalIgnoreCase)
-            .Select(archive => $"{archive.Summary.RelativePath.ToUpperInvariant()}\t{archive.Summary.Length}\t{archive.Summary.LastWriteUtcTicks}\t{archive.Summary.Sha256 ?? "NO_ARCHIVE_HASH"}"));
+            .Select(archive => $"{archive.Summary.RelativePath.ToUpperInvariant()}\t{archive.Summary.Length}\t{archive.Summary.LastWriteUtcTicks}\t{archive.Summary.Sha256 ?? "NO_ARCHIVE_HASH"}\t{archive.Precedence}"));
         Fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{index.ActiveLocale ?? "-"}\n{identity}")));
     }
 
-    public static ClientEffectiveAssetCatalog Load(string indexDirectory, CancellationToken cancellationToken = default)
+    public static ClientEffectiveAssetCatalog Load(string indexDirectory, CancellationToken cancellationToken = default, ClientArchiveOrderPolicy orderPolicy = ClientArchiveOrderPolicy.StandardWrath)
     {
         indexDirectory = Path.GetFullPath(indexDirectory);
         var index = ClientArchiveIndexService.Load(indexDirectory);
         if (!index.Complete) throw new InvalidDataException("Target-client satisfaction requires a complete client index; finish or resume indexing first.");
         var clientRoot = Path.GetFullPath(index.ClientRoot); var archives = new List<IndexedArchive>();
+        // CoA's patch-*.MPQ loader opens ascending filenames with increasing priority.
+        // Keep this opt-in: ordinary Wrath clients do not prove the order of arbitrary patch names.
+        var coaPatches = index.Archives.Where(a => a.Scope == ClientArchiveScope.RootData && Path.GetFileName(a.RelativePath).StartsWith("patch-", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(a => Path.GetFileName(a.RelativePath), StringComparer.OrdinalIgnoreCase).Select((a, i) => (a.RelativePath, Rank: 2_900_000L + i))
+            .ToDictionary(a => a.RelativePath, a => a.Rank, StringComparer.OrdinalIgnoreCase);
         foreach (var summary in index.Archives.Where(archive => archive.Scope is ClientArchiveScope.RootData or ClientArchiveScope.ActiveLocale))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -57,6 +63,8 @@ public sealed class ClientEffectiveAssetCatalog
             var content = File.Exists(contentPath) ? JsonSerializer.Deserialize<ArchiveContentIndex>(File.ReadAllText(contentPath)) : null;
             var files = content?.Files.Where(file => !file.IsMetadata && !ClientArchiveIndexService.IsAnonymous(file.ArchivePath)).ToArray() ?? [];
             var (precedence, description) = Precedence(summary.RelativePath, summary.Scope, index.ActiveLocale);
+            if (orderPolicy == ClientArchiveOrderPolicy.CoA && coaPatches.TryGetValue(summary.RelativePath, out var coaRank))
+            { precedence = coaRank; description = "CoA ascending patch filename order"; }
             archives.Add(new(summary, archivePath, files, precedence, description, summary.AnonymousFiles > 0 || summary.Error is not null || content is null));
         }
         if (archives.Count == 0) throw new InvalidDataException("The target client index contains no active root-data or active-locale MPQ archives.");

@@ -56,6 +56,7 @@
                         </Expander>
                         <Expander Header="CREATE GAME CONTENT">
                             <StackPanel Spacing="4" Margin="8,4,0,4">
+                                <Button HorizontalContentAlignment="Left" Click="OpenClassStudioClick" ToolTip.Tip="Open the shared talent and spellbook editor, connected to Crucible, in your browser."><TextBlock Text="Class Studio" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenItemWorkbenchClick" ToolTip.Tip="Create, clone, edit, and audit items and item sets."><TextBlock Text="Items &amp; item sets" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenCreatureWorkspaceClick" ToolTip.Tip="Create NPCs and creatures, appearances, spawns, vendors, loot, quests, and trainers."><TextBlock Text="Creatures &amp; NPCs" TextWrapping="Wrap" /></Button>
                                 <Button HorizontalContentAlignment="Left" Click="OpenQuestWorkspaceClick" ToolTip.Tip="Edit complete quests, objectives, rewards, text, and giver relationships."><TextBlock Text="Quests" TextWrapping="Wrap" /></Button>
