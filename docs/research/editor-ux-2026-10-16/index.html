@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Crucible editor UX research · 16 October 2026</title>
+  <link rel="stylesheet" href="report.css">
+  <script src="research-data.js" defer></script>
+  <script src="report.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to report</a>
+<header>
+  <p class="eyebrow">WoW Crucible · research dossier · 16 October 2026</p>
+  <h1>Make the game object the starting point.</h1>
+  <p class="lead">Crucible needs a coherent editing workflow, not another collection of prettier tool panels. This report compares established editors, traces problems to the current implementation, and specifies how to evaluate a replacement.</p>
+  <p><strong>Research and proposed requirements. The redesign described here is not implemented or user-tested.</strong> Target: the CoA client, server and core. Baseline: <a href="https://github.com/Zaelemgaad/WoW-Crucible/tree/52b826de0cc413a697056ccf14c6f8b4c40d51a1">52b826d</a>.</p>
+  <div class="reading-controls" aria-label="Reading preferences">
+    <label>Text size <input id="text-size" type="range" min="14" max="24" value="17"> <output id="text-size-value">17 px</output></label>
+    <label>Report width <input id="report-width" type="range" min="55" max="110" value="88"> <output id="report-width-value">88 rem</output></label>
+    <button id="print" type="button">Print / save PDF</button>
+  </div>
+  <nav aria-label="Report sections">
+    <a href="#conclusion">Conclusion</a><a href="#method">Evidence & limits</a><a href="#comparison">Editor comparisons</a><a href="#audit">Crucible audit</a><a href="#flows">Task flows</a><a href="#structure">Layout decisions</a><a href="#requirements">Interaction requirements</a><a href="#delivery">Rework sequence</a><a href="#evaluation">Usability tests</a><a href="#sources">Sources</a>
+  </nav>
+</header>
+<main id="main">
+<section id="conclusion">
+  <h2>The main finding</h2>
+  <p>The current interface frequently asks the user to translate a game problem into a file, table, record identifier or deployment operation before they can edit it. “Fix this floor” becomes “find the ADT, identify the texture layer and its MTEX entry.” “Change this sword” crosses copying, appearance resolution, SQL editing and client synchronization. Those are legitimate internal operations; making the user assemble them is the usability failure.</p>
+  <p>The strongest candidate direction is a shared content document: find or select an item, creature, spell, class or place; edit relevant properties; see the effect; review the actual affected destinations. This is an inference from the comparisons and code audit below. It is not evidence that one particular arrangement of panels will suit every task.</p>
+  <p>Keep the technical depth. Raw tables, custom fields, exact IDs, source comparison and scripts must remain reachable. Simpler entry should remove unnecessary translation, not remove capability. The default experience and the expert view should edit the same draft through the same validation and target adapters. <a href="#S03">Unity inspection</a>, <a href="#S09">RPG Maker’s game concepts</a>, <a href="#S27">TEdit’s contextual editing</a> and <a href="#S32">progressive disclosure</a> inform this direction.</p>
+  <p><strong>A resizable three-pane shell alone will not solve this.</strong> Crucible already has splitters, preview surfaces and workflow-oriented documentation. The missing piece is consistency across discovery, selection, editing, undo, saving and application. A friendly control cannot compensate for an unimplemented writer or an unknown CoA field.</p>
+  <div class="sequence" aria-label="Proposed common editing sequence">
+    <span>Find / select</span><span>Edit in context</span><span>Preview</span><span>Review & apply</span><span>Verify / recover</span>
+  </div>
+</section>
+<section id="method">
+  <h2>What was actually researched</h2>
+  <p><span id="scope-count"></span> The source ledger distinguishes official documentation, primary code, published screenshots and UX/accessibility guidance. Patterns were selected for their relevance to Crucible’s tasks, not because a tool is popular or its screenshot looks attractive.</p>
+  <ul>
+    <li><strong>External evidence:</strong> read the linked editor manuals, project material and UX guidance. Inspected the published Keira3 item screenshot and WoW Database Editor game-view screenshot. The latter labels itself 2021.2; neither screenshot is a current installed-app test.</li>
+    <li><strong>Local evidence:</strong> inspected the main shell, item creation/workbench, texture and map workspaces, setup, responsive split layout, document undo, Class Studio spellbook/bridge and relevant CoA/asset services. Source links in the audit use the exact baseline commit.</li>
+    <li><strong>Capture limitation:</strong> isolated item, texture, map and setup views were rendered at 1440×900 and 1024×768 without global input or game writes. Their offscreen render had unreliable tab/text presentation; those captures are excluded from visual defect evidence. Source-backed terminology and workflow findings do not depend on them.</li>
+    <li><strong>Not performed:</strong> hands-on trials of every external editor, novice participant testing, live SQL editing, game deployment, a final visual design, or a full Crucible accessibility audit. Interaction feel and discoverability remain hypotheses until observed in use.</li>
+  </ul>
+  <p>Published manuals describe intended behavior, not universal usability. A reference is useful even when part of its interface is a poor fit. The comparison explicitly separates observed behavior, proposed adoption, rejected patterns and a validation question. Failed page fetches and third-party search snippets are not used to establish technical behavior. No external editor source or artwork is copied into the product.</p>
+  <p>The primary project pages establish Noggit3 and Noggit RED separately; old source is not labelled current RED behavior. Terrasavr’s manual includes legacy browser guidance. PKHeX’s older tutorial is paired with release notes documenting newer feedback changes. These version limits are retained in the evidence ledger.</p>
+</section>
+<section id="comparison">
+  <h2>What to borrow—and what not to copy</h2>
+  <div class="filters">
+    <label>Find a tool or pattern <input id="tool-search" type="search" placeholder="Try: undo, item, layout, scope…"></label>
+    <label>Type <select id="tool-category"><option value="">All editor types</option></select></label>
+    <button id="expand-tools" type="button">Expand all comparisons</button>
+  </div>
+  <p id="tool-count" role="status"></p>
+  <div id="tools"></div>
+</section>
+<section id="audit">
+  <h2>Concrete problems in Crucible</h2>
+  <p>Severity is an analyst prioritization of likely task impact, not a measured frequency of failure. These findings include useful existing foundations so that rework does not discard working capabilities.</p>
+  <div id="findings"></div>
+</section>
+<section id="flows">
+  <h2>Eight complete editing jobs</h2>
+  <p>These are proposed interaction contracts, not mock buttons or promises that the backend can already perform every step. Each names the current handoffs, intended flow, failure behavior and completion criterion.</p>
+  <label class="workflow-picker">Choose a task <select id="workflow-select"></select></label>
+  <div id="workflow"></div>
+  <details><summary>Read all eight task specifications</summary><div id="all-workflows"></div></details>
+</section>
+<section id="structure">
+  <h2>Layout decisions that follow from the tasks</h2>
+  <p>The starting arrangement should vary with the work while keeping navigation, state, commands and recovery consistent. These are structural alternatives to prototype and compare, not a prescribed visual theme.</p>
+  <div class="table-wrap" tabindex="0" aria-label="Layout alternatives">
+  <table><thead><tr><th>Task</th><th>Candidate arrangement</th><th>Why / evidence</th><th>What to reject</th></tr></thead><tbody>
+    <tr><td>Items, spells, creatures</td><td>Search/list beside a selected content document; grouped properties and a persistent preview. Related documents can be pinned side by side.</td><td>Selection-driven editing and game-concept forms: <a href="#S03">Unity</a>, <a href="#S09">RPG Maker</a>, <a href="#S18">Keira3</a>.</td><td>A giant raw-field grid, or a wizard that makes the user repeatedly go back to compare appearance and stats.</td></tr>
+    <tr><td>Terrain, models, materials</td><td>A large visual surface, contextual tool controls, searchable asset palette, selected-object properties.</td><td>Visual selection and placement: <a href="#S01">Unreal</a>, <a href="#S11">Tiled</a>, <a href="#S26">TEdit</a>.</td><td>Starting with a generic file picker when a configured project already knows the content.</td></tr>
+    <tr><td>Class/spec planning</td><td>Free board canvas with movable/resizable boards, shared sideboard and optional pinned talent inspector.</td><td>The user explicitly requested free placement, grid and snapping. <a href="#S07">Blender</a> informs saved layouts, not a forced grid for all app controls.</td><td>Forcing the sideboard back into a fixed side rail or equating canvas coordinates with game talent coordinates.</td></tr>
+    <tr><td>NPC behavior</td><td>Readable event/condition/action blocks; related targets and validation beside the rule.</td><td><a href="#S16">Construct</a> and <a href="#S17">GDevelop</a> offer observable event structure.</td><td>A node graph for every simple rule, or attractive sentences without correct target semantics.</td></tr>
+    <tr><td>Conflicts and advanced data</td><td>Source comparison, raw table views and dependency inspection in explicit technical documents.</td><td><a href="#S28">xEdit</a> and <a href="#S31">Smithbox</a> support inspection of complex data.</td><td>Making all users navigate provenance columns before an ordinary stat edit.</td></tr>
+  </tbody></table></div>
+  <h3>Docking and free placement are different jobs</h3>
+  <p>Application panels need movable docks, split sizing, optional floating, maximize, close/reopen and saved layouts. The class-design workspace additionally needs free board placement with the requested grid and snapping. Both should persist, but they should not share a model that treats closing a panel as deleting the content. A visible Layout menu must recover every hidden panel and restore defaults without losing edits. Every major pane must be adjustable; a useful default is still required.</p>
+  <h3>Beginner access without a separate crippled mode</h3>
+  <p>Prefer task-relevant controls first and named secondary sections such as Advanced fields, Source values and Generated output. Avoid global Beginner/Expert modes that silently change behavior or hide the location of a setting. A known field should keep its meaning between views; unknown custom data stays intact and inspectable. Guided entry can help a first edit, but repeated edits should not require a tutorial or multi-page wizard. This is a proposed application of <a href="#S32">progressive disclosure</a>.</p>
+  <h3>Saving must have one understandable vocabulary</h3>
+  <div class="table-wrap" tabindex="0" aria-label="Save and application meanings">
+  <table><thead><tr><th>Action / state</th><th>Meaning to the user</th><th>Required evidence</th></tr></thead><tbody>
+    <tr><td>Save project</td><td>Keep my designs and drafts so I can resume.</td><td>Visible edit included, successful persisted write, saved location and recovery behavior.</td></tr>
+    <tr><td>Export</td><td>Create a portable file or implementation plan.</td><td>Format, destination and whether it is directly importable or still needs implementation.</td></tr>
+    <tr><td>Review & apply</td><td>Show and perform the changes needed by this configured game.</td><td>Affected objects, client/server targets, prerequisites, conflicts, backup/rollback and explicit completion state.</td></tr>
+    <tr><td>Verify in game</td><td>Confirm the actual runtime result.</td><td>A recorded game check. A successful writer or preview is not equivalent.</td></tr>
+  </tbody></table></div>
+  <p>A change can be saved yet unapplied, partly applied yet unverified, or blocked by a source that changed externally. Those states need concise names and a clear next action. They should not become permanent warning walls. Dismiss a notification without erasing its underlying issue from Problems. <a href="#S24">PKHeX’s unsaved-editor warning</a> and <a href="#S25">Terrasavr’s file handoff</a> illustrate why the boundaries matter.</p>
+</section>
+<section id="requirements">
+  <h2>How the interaction should feel</h2>
+  <p>Predictable, responsive and recoverable are testable properties. “Modern,” “clean” and “intuitive” are not sufficient acceptance criteria. The following requirements are proposed for Crucible; references motivate them, but do not prove their implementation or effectiveness here.</p>
+  <div id="requirements-list"></div>
+  <p>The 100 ms feedback budget is a proposed engineering target, not a measured result. Test it separately from indexing or decoding time. Likewise, WCAG guidance informs the browser surface and analogous desktop interaction tests; this report does not claim whole-application WCAG conformance. <a href="#S35">Response-time guidance</a>, <a href="#S38">drag alternatives</a>, <a href="#S39">target size</a> and <a href="#S40">status announcements</a> provide concrete references.</p>
+</section>
+<section id="delivery">
+  <h2>Rework the workflow at the correct layer</h2>
+  <p>Do not begin with a color palette, a new sidebar or a framework migration. First prove the content/draft contract and two real editing jobs. The current app is Avalonia with a shared Class Studio frontend; no evidence gathered here justifies rewriting all readers or changing that technology merely to improve appearance.</p>
+  <p>The existing <a href="https://github.com/Zaelemgaad/WoW-Crucible/blob/52b826de0cc413a697056ccf14c6f8b4c40d51a1/src/WoWCrucible.Core/CrucibleContentProjectService.cs">CrucibleContentProjectService</a> already owns project identity, target profile and reserved content IDs. Extend and integrate that foundation where appropriate; do not introduce a competing project format merely to support new panels. The missing common document/draft behavior must be assessed separately from the project container that already exists.</p>
+  <div id="phases"></div>
+  <h3>Feature preservation is a release requirement</h3>
+  <p>Before replacing a workspace, inventory its operations: opening/search, creating/cloning, references, custom fields, previews, batch behavior, validation, exports, application, recovery and keyboard access. Map each to the replacement, an explicit advanced route, or a clearly documented unsupported operation. This prevents the redesign from becoming a smaller editor that happens to look simpler.</p>
+  <p>Retain existing source fingerprinting, exact-schema checks, CoA archive policy, unknown-field preservation and transaction boundaries. Do not auto-fix an ambiguous source, silently invent a default or flatten custom class IDs into stock classes. Unknown semantics are an adapter problem, not something an explanatory tooltip can repair.</p>
+  <p>As each vertical workflow is verified, replace its old UI and remove the superseded interaction path. Keep existing formats and saved designs migratable. Avoid permanently maintaining a “new friendly UI” and an unrelated legacy editor with separate draft models. Export-only capabilities must keep honest labels until their corresponding writers and deployment checks exist.</p>
+</section>
+<section id="evaluation">
+  <h2>How to prove it is usable</h2>
+  <p>The user’s “no questions” goal means ordinary jobs should not require knowing table names, asking the developer, or reading a technical manual. No responsible research report can guarantee every novice will understand every advanced editing task. Treat a request for help during a common task as actionable evidence, not as user failure.</p>
+  <p>Run short, observed task sessions with people unfamiliar with Crucible, including basic computer users and experienced WoW modders. Give an outcome, not directions containing button names. Ask them to say what they expect; do not teach the route. Separate an exploratory think-aloud session from a timed performance session. Record assistance, wrong turns, lost drafts, mistaken scope, and whether they understand where the change was saved. <a href="#S34">Thinking-aloud method</a>.</p>
+  <div class="table-wrap" tabindex="0" aria-label="Usability trial tasks"><table><thead><tr><th>Trial</th><th>Outcome prompt</th><th>Pass evidence</th></tr></thead><tbody id="trial-rows"></tbody></table></div>
+  <h3>Proposed acceptance gates, not measured results</h3>
+  <ul>
+    <li>For common single-object tasks: no external ID/file/table lookup, no facilitator instructions, no loss of work and no unintended game changes. Time targets should be set after the first observed baseline, rather than invented here.</li>
+    <li>For all tasks: user can identify the selected object, affected scope, current save/application state and next action.</li>
+    <li>For recovery: undo restores the expected draft; errors retain edits; a closed panel is recoverable; a failed/partial apply is never displayed as complete.</li>
+    <li>For layout: verify 1024×768, 1440×900 and 1920×1080 effective viewport sizes, 100/150/200% scaling as applicable, larger text and monitor changes. Default forms must not need horizontal scrolling for a few clipped pixels. Deliberately wide tables/canvases may scroll within their own surface.</li>
+    <li>For compatibility: include a custom CoA class, a spell supplied by an override, missing SQL, conflicting patches and an unknown custom column. A stock Wrath success must not stand in for CoA compatibility.</li>
+    <li>For testing claims: automated navigation, layout, reader and writer checks support correctness. They do not establish novice comprehension or subjective interaction quality. Human sessions remain pending.</li>
+  </ul>
+  <p>Use the same tasks to compare the old and replacement flows. Avoid turning a small qualitative sample into a statistical success-rate claim. Fix recurring blockers and repeat with fresh participants so familiarity does not masquerade as improved design. Keep the findings in the repository with the tested build and actual observations.</p>
+</section>
+<section id="sources">
+  <h2>Source ledger</h2>
+  <p>Primary editor material and UX guidance consulted on 16 October 2026. URLs using latest/stable/main may change after this date. Notes describe the evidence actually used, not a claim that each entire application was tested. Comparisons and requirements link back to these entries.</p>
+  <label>Filter sources <input id="source-search" type="search" placeholder="Tool, topic, source type…"></label>
+  <p id="source-count" role="status"></p>
+  <div id="source-list"></div>
+</section>
+<footer><p>This dossier is an implementation brief and research record. It does not change the running application, client or server. No production dependencies were added. The report itself passed headless browser checks for references, filters, task selection, print expansion and page overflow at four viewport/text-size combinations. Those checks validate this report, not the proposed redesign. See also the existing <a href="../../UX-PRINCIPLES.md">UX principles</a>, <a href="../../REFERENCE-TOOL-AUDIT.md">tool audit</a> and <a href="../../CLASS-STUDIO.md">Class Studio contract</a>.</p></footer>
+</main>
+<noscript><p>This report uses local JavaScript to display its comparison, audit, task and source records. Enable JavaScript, or read <a href="research-data.js">the complete research data</a>. No external service is required.</p></noscript>
+</body>
+</html>

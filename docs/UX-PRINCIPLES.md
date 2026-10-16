@@ -1,5 +1,11 @@
 # Editing UX principles
 
+The [16 October 2026 editor UX research dossier](research/editor-ux-2026-10-16/index.html)
+compares 17 editor families and 40 sources, audits the CoA-targeted application,
+and specifies complete task flows and usability trials. Its redesign requirements
+are proposals, not implemented or user-tested behavior. Use its task-level gates
+alongside these principles when replacing a workspace.
+
 Keira3 demonstrates several workflow ideas that are worth retaining independently of its Angular/Electron implementation and AzerothCore-specific data model.
 
 Specialized WoW Crucible editors should provide:
