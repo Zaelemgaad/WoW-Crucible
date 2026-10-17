@@ -1494,12 +1494,7 @@ function closeTextModal() {
   qs('#textModal').classList.add('hidden');
 }
 function downloadText(filename, text) {
-  var blob = new Blob([text], { type: 'text/plain' });
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  return window.StudioBridge.download(filename, text, 'text/plain');
 }
 
 function exportBuildString(classId) {

@@ -1,0 +1,11 @@
+<Project>
+  <ItemGroup>
+    <!-- Use the Core SDK only; its default build targets also reference unused WPF/WinForms controls. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50" GeneratePathProperty="true" ExcludeAssets="build;buildTransitive" PrivateAssets="all" />
+    <Reference Include="Microsoft.Web.WebView2.Core">
+      <HintPath>$(PkgMicrosoft_Web_WebView2)/lib_manual/netcoreapp3.0/Microsoft.Web.WebView2.Core.dll</HintPath>
+    </Reference>
+    <Content Include="$(PkgMicrosoft_Web_WebView2)/runtimes/**/native/WebView2Loader.dll"
+             Link="runtimes/%(RecursiveDir)native/WebView2Loader.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

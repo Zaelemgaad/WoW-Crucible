@@ -153,6 +153,13 @@ internal static class WorkspaceShellTestSuite
                     Capture(root, width, height, $"shell-{name}-{width}.png");
                 }
             }
+            window.OpenClassStudio();
+            var studio = host.Child;
+            var studioTab = tabState.SelectedId;
+            Require(studio is ClassStudioView && tabState.Tabs.Single(tab => tab.Id == studioTab).Title == "Class Studio", "Class Studio did not open inside the editor shell.");
+            Invoke(window, "CloseWorkspaceTab", studioTab);
+            window.OpenClassStudio();
+            Require(ReferenceEquals(studio, host.Child) && tabState.SelectedId == studioTab, "Reopening Class Studio duplicated its session or tab.");
             var configured = (HashSet<ResponsiveSplitGrid>)typeof(MainWindow).GetField("_configuredSplits", Private)!.GetValue(window)!;
             Require(configured.Count >= 3, "Shared pane persistence was not attached to real editors.");
             window.OpenAssetComparison(Path.Combine(AppContext.BaseDirectory, "missing-asset-corpus"));

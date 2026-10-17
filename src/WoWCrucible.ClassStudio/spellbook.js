@@ -7,7 +7,7 @@ function button(text, fn) { var b=el('button','btn',text); b.type='button'; b.on
 function fail(error) { status.textContent=error.message; status.classList.add('studio-error'); }
 function say(text) { status.textContent=text; status.classList.remove('studio-error'); }
 function save() { localStorage.setItem('twc.studio.edits',JSON.stringify(edits)); B.changed(); updateCount(); }
-function download(name,text,type) { var a=el('a'), url=URL.createObjectURL(new Blob([text],{type:type||'application/json'})); a.href=url;a.download=name;a.click();setTimeout(function(){URL.revokeObjectURL(url);},1000); }
+function download(name,text,type) { return B.download(name,text,type); }
 function option(select,value,text) { var o=el('option',null,text);o.value=value;select.appendChild(o); }
 function field(parent,label,input) { var l=el('label','studio-field',label);input.setAttribute('aria-label',label);l.appendChild(input);parent.appendChild(l);return input; }
 function select(parent,label) { return field(parent,label,el('select')); }
@@ -181,7 +181,7 @@ function init() {
     Object.values(data.storage).forEach(function(v){JSON.parse(v);});
     if(!confirm('Replace this editor workspace with the imported one?'))return;
     Object.keys(B.storage()).forEach(function(k){localStorage.removeItem(k);});Object.entries(data.storage).forEach(function(p){localStorage.setItem(p[0],p[1]);});
-    if(B.connected)await B.api('state',B.storage());location.reload();
+    if(B.connected){B.prepareClose();await B.api('state',B.storage());}location.reload();
   }catch(error){alert(error.message);}finally{this.value='';}};
 }
 document.addEventListener('DOMContentLoaded',function(){B.ready.then(init);});

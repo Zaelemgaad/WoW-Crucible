@@ -1980,12 +1980,14 @@ public partial class MainWindow : Window
         if (_closingPromptActive) { e.Cancel = true; return; }
         if (_savingDbc || !CommitPendingDbcEdits()) { e.Cancel = true; return; }
         var dirty = _documents.Where(document => document.File.IsDirty).ToArray();
-        if (dirty.Length == 0) return;
+        if (dirty.Length == 0 && _classStudio is null) return;
         e.Cancel = true;
         _closingPromptActive = true;
         try
         {
-            var choice = await PromptSaveAsync($"{dirty.Length:N0} modified DBC file(s)");
+            try { if (_classStudio is not null) await _classStudio.FlushAsync(); }
+            catch (Exception exception) { await ShowErrorAsync("Could not save Class Studio", exception.Message); return; }
+            var choice = dirty.Length == 0 ? SaveChoice.Discard : await PromptSaveAsync($"{dirty.Length:N0} modified DBC file(s)");
             if (choice == SaveChoice.Cancel) return;
             if (choice == SaveChoice.Save)
             {

@@ -1,10 +1,20 @@
 # Class Studio
 
-Open **Create game content → Class Studio**, search for it in **Commands**, or run
-`WoWCrucible.Desktop.exe --class-studio`. Crucible serves the editor on loopback and
-opens it in the default browser. Keep Crucible open while using folder selection or
-source loading. There is one frontend, in `src/WoWCrucible.ClassStudio`, packaged by
-the desktop project; there is no separate browser implementation to maintain.
+Open **Game content → Class Studio**, search for it in **Commands**, or run
+`WoWCrucible.Desktop.exe --class-studio`. The editor opens in a retained Crucible
+workspace tab. It reads the packaged frontend directly from disk and calls
+Crucible's data readers through native WebView2 messages. There is no HTTP
+listener, localhost port, external browser launch, or separate service to start.
+Switching or closing the tab keeps its loaded records and in-progress controls
+available for reopening during the session.
+
+There is one frontend, in `src/WoWCrucible.ClassStudio`, packaged by the desktop
+project. The embedded display uses the Microsoft.Web.WebView2 Core SDK pinned in
+`build/WebView2.props`; its loaders ship with the desktop build. The Windows
+WebView2 Runtime must be installed (144.0.3719.104 was present on the verified PC).
+No additional machine-wide software was installed for this integration. See
+[Microsoft's runtime distribution documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution)
+for another PC that lacks the runtime.
 
 The existing local `E:\wowps\3.3.5 WOTLK\site\app` directory is a junction to this
 source directory. Its original file URL remains usable for offline talent planning.
@@ -104,10 +114,23 @@ deploying a finished design.
 - Talent JSON and the existing talent-reference CSV remain available per class.
   They describe a design; they do not automatically implement new spell behavior.
 
-Hosted editor state is saved atomically beside Crucible under
-`Config/class-studio.json`, with browser storage as the working copy. A loopback
-token and same-origin checks protect native endpoints. No new production package
-or externally installed service is required.
+Desktop editor state remains at `Config/class-studio.json`, using the existing
+`twc.*` dictionary format. Existing desktop saves need no conversion. Changes
+are saved atomically, and closing Crucible captures edits still inside the
+short autosave delay. A failed restore stops editor initialization instead of
+overwriting the saved design. Browser-only designs still use the export/restore
+handoff described above; the app does not read another browser's private profile.
+
+Folder selection and CSV/JSON export use Crucible's native file dialogs. The
+embedded page is restricted to packaged local assets and its own native message
+handler; unrelated page/frame navigation is blocked. Workspace requests retain
+the 32 MiB limit; full-table exports are not constrained by that workspace limit.
+The SDK's virtual asset address is resolved from disk, not DNS or a web server.
+
+This integration preserves the current editor UI. It is not the completed
+application-wide modular-panel redesign. The accepted direction is independent
+panels and reusable layout presets, including a class-authoring preset; see
+[the editor UX requirements](UX-PRINCIPLES.md#reusable-panels-and-layout-presets).
 
 ## Validation
 
@@ -116,6 +139,7 @@ Core reader/import checks:
 ```powershell
 dotnet run --project tests/WoWCrucible.Core.Tests -- --class-studio
 dotnet run --project tests/WoWCrucible.Desktop.Tests
+dotnet run --project tests/WoWCrucible.Desktop.Tests -- --embedded-studio
 node tests/class-studio/data.cjs
 ```
 
@@ -140,3 +164,14 @@ Checks cover canvas sizing/snapping, ten-board copy/move and cancellation,
 workspace persistence, native HTTP boundaries, source schemas, packed CoA fields,
 class filters, full spell editing, cloning, source talent import, and exports.
 They do not deploy changes or substitute for gameplay validation of a finished spec.
+
+17 October 2026 integration validation: the real WebView2 control loaded the
+packaged editor in an unshown native test window, restored state, exchanged folder,
+source and full-record requests, exported CSV through the native callback, retained
+the page across tab detach/reattach, flushed an immediate last edit, and restored it
+in a new view. External navigation was blocked. The optional `--embedded-studio
+--coa` pass read the configured CoA client/server/core: 210,795 server spells,
+209,568 client spells, and all 29 returned source tables reached the embedded page.
+The full catalog was transferred; this was not a reduced-data transport fixture.
+No live SQL connection or in-game application was tested. Native file-dialog mouse
+interaction and focused keyboard traversal remain manual checks.

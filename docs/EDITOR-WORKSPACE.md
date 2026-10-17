@@ -92,9 +92,9 @@ Manual checks still required: real pointer dragging, keyboard traversal with the
 window focused, and user evaluation of the new workflow. The research dossier's
 broader novice-authoring trials remain pending.
 
-Validation on 16 October 2026: the desktop build, native shell suite, Class Studio
-core reader/import suite and JavaScript data tests passed. The separate Class
-Studio HTTP-host test could not connect to its localhost listener; a standalone
-Python TCP listener/client control also timed out on loopback. The HTTP-host test
-therefore remains unverified in this environment. No network or firewall settings
-were changed to bypass that failure.
+Validation on 17 October 2026: Class Studio now uses a retained embedded view and
+direct native messages. The former HTTP host and browser-launch path have been
+removed. Real WebView2 integration, the full CoA catalog, the desktop shell, core
+readers, canvas, independent spec boards and spellbook UI fixtures pass. See
+[Class Studio](CLASS-STUDIO.md) for commands and remaining manual checks. Localhost
+connectivity is no longer part of the editor's operation or validation.

@@ -34,3 +34,49 @@ Specialized WoW Crucible editors should provide:
 The generic virtual DBC table remains available as an escape hatch. It is not intended to be the primary interface for authoring a spell, item, race, or class.
 
 See [REFERENCE-TOOL-AUDIT.md](REFERENCE-TOOL-AUDIT.md) for the local tool-corpus findings and implementation order.
+
+## Reusable panels and layout presets
+
+User direction accepted on 17 October 2026: the unit of composition is an editing
+panel, not an isolated class-editor application. Class authoring is a named preset
+assembled from the same tools available elsewhere. Embedding the existing editor
+removes its transport dependency; it does not by itself satisfy this requirement.
+
+The reviewed references give specific interaction precedents:
+
+| Reference | Observed behavior | Requirement for Crucible |
+| --- | --- | --- |
+| [Unity Inspector](https://docs.unity3d.com/6000.0/Documentation/Manual/InspectorOptions.html) | Multiple inspectors can be moved, docked, resized and focused on a particular object. | Properties can follow selection or stay pinned. Editing a spell must not require opening an unrelated class workspace. |
+| [Godot docks and layouts](https://docs.godotengine.org/en/stable/tutorials/editor/customizing_editor.html) | Docks can move, resize or float; named layouts retain their arrangements. | A layout stores panel placement and visibility, independently of game-data edits. Closing/resetting a panel never deletes its draft. |
+| [Unreal editor interface](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-editor-interface) | The viewport, object list, Details and content tools provide distinct roles in one editor. | Search/browse, selection, editing and preview must have identifiable roles and share the same selected object. |
+
+These are design precedents, not evidence that copying their appearance will make
+Crucible usable. The existing dossier covers 17 editor families and 40 sources;
+no claim of testing thousands of apps or proving novice usability is made.
+
+The class-authoring preset should open a spell catalog, learning rules, talent
+canvas/spec boards, sideboard, properties, and changes/export panels. Each panel
+must also be available independently. Other presets should reuse the same panels
+where their responsibilities match, and users must be able to save their own
+arrangements. Tool defaults should provide a useful starting layout so a new user
+does not have to build one before editing.
+
+Implementation boundaries for the next UI pass:
+
+- Shared project/source/draft services own records and edits. Panels render and
+  manipulate those services; they must not each load a conflicting copy of the data.
+- Layout state owns positions, dimensions, visibility, docking and optional grid
+  snapping. Moving/resetting layouts never changes game content or selected ranks.
+- A single panel catalog drives Add panel, reopen, and presets. A preset is data
+  describing an arrangement, not a duplicated class-specific interface.
+- Each panel has an obvious title, close control, resize affordance and recoverable
+  placement. Grid visibility and spacing apply to the workspace; edge, neighbor,
+  and grid snapping remain separate choices.
+- User-facing controls are named for the job: find spell, change cost, choose
+  learning level, review changes. IDs/raw tables remain available as expert detail.
+- Validate a complete class workflow plus a mixed item/spell workflow, close/reopen,
+  restart, narrow windows and a fresh-user trial before calling the redesign done.
+
+The modular-panel framework and presets are still pending implementation. Current
+retained editor tabs and embedded Class Studio are integration infrastructure,
+not a substitute for this work.

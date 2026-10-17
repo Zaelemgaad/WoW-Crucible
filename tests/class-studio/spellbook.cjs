@@ -1,36 +1,49 @@
 const assert=require('node:assert/strict');
 const fs=require('node:fs/promises');
 const path=require('node:path');
-const http=require('node:http');
+const {pathToFileURL}=require('node:url');
 const {chromium}=require(process.argv[2]||'playwright');
 (async()=>{
   const root=path.resolve(__dirname,'../../src/WoWCrucible.ClassStudio');
   const fixtures=path.resolve(__dirname,'../../.local/class-studio-test');
-  const catalog=await fs.readFile(path.join(fixtures,'catalog.json'),'utf8'), detail=JSON.parse(await fs.readFile(path.join(fixtures,'spell.json'),'utf8'));
-  let state=null;
-  const server=http.createServer(async(req,res)=>{
-    try{
-      const url=new URL(req.url,'http://localhost');let body='';for await(const chunk of req)body+=chunk;
-      res.setHeader('Content-Type','application/json');
-      if(url.pathname==='/api/state'){if(req.method==='POST')state=JSON.parse(body);res.end(JSON.stringify(req.method==='GET'?state:{saved:true}));}
-      else if(url.pathname==='/api/settings')res.end(JSON.stringify({serverPath:'fixture',clientPath:'',sql:false}));
-      else if(url.pathname==='/api/load')res.end(catalog);
-      else if(url.pathname==='/api/row')res.end(JSON.stringify(detail));
-      else{const file=path.join(root,url.pathname==='/'?'index.html':url.pathname);res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.html')?'text/html':'image/png');res.end(await fs.readFile(file));}
-    }catch(e){res.statusCode=500;res.end(JSON.stringify({error:e.message}));}
-  });
-  await new Promise(r=>server.listen(0,'127.0.0.1',r));const browser=await chromium.launch();
+  const detail=JSON.parse(await fs.readFile(path.join(fixtures,'spell.json'),'utf8'));
+  let state=null;const exports=[];const browser=await chromium.launch();
   try{
     const page=await browser.newPage({viewport:{width:1800,height:1100}}),errors=[];
-    page.on('pageerror',e=>errors.push(e.message));await page.goto('http://127.0.0.1:'+server.address().port+'/');await page.click('#spellbookBtn');
+    // Exercise the frontend's native-message protocol. The C# embedded suite verifies real WebView2.
+    await page.exposeBinding('nativeRequest',async(_,message)=>{
+      let result;const route=message.route.split('?')[0];
+      if(route==='state'){if(message.body!==undefined)state=message.body;result=message.body===undefined?state:{saved:true};}
+      else if(route==='settings')result={serverPath:'fixture',clientPath:'',sql:false};
+      else if(route==='load')result={fixture:true};
+      else if(route==='row')result=detail;
+      else if(route==='export'){exports.push(message.body);result={saved:true};}
+      else throw new Error('Unexpected native request: '+route);
+      return JSON.stringify({id:message.id,result});
+    });
+    await page.addInitScript(()=>{
+      const listeners=[];window.nativeExportCount=0;window.chrome=window.chrome||{};
+      window.chrome.webview={addEventListener:(name,fn)=>listeners.push(fn),postMessage:message=>window.nativeRequest(message).then(async reply=>{
+        const data=JSON.parse(reply);
+        // A real file fixture avoids CDP expanding a 248 MB CoA object into a multi-GB binding graph.
+        if(message.route==='load')data.result=JSON.parse(await document.querySelector('#catalogFixture').files[0].text());
+        if(message.route==='load')window.fixtureHasCoA=data.result.tables.some(t=>t.name==='CharacterAdvancement');
+        if(message.route==='export')window.nativeExportCount++;
+        listeners.forEach(fn=>fn({data}));
+      })};
+    });
+    page.on('pageerror',e=>errors.push(e.message));await page.goto(pathToFileURL(path.join(root,'index.html')).href);await page.click('#spellbookBtn');
+    await page.evaluate(()=>{const input=document.createElement('input');input.type='file';input.id='catalogFixture';input.hidden=true;document.body.appendChild(input);});
+    await page.locator('#catalogFixture').setInputFiles(path.join(fixtures,'catalog.json'));
     await page.getByRole('button',{name:'Load / refresh sources',exact:true}).click();
     await page.getByText(/^Loaded \d+ tables\. Staged edits were retained\.$/).waitFor();
     assert.equal(await page.locator('.studio-table tr').count(),101,'large catalogs are paged');
     await page.locator('.studio-table button').first().click();await page.locator('input[name="ManaCost"]').fill('321');
     await page.getByRole('button',{name:'Stage row',exact:true}).click();
     let edits=await page.evaluate(()=>JSON.parse(localStorage.getItem('twc.studio.edits')));assert.equal(Object.values(edits)[0].after.ManaCost,321);
-    const csvPromise=page.waitForEvent('download');await page.getByRole('button',{name:'Export table CSV',exact:true}).click();const csv=await csvPromise;
-    const csvText=await fs.readFile(await csv.path(),'utf8');assert(csvText.startsWith('$recordKey,ID,'));await fs.copyFile(await csv.path(),path.join(fixtures,'edited-spell.csv'));
+    await page.getByRole('button',{name:'Export table CSV',exact:true}).click();
+    await page.waitForFunction(()=>window.nativeExportCount===1);assert.equal(exports.length,1);
+    const csvText=exports[0].text;assert(csvText.startsWith('$recordKey,ID,'));await fs.writeFile(path.join(fixtures,'edited-spell.csv'),csvText);
     // A staged edit must be the source of cloning even before reopening the row.
     await page.getByRole('button',{name:'Clone as new',exact:true}).click();await page.locator('input[name="ID"]').fill('2000000000');
     await page.getByRole('button',{name:'Stage row',exact:true}).click();edits=await page.evaluate(()=>JSON.parse(localStorage.getItem('twc.studio.edits')));assert.equal(edits['server/Spell/2000000000'].after.ManaCost,321);
@@ -38,7 +51,7 @@ const {chromium}=require(process.argv[2]||'playwright');
     assert(await page.locator('.studio-table tr').count()>1,'class learning list contains actual records');
     page.once('dialog',d=>d.accept());await page.getByRole('button',{name:'Use class talents',exact:true}).click();
     assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('twc.class.2')).trees.length),3);
-    if(JSON.parse(catalog).tables.some(t=>t.name==='CharacterAdvancement')) {
+    if(await page.evaluate(()=>window.fixtureHasCoA)) {
       await page.getByLabel('Class',{exact:true}).selectOption('19');
       assert(await page.locator('.studio-table tr').count()>1,'CoA Templar learns are present');
       page.once('dialog',d=>d.accept());await page.getByRole('button',{name:'Use class talents',exact:true}).click();
@@ -49,9 +62,11 @@ const {chromium}=require(process.argv[2]||'playwright');
     await page.getByLabel('View',{exact:true}).selectOption('tables');
     const sla=await page.getByLabel('Table',{exact:true}).locator('option').evaluateAll(os=>os.find(o=>o.textContent.includes('/ SkillLineAbility ')).value);
     await page.getByLabel('Table',{exact:true}).selectOption(sla);await page.locator('.studio-table button').first().click();await page.locator('input[name="Spell"]').fill('2000000000');await page.getByRole('button',{name:'Stage row',exact:true}).click();
-    const planPromise=page.waitForEvent('download');await page.getByRole('button',{name:'Export changes JSON',exact:true}).click();const plan=JSON.parse(await fs.readFile(await(await planPromise).path(),'utf8'));assert.equal(plan.changes.length,3);assert(plan.changes.every(c=>c.source&&c.fingerprint));
+    await page.getByRole('button',{name:'Export changes JSON',exact:true}).click();
+    await page.waitForFunction(()=>window.nativeExportCount===2);
+    const plan=JSON.parse(exports[1].text);assert.equal(plan.changes.length,3);assert(plan.changes.every(c=>c.source&&c.fingerprint));
     await page.waitForTimeout(350);await page.reload();await page.click('#spellbookBtn');assert(await page.getByText('3 staged row changes',{exact:true}).isVisible(),'native state restore persists edits');
     await page.screenshot({path:path.join(fixtures,'spellbook.png')});assert.deepEqual(errors,[]);
     console.log('PASS live-data UI fixture: catalog paging, spell fields, clone, learning rule edits, talent import, CSV/JSON and native workspace persistence.');
-  }finally{await browser.close();await new Promise(r=>server.close(r));}
+  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

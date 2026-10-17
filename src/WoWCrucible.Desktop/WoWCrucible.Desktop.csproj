@@ -67,4 +67,5 @@
           Condition="'$(OS)' == 'Windows_NT' and '$(DesignTimeBuild)' != 'true' and Exists('$(CrucibleDesktopShortcutSettings)') and Exists('$(PublishDir)$(AssemblyName).exe')">
     <Exec Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(CrucibleDesktopShortcutUpdater)&quot; -ExecutablePath &quot;$(PublishDir)$(AssemblyName).exe&quot; -SettingsPath &quot;$(CrucibleDesktopShortcutSettings)&quot;" />
   </Target>
+  <Import Project="../../build/WebView2.props" />
 </Project>

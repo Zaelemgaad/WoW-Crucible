@@ -2,10 +2,12 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
+    <ApplicationManifest>../../src/WoWCrucible.Desktop/app.manifest</ApplicationManifest>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj" />
   </ItemGroup>
+  <Import Project="../../build/WebView2.props" />
 </Project>
