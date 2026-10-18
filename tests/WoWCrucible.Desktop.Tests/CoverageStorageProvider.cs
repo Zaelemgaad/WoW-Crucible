@@ -7,12 +7,13 @@ internal class CoverageStorageProvider : DispatchProxy
 {
     public static IStorageProvider Create() => Create<IStorageProvider, CoverageStorageProvider>();
     public int Calls { get; private set; }
+    public FilePickerOpenOptions? LastOpenOptions { get; private set; }
     protected override object? Invoke(MethodInfo? method, object?[]? args)
     {
         switch (method!.Name)
         {
             case "get_CanOpen": case "get_CanSave": case "get_CanPickFolder": return true;
-            case "OpenFilePickerAsync": Calls++; return Task.FromResult<IReadOnlyList<IStorageFile>>([]);
+            case "OpenFilePickerAsync": Calls++; LastOpenOptions = (FilePickerOpenOptions)args![0]!; return Task.FromResult<IReadOnlyList<IStorageFile>>([]);
             case "OpenFilePickerWithResultAsync": Calls++; return Task.FromResult(new OpenFilePickerResult());
             case "SaveFilePickerAsync": Calls++; return Task.FromResult<IStorageFile?>(null);
             case "SaveFilePickerWithResultAsync": Calls++; return Task.FromResult(new SaveFilePickerResult());

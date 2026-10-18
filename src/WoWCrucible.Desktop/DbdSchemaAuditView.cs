@@ -63,6 +63,7 @@ internal sealed class DbdSchemaAuditView : UserControl
         AddPath(paths, 4, "Write proof", _roundTrip, new TextBlock { Text = "Optional · slower on a full corpus", Foreground = Brush.Parse("#8995A8"), VerticalAlignment = VerticalAlignment.Center });
         var filters = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Margin = new Thickness(12, 0, 12, 8), Children = { _search, WithColumn(_statusFilter, 1) } };
         var resultGrid = new Grid { RowDefinitions = new("Auto,*,Auto,*"), RowSpacing = 5, Margin = new Thickness(12, 0, 12, 8), Children = { _summary, WithRow(_results, 1), WithRow(new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Background = Brush.Parse("#2B3445") }, 2), WithRow(new ScrollViewer { Content = _detail }, 3) } };
+        heading.Classes.Add("workspace-toolbar");
         Content = new Grid { RowDefinitions = new("Auto,Auto,Auto,*"), Children = { heading, WithRow(paths, 1), WithRow(filters, 2), WithRow(resultGrid, 3) } };
     }
 

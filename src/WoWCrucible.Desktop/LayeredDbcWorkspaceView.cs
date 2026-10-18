@@ -45,7 +45,7 @@ internal sealed class LayeredDbcWorkspaceView : UserControl, IDisposable
             RowDefinitions = new("Auto,Auto,*,Auto"),
             Children =
             {
-                new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading },
+                new Border { Classes = { "workspace-toolbar" }, BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading },
                 WithRow(PathAndActionArea(), 1),
                 WithRow(ComparisonArea(), 2),
                 WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _status }, 3)

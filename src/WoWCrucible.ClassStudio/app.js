@@ -336,9 +336,10 @@ function mountBoardCanvas(root, cd, workspace) {
     board.classList.add('spec-board');
     return { element: board, model: tree, cols: COLS, rows: Math.max(STATE.tiers, tree.t.reduce(function (n, t) { return Math.max(n, t.y + 1); }, 0)) };
   });
-  var sideRows = Math.max(workspace ? 40 : 6, cd.sideboard.t.reduce(function (n, t) { return Math.max(n, t.y + 3); }, 0));
-  items.push({ element: renderSideboard(cd), model: cd.sideboard, cols: sideboardCols(cd), rows: sideRows });
+  var sideboard = renderSideboard(cd);
+  items.push({ element: sideboard, model: cd.sideboard, get cols() { return sideboardCols(cd); }, get rows() { return sideboardRows(cd); }, resized: sideboard.refreshSlots });
   BoardCanvas.mount(root, items, {
+    id: root.id,
     workspace: workspace,
     load: function () { return lsGet('twc.canvas.' + cd.classId, {}); },
     save: function (settings) { lsSet('twc.canvas.' + cd.classId, settings); },
@@ -655,8 +656,9 @@ function renderTree(cd, tree, treeIdx) {
     nameEl.contentEditable = 'true';
     nameEl.addEventListener('blur', function () {
       tree.n = nameEl.textContent.trim() || tree.n;
+      nameEl.textContent = tree.n;
       saveClassOverride(cd.classId);
-      renderAll();
+      STATE.panes.forEach(function (classId, paneIndex) { if (classId === cd.classId) updateSummary(paneIndex, cd); });
     });
   }
   header.appendChild(nameEl);
@@ -728,18 +730,19 @@ function renderTree(cd, tree, treeIdx) {
   return block;
 }
 
-var SIDEBOARD_COLS = 2;
-
 function sideboardCols(cd) {
-  return Math.max(cd.classId === 'workspace' ? 12 : SIDEBOARD_COLS,
+  return Math.max(12, Math.min(64, Math.floor((((cd.sideboard.layout || {}).width || 0) - 19) / 50)),
     cd.sideboard.t.reduce(function (max, t) { return Math.max(max, t.x + 1); }, 0));
+}
+
+function sideboardRows(cd) {
+  return Math.max(40, Math.min(64, Math.floor(((cd.sideboard.layout || {}).height || 0) / 50)),
+    cd.sideboard.t.reduce(function (max, t) { return Math.max(max, t.y + 3); }, 0));
 }
 
 function renderSideboard(cd) {
   var bucket = cd.sideboard;
-  var maxY = 0;
-  bucket.t.forEach(function (t) { if (t.y > maxY) maxY = t.y; });
-  var rows = Math.max(cd.classId === 'workspace' ? 40 : 6, maxY + 3);
+  var rows = sideboardRows(cd);
   var cols = sideboardCols(cd);
 
   var block = ce('div', 'tree-block sideboard-block');
@@ -751,8 +754,8 @@ function renderSideboard(cd) {
     nameEl.contentEditable = 'true';
     nameEl.addEventListener('blur', function () {
       bucket.n = nameEl.textContent.trim() || bucket.n || 'Side Board';
+      nameEl.textContent = bucket.n;
       saveClassOverride(cd.classId);
-      renderAll();
     });
   }
   header.appendChild(nameEl);
@@ -768,22 +771,26 @@ function renderSideboard(cd) {
   grid.style.width = (cols * 50) + 'px';
   grid.style.height = (rows * 50) + 'px';
 
-  var occupied = {};
-  bucket.t.forEach(function (t) { occupied[t.x + ',' + t.y] = t; });
-
-  if (STATE.editMode) {
-    for (var y = 0; y < rows; y++) {
-      for (var x = 0; x < cols; x++) {
-        if (!occupied[x + ',' + y]) {
-          grid.appendChild(makeEmptySlot(cd, bucket, 'sideboard', x, y));
+  var lastSize = '';
+  block.refreshSlots = function () {
+    cols = sideboardCols(cd); rows = sideboardRows(cd);
+    var size = cols + ':' + rows;
+    if (size === lastSize) return;
+    lastSize = size;
+    grid.replaceChildren();
+    grid.style.width = (cols * 50) + 'px'; grid.style.height = (rows * 50) + 'px';
+    var occupied = {};
+    bucket.t.forEach(function (t) { occupied[t.x + ',' + t.y] = t; });
+    if (STATE.editMode) {
+      for (var y = 0; y < rows; y++) {
+        for (var x = 0; x < cols; x++) {
+          if (!occupied[x + ',' + y]) grid.appendChild(makeEmptySlot(cd, bucket, 'sideboard', x, y));
         }
       }
     }
-  }
-
-  bucket.t.forEach(function (t) {
-    grid.appendChild(makeTalentCell(cd, bucket, 'sideboard', t));
-  });
+    bucket.t.forEach(function (t) { grid.appendChild(makeTalentCell(cd, bucket, 'sideboard', t)); });
+  };
+  block.refreshSlots();
 
   wrap.appendChild(grid);
   block.appendChild(wrap);
@@ -1716,6 +1723,7 @@ function applySplitViewButton() {
 }
 
 window.TalentStudio = {
+  setToolbarsVisible: function (visible) { document.body.classList.toggle('toolbars-hidden', !visible); },
   importClass: function (payload) {
     var classId = payload.classId;
     if (!BASE[classId] && !classMeta(classId)) { STATE.customClasses.push({id:classId,name:payload.name,icon:'spell:_placeholder'}); saveCustomClasses(); }

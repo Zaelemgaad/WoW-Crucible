@@ -58,6 +58,8 @@ internal static class EmbeddedStudioTestSuite
             Require(export == "spells.csv:ID,ManaCost\n900001,321", "Native CSV export failed.");
             var rejected = await Evaluate("StudioBridge.api('state',{foreign:'bad'}).then(()=>false,()=>true)");
             Require(rejected.GetBoolean(), "Invalid native state was accepted.");
+            var layoutResult = await Evaluate(File.ReadAllText("tests/WoWCrucible.Desktop.Tests/workspace-layout-regression.js"));
+            Console.WriteLine("PASS editor layout: " + layoutResult.GetRawText());
             await Evaluate("(() => { document.querySelector('#freeModeBtn').click(); window.retentionProbe=47; return true; })()");
             rootPanel.Children.Clear(); rootPanel.Children.Add(new TextBlock { Text = "Other workspace" });
             await Task.Delay(300);

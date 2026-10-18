@@ -26,13 +26,22 @@ workspace; export it first if both designs matter.
 ## Canvas and windows
 
 - Each spec and the sideboard has a grip at the upper left and a resize handle at
-  the lower right. **Fit** sizes the window to its content and available height.
+  the lower right. The **⋯** menu holds **Fit**, copy and other board actions.
+  **Fit** sizes the window to its content and available height. The header keeps
+  the same height when switching Edit Mode, so fitted windows stay fitted.
   Focus either handle and use arrow keys; Shift uses one-pixel steps.
 - **Grid** toggles the canvas background. **Grid spacing** accepts 1–64 pixels.
   **Snap** aligns board centers to grid lines and aligns edges/centers to nearby
   boards and viewport boundaries. Zoom changes the canvas scale.
 - New boards find unoccupied space. Moving an existing board never rearranges the
   others. Positions, sizes, stacking, inner scrolling and canvas settings persist.
+- Normal classes and Free Mode both start with a 12-column, 40-row sideboard.
+  Widening or enlarging the window adds available columns/rows up to 64 in either
+  direction. Existing talents outside those dimensions are always retained.
+- **Layout → Hide editor toolbars** collapses the editor's top bars and returns
+  their space to the canvas. The same menu independently controls the application
+  menu, server status, workspace tabs and tool browser. **F6** hides surrounding
+  controls together; press it again or use **Restore controls** to return.
 - The page fits the viewport; only a canvas extending beyond it and individual
   window contents scroll. Resizing deliberately below content width permits an
   inner horizontal scrollbar. Default board sizes fit their columns.

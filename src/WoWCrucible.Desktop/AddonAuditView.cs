@@ -48,7 +48,7 @@ internal sealed class AddonAuditView : UserControl
         {
             Margin = new Thickness(12), RowSpacing = 8, RowDefinitions = new("Auto,Auto,Auto,Auto,*,Auto"), Children =
             {
-                new WrapPanel { Children = { back, new TextBlock { Text = "Addons", FontSize = 20, FontWeight = FontWeight.SemiBold, Margin = new Thickness(12,0), VerticalAlignment = VerticalAlignment.Center }, browse, scan, cancel, export, reveal } },
+                new WrapPanel { Classes = { "workspace-toolbar" }, Children = { back, new TextBlock { Text = "Addons", FontSize = 20, FontWeight = FontWeight.SemiBold, Margin = new Thickness(12,0), VerticalAlignment = VerticalAlignment.Center }, browse, scan, cancel, export, reveal } },
                 Cell(new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Children = { _root, Cell(_interface, 0, 1) } }, 1),
                 Cell(_exclude, 2),
                 Cell(new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Children = { _search, Cell(_filter, 0, 1) } }, 3),

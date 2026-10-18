@@ -249,7 +249,7 @@ internal sealed class MapWorkspaceView : UserControl, IDisposable
             if (_pendingLightingId is { } id) _lightingView.SelectLightId(id);
         };
         var root = new Grid { RowDefinitions = new("Auto,*,Auto") };
-        root.Children.Add(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading });
+        root.Children.Add(new Border { Classes = { "workspace-toolbar" }, BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading });
         root.Children.Add(_workspaceTabs); Grid.SetRow(_workspaceTabs, 1);
         var footer = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _status }; root.Children.Add(footer); Grid.SetRow(footer, 2);
         Content = root; UpdateScenePlacementSnapSettings();

@@ -39,7 +39,7 @@ internal sealed class BehaviorWorkspaceView : UserControl, IDisposable
         var preview = new TabControl { Items = { new TabItem { Header = "Decoded summary", Content = new ScrollViewer { Content = new Border { Padding = new Thickness(16), BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _summary } } }, new TabItem { Header = "SQL change plan", Content = _sql } } };
         var workspace = new ResponsiveSplitGrid(_fieldTabs, preview, 3, 2);
         var import = new Button { Content = "Open portable draft…" }; import.Click += async (_, _) => await ImportDraftAsync(); var exportDraft = new Button { Content = "Export portable draft…" }; exportDraft.Click += async (_, _) => await ExportDraftAsync(); var exportSql = new Button { Content = "Export SQL…" }; exportSql.Click += async (_, _) => await ExportSqlAsync(); _commit.Click += (_, _) => PrepareCommit();
-        Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(new WrapPanel { Children = { import, exportDraft, exportSql, _commit, _status } }, 2), WithRow(_confirmation, 3) } };
+        Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { Classes = { "workspace-toolbar" }, BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(new WrapPanel { Children = { import, exportDraft, exportSql, _commit, _status } }, 2), WithRow(_confirmation, 3) } };
         RebuildFields(); RefreshSchemaStatus();
     }
 

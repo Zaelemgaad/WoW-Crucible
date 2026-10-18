@@ -153,7 +153,7 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
             }
         };
         var root = new Grid { RowDefinitions = new("Auto,*,Auto") };
-        root.Children.Add(new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Child = heading }); Grid.SetRow(tabs, 1); root.Children.Add(tabs);
+        root.Children.Add(new Border { Classes = { "workspace-toolbar" }, BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,0,0,1), Child = heading }); Grid.SetRow(tabs, 1); root.Children.Add(tabs);
         var status = new Border { BorderBrush = new SolidColorBrush(Color.Parse("#2B3445")), BorderThickness = new Thickness(0,1,0,0), Padding = new Thickness(14,7), Child = _status }; Grid.SetRow(status, 2); root.Children.Add(status);
         Content = root; PopulateFromSession();
     }

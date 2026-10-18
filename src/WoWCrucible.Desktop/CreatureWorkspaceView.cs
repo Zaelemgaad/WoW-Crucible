@@ -148,7 +148,7 @@ internal sealed class CreatureWorkspaceView : UserControl, IDisposable
         Content = new Grid
         {
             RowDefinitions = new("Auto,*,Auto,Auto"),
-            Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(actions, 2), WithRow(_confirmation, 3) }
+            Children = { new Border { Classes = { "workspace-toolbar" }, BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(actions, 2), WithRow(_confirmation, 3) }
         };
         RefreshPreview(); RefreshSchemaStatus();
         UseConfiguredChrTargets();

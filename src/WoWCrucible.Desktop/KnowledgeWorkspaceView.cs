@@ -45,6 +45,7 @@ internal sealed class KnowledgeWorkspaceView : UserControl, IDisposable
         var articleHeader = new Grid { ColumnDefinitions = new("*,Auto"), Children = { new StackPanel { Spacing = 3, Children = { _articleTitle, _articleContext } }, WithColumn(new WrapPanel { Children = { reveal, copy } }, 1) } };
         var right = new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 8, Children = { articleHeader, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(6), Padding = new Thickness(10), Child = _article }, 1) } };
         var body = new ResponsiveSplitGrid(left, right, 1.1, 2);
+        heading.Classes.Add("workspace-toolbar");
         Content = new Grid { RowDefinitions = new("Auto,Auto,*"), Margin = new Thickness(12), RowSpacing = 8, Children = { heading, WithRow(source, 1), WithRow(body, 2) } };
     }
 

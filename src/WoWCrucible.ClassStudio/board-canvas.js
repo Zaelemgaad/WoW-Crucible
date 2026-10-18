@@ -87,6 +87,7 @@ function mount(parent, items, options) {
       board.style.left = p.x + 'px'; board.style.top = p.y + 'px';
       board.style.width = p.width + 'px'; board.style.height = p.height + 'px';
       board.style.zIndex = p.z || 0;
+      if (item.resized) item.resized();
     }
     var move = element('button', 'board-move', '⠿');
     move.type = 'button'; move.title = 'Drag to move board; arrow keys move it';
@@ -100,10 +101,25 @@ function mount(parent, items, options) {
     fit.title = 'Fit this window to its board and the viewport';
     fit.addEventListener('click', function () {
       p.width = item.cols * 50 + body.offsetWidth - body.clientWidth + 2;
+      place();
       p.height = Math.max(120, Math.min(item.rows * 50 + header.offsetHeight + 2, viewport.clientHeight / zoom - 32));
       place(); bounds(); options.changed();
     });
-    header.appendChild(fit);
+    var actions = element('div', 'board-actions');
+    actions.setAttribute('popover', 'auto');
+    actions.id = 'board-actions-' + options.id + '-' + items.indexOf(item);
+    header.querySelectorAll('button.tree-copy-btn').forEach(function (button) { actions.appendChild(button); });
+    actions.appendChild(fit);
+    var menu = element('button', 'board-menu', '⋯');
+    menu.setAttribute('aria-label', 'Actions for ' + item.model.n);
+    menu.setAttribute('popovertarget', actions.id);
+    menu.addEventListener('click', function () {
+      var rect = menu.getBoundingClientRect();
+      actions.style.left = Math.max(0, Math.min(rect.right - 160, innerWidth - 170)) + 'px';
+      actions.style.top = Math.min(rect.bottom, innerHeight - 150) + 'px';
+    });
+    actions.addEventListener('click', function (event) { if (event.target.closest('button') && actions.matches(':popover-open')) actions.hidePopover(); });
+    header.appendChild(menu); board.appendChild(actions);
     function snapPosition(value, horizontal) {
       var extent = horizontal ? p.width : p.height;
       var offset = (horizontal ? viewport.scrollLeft : viewport.scrollTop) / zoom;

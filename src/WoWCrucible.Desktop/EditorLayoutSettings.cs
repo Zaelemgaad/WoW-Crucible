@@ -3,6 +3,11 @@ namespace WoWCrucible.Desktop;
 internal sealed class EditorLayoutSettings
 {
     public bool BrowserVisible { get; set; } = true;
+    public bool MenuVisible { get; set; } = true;
+    public bool RuntimeVisible { get; set; } = true;
+    public bool TabsVisible { get; set; } = true;
+    public bool ToolbarsVisible { get; set; } = true;
+    public bool StatusVisible { get; set; } = true;
     public bool BrowserOnRight { get; set; }
     public double BrowserWidth { get; set; } = 260;
     public double InspectorWidth { get; set; } = 340;

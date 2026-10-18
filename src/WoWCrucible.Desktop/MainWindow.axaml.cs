@@ -289,6 +289,32 @@ public partial class MainWindow : Window
         ToolsPaneToggle.IsChecked = navigationVisible;
         DetailsPaneToggle.IsChecked = inspectorVisible;
         DetailsPaneToggle.IsEnabled = !WelcomePanel.IsVisible && !FeatureWorkspaceHost.IsVisible;
+        var tables = !FeatureWorkspaceHost.IsVisible && DbcHost.IsVisible && Current is not null;
+        var toolbars = !_focusEditor && layout.ToolbarsVisible;
+        if (_inspectorMenu is not null) _inspectorMenu.IsVisible = tables;
+        // Views explicitly mark their toolbar containers; do not infer chrome from
+        // row position or hide editing fields that happen to sit near the top.
+        var localToolbars = FeatureWorkspaceHost.Child is { } view
+            ? WalkWorkspaceControls(view, includeItems: true).Select(entry => entry.Control).Where(control => control.Classes.Contains("workspace-toolbar")).ToArray()
+            : [];
+        foreach (var toolbar in localToolbars)
+        {
+            if (!toolbars && toolbar.IsVisible) { _hiddenWorkspaceToolbars.Add(toolbar); toolbar.IsVisible = false; }
+            else if (toolbars && _hiddenWorkspaceToolbars.Remove(toolbar)) toolbar.IsVisible = true;
+        }
+        if (_toolbarMenu is not null) _toolbarMenu.IsVisible = tables || FeatureToolbarHost.Child is not null || FeatureWorkspaceHost.Child is ClassStudioView || localToolbars.Length > 0;
+        if (_statusMenu is not null) _statusMenu.IsVisible = !FeatureWorkspaceHost.IsVisible;
+        foreach (var (item, label, visible) in _chromeMenus) item.Header = (visible() ? "Hide " : "Show ") + label;
+        RuntimeStrip.SetChromeVisibility(!_focusEditor && layout.MenuVisible, !_focusEditor && layout.RuntimeVisible);
+        RuntimeStrip.SetTableContext(tables);
+        RuntimeStrip.IsVisible = !_focusEditor && (layout.MenuVisible || layout.RuntimeVisible);
+        WorkspaceBar.IsVisible = !_focusEditor && layout.TabsVisible;
+        RestoreChromeButton.IsVisible = !WorkspaceBar.IsVisible;
+        MainHeader.IsVisible = toolbars && !FeatureWorkspaceHost.IsVisible && _workspaceTabs.SelectedId == "tables";
+        DbcDocumentToolbar.IsVisible = toolbars && tables;
+        FeatureToolbarHost.IsVisible = toolbars && FeatureWorkspaceHost.IsVisible && FeatureToolbarHost.Child is not null;
+        MainStatusBar.IsVisible = !_focusEditor && layout.StatusVisible && !FeatureWorkspaceHost.IsVisible;
+        if (FeatureWorkspaceHost.Child is ClassStudioView studio) studio.SetToolbarsVisible(toolbars);
     }
 
     private void RefreshShellContext()
@@ -346,7 +372,9 @@ public partial class MainWindow : Window
             : ShowErrorAsync("Unsupported file", "The desktop opens DBC, WDB2 DB2, WDB/ADB client caches, M2, BLP, ADT, WDT, and WDL files directly.");
     }
 
-    private async void OpenDbcClick(object? sender, RoutedEventArgs e)
+    private async void OpenDbcClick(object? sender, RoutedEventArgs e) => await OpenGameFilesAsync(tablesOnly: true);
+
+    private async Task OpenGameFilesAsync(bool tablesOnly = false)
     {
         if (!CommitPendingDbcEdits()) return;
         var directory = Directory.Exists(_workspaceSession.Settings.LastDbcDirectory)
@@ -356,20 +384,27 @@ public partial class MainWindow : Window
             : null;
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Open DBC / DB2",
+            Title = tablesOnly ? "Open data table (DBC / DB2)" : "Open game file",
             AllowMultiple = true,
             SuggestedStartLocation = start,
-            FileTypeFilter =
-            [
+            FileTypeFilter = tablesOnly ?
+            new FilePickerFileType[] {
                 new FilePickerFileType("DBC / DB2 files (*.dbc; *.db2)") { Patterns = ["*.dbc", "*.db2"] },
                 new FilePickerFileType("DBC files (*.dbc)") { Patterns = ["*.dbc"] },
                 new FilePickerFileType("DB2 files (*.db2)") { Patterns = ["*.db2"] }
-            ]
+            } : new FilePickerFileType[] {
+                new("Supported game files") { Patterns = ["*.dbc", "*.db2", "*.m2", "*.blp", "*.adt", "*.wdt", "*.wdl", "*.wdb", "*.adb"] },
+                new("Data tables (DBC / DB2)") { Patterns = ["*.dbc", "*.db2"] },
+                new("Textures (BLP)") { Patterns = ["*.blp"] },
+                new("Models (M2)") { Patterns = ["*.m2"] },
+                new("Maps (ADT / WDT / WDL)") { Patterns = ["*.adt", "*.wdt", "*.wdl"] },
+                new("Client caches (WDB / ADB)") { Patterns = ["*.wdb", "*.adb"] }
+            }
         });
         foreach (var file in files)
         {
             var path = file.TryGetLocalPath();
-            if (path is not null) await LoadDbcAsync(path);
+            if (path is not null) await LoadPathAsync(path);
         }
     }
 
@@ -1698,6 +1733,7 @@ public partial class MainWindow : Window
         FeatureToolbarHost.Child = null;
         FeatureToolbarHost.IsVisible = false;
         _editorPaneLayoutMenu.IsEnabled = false;
+        _editorPaneLayoutMenu.IsVisible = false;
         MainHeader.IsVisible = EditorWorkspace.IsVisible = MainStatusBar.IsVisible = true;
         ToolBrowser.SelectCommand("workspace.dbc");
         RefreshShellContext();
@@ -1903,6 +1939,7 @@ public partial class MainWindow : Window
             ["workspace.sql-favorites"] = Done(OpenSqlFavorites),
             ["workspace.cli-guide"] = Done(() => OpenCliGuideClick(null, new RoutedEventArgs())),
             ["action.open-dbc"] = Done(() => OpenDbcClick(null, new RoutedEventArgs())),
+            ["action.open-file"] = () => OpenGameFilesAsync(),
             ["action.open-m2"] = Done(() => OpenM2Click(null, new RoutedEventArgs())),
             ["action.save"] = () => SaveVisibleTableAsync(false),
             ["action.save-as"] = () => SaveVisibleTableAsync(true),
@@ -1979,7 +2016,7 @@ public partial class MainWindow : Window
         if (e.KeyModifiers.HasFlag(KeyModifiers.Alt) && e.Key == Key.Left) { CloseFeatureWorkspace(); e.Handled = true; return; }
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
         if (e.Key == Key.W && FeatureWorkspaceHost.IsVisible) CloseWorkspaceTab(_workspaceTabs.SelectedId);
-        else if (e.Key == Key.O) OpenDbcClick(null, new RoutedEventArgs());
+        else if (e.Key == Key.O) _ = OpenGameFilesAsync();
         else if (!FeatureWorkspaceHost.IsVisible && !WelcomePanel.IsVisible)
         {
             if (e.Key == Key.Z) Undo();

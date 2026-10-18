@@ -33,7 +33,7 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
         var preview = new TabControl { Items = { new TabItem { Header = "Decoded summary", Content = new ScrollViewer { Content = new Border { Padding = new Thickness(16), BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _summary } } }, new TabItem { Header = "SQL change plan", Content = _sql } } };
         var workspace = new ResponsiveSplitGrid(editor, preview, 3, 2);
         var reserveId = AccentButton("Reserve project ID"); reserveId.Click += async (_, _) => await ReserveProjectIdAsync(reserveId); var export = new Button { Content = "Export SQL…" }; export.Click += async (_, _) => await ExportAsync(); var exportDraft = new Button { Content = "Export portable draft…" }; exportDraft.Click += async (_, _) => await ExportDraftAsync(); _commit.Click += (_, _) => PrepareCommit();
-        Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(new WrapPanel { Children = { reserveId, export, exportDraft, _commit, _status } }, 2), WithRow(_confirmation, 3) } };
+        Content = new Grid { RowDefinitions = new("Auto,*,Auto,Auto"), Children = { new Border { Classes = { "workspace-toolbar" }, BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading }, WithRow(workspace, 1), WithRow(new WrapPanel { Children = { reserveId, export, exportDraft, _commit, _status } }, 2), WithRow(_confirmation, 3) } };
         RebuildFields(); RefreshSchemaStatus();
     }
 

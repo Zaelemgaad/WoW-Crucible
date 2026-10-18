@@ -99,6 +99,7 @@ internal sealed class DbcExportWorkspaceView : UserControl, IDisposable
         };
         var right = new Grid { RowDefinitions = new("Auto,Auto,*"), RowSpacing = 8, Children = { controls, WithRow(_status, 1), WithRow(_preview, 2) } };
         var body = new ResponsiveSplitGrid(left, right, 1, 2) { Margin = new Thickness(12, 9, 12, 12) };
+        header.Classes.Add("workspace-toolbar");
         Content = new Grid { RowDefinitions = new("Auto,Auto,*"), Children = { header, WithRow(identity, 1), WithRow(body, 2) } };
     }
 

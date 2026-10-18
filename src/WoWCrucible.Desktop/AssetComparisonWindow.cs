@@ -213,6 +213,7 @@ internal sealed class AssetComparisonView : UserControl, IDisposable
         var directoryPane = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,1,0), Child = left };
         var reviewAndCompare = new ResponsiveSplitGrid(middle, compare, 1.35, 2, compactFirstWeight: 1.4, compactSecondWeight: 1);
         var body = new ResponsiveSplitGrid(directoryPane, reviewAndCompare, 0.85, 3.35, compactFirstWeight: 1, compactSecondWeight: 3);
+        top.Classes.Add("workspace-toolbar");
         var root = new Grid { RowDefinitions = new("Auto,*,Auto,Auto") }; root.Children.Add(top); Grid.SetRow(body, 1); root.Children.Add(body); Grid.SetRow(projectTools, 2); root.Children.Add(projectTools);
         var status = new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,1,0,0), Padding = new Thickness(14,7), Child = _status }; Grid.SetRow(status, 3); root.Children.Add(status); return root;
     }

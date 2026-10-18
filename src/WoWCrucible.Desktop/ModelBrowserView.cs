@@ -95,6 +95,7 @@ internal sealed class ModelBrowserView : UserControl, IDisposable
         var body = new ResponsiveSplitGrid(filePane, previewAndDetails, 0.8, 3.2, wideAspect: 1.3, compactFirstWeight: 1, compactSecondWeight: 3) { Margin = new Thickness(10) };
         var toolbar = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto"), ColumnSpacing = 7, Margin = new Thickness(10, 7) };
         toolbar.Children.Add(folder); PutColumn(toolbar, _root, 1); PutColumn(toolbar, refresh, 2); PutColumn(toolbar, cancel, 3);
+        toolbar.Classes.Add("workspace-toolbar");
         var content = new Grid { RowDefinitions = new("Auto,*") }; content.Children.Add(toolbar); Put(content, body, 1); Content = content;
         DragDrop.SetAllowDrop(this, true);
         AddHandler(DragDrop.DragOverEvent, (_, args) => { args.DragEffects = args.DataTransfer.TryGetFiles()?.Any(file => CanOpen(file.TryGetLocalPath())) == true ? DragDropEffects.Copy : DragDropEffects.None; args.Handled = true; }, RoutingStrategies.Bubble, true);

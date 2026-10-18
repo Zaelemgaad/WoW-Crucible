@@ -124,6 +124,7 @@ internal sealed class NativeConversionWorkspaceView : UserControl, IDisposable
             }
         };
         var body = new ResponsiveSplitGrid(left, right, 1, 2) { Margin = new Thickness(12, 9, 12, 12) };
+        header.Classes.Add("workspace-toolbar");
         Content = new Grid { Background = Brushes.Transparent, RowDefinitions = new("Auto,Auto,Auto,*"), Children = { header, WithRow(listfileStrip, 1), WithRow(dropTarget, 2), WithRow(body, 3) } };
     }
 

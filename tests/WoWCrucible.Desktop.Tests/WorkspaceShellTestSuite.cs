@@ -90,6 +90,11 @@ internal static class WorkspaceShellTestSuite
         try
         {
             var root = window.FindControl<Grid>("RootLayout")!;
+            var picker = CoverageStorageProvider.Create();
+            typeof(TopLevel).GetField("_storageProvider", Private)!.SetValue(window, picker);
+            ((Task)typeof(MainWindow).GetMethod("OpenGameFilesAsync", Private)!.Invoke(window, [false])!).GetAwaiter().GetResult();
+            var openOptions = ((CoverageStorageProvider)picker).LastOpenOptions!;
+            Require(openOptions.Title == "Open game file" && openOptions.FileTypeFilter!.First().Patterns!.Contains("*.blp") && openOptions.FileTypeFilter!.First().Patterns!.Contains("*.m2"), "General file opening did not advertise supported editors.");
             var host = window.FindControl<Border>("FeatureWorkspaceHost")!;
             var browser = window.FindControl<Border>("NavigationPane")!;
             ArrangeWindow(window, 1440, 900);
@@ -132,10 +137,22 @@ internal static class WorkspaceShellTestSuite
                 Capture(root, width, height, $"shell-home-{width}.png");
             }
             Invoke(window, "SelectWorkspaceTab", firstId);
+            var inspectorMenu = (MenuItem)typeof(MainWindow).GetField("_inspectorMenu", Private)!.GetValue(window)!;
+            Require(!inspectorMenu.IsVisible, "Table inspector command leaked into a feature workspace.");
+            ArrangeWindow(window, 1440, 900);
+            var regularHeight = host.Bounds.Height;
             Invoke(window, "ToggleEditorFocus");
+            ArrangeWindow(window, 1440, 900);
             Require(!browser.IsVisible, "Focus mode did not hide navigation.");
+            Require(!window.FindControl<WorkspaceRuntimeStrip>("RuntimeStrip")!.IsVisible && !window.FindControl<Grid>("WorkspaceBar")!.IsVisible, "Focus mode retained shell bars.");
+            Require(host.Bounds.Height > regularHeight, "Focus mode hid controls without returning editor space.");
             Invoke(window, "ToggleEditorFocus");
             Require(browser.IsVisible && draft.Text == "Unapplied record edits", "Focus mode failed to restore panels/content.");
+            settings.EditorLayout.TabsVisible = false;
+            Invoke(window, "ApplyShellPaneState");
+            Require(window.FindControl<Button>("RestoreChromeButton")!.IsVisible, "Hiding tabs removed the recovery control.");
+            Invoke(window, "RestoreChromeClick", null!, new Avalonia.Interactivity.RoutedEventArgs());
+            Require(settings.EditorLayout.TabsVisible, "Recovery control did not restore layout access.");
             var roundTrip = JsonSerializer.Deserialize<DesktopSettings>(JsonSerializer.Serialize(settings))!;
             Require(roundTrip.EditorLayout.BrowserVisible && !roundTrip.EditorLayout.BrowserOnRight, "Shell layout settings did not round-trip.");
             foreach (var (name, open) in new (string, Action)[]
@@ -146,6 +163,15 @@ internal static class WorkspaceShellTestSuite
             })
             {
                 open();
+                ArrangeWindow(window, 1440, 900);
+                var localBars = host.GetVisualDescendants().OfType<Control>().Where(c => c.Classes.Contains("workspace-toolbar") && c.IsVisible).ToArray();
+                settings.EditorLayout.ToolbarsVisible = false;
+                Invoke(window, "ApplyShellPaneState"); ArrangeWindow(window, 1440, 900);
+                Require(localBars.All(c => !c.IsVisible), name + " retained its editor toolbar");
+                Require(!window.FindControl<Border>("FeatureToolbarHost")!.IsVisible, name + " retained shared toolbar space");
+                settings.EditorLayout.ToolbarsVisible = true;
+                Invoke(window, "ApplyShellPaneState"); ArrangeWindow(window, 1440, 900);
+                Require(localBars.All(c => c.IsVisible), name + " did not restore its toolbar");
                 foreach (var (width, height) in new[] { (1440, 900), (1024, 768) })
                 {
                     ArrangeWindow(window, width, height);
@@ -190,6 +216,7 @@ internal static class WorkspaceShellTestSuite
         load.GetAwaiter().GetResult();
         var documents = (List<DbcDocumentSession>)typeof(MainWindow).GetField("_documents", Private)!.GetValue(window)!;
         Require(documents.Count == 1 && tabs.SelectedId == "tables", "Loading a table did not activate its workspace.");
+        Require(((MenuItem)typeof(MainWindow).GetField("_inspectorMenu", Private)!.GetValue(window)!).IsVisible, "Table inspector command was missing from a loaded table.");
         Invoke(window, "OpenFeatureWorkspace", editor, "Test record editor");
         foreach (var key in new[] { Key.S, Key.Z, Key.Y })
         {

@@ -100,6 +100,7 @@ internal sealed class SpellWorkspaceView : UserControl
             Padding = new Thickness(12, 7),
             Child = _status
         };
+        header.Classes.Add("workspace-toolbar");
         Content = new Grid
         {
             RowDefinitions = new("Auto,*,Auto"),

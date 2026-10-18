@@ -85,6 +85,7 @@ internal sealed class DbcStagingWorkspaceView : UserControl
             new Border { BorderBrush = Brush.Parse("#293246"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(7), Margin = new Thickness(10, 4, 4, 10), Child = left },
             new Border { BorderBrush = Brush.Parse("#293246"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(7), Margin = new Thickness(4, 4, 10, 10), Child = right },
             1, 1, compactFirstWeight: 1.2, compactSecondWeight: 1);
+        header.Classes.Add("workspace-toolbar");
         Content = new Grid { RowDefinitions = new("Auto,*"), Children = { header, Row(body, 1) } };
         _status.Text = File.Exists(_workspace.Text) ? "Existing staging database found. Refresh its exact diff or run a bounded query." : "Create a Crucible project or select an active project, then create this table's staging database.";
     }

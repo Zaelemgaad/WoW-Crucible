@@ -159,6 +159,7 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
             new TabItem { Header = "Playable race bundle", Content = raceBody },
             new TabItem { Header = "Owned files & cleanup", Content = _artifactOwnershipView }
         } };
+        heading.Classes.Add("workspace-toolbar");
         Content = new Grid { RowDefinitions = new("Auto,*"), Children = { heading, WithRow(tabs, 1) } };
         ShowPolicy(); TryLoadConfiguredProject();
     }

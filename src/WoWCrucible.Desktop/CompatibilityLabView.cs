@@ -66,6 +66,7 @@ internal sealed class CompatibilityLabView : UserControl
         Grid.SetRow(splitter, 1); body.Children.Add(splitter);
         var detailScroll = new ScrollViewer { Content = _detail };
         Grid.SetRow(detailScroll, 2); body.Children.Add(detailScroll);
+        heading.Classes.Add("workspace-toolbar");
         Content = new Grid { RowDefinitions = new("Auto,Auto,Auto,*"), Children = { heading, WithRow(requestRow, 1), WithRow(operationState, 2), WithRow(body, 3) } };
     }
 

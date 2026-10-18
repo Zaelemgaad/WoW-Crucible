@@ -116,7 +116,7 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
             RowDefinitions = new("Auto,*,Auto"),
             Children =
             {
-                new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading },
+                new Border { Classes = { "workspace-toolbar" }, BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading },
                 WithRow(tabs, 1),
                 WithRow(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _operationStatus }, 2)
             }

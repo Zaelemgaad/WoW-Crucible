@@ -25,6 +25,9 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
     private ServerRuntimeStatus? _status;
     private CancellationTokenSource? _operation;
     private bool _refreshing;
+    private readonly Menu _applicationMenu;
+    private readonly Grid _context;
+    private readonly List<MenuItem> _tableCommands = [];
 
     public event EventHandler? WorkspaceRequested;
     public event EventHandler<string>? CommandRequested;
@@ -60,13 +63,14 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             HorizontalAlignment = HorizontalAlignment.Right,
             Children = { _sql, _auth, _world, _refresh }
         };
-        var context = new Grid
+        _context = new Grid
         {
             ColumnDefinitions = new("*,Auto"),
             ColumnSpacing = 8,
             Margin = new Thickness(8, 2),
             Children = { _workspace, AtColumn(runtime, 1) }
         };
+        _applicationMenu = BuildApplicationMenu();
         Content = new Border
         {
             Background = new SolidColorBrush(Color.Parse("#090D13")),
@@ -77,8 +81,8 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
                 RowDefinitions = new("Auto,Auto,Auto"),
                 Children =
                 {
-                    BuildApplicationMenu(),
-                    AtRow(context, 1),
+                    _applicationMenu,
+                    AtRow(_context, 1),
                     AtRow(_operationStatus, 2)
                 }
             }
@@ -96,7 +100,10 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             Items =
             {
                 DomainMenu("File",
-                    ("Open DBC / DB2…", "action.open-dbc"),
+                    ("Open game file…", "action.open-file"),
+                    ("Open data table (DBC / DB2)…", "action.open-dbc"),
+                    ("Browse client archives…", "workspace.client"),
+                    ("Projects…", "workspace.projects"),
                     ("Save current table", "action.save"),
                     ("Save current table as…", "action.save-as")),
                 DomainMenu("Workspace",
@@ -124,6 +131,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
                 !CrucibleCommandCatalog.All.Any(candidate => candidate.Id.Equals(command, StringComparison.Ordinal)))
                 throw new InvalidOperationException($"Application menu entry '{label}' references unknown command '{command}'.");
             var item = new MenuItem { Header = label };
+            if (command is "action.save" or "action.save-as") _tableCommands.Add(item);
             item.Click += (_, _) => CommandRequested?.Invoke(this, command);
             menu.Items.Add(item);
         }
@@ -139,6 +147,21 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
         ShowWorkspace();
         _timer.Start();
         _ = RefreshAsync();
+    }
+
+    public void SetTableContext(bool active)
+    {
+        foreach (var item in _tableCommands) item.IsVisible = active;
+    }
+
+    public void SetChromeVisibility(bool menu, bool runtime)
+    {
+        _applicationMenu.IsVisible = menu;
+        _context.IsVisible = runtime;
+        // Keep an operation result's state for restoration, but collapse its row too.
+        var container = (Grid)((Border)Content!).Child!;
+        container.RowDefinitions[2].Height = runtime ? GridLength.Auto : new GridLength(0);
+        _operationStatus.ClipToBounds = true;
     }
 
     private async Task ToggleAsync(Component component)

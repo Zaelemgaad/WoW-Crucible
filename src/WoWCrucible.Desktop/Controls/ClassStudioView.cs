@@ -17,6 +17,7 @@ internal sealed class ClassStudioView : UserControl, IDisposable
     private readonly StudioSurface _surface;
     private readonly TextBlock _status = new() { Text = "Opening Class Studio…", Margin = new Thickness(20), TextWrapping = Avalonia.Media.TextWrapping.Wrap };
     private bool _restored, _displayFailed, _disposed;
+    private bool _toolbarsVisible = true;
     internal event EventHandler<KeyEventArgs>? ShellKeyRequested;
     internal Task Ready => _surface.Ready;
     internal CoreWebView2? Browser => _surface.Browser;
@@ -28,7 +29,7 @@ internal sealed class ClassStudioView : UserControl, IDisposable
         _surface.Message += HandleMessage;
         _surface.ShellKeyRequested += (_, e) => ShellKeyRequested?.Invoke(this, e);
         _surface.Failed += (_, error) => ShowFailure(error);
-        _surface.LoadedPage += (_, _) => _status.IsVisible = false;
+        _surface.LoadedPage += (_, _) => { _status.IsVisible = false; ApplyToolbarVisibility(); };
         Content = new Grid { Children = { _status, _surface } };
     }
 
@@ -78,6 +79,20 @@ internal sealed class ClassStudioView : UserControl, IDisposable
     }
 
     public void SetOccluded(bool occluded) => _surface.IsVisible = !occluded && !_displayFailed;
+
+    public void SetToolbarsVisible(bool visible)
+    {
+        if (_toolbarsVisible == visible) return;
+        _toolbarsVisible = visible;
+        ApplyToolbarVisibility();
+    }
+
+    private async void ApplyToolbarVisibility()
+    {
+        if (Browser is null || !Ready.IsCompletedSuccessfully || _disposed || _displayFailed) return;
+        try { await Browser.ExecuteScriptAsync("window.TalentStudio.setToolbarsVisible(" + (_toolbarsVisible ? "true" : "false") + ");"); }
+        catch (Exception error) { if (!_disposed) ShowFailure(error); }
+    }
 
     public void Dispose()
     {
@@ -162,6 +177,7 @@ internal sealed class ClassStudioView : UserControl, IDisposable
                     {
                         0x75 => Key.F6,
                         0x4B when modifiers.HasFlag(KeyModifiers.Control) => Key.K,
+                        0x4F when modifiers.HasFlag(KeyModifiers.Control) => Key.O,
                         0x57 when modifiers.HasFlag(KeyModifiers.Control) => Key.W,
                         0x09 when modifiers.HasFlag(KeyModifiers.Control) => Key.Tab,
                         _ => Key.None

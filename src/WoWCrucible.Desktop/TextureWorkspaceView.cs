@@ -216,7 +216,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
             RowDefinitions = new("Auto,*,Auto"),
             Children =
             {
-                new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading },
+                new Border { Classes = { "workspace-toolbar" }, BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 0, 0, 1), Child = heading },
                 Row(body, 1),
                 Row(new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(12, 7), Child = _status }, 2)
             }

@@ -133,7 +133,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         _tabs.Items.Add(new TabItem { Header = "CASC browser", Content = BuildCascBrowserPage() });
         _tabs.Items.Add(new TabItem { Header = "Merge small patches", Content = BuildMergePage() });
         _tabs.Items.Add(new TabItem { Header = "Client deployment", Content = BuildDeploymentPage() });
-        Content = new Grid { RowDefinitions = new("Auto,*"), Children = { new Border { BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,0,1), Child = heading }, WithRow(_tabs, 1) } };
+        Content = new Grid { RowDefinitions = new("Auto,*"), Children = { new Border { Classes = { "workspace-toolbar" }, BorderBrush = Brush.Parse("#2B3445"), BorderThickness = new Thickness(0,0,0,1), Child = heading }, WithRow(_tabs, 1) } };
     }
 
     public async Task OpenArchiveAsync(string path)

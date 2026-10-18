@@ -33,6 +33,7 @@ internal sealed class ToolInventoryView : UserControl
         var filters = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { _search, WithColumn(_statusFilter, 1), WithColumn(reveal, 2) } };
         _entries.ItemTemplate = new FuncDataTemplate<ToolInventoryEntry>((entry, _) => entry is null ? new Grid() : BuildEntry(entry));
         _entries.SelectionChanged += (_, _) => ShowSelection(); _search.TextChanged += (_, _) => Filter(); _statusFilter.SelectionChanged += (_, _) => Filter();
+        heading.Classes.Add("workspace-toolbar");
         Content = new Grid
         {
             RowDefinitions = new("Auto,Auto,Auto,Auto,*,Auto"), Margin = new Thickness(12), RowSpacing = 8, Children =

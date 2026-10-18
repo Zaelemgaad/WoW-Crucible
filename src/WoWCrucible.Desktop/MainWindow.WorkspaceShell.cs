@@ -16,6 +16,9 @@ public partial class MainWindow
     private bool _focusEditor;
     private readonly HashSet<ResponsiveSplitGrid> _configuredSplits = [];
     private readonly MenuItem _editorPaneLayoutMenu = new() { Header = "Editor panes", IsEnabled = false };
+    private MenuItem? _inspectorMenu, _toolbarMenu, _statusMenu;
+    private readonly HashSet<Control> _hiddenWorkspaceToolbars = [];
+    private readonly List<(MenuItem Item, string Label, Func<bool> Visible)> _chromeMenus = [];
 
     private void InitializeWorkspaceShell()
     {
@@ -30,20 +33,33 @@ public partial class MainWindow
         InspectorSplitter.KeyUp += (_, _) => SaveShellPaneSizes();
         var layout = new MenuFlyout();
         Add("Show / hide tool browser", () => ToggleNavigationPaneClick(null, new RoutedEventArgs()));
-        Add("Show / hide table inspector", () => ToggleInspectorPaneClick(null, new RoutedEventArgs()));
+        _inspectorMenu = Add("Show / hide selected table record", () => ToggleInspectorPaneClick(null, new RoutedEventArgs()));
         Add("Move tool browser to left", () => DockBrowser(false));
         Add("Move tool browser to right", () => DockBrowser(true));
-        Add("Focus editor / restore panels (F6)", ToggleEditorFocus);
+        Add("Editor only / restore controls (F6)", ToggleEditorFocus);
+        var settings = _workspaceSession.Settings.EditorLayout;
+        Chrome("application menu", () => settings.MenuVisible, value => settings.MenuVisible = value);
+        Chrome("server status bar", () => settings.RuntimeVisible, value => settings.RuntimeVisible = value);
+        Chrome("workspace tabs", () => settings.TabsVisible, value => settings.TabsVisible = value);
+        _toolbarMenu = Chrome("editor toolbars", () => settings.ToolbarsVisible, value => settings.ToolbarsVisible = value);
+        _statusMenu = Chrome("bottom status bar", () => settings.StatusVisible, value => settings.StatusVisible = value);
         layout.Items.Add(_editorPaneLayoutMenu);
         Add("Restore default layout", ResetEditorLayout);
         LayoutButton.Flyout = layout;
         WorkspaceTabs.Refresh(_workspaceTabs);
 
-        void Add(string title, Action action)
+        MenuItem Add(string title, Action action)
         {
             var item = new MenuItem { Header = title };
             item.Click += (_, _) => action();
             layout.Items.Add(item);
+            return item;
+        }
+        MenuItem Chrome(string label, Func<bool> visible, Action<bool> set)
+        {
+            var item = Add("Hide " + label, () => { set(!visible()); ApplyShellPaneState(); _workspaceSession.Settings.Save(); });
+            _chromeMenus.Add((item, label, visible));
+            return item;
         }
     }
 
@@ -61,11 +77,20 @@ public partial class MainWindow
         ApplyShellPaneState();
     }
 
+    private void RestoreChromeClick(object? sender, RoutedEventArgs e)
+    {
+        _focusEditor = false;
+        _workspaceSession.Settings.EditorLayout.TabsVisible = true;
+        ApplyShellPaneState();
+        _workspaceSession.Settings.Save();
+    }
+
     private void ResetEditorLayout()
     {
         _focusEditor = false;
         var layout = _workspaceSession.Settings.EditorLayout;
         layout.BrowserVisible = true;
+        layout.MenuVisible = layout.RuntimeVisible = layout.TabsVisible = layout.ToolbarsVisible = layout.StatusVisible = true;
         layout.BrowserOnRight = false;
         layout.BrowserWidth = 260;
         layout.InspectorWidth = 340;
@@ -90,6 +115,7 @@ public partial class MainWindow
         var splits = WalkWorkspaceControls(workspace, includeItems: true).Select(entry => entry.Control).OfType<ResponsiveSplitGrid>().ToArray();
         _editorPaneLayoutMenu.Items.Clear();
         _editorPaneLayoutMenu.IsEnabled = splits.Length > 0;
+        _editorPaneLayoutMenu.IsVisible = splits.Length > 0;
         foreach (var split in splits)
         {
             if (splits.Length == 1)
@@ -128,6 +154,7 @@ public partial class MainWindow
         if (id is null) return;
         _workspaceTabs.Close(id);
         _workspacePages.Remove(id);
+        foreach (var entry in WalkWorkspaceControls(workspace, includeItems: true)) _hiddenWorkspaceToolbars.Remove(entry.Control);
         foreach (var split in WalkWorkspaceControls(workspace, includeItems: true).Select(entry => entry.Control).OfType<ResponsiveSplitGrid>())
             _configuredSplits.Remove(split);
         if (ReferenceEquals(FeatureWorkspaceHost.Child, workspace))

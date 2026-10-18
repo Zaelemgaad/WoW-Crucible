@@ -9,11 +9,12 @@
         WindowStartupLocation="CenterScreen">
     <Grid x:Name="RootLayout" RowDefinitions="Auto,Auto,Auto,*,Auto" ColumnDefinitions="260,Auto,*,Auto,340">
         <local:WorkspaceRuntimeStrip x:Name="RuntimeStrip" Grid.Row="0" Grid.ColumnSpan="5" />
-        <Grid Grid.Row="1" Grid.ColumnSpan="5" ColumnDefinitions="Auto,*,Auto" Background="#10151E">
+        <Grid x:Name="WorkspaceBar" Grid.Row="1" Grid.ColumnSpan="5" ColumnDefinitions="Auto,*,Auto" Background="#10151E">
             <ToggleButton x:Name="ToolsPaneToggle" Content="Tools" Margin="6,3" Click="ToggleNavigationPaneClick" ToolTip.Tip="Show or hide the tool browser" />
             <local:WorkspaceTabStrip x:Name="WorkspaceTabs" Grid.Column="1" />
             <Button x:Name="LayoutButton" Grid.Column="2" Content="Layout ▾" Margin="6,3" />
         </Grid>
+        <Button x:Name="RestoreChromeButton" Grid.Row="1" Grid.ColumnSpan="5" Content="Restore controls · F6" HorizontalAlignment="Right" IsVisible="False" Click="RestoreChromeClick" Padding="8,2" />
         <Border x:Name="MainHeader" Grid.Row="2" Grid.Column="2" Grid.ColumnSpan="3" Background="#191B1E" BorderBrush="#36393E" BorderThickness="0,0,0,1">
             <StackPanel Margin="8,4" Spacing="4">
                 <WrapPanel Orientation="Horizontal">

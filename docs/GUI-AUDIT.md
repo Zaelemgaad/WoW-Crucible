@@ -497,3 +497,27 @@ this is recorded separately and is not a claim of a clean native stderr log.
 
 Post-fix randomized regression: seed **180035**, **2,000/2,000** actions and
 **1,940** embedded clicks passed, including the existing document/preview checks.
+
+## Layout usability regression — 2026-10-18
+
+The embedded-editor suite now runs `workspace-layout-regression.js`. It checks
+the board actions popover, Fit, unchanged outer/content dimensions after level,
+points-per-tier and Edit Mode changes, saved-layout reload, no horizontal overflow
+after fitting, normal-mode sideboard capacity and expansion, and actual canvas
+height reclaimed/restored by hiding editor toolbars. Board headers retain a fixed
+height; transient actions live in the popover rather than wrapping into more rows.
+
+The native shell suite checks contextual inspector visibility, editor-only mode
+removing the menu/server/tab bars and increasing the editor's measured height,
+restoration access after hiding tabs, and toolbar hide/restore for items, textures
+and maps. Native views explicitly label their toolbar containers; the shell never
+guesses which fields to hide from their position in the layout.
+
+The short root README links to the preserved `README-EXTENDED.md`. File now offers
+Open game file with descriptive filters and routes supported files to their editor;
+table-specific save actions and the record inspector only appear in table context.
+
+Validation: embedded editor and native shell suites passed; randomized seed
+**180036** passed **2,000** actions and **1,980** embedded clicks. These are
+automated control/DOM/layout checks, not a claim that every physical mouse gesture
+or every data-dependent editor workflow was exercised.

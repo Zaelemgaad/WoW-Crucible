@@ -64,6 +64,7 @@ internal sealed class CacheTableWorkspaceView : UserControl
         DragDrop.SetAllowDrop(drop, true);
         DragDrop.AddDragOverHandler(drop, (_, args) => { args.DragEffects = args.DataTransfer.TryGetFiles()?.Any(file => IsCache(file.TryGetLocalPath())) == true ? DragDropEffects.Copy : DragDropEffects.None; args.Handled = true; });
         DragDrop.AddDropHandler(drop, async (_, args) => { var path = args.DataTransfer.TryGetFiles()?.Select(file => file.TryGetLocalPath()).FirstOrDefault(IsCache); if (path is not null) await LoadAsync(path); args.Handled = true; });
+        heading.Classes.Add("workspace-toolbar");
         Content = drop;
     }
 
