@@ -47,6 +47,9 @@ internal static class EmbeddedStudioTestSuite
             // A real HWND and message loop, without showing or focusing a test window.
             window.ApplyTemplate(); Arrange();
             await view.Ready.WaitAsync(TimeSpan.FromSeconds(25));
+            var importedPath = Path.Combine(root, "open-talents.json");
+            await File.WriteAllTextAsync(importedPath, "{\"classId\":\"open-file-test\",\"name\":\"File open fixture\",\"trees\":[{\"n\":\"Imported tree\",\"t\":[]}]}");
+            await view.ImportFileAsync(importedPath);
             var browser = view.Browser!;
             var restored = await Evaluate("StudioBridge.ready.then(() => ({connected:StudioBridge.connected,saved:localStorage.getItem('twc.test.saved')}))");
             Require(restored.GetProperty("connected").GetBoolean() && restored.GetProperty("saved").GetString() == "123", "Existing desktop state was not restored.");
@@ -58,6 +61,7 @@ internal static class EmbeddedStudioTestSuite
             Require(export == "spells.csv:ID,ManaCost\n900001,321", "Native CSV export failed.");
             var rejected = await Evaluate("StudioBridge.api('state',{foreign:'bad'}).then(()=>false,()=>true)");
             Require(rejected.GetBoolean(), "Invalid native state was accepted.");
+            Require((await Evaluate("JSON.parse(localStorage.getItem('twc.class.open-file-test') || 'null') !== null")).GetBoolean(), "Native talent-file opening did not import its contents.");
             var layoutResult = await Evaluate(File.ReadAllText("tests/WoWCrucible.Desktop.Tests/workspace-layout-regression.js"));
             Console.WriteLine("PASS editor layout: " + layoutResult.GetRawText());
             await Evaluate("(() => { document.querySelector('#freeModeBtn').click(); window.retentionProbe=47; return true; })()");

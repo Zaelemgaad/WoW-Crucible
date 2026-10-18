@@ -6,7 +6,8 @@ namespace WoWCrucible.Core;
 public enum ReferenceDomain
 {
     Spell, Item, Creature, Quest, GameObject,
-    SpellCastTime, SpellDuration, SpellRange, SpellRuneCost, SpellVisual, SpellIcon, SpellDifficulty
+    SpellCastTime, SpellDuration, SpellRange, SpellRuneCost, SpellVisual, SpellIcon, SpellDifficulty,
+    Faction, Area, QuestSort, QuestInfo, Map, CharacterTitle
 }
 
 public sealed record ReferenceLookupEntry(uint Id, string Name, string Source, string Details)
@@ -72,7 +73,7 @@ public sealed class ReferenceLookupService
         var numeric = uint.TryParse(query, NumberStyles.Integer, CultureInfo.InvariantCulture, out var exactId); var entries = new List<ReferenceLookupEntry>(limit + 1);
         for (var row = 0; row < file.RowCount && entries.Count <= limit; row++)
         {
-            var id = file.GetRaw(row, columns[idColumnIndex]); if (id == 0) continue;
+            var id = file.GetRaw(row, columns[idColumnIndex]); if (id == 0 && domain != ReferenceDomain.Map) continue;
             var name = nameColumnIndex < 0 ? string.Empty : Convert.ToString(file.GetDisplayValue(row, columns[nameColumnIndex]), CultureInfo.InvariantCulture) ?? string.Empty;
             var details = string.Join(" · ", detailColumnIndices.Where(index => index >= 0 && index < columns.Count).Select(index => $"{columns[index].Name}: {Convert.ToString(file.GetDisplayValue(row, columns[index]), CultureInfo.InvariantCulture)}"));
             if (query.Length > 0 && (numeric ? id != exactId : !name.Contains(query, StringComparison.OrdinalIgnoreCase) && !details.Contains(query, StringComparison.OrdinalIgnoreCase))) continue;

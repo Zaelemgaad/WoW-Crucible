@@ -514,10 +514,30 @@ and maps. Native views explicitly label their toolbar containers; the shell neve
 guesses which fields to hide from their position in the layout.
 
 The short root README links to the preserved `README-EXTENDED.md`. File now offers
-Open game file with descriptive filters and routes supported files to their editor;
+Open (subsequently expanded with detection and destination selection below);
 table-specific save actions and the record inspector only appear in table context.
 
 Validation: embedded editor and native shell suites passed; randomized seed
 **180036** passed **2,000** actions and **1,980** embedded clicks. These are
 automated control/DOM/layout checks, not a claim that every physical mouse gesture
 or every data-dependent editor workflow was exercised.
+
+## File routing and guided fields — 2026-10-18
+
+`--guided-editors` verifies class/subclass/slot combinations, custom item value
+retention, WotLK quality colors, full portable quest field definition coverage,
+unknown quest type/flag/race preservation, reference kinds and signed objective
+encoding, and portable quest round trips. It also exercises binary identification,
+ambiguous CSV destinations, native SQL opening and PNG editing/reset. Native
+screenshots are written under `.local/editor-shell-tests`.
+
+The stock CoA quest_template SQL definition was checked separately: **105/105**
+columns have catalog definitions. No live SQL writes were performed for these tests.
+The embedded suite also imports a real talent JSON file through the native entry
+point. The shell suite verifies the single unrestricted **Open** picker.
+
+Guided editor, native shell and embedded suites passed. Randomized seed **180037**
+passed **2,000/2,000** actions and **2,040** embedded clicks. These checks do not
+claim that every possible file format, live database schema or physical gesture
+has been tested. See [the field guide](EDITOR-FIELDS.md) for supported routes and
+source definitions.

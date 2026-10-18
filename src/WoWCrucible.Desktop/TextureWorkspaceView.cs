@@ -138,8 +138,8 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         if (Directory.Exists(session.Settings.CoreDbcPath)) _usageDbcRoot.Text = session.Settings.CoreDbcPath;
         var back = new Button { Content = "← Editor" }; back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         var open = AccentButton("Open BLP…"); open.Click += async (_, _) => { var path = await PickFileAsync("Open a BLP texture", ["*.blp"]); if (path is not null) await OpenAsync(path); };
-        var reload = new Button { Content = "Reload" }; reload.Click += async (_, _) => { if (File.Exists(_sourcePath.Text)) await OpenAsync(_sourcePath.Text!); };
-        var decode = new Button { Content = "Save selected mip as PNG…" }; decode.Click += async (_, _) => await SavePngAsync();
+        var reload = new Button { Content = "Reload" }; reload.Click += async (_, _) => { if (File.Exists(_sourcePath.Text)) { if (_imageSource is not null) await OpenImageAsync(_imageSource); else await OpenAsync(_sourcePath.Text!); } };
+        var decode = new Button { Content = "Save PNG…" }; decode.Click += async (_, _) => await SavePngAsync();
         _mip.SelectionChanged += async (_, _) =>
         {
             if (_changingMip || _info is null) return;
@@ -223,6 +223,30 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         };
     }
 
+    private string? _imageSource;
+    private string? LoadedTexturePath => _info?.Path ?? _imageSource;
+
+    public async Task OpenImageAsync(string path)
+    {
+        if (_editDirty) { _status.Text = "Save or reset the current pixel edits before opening another texture."; return; }
+        Begin("Decoding image…");
+        try
+        {
+            path = Path.GetFullPath(path);
+            var texture = await Task.Run(() => BlpTextureService.DecodeImage(path), _operation!.Token);
+            _operation.Token.ThrowIfCancellationRequested();
+            _info = null; _imageSource = path; _sourcePath.Text = path;
+            _changingMip = true; _mip.ItemsSource = new[] { "Original image" }; _mip.SelectedIndex = 0; _changingMip = false;
+            _metadata.Text = $"{Path.GetExtension(path).TrimStart('.').ToUpperInvariant()} · {texture.Width} × {texture.Height}";
+            _warnings.Text = ""; _encodeSource.Text = path;
+            SetDecodedTexture(texture, 0); _visualPages.SelectedIndex = 1;
+            _status.Text = "Image opened. Edit pixels, then save as PNG or a Wrath BLP texture.";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) { Fail("Image open failed", exception); }
+        finally { End(); }
+    }
+
     public async Task OpenAsync(string path)
     {
         if (_editDirty) { _status.Text = "The current texture has unsaved pixel edits. Save or reset that draft before reloading or opening another BLP."; return; }
@@ -232,7 +256,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
             path = Path.GetFullPath(path);
             var info = await Task.Run(() => BlpTextureService.Inspect(path), _operation!.Token);
             _operation.Token.ThrowIfCancellationRequested();
-            _info = info; _sourcePath.Text = path;
+            _info = info; _imageSource = null; _sourcePath.Text = path;
             _usageTexturePath.Text = path;
             _changingMip = true;
             _mip.ItemsSource = info.MipLevels.Select(level => $"{level.Index} · {level.Width} × {level.Height} · {FormatBytes(level.Size)}").ToArray();
@@ -825,22 +849,26 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
 
     private async Task ResetEditAsync()
     {
-        if (_info is null || _editMip < 0 || _editBusy) return; _editDirty = false; ClearUndo(); await DecodePreviewAsync(); _status.Text = $"Reset mip {_editMip} from the immutable loaded BLP source.";
+        if (LoadedTexturePath is null || _editMip < 0 || _editBusy) return;
+        _editDirty = false; ClearUndo();
+        if (_imageSource is not null) await OpenImageAsync(_imageSource); else await DecodePreviewAsync();
+        _status.Text = "Reset pixels from the loaded source.";
     }
 
     private async Task SaveEditedPngAsync()
     {
-        if (_editTexture is null || _info is null) { _status.Text = "Decode a BLP mip before saving edited pixels."; return; }
-        var output = await PickSaveFileAsync("Save edited RGBA pixels as PNG", $"{Path.GetFileNameWithoutExtension(_info.Path)}-edited-mip{_editMip}.png", "png"); if (output is null) return;
+        if (_editTexture is null || LoadedTexturePath is null) { _status.Text = "Open a texture before saving edited pixels."; return; }
+        var output = await PickSaveFileAsync("Save edited RGBA pixels as PNG", $"{Path.GetFileNameWithoutExtension(LoadedTexturePath)}-edited-mip{_editMip}.png", "png"); if (output is null) return;
+        if (Path.GetFullPath(output).Equals(Path.GetFullPath(LoadedTexturePath), StringComparison.OrdinalIgnoreCase)) { _status.Text = "Choose a new output path to preserve the loaded source."; return; }
         Begin("Writing edited PNG atomically…"); try { var texture = CloneEditTexture(); await Task.Run(() => BlpTextureService.WritePng(output, texture, overwrite: true), _operation!.Token); MarkEditSaved(); _status.Text = $"Edited PNG saved: {output}"; }
         catch (OperationCanceledException) { } catch (Exception exception) { Fail("Edited PNG save failed", exception); } finally { End(); }
     }
 
     private async Task SaveEditedBlpAsync()
     {
-        if (_editTexture is null || _info is null) { _status.Text = "Decode a BLP mip before saving edited pixels."; return; }
-        var output = await PickSaveFileAsync("Save edited pixels as Wrath-compatible BLP2", $"{Path.GetFileNameWithoutExtension(_info.Path)}-edited.blp", "blp"); if (output is null) return;
-        if (Path.GetFullPath(output).Equals(Path.GetFullPath(_info.Path), StringComparison.OrdinalIgnoreCase)) { _status.Text = "The loaded source is immutable in Texture Lab. Choose a new BLP output path."; return; }
+        if (_editTexture is null || LoadedTexturePath is null) { _status.Text = "Open a texture before saving edited pixels."; return; }
+        var output = await PickSaveFileAsync("Save edited pixels as Wrath-compatible BLP2", $"{Path.GetFileNameWithoutExtension(LoadedTexturePath)}-edited.blp", "blp"); if (output is null) return;
+        if (Path.GetFullPath(output).Equals(Path.GetFullPath(LoadedTexturePath), StringComparison.OrdinalIgnoreCase)) { _status.Text = "The loaded source is immutable in Texture Lab. Choose a new BLP output path."; return; }
         var format = SelectedFormat(); var quality = SelectedQuality(); Begin("Encoding edited BLP2 atomically…");
         try { var texture = CloneEditTexture(); await Task.Run(() => BlpTextureService.EncodeBlp2(texture, output, new(format, _mipmaps.IsChecked == true, quality), overwrite: true), _operation!.Token); var verified = BlpTextureService.Inspect(output); MarkEditSaved(); _status.Text = $"Edited BLP2 saved and reopened structurally · {verified.Width:N0}×{verified.Height:N0} · {verified.Encoding} · {verified.MipLevels.Count:N0} mip(s): {output}"; }
         catch (OperationCanceledException) { } catch (Exception exception) { Fail("Edited BLP2 save failed", exception); } finally { End(); }
@@ -919,6 +947,12 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         return Card(new StackPanel { Spacing = 8, Children = { new WrapPanel { Children = { validateFile, validateFolder } }, _validationResults } });
     }
 
+    private void SetDecodedTexture(RgbaTexture texture, int mip)
+    {
+        var bitmap = CreateBitmap(texture); var previous = _bitmap; _bitmap = bitmap; _preview.Source = bitmap; previous?.Dispose();
+        _editTexture = texture; _editBaseline = texture.Pixels.LongLength <= 64L * 1024 * 1024 ? new(texture.Width, texture.Height, texture.Pixels.ToArray()) : null; _editMip = mip; _editDirty = false; ClearUndo(); _editorCanvas.BrushRadius = double.TryParse(_brushRadius.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var radius) && radius > 0 ? radius : 8; RefreshEditedPixels();
+    }
+
     private async Task DecodePreviewAsync(bool reuseOperation = false)
     {
         if (_info is null || _mip.SelectedIndex < 0) return;
@@ -927,8 +961,7 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
         {
             var token = _operation?.Token ?? CancellationToken.None; var path = _info.Path; var mip = _mip.SelectedIndex;
             var texture = await Task.Run(() => BlpTextureService.Decode(path, mip), token); token.ThrowIfCancellationRequested();
-            var bitmap = CreateBitmap(texture); var previous = _bitmap; _bitmap = bitmap; _preview.Source = bitmap; previous?.Dispose();
-            _editTexture = texture; _editBaseline = texture.Pixels.LongLength <= 64L * 1024 * 1024 ? new(texture.Width, texture.Height, texture.Pixels.ToArray()) : null; _editMip = mip; _editDirty = false; ClearUndo(); _editorCanvas.BrushRadius = double.TryParse(_brushRadius.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var radius) && radius > 0 ? radius : 8; RefreshEditedPixels();
+            SetDecodedTexture(texture, mip);
             _status.Text = $"Decoded mip {mip} · {texture.Width:N0} × {texture.Height:N0} · {texture.Pixels.Length:N0} RGBA bytes";
         }
         catch (OperationCanceledException) { }
@@ -938,8 +971,9 @@ internal sealed class TextureWorkspaceView : UserControl, IDisposable
 
     private async Task SavePngAsync()
     {
+        if (_imageSource is not null) { await SaveEditedPngAsync(); return; }
         if (_info is null || _mip.SelectedIndex < 0) { _status.Text = "Open a BLP and choose a mip first."; return; }
-        var output = await PickSaveFileAsync("Save decoded PNG", $"{Path.GetFileNameWithoutExtension(_info.Path)}-mip{_mip.SelectedIndex}.png", "png");
+        var output = await PickSaveFileAsync("Save decoded PNG", $"{Path.GetFileNameWithoutExtension(LoadedTexturePath)}-mip{_mip.SelectedIndex}.png", "png");
         if (output is null) return;
         Begin("Writing PNG…");
         try { await Task.Run(() => BlpTextureService.DecodeToPng(_info.Path, output, _mip.SelectedIndex, overwrite: true), _operation!.Token); _status.Text = $"PNG saved: {output}"; }

@@ -6,6 +6,49 @@ namespace WoWCrucible.Core;
 /// </summary>
 public static class ItemSemanticCatalog
 {
+    // WotLK / build 12340. Keep the guided editor and all rarity displays on one definition.
+    public static string QualityColor(int value) => value switch
+    {
+        0 => "#9d9d9d", 1 => "#ffffff", 2 => "#1eff00", 3 => "#0070dd",
+        4 => "#a335ee", 5 => "#ff8000", 6 or 7 => "#e6cc80", _ => "#ffffff"
+    };
+
+    public static IReadOnlyList<int> Subclasses(int itemClass) => itemClass switch
+    {
+        0 or 1 or 3 => Enumerable.Range(0, 9).ToArray(),
+        2 => Enumerable.Range(0, 21).ToArray(),
+        4 => Enumerable.Range(0, 11).ToArray(),
+        6 => Enumerable.Range(0, 5).ToArray(),
+        7 => Enumerable.Range(0, 16).ToArray(),
+        9 => Enumerable.Range(0, 12).ToArray(),
+        11 => [0, 1, 2, 3], 13 => [0, 1], 15 => [0, 1, 2, 3, 4, 5],
+        16 => [1, 2, 3, 4, 5, 6, 7, 8, 9, 11], _ => [0]
+    };
+
+    // Normal equipment choices from ItemTemplate.h and Player::FindEquipSlot.
+    // Loaded custom values are retained by editors, never silently coerced by this catalog.
+    public static IReadOnlyList<int> InventoryTypes(int itemClass, int subclass) => itemClass switch
+    {
+        1 => [18], 11 => [27], 6 => [24],
+        2 => subclass switch
+        {
+            1 or 5 or 6 or 8 or 10 or 17 or 20 => [17],
+            2 or 3 or 18 => [15, 26], 16 => [25], 19 => [26],
+            _ => [13, 21, 22]
+        },
+        4 => subclass switch
+        {
+            5 or 6 => [14], 7 or 8 or 9 or 10 => [28],
+            0 => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 19, 20, 23],
+            _ => [1, 3, 5, 6, 7, 8, 9, 10, 16, 20]
+        },
+        _ => [0]
+    };
+
+    public static bool UsesSheath(int itemClass, int inventoryType) => itemClass == 2 || itemClass == 4 && inventoryType is 14 or 23;
+
+    public static bool UsesWeaponDamage(int itemClass) => itemClass is 2 or 6;
+    public static bool UsesEquipmentStats(int itemClass) => itemClass is 2 or 4;
     public static IReadOnlyList<SemanticOption> StatTypes { get; } =
     [
         new(uint.MaxValue, "Unused"), new(0, "Mana"), new(1, "Health"),

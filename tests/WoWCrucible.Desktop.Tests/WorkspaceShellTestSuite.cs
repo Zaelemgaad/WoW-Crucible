@@ -94,7 +94,7 @@ internal static class WorkspaceShellTestSuite
             typeof(TopLevel).GetField("_storageProvider", Private)!.SetValue(window, picker);
             ((Task)typeof(MainWindow).GetMethod("OpenGameFilesAsync", Private)!.Invoke(window, [false])!).GetAwaiter().GetResult();
             var openOptions = ((CoverageStorageProvider)picker).LastOpenOptions!;
-            Require(openOptions.Title == "Open game file" && openOptions.FileTypeFilter!.First().Patterns!.Contains("*.blp") && openOptions.FileTypeFilter!.First().Patterns!.Contains("*.m2"), "General file opening did not advertise supported editors.");
+            Require(openOptions.Title == "Open" && openOptions.FileTypeFilter!.First().Patterns!.Contains("*"), "Open must let the file router identify any selected file.");
             var host = window.FindControl<Border>("FeatureWorkspaceHost")!;
             var browser = window.FindControl<Border>("NavigationPane")!;
             ArrangeWindow(window, 1440, 900);

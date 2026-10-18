@@ -1575,38 +1575,38 @@ function exportDbcReference(classId) {
   ]);
 }
 
+function importTalentData(parsed) {
+  if (parsed.format === 'twc-workspace') {
+    importWorkspace(parsed);
+    return;
+  }
+  var payloads = (parsed.trees && parsed.classId != null) ? [parsed] : Object.keys(parsed).map(function (k) { return parsed[k]; });
+
+  var count = 0;
+  payloads.forEach(function (p) {
+    if (!p || !p.trees) return;
+    var classId = p.classId != null ? p.classId : null;
+    if (classId == null) return;
+    classId = parseClassId(String(classId));
+
+    if (!BASE[classId] && !classMeta(classId)) {
+      STATE.customClasses.push({ id: classId, name: p.name || String(classId), icon: p.icon || 'spell:_placeholder' });
+      saveCustomClasses();
+    }
+    lsSet(classOverrideKey(classId), { trees: p.trees, sideboard: p.sideboard || { n: 'Side Board', t: [] } });
+    delete STATE.data[classId];
+    count++;
+  });
+
+  if (!count) throw new Error('No class talent layouts were found in this file.');
+  renderAll();
+}
+
 function importJsonFile(file) {
   var reader = new FileReader();
   reader.onload = function () {
-    try {
-      var parsed = JSON.parse(reader.result);
-      if (parsed.format === 'twc-workspace') {
-        importWorkspace(parsed);
-        return;
-      }
-      var payloads = (parsed.trees && parsed.classId != null) ? [parsed] : Object.keys(parsed).map(function (k) { return parsed[k]; });
-
-      var count = 0;
-      payloads.forEach(function (p) {
-        if (!p || !p.trees) return;
-        var classId = p.classId != null ? p.classId : null;
-        if (classId == null) return;
-        classId = parseClassId(String(classId));
-
-        if (!BASE[classId] && !classMeta(classId)) {
-          STATE.customClasses.push({ id: classId, name: p.name || String(classId), icon: p.icon || 'spell:_placeholder' });
-          saveCustomClasses();
-        }
-        lsSet(classOverrideKey(classId), { trees: p.trees, sideboard: p.sideboard || { n: 'Side Board', t: [] } });
-        delete STATE.data[classId];
-        count++;
-      });
-
-      alert('Imported talent data for ' + count + ' class(es).');
-      renderAll();
-    } catch (e) {
-      alert('Could not parse that file as talent JSON: ' + e.message);
-    }
+    try { importTalentData(JSON.parse(reader.result)); }
+    catch (e) { alert('Could not import talent JSON: ' + e.message); }
   };
   reader.readAsText(file);
 }
@@ -1723,6 +1723,8 @@ function applySplitViewButton() {
 }
 
 window.TalentStudio = {
+  initialized: false,
+  importData: importTalentData,
   setToolbarsVisible: function (visible) { document.body.classList.toggle('toolbars-hidden', !visible); },
   importClass: function (payload) {
     var classId = payload.classId;
@@ -1734,5 +1736,5 @@ window.TalentStudio = {
   },
   refresh: function () { STATE.data = {}; loadSettings(); renderAll(); }
 };
-document.addEventListener('DOMContentLoaded', function () { window.StudioBridge.ready.then(init); });
+document.addEventListener('DOMContentLoaded', function () { window.StudioBridge.ready.then(function () { init(); window.TalentStudio.initialized = true; }); });
 })();

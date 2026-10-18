@@ -44,6 +44,7 @@ review changes before applying them to a live server or client.
 
 - [Extended README](README-EXTENDED.md) — full feature list, commands and build details
 - [Class Studio guide](docs/CLASS-STUDIO.md)
+- [Opening files and editing items / quests](docs/EDITOR-FIELDS.md)
 - [UI test results and known coverage gaps](docs/GUI-AUDIT.md)
 - [Report a bug or request a feature](https://github.com/Zaelemgaad/WoW-Crucible/issues)
 - [Contributing](CONTRIBUTING.md)

@@ -100,8 +100,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
             Items =
             {
                 DomainMenu("File",
-                    ("Open game file…", "action.open-file"),
-                    ("Open data table (DBC / DB2)…", "action.open-dbc"),
+                    ("Open…", "action.open-file"),
                     ("Browse client archives…", "workspace.client"),
                     ("Projects…", "workspace.projects"),
                     ("Save current table", "action.save"),

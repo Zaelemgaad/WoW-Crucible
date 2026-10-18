@@ -12,15 +12,15 @@ public static class QuestSemanticCatalog
 {
     public static IReadOnlyList<QuestTypeDefinition> Types { get; } =
     [
-        new(0, "Enabled, auto-completes on acceptance"), new(1, "Disabled / unavailable"), new(2, "Enabled with normal objectives")
+        new(0, "Auto-complete (skip objectives / details)"), new(1, "Disabled / unavailable"), new(2, "Enabled with normal objectives")
     ];
 
     public static IReadOnlyList<QuestFlagDefinition> Flags { get; } =
     [
-        new(0x00000001, "Stay alive", "Legacy/unused by the stock core"), new(0x00000002, "Party accept", "Offers confirmation to eligible party members"),
-        new(0x00000004, "Exploration", "Exploration objective behavior"), new(0x00000008, "Sharable", "Players may share this quest"),
-        new(0x00000010, "Has condition", "Legacy condition marker"), new(0x00000020, "Hide reward POI", "Hides reward point-of-interest"),
-        new(0x00000040, "Raid", "Raid quest marker"), new(0x00000080, "TBC", "Requires Burning Crusade content"),
+        new(0x00000001, "Stay alive", "Quest fails when the player dies"), new(0x00000002, "Party accept", "Offers confirmation to eligible party members"),
+        new(0x00000004, "Exploration", "Legacy exploration marker; the current core does not use this flag"), new(0x00000008, "Sharable", "Players may share this quest"),
+        new(0x00000010, "Has condition", "Legacy condition marker; unused by the current core"), new(0x00000020, "Hide reward POI", "Legacy client marker for hiding reward points of interest; unused by the current core"),
+        new(0x00000040, "Raid", "Legacy raid marker; use Quest category for the core raid type"), new(0x00000080, "TBC", "Legacy expansion marker; unused by the current core"),
         new(0x00000100, "No max-level XP money", "Do not convert experience to money at max level"), new(0x00000200, "Hidden rewards", "Hide item/money rewards until reward offer"),
         new(0x00000400, "Tracking", "Automatically rewarded and hidden from the quest log"), new(0x00000800, "Deprecated reputation", "Legacy reputation behavior"),
         new(0x00001000, "Daily", "Repeatable once per day"), new(0x00002000, "Forces PvP", "Carrying the quest forces PvP flag"),
@@ -29,27 +29,8 @@ public static class QuestSemanticCatalog
         new(0x00040000, "Objective text as complete text", "Uses objective text for completion"), new(0x00080000, "Auto accept", "Client-recognized auto-accept flag; unused by stock 3.3.5 quests")
     ];
 
-    public static string DescribeField(string name) => name switch
-    {
-        "ID" => "Unique quest ID. Existing IDs are never replaced implicitly.",
-        "QuestType" => "Quest category shown by the client (normal, elite, dungeon, raid, etc.).",
-        "QuestLevel" => "Displayed quest level; -1 scales to the player in supported core paths.",
-        "MinLevel" => "Minimum player level required to accept the quest.",
-        "QuestSortID" => "Positive values are area IDs; negative values select a profession/class quest sort.",
-        "QuestInfoID" => "QuestInfo.dbc category such as group, class, profession, or PvP.",
-        "Flags" => "Bitmask decoded in the Quest flags panel.",
-        "RequiredNpcOrGo1" or "RequiredNpcOrGo2" or "RequiredNpcOrGo3" or "RequiredNpcOrGo4" => "Positive ID means creature; negative ID means gameobject.",
-        "RewardNextQuest" => "Quest offered after this one is rewarded.",
-        "RewardSpell" => "Spell cast/learned by the server when rewarded.",
-        "RewardDisplaySpell" => "Spell visual displayed in the reward UI.",
-        "AllowableRaces" => "Race bitmask; 0 means no race restriction on current AzerothCore.",
-        "VerifiedBuild" => "Source client build evidence; use 0 for custom content unless you have exact provenance.",
-        _ when name.StartsWith("RewardChoiceItemID", StringComparison.OrdinalIgnoreCase) => "One of up to six player-selected reward items.",
-        _ when name.StartsWith("RewardItem", StringComparison.OrdinalIgnoreCase) => "Guaranteed reward item.",
-        _ when name.StartsWith("RequiredItemId", StringComparison.OrdinalIgnoreCase) => "Item required for an objective.",
-        _ when name.StartsWith("ObjectiveText", StringComparison.OrdinalIgnoreCase) => "Client-visible text for the corresponding objective slot.",
-        _ => string.Empty
-    };
+    public static string DescribeField(string name) => QuestFieldCatalog.Get(name)?.Description ?? string.Empty;
+
 }
 
 public static class QuestTemplateAdapter

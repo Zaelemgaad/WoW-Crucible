@@ -86,13 +86,8 @@ public static class DbcSemanticCatalog
         ? Enumerable.Range(1, 10).ToArray()
         : Fields.Keys.Where(key => key.Table.Equals(table, StringComparison.OrdinalIgnoreCase)).Select(key => key.Column).Distinct().ToArray();
 
-    private static SemanticField ItemSubclass(uint itemClass) => itemClass switch
-    {
-        2 => MakeEnum("Weapon subtype", "0:Axe (one-hand),1:Axe (two-hand),2:Bow,3:Gun,4:Mace (one-hand),5:Mace (two-hand),6:Polearm,7:Sword (one-hand),8:Sword (two-hand),10:Staff,13:Fist weapon,14:Miscellaneous,15:Dagger,16:Thrown,18:Crossbow,19:Wand,20:Fishing pole"),
-        4 => MakeEnum("Armor subtype", "0:Miscellaneous,1:Cloth,2:Leather,3:Mail,4:Plate,6:Shield,7:Libram,8:Idol,9:Totem,10:Sigil"),
-        15 => MakeEnum("Misc subtype", "0:Junk,1:Reagent,2:Companion pet,3:Holiday,4:Other,5:Mount"),
-        _ => MakeEnum("Item subtype", "0:Subtype 0")
-    };
+    private static SemanticField ItemSubclass(uint itemClass) => new("Item subtype", SemanticKind.Enum,
+        ItemSemanticCatalog.Subclasses((int)itemClass).Select(value => new SemanticOption((uint)value, ItemSemanticCatalog.SubclassName((int)itemClass, value))).ToArray());
 
     private static void Enum(string table, int column, string label, string values) => Fields[(table, column)] = MakeEnum(label, values);
     private static void Flags(string table, int column, string label, string values) => Fields[(table, column)] = new(label, SemanticKind.Flags, Parse(values));

@@ -355,22 +355,7 @@ public partial class MainWindow : Window
         StatusText.Text = _documents.Count == 0 ? "Ready" : $"{_documents.Count:N0} open file(s)";
     }
 
-    public Task LoadPathAsync(string path)
-    {
-        DesktopCrashLogger.Debug("FILE", "load-path-requested", ("path", path));
-        var extension = Path.GetExtension(path);
-        return extension.Equals(".dbc", StringComparison.OrdinalIgnoreCase) || extension.Equals(".db2", StringComparison.OrdinalIgnoreCase)
-            ? LoadDbcAsync(path)
-            : extension.Equals(".m2", StringComparison.OrdinalIgnoreCase)
-                ? LoadM2Async(path)
-                : extension.Equals(".blp", StringComparison.OrdinalIgnoreCase)
-                    ? OpenTextureWorkspaceAsync(path)
-                    : extension.Equals(".adt", StringComparison.OrdinalIgnoreCase) || extension.Equals(".wdt", StringComparison.OrdinalIgnoreCase) || extension.Equals(".wdl", StringComparison.OrdinalIgnoreCase)
-                    ? OpenMapWorkspaceAsync(path)
-                    : extension.Equals(".wdb", StringComparison.OrdinalIgnoreCase) || extension.Equals(".adb", StringComparison.OrdinalIgnoreCase)
-                        ? OpenCacheTableAsync(path)
-            : ShowErrorAsync("Unsupported file", "The desktop opens DBC, WDB2 DB2, WDB/ADB client caches, M2, BLP, ADT, WDT, and WDL files directly.");
-    }
+    public Task LoadPathAsync(string path) => OpenDetectedFileAsync(path);
 
     private async void OpenDbcClick(object? sender, RoutedEventArgs e) => await OpenGameFilesAsync(tablesOnly: true);
 
@@ -384,7 +369,7 @@ public partial class MainWindow : Window
             : null;
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = tablesOnly ? "Open data table (DBC / DB2)" : "Open game file",
+            Title = "Open",
             AllowMultiple = true,
             SuggestedStartLocation = start,
             FileTypeFilter = tablesOnly ?
@@ -393,12 +378,7 @@ public partial class MainWindow : Window
                 new FilePickerFileType("DBC files (*.dbc)") { Patterns = ["*.dbc"] },
                 new FilePickerFileType("DB2 files (*.db2)") { Patterns = ["*.db2"] }
             } : new FilePickerFileType[] {
-                new("Supported game files") { Patterns = ["*.dbc", "*.db2", "*.m2", "*.blp", "*.adt", "*.wdt", "*.wdl", "*.wdb", "*.adb"] },
-                new("Data tables (DBC / DB2)") { Patterns = ["*.dbc", "*.db2"] },
-                new("Textures (BLP)") { Patterns = ["*.blp"] },
-                new("Models (M2)") { Patterns = ["*.m2"] },
-                new("Maps (ADT / WDT / WDL)") { Patterns = ["*.adt", "*.wdt", "*.wdl"] },
-                new("Client caches (WDB / ADB)") { Patterns = ["*.wdb", "*.adb"] }
+                new("All files") { Patterns = ["*"] }
             }
         });
         foreach (var file in files)
@@ -1007,6 +987,15 @@ public partial class MainWindow : Window
                         {
                             var catalog = _tableSchemas.ResolveCatalog(); var loaded = await Task.Run(() => WdbcFile.Load(path)); var resolution = catalog.ResolveColumns(dbcDefinition.TableName, loaded.FieldCount);
                             if (resolution.MatchKind == DbcSchemaMatchKind.NamedMatch) _referenceDbcCache[path] = cached = (loaded, resolution.Columns);
+                            else if (dbcDefinition.WrathFieldCount == loaded.FieldCount && loaded.RecordSize == loaded.FieldCount * 4)
+                            {
+                                // Read-only reference projection, verified against the 12340 DBC layout.
+                                // This is not offered as a full editing schema.
+                                var columns = Enumerable.Range(0, loaded.FieldCount).Select(index => new DbcColumn(index, index * 4, 4,
+                                    index == 0 ? "ID" : index == dbcDefinition.NameColumn ? "Name" : $"Field{index}",
+                                    index == dbcDefinition.NameColumn ? DbcValueType.StringOffset : DbcValueType.UInt32)).ToArray();
+                                _referenceDbcCache[path] = cached = (loaded, columns);
+                            }
                         }
                         if (cached.File is not null) request = request with { DbcSource = new(cached.File, cached.Columns, 0, dbcDefinition.NameColumn, dbcDefinition.DetailColumns) };
                     }
@@ -1020,9 +1009,15 @@ public partial class MainWindow : Window
         OpenFeatureWorkspace(view, $"Select {request.Domain} for {request.FieldLabel}");
     }
 
-    private sealed record ReferenceDbcDefinitionRow(string FileName, string TableName, int NameColumn, int[] DetailColumns);
+    private sealed record ReferenceDbcDefinitionRow(string FileName, string TableName, int NameColumn, int[] DetailColumns, int WrathFieldCount = 0);
     private static ReferenceDbcDefinitionRow? ReferenceDbcDefinition(ReferenceDomain domain) => domain switch
     {
+        ReferenceDomain.Faction => new("Faction.dbc", "Faction", 23, [], 57),
+        ReferenceDomain.Area => new("AreaTable.dbc", "AreaTable", 11, [1, 2], 36),
+        ReferenceDomain.QuestSort => new("QuestSort.dbc", "QuestSort", 1, [], 18),
+        ReferenceDomain.QuestInfo => new("QuestInfo.dbc", "QuestInfo", 1, [], 18),
+        ReferenceDomain.Map => new("Map.dbc", "Map", 5, [], 66),
+        ReferenceDomain.CharacterTitle => new("CharTitles.dbc", "CharTitles", 2, [], 37),
         ReferenceDomain.Spell => new("Spell.dbc", "Spell", 136, [39, 3]),
         ReferenceDomain.SpellCastTime => new("SpellCastTimes.dbc", "SpellCastTimes", -1, [1, 2, 3]),
         ReferenceDomain.SpellDuration => new("SpellDuration.dbc", "SpellDuration", -1, [1, 2, 3]),

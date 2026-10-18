@@ -185,6 +185,12 @@ internal sealed class ProjectWorkspaceView : UserControl, IDisposable
         await Task.CompletedTask;
     }
 
+    public async Task OpenProjectFileAsync(string path)
+    {
+        _root.Text = Path.GetFullPath(path);
+        await OpenAsync();
+    }
+
     private async Task OpenAsync()
     {
         try { var root = RequiredPath(_root.Text, "Choose a project folder first."); var project = CrucibleContentProjectService.Load(root); SetActive(root); ShowProject(project); _status.Text = $"Opened {project.Name}."; }

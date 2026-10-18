@@ -736,11 +736,7 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         return null;
     }
 
-    private static IBrush ItemQualityBrush(int quality) => Brush.Parse(quality switch
-    {
-        0 => "#9D9D9D", 1 => "#F5F7FA", 2 => "#1EFF00", 3 => "#4A9EFF", 4 => "#C066FF",
-        5 => "#FF9B38", 6 => "#E85B52", 7 => "#31D5F4", _ => "#F5F7FA"
-    });
+    private static IBrush ItemQualityBrush(int quality) => Brush.Parse(ItemSemanticCatalog.QualityColor(quality));
 
     private static bool IsFriendlyNameColumn(string name) =>
         name.Equals("name", StringComparison.OrdinalIgnoreCase) ||
@@ -1568,13 +1564,25 @@ internal sealed class SqlWorkspaceView : UserControl, IDisposable
         finally { End(); }
     }
 
-    private async Task PrepareImportAsync()
+    public void OpenScript(string text)
+    {
+        _query.Text = text; _tabs.SelectedIndex = 1;
+        _status.Text = "SQL file opened for review. Nothing has been executed.";
+    }
+
+    public async Task OpenCsvAsync(string path, string table)
+    {
+        _tables.SelectedItem = (_tables.ItemsSource as IEnumerable<TableChoice>)?.FirstOrDefault(choice => choice.Table.Name.Equals(table, StringComparison.OrdinalIgnoreCase));
+        await PrepareImportAsync(path);
+    }
+
+    private async Task PrepareImportAsync(string? inputPath = null)
     {
         if (_profile is null || _tables.SelectedItem is not TableChoice selected) { _status.Text = "Connect SQL and select a table first."; return; }
         try
         {
-            var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = $"Import CSV rows into {selected.Table.Name}", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("CSV") { Patterns = ["*.csv"] }] });
-            var path = files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return;
+            var files = inputPath is not null ? Array.Empty<IStorageFile>() : await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = $"Import CSV rows into {selected.Table.Name}", AllowMultiple = false, FileTypeFilter = [new FilePickerFileType("CSV") { Patterns = ["*.csv"] }] });
+            var path = inputPath ?? files.FirstOrDefault()?.TryGetLocalPath(); if (path is null) return;
             var plan = await Task.Run(() => new SqlTransferService().AnalyzeCsv(path, selected.Table));
             if (!plan.CanApply) { _status.Text = $"CSV import blocked: {string.Join(" ", plan.Findings)}"; return; }
             var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _confirmation.IsVisible = false;

@@ -42,6 +42,8 @@ internal sealed class DbcImportWorkspaceView : UserControl, IDisposable
         _input.TextChanged += (_, _) => InvalidatePlan(); _format.SelectionChanged += (_, _) => InvalidatePlan(); _append.IsCheckedChanged += (_, _) => InvalidatePlan(); _rawStrings.IsCheckedChanged += (_, _) => InvalidatePlan();
     }
 
+    public void SetInputPath(string path) => _input.Text = Path.GetFullPath(path);
+
     private async Task PickInputAsync()
     {
         var files = await Storage().OpenFilePickerAsync(new FilePickerOpenOptions { Title = "Select structured DBC rows", AllowMultiple = false,

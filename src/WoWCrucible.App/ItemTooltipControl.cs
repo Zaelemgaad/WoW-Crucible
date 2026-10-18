@@ -92,7 +92,7 @@ internal sealed class ItemTooltipControl : Control
     }
 
     private void DrawCentered(Graphics graphics, string text, Rectangle bounds, Color color) { using var brush = new SolidBrush(color); using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center }; graphics.DrawString(text, _nameFont, brush, bounds, format); }
-    private static Color QualityColor(int quality) => quality switch { 0 => Color.FromArgb(157, 157, 157), 1 => Color.White, 2 => Color.FromArgb(30, 255, 0), 3 => Color.FromArgb(0, 112, 221), 4 => Color.FromArgb(163, 53, 238), 5 => Color.FromArgb(255, 128, 0), 6 => Color.FromArgb(230, 40, 30), 7 => Color.FromArgb(0, 204, 255), _ => Color.White };
+    private static Color QualityColor(int quality) => ColorTranslator.FromHtml(WoWCrucible.Core.ItemSemanticCatalog.QualityColor(quality));
     private static string BondingName(uint bonding) => bonding switch { 1 => "Binds when picked up", 2 => "Binds when equipped", 3 => "Binds when used", 4 or 5 => "Quest Item", _ => string.Empty };
     private static string SecondaryStatText(int type, int value) => type switch
     {

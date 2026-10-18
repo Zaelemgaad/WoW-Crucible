@@ -53,6 +53,20 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
 
     public void OpenQuestRow(IReadOnlyDictionary<string, object?> row) { _loadedValues = new Dictionary<string, object?>(row, StringComparer.OrdinalIgnoreCase); _loadedId = ToUInt(Value(row, "ID")); _commit.Content = "Apply decoded fields to existing quest"; RebuildFields(); _status.Text = $"Loaded quest {_loadedId}. Existing custom columns are preserved and newly staged starter/ender links remain additive."; }
 
+    public void OpenDraft(QuestPortableDraft draft)
+    {
+        var unknown = draft.Values.Keys.Where(name => Table().Find(name) is null).ToArray();
+        if (unknown.Length > 0) throw new InvalidDataException("Draft has fields absent from this schema: " + string.Join(", ", unknown));
+        _loadedId = null;
+        _loadedValues = draft.Values.ToDictionary(pair => pair.Key, pair => (object?)pair.Value, StringComparer.OrdinalIgnoreCase);
+        _commit.Content = "Insert quest and giver links";
+        _creatureStarters.Text = string.Join(", ", draft.Links?.CreatureStarters ?? []);
+        _creatureEnders.Text = string.Join(", ", draft.Links?.CreatureEnders ?? []);
+        _gameObjectStarters.Text = string.Join(", ", draft.Links?.GameObjectStarters ?? []);
+        _gameObjectEnders.Text = string.Join(", ", draft.Links?.GameObjectEnders ?? []);
+        RebuildFields();
+    }
+
     private void ResetNew() { _loadedValues = null; _loadedId = null; _commit.Content = "Insert into connected world database"; foreach (var input in LinkInputs()) input.Text = string.Empty; RebuildFields(); }
 
     private void RebuildFields()
@@ -61,28 +75,17 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
         foreach (var group in table.Columns.GroupBy(column => QuestTemplateAdapter.Group(column.Name)).OrderBy(group => GroupOrder(group.Key)))
         {
             var panel = new StackPanel { Spacing = 7, Margin = new Thickness(12) };
-            if (group.Key == "Identity & behavior")
-            {
-                panel.Children.Add(new TextBlock { Text = "Decoded quest type", FontWeight = FontWeight.SemiBold }); panel.Children.Add(_questType);
-                panel.Children.Add(new TextBlock { Text = "Quest flags", FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 8, 0, 0) }); panel.Children.Add(_flagPanel);
-                panel.Children.Add(new TextBlock { Text = "Every value is still present below, including the raw type and Flags bitmask. Semantic controls stay synchronized with those raw fields.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") });
-            }
             foreach (var column in group)
             {
                 var value = initial.FirstOrDefault(pair => pair.Key.Equals(column.Name, StringComparison.OrdinalIgnoreCase)).Value; var textField = IsText(column);
                 var text = new TextBox { Text = CellText(value), AcceptsReturn = textField, TextWrapping = textField ? TextWrapping.Wrap : TextWrapping.NoWrap, IsReadOnly = column.Extra.Contains("GENERATED", StringComparison.OrdinalIgnoreCase) || column.Extra.Contains("auto_increment", StringComparison.OrdinalIgnoreCase) };
                 var nullValue = new CheckBox { Content = "NULL", IsChecked = value is null, IsEnabled = column.Nullable && !text.IsReadOnly }; nullValue.IsCheckedChanged += (_, _) => { text.IsEnabled = nullValue.IsChecked != true; RefreshPreview(); }; text.IsEnabled = value is not null; text.TextChanged += (_, _) => { RawSemanticChanged(column.Name); RefreshPreview(); };
-                var description = QuestSemanticCatalog.DescribeField(column.Name); var label = new TextBlock { Text = $"{column.Name} · {column.ColumnType}{(column.Key.Equals("PRI", StringComparison.OrdinalIgnoreCase) ? " · PRIMARY KEY" : string.Empty)}{(description.Length == 0 ? string.Empty : $"\n{description}")}", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center, Foreground = description.Length == 0 ? null : Brush.Parse("#B7C2D5") };
-                var row = new Grid { ColumnDefinitions = new("2*,3*,Auto,Auto"), ColumnSpacing = 9, Children = { label, WithColumn(text, 1), WithColumn(nullValue, 2) } };
-                if (ReferenceForField(column.Name) is { } reference)
-                {
-                    var find = new Button { Content = "Find…", IsEnabled = !text.IsReadOnly }; find.Click += (_, _) =>
-                    {
-                        var current = uint.TryParse(text.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
-                        ReferenceLookupRequested?.Invoke(this, new(reference, column.Name, current, selected => text.Text = selected.ToString(CultureInfo.InvariantCulture)));
-                    };
-                    Grid.SetColumn(find, 3); row.Children.Add(find);
-                }
+                var definition = QuestFieldCatalog.Get(column.Name);
+                var label = new TextBlock { Text = definition?.Label ?? column.Name, FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap };
+                ToolTip.SetTip(label, $"{column.Name} · {column.ColumnType}");
+                var input = BuildFieldInput(column, text, nullValue);
+                var row = new StackPanel { Spacing = 4, Margin = new Thickness(0, 3, 0, 9), Children = { label,
+                    new TextBlock { Text = definition?.Description ?? $"Custom field {column.Name}; no verified definition in the selected core catalog. SQL type: {column.ColumnType}.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, input } };
                 panel.Children.Add(row); _editors[column.Name] = (column, text, nullValue);
             }
             tabs.Add(new TabItem { Header = group.Key, Content = new ScrollViewer { Content = panel } });
@@ -122,12 +125,91 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
         return new StackPanel { Spacing = 4, Children = { new TextBlock { Text = label, FontWeight = FontWeight.SemiBold }, new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 7, Children = { input, WithColumn(find, 1) } } } };
     }
 
-    private static ReferenceDomain? ReferenceForField(string name)
+    private static ReferenceDomain? ReferenceForField(string name) => QuestFieldCatalog.Get(name)?.Reference;
+
+    private Control BuildFieldInput(DatabaseColumnCapability column, TextBox text, CheckBox nullValue)
     {
-        if (name.StartsWith("RewardItem", StringComparison.OrdinalIgnoreCase) || name.StartsWith("RewardChoiceItemID", StringComparison.OrdinalIgnoreCase) || name.StartsWith("RequiredItemId", StringComparison.OrdinalIgnoreCase) || name.StartsWith("ItemDrop", StringComparison.OrdinalIgnoreCase) || name.Equals("StartItem", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Item;
-        if (name.Equals("RewardSpell", StringComparison.OrdinalIgnoreCase) || name.Equals("RewardDisplaySpell", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Spell;
-        if (name.Equals("RewardNextQuest", StringComparison.OrdinalIgnoreCase)) return ReferenceDomain.Quest;
-        return null;
+        var name = column.Name;
+        var panel = new StackPanel { Spacing = 5 };
+        var choices = QuestFieldCatalog.Choices(name);
+        var raw = new Grid { ColumnDefinitions = new("*,Auto"), ColumnSpacing = 8, Children = { text, WithColumn(nullValue, 1) } };
+        nullValue.IsVisible = column.Nullable;
+        Control? decoded = null;
+        if (name.Equals("Flags", StringComparison.OrdinalIgnoreCase)) decoded = _flagPanel;
+        else if (name.Equals("QuestType", StringComparison.OrdinalIgnoreCase)) decoded = _questType;
+        else if (name.Equals("AllowableRaces", StringComparison.OrdinalIgnoreCase)) decoded = RaceEditor(text);
+        else if (choices.Count > 0)
+        {
+            var combo = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch };
+            var syncing = false;
+            void Sync()
+            {
+                syncing = true;
+                var value = int.TryParse(text.Text, out var number) ? number : 0;
+                var selected = choices.FirstOrDefault(option => option.Value == value) ?? new QuestTypeDefinition(value, "Custom / existing value");
+                combo.ItemsSource = choices.Any(option => option.Value == value) ? choices : choices.Append(selected).ToArray();
+                combo.SelectedItem = selected; syncing = false;
+            }
+            combo.SelectionChanged += (_, _) => { if (!syncing && combo.SelectedItem is QuestTypeDefinition selected) text.Text = selected.Value.ToString(CultureInfo.InvariantCulture); };
+            text.TextChanged += (_, _) => Sync(); Sync(); decoded = combo;
+        }
+        if (decoded is not null)
+        {
+            panel.Children.Add(decoded);
+            panel.Children.Add(new Expander { Header = $"Advanced: {name} stored value", Content = raw });
+            nullValue.IsCheckedChanged += (_, _) => decoded.IsEnabled = !text.IsReadOnly && nullValue.IsChecked != true;
+            decoded.IsEnabled = !text.IsReadOnly && nullValue.IsChecked != true;
+        }
+        else panel.Children.Add(raw);
+
+        var signedObjective = System.Text.RegularExpressions.Regex.IsMatch(name, @"^RequiredNpcOrGo[1-4]$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var category = name.Equals("QuestSortID", StringComparison.OrdinalIgnoreCase);
+        if (signedObjective || category)
+        {
+            var kind = new ComboBox { ItemsSource = signedObjective ? new[] { "Creature", "Game object" } : new[] { "Area", "Special category" }, SelectedIndex = text.Text?.StartsWith('-') == true ? 1 : 0 };
+            var find = new Button { Content = "Find by name…", IsEnabled = !text.IsReadOnly };
+            find.Click += (_, _) =>
+            {
+                var negative = kind.SelectedIndex == 1;
+                var domain = signedObjective ? (negative ? ReferenceDomain.GameObject : ReferenceDomain.Creature) : (negative ? ReferenceDomain.QuestSort : ReferenceDomain.Area);
+                var current = long.TryParse(text.Text, out var id) ? (uint)Math.Min(uint.MaxValue, Math.Abs(id == long.MinValue ? 0 : id)) : 0;
+                ReferenceLookupRequested?.Invoke(this, new(domain, QuestFieldCatalog.Get(name)!.Label, current, selected =>
+                { nullValue.IsChecked = false; text.Text = ((long)selected * (negative ? -1 : 1)).ToString(CultureInfo.InvariantCulture); }));
+            };
+            panel.Children.Add(new WrapPanel { Children = { kind, find } });
+            text.TextChanged += (_, _) => kind.SelectedIndex = text.Text?.StartsWith('-') == true ? 1 : 0;
+        }
+        else if (ReferenceForField(name) is { } reference)
+        {
+            var find = new Button { Content = "Find by name…", IsEnabled = !text.IsReadOnly };
+            find.Click += (_, _) => ReferenceLookupRequested?.Invoke(this, new(reference, QuestFieldCatalog.Get(name)!.Label,
+                uint.TryParse(text.Text, out var current) ? current : 0, selected => { nullValue.IsChecked = false; text.Text = selected.ToString(CultureInfo.InvariantCulture); }));
+            panel.Children.Add(find);
+        }
+        return panel;
+    }
+
+    private static Control RaceEditor(TextBox text)
+    {
+        var panel = new WrapPanel(); var syncing = false;
+        var all = new CheckBox { Content = "All races" };
+        var boxes = QuestFieldCatalog.Races.Select(race => (race.Value, Box: new CheckBox { Content = race.Name })).ToArray();
+        var known = QuestFieldCatalog.Races.Aggregate(0u, (mask, race) => mask | race.Value);
+        uint Raw() => uint.TryParse(text.Text, out var value) ? value : 0;
+        void Sync()
+        {
+            syncing = true; var value = Raw(); all.IsChecked = value == 0;
+            foreach (var box in boxes) box.Box.IsChecked = (value & box.Value) != 0;
+            syncing = false;
+        }
+        all.IsCheckedChanged += (_, _) => { if (!syncing && all.IsChecked == true) text.Text = "0"; else if (!syncing && Raw() == 0) Sync(); };
+        panel.Children.Add(all);
+        foreach (var box in boxes)
+        {
+            box.Box.IsCheckedChanged += (_, _) => { if (!syncing) text.Text = ((Raw() & ~known) | boxes.Where(item => item.Box.IsChecked == true).Aggregate(0u, (mask, item) => mask | item.Value)).ToString(CultureInfo.InvariantCulture); };
+            panel.Children.Add(box.Box);
+        }
+        text.TextChanged += (_, _) => Sync(); Sync(); return panel;
     }
 
     private void RawSemanticChanged(string name) { if (_syncingSemantics) return; if (name.Equals("QuestType", StringComparison.OrdinalIgnoreCase) || name.Equals("Flags", StringComparison.OrdinalIgnoreCase)) SyncSemanticControls(); }
@@ -136,12 +218,15 @@ internal sealed class QuestWorkspaceView : UserControl, IDisposable
         _syncingSemantics = true;
         try
         {
-            var type = RawInt("QuestType"); _questType.SelectedItem = QuestSemanticCatalog.Types.FirstOrDefault(item => item.Value == type) ?? QuestSemanticCatalog.Types[0]; var flags = unchecked((uint)RawLong("Flags")); foreach (var item in _flagBoxes) item.Value.IsChecked = (flags & item.Key) != 0;
+            var type = RawInt("QuestType");
+            var selected = QuestSemanticCatalog.Types.FirstOrDefault(item => item.Value == type) ?? new QuestTypeDefinition(type, "Custom / existing value");
+            _questType.ItemsSource = QuestSemanticCatalog.Types.Any(item => item.Value == type) ? QuestSemanticCatalog.Types : QuestSemanticCatalog.Types.Append(selected).ToArray();
+            _questType.SelectedItem = selected; var flags = unchecked((uint)RawLong("Flags")); foreach (var item in _flagBoxes) item.Value.IsChecked = (flags & item.Key) != 0;
         }
         finally { _syncingSemantics = false; }
     }
     private void TypeChanged() { if (_syncingSemantics || _questType.SelectedItem is not QuestTypeDefinition type || !_editors.TryGetValue("QuestType", out var editor)) return; _syncingSemantics = true; editor.Text.Text = type.Value.ToString(CultureInfo.InvariantCulture); _syncingSemantics = false; RefreshPreview(); }
-    private void FlagsChanged() { if (_syncingSemantics || !_editors.TryGetValue("Flags", out var editor)) return; var value = _flagBoxes.Where(pair => pair.Value.IsChecked == true).Aggregate(0u, (current, pair) => current | pair.Key); _syncingSemantics = true; editor.Text.Text = value.ToString(CultureInfo.InvariantCulture); _syncingSemantics = false; RefreshPreview(); }
+    private void FlagsChanged() { if (_syncingSemantics || !_editors.TryGetValue("Flags", out var editor)) return; var known = _flagBoxes.Keys.Aggregate(0u, (mask, bit) => mask | bit); var value = (unchecked((uint)RawLong("Flags")) & ~known) | _flagBoxes.Where(pair => pair.Value.IsChecked == true).Aggregate(0u, (current, pair) => current | pair.Key); _syncingSemantics = true; editor.Text.Text = value.ToString(CultureInfo.InvariantCulture); _syncingSemantics = false; RefreshPreview(); }
 
     private IReadOnlyDictionary<string, object?> Values()
     {

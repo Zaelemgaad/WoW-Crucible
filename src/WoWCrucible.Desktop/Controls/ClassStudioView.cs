@@ -71,6 +71,23 @@ internal sealed class ClassStudioView : UserControl, IDisposable
         await _session.InvokeAsync("state", document.RootElement);
     }
 
+    public async Task ImportFileAsync(string path)
+    {
+        await Ready;
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (await Browser!.ExecuteScriptAsync("Boolean(window.TalentStudio && window.TalentStudio.initialized)") != "true")
+        {
+            if (_disposed || _displayFailed) throw new InvalidOperationException("The editor closed before the file could be opened.");
+            if (DateTime.UtcNow >= deadline) throw new TimeoutException("Class Studio did not finish restoring its saved workspace. The file was not imported.");
+            await Task.Delay(25);
+        }
+        var json = await File.ReadAllTextAsync(path);
+        using var parsed = JsonDocument.Parse(json);
+        var result = await Browser!.ExecuteScriptAsync("(() => { try { window.TalentStudio.importData(JSON.parse(" + JsonSerializer.Serialize(parsed.RootElement.GetRawText()) + ")); return null; } catch (e) { return String(e.message); } })()");
+        var error = JsonSerializer.Deserialize<string>(result);
+        if (error is not null) throw new InvalidDataException(error);
+    }
+
     private void ShowFailure(Exception error)
     {
         _displayFailed = true; _surface.IsVisible = false;
