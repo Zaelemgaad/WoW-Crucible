@@ -54,8 +54,8 @@ public partial class MainWindow : Window
     private DbdSchemaAuditView? _dbdSchemaAuditView;
     private CacheTableWorkspaceView? _cacheTableWorkspaceView;
     private ProjectWorkspaceView? _projectWorkspaceView;
-    private DbcExportWorkspaceView? _dbcExportWorkspaceView;
-    private DbcImportWorkspaceView? _dbcImportWorkspaceView;
+    private readonly Dictionary<DbcDocumentSession, DbcExportWorkspaceView> _dbcExportViews = [];
+    private readonly Dictionary<DbcDocumentSession, DbcImportWorkspaceView> _dbcImportViews = [];
     private CreatureWorkspaceView? _creatureWorkspaceView;
     private GameObjectWorkspaceView? _gameObjectWorkspaceView;
     private QuestWorkspaceView? _questWorkspaceView;
@@ -120,7 +120,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { RuntimeStrip.Dispose(); _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); _dbcExportWorkspaceView?.Dispose(); _dbcImportWorkspaceView?.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
+        Closed += (_, _) => { RuntimeStrip.Dispose(); _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); foreach (var view in _dbcExportViews.Values) view.Dispose(); foreach (var view in _dbcImportViews.Values) view.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.WorkspaceRootPath) || Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -496,8 +496,12 @@ public partial class MainWindow : Window
     {
         var document = Current;
         if (document is null) { StatusText.Text = "Open or select a DBC before exporting rows."; return; }
-        _dbcExportWorkspaceView?.Dispose(); var view = _dbcExportWorkspaceView = new DbcExportWorkspaceView(document);
-        view.BackRequested += (_, _) => { view.Dispose(); if (ReferenceEquals(_dbcExportWorkspaceView, view)) _dbcExportWorkspaceView = null; CloseFeatureWorkspace(); };
+        if (!_dbcExportViews.TryGetValue(document, out var view))
+        {
+            view = new DbcExportWorkspaceView(document);
+            view.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _dbcExportViews.Add(document, view);
+        }
         OpenFeatureWorkspace(view, $"Export {Path.GetFileName(document.File.SourcePath)}");
     }
 
@@ -505,15 +509,27 @@ public partial class MainWindow : Window
     {
         var document = Current;
         if (document is null) { StatusText.Text = "Open or select a DBC before importing structured rows."; return; }
-        _dbcImportWorkspaceView?.Dispose(); var view = _dbcImportWorkspaceView = new DbcImportWorkspaceView(document);
-        view.BackRequested += (_, _) => { view.Dispose(); if (ReferenceEquals(_dbcImportWorkspaceView, view)) _dbcImportWorkspaceView = null; CloseFeatureWorkspace(); };
-        view.Applied += (_, result) =>
+        if (!_dbcImportViews.TryGetValue(document, out var view))
         {
-            ActiveDbcView.SetDocument(document.File, document.Schema.Columns, document.Schema.KeyStrategy, document.File.LogicalTableName, DecodedToggle.IsChecked == true, document.ColumnLayout);
-            ShowDocumentSummary(document); RefreshTabs();
-            StatusText.Text = $"Structured import staged · {result.UpdatedRows:N0} updated row(s) · {result.AppendedRows:N0} appended · {result.ChangedCells:N0} cells · save still required";
-        };
+            view = new DbcImportWorkspaceView(document);
+            view.BackRequested += (_, _) => CloseFeatureWorkspace();
+            view.Applied += (_, result) =>
+            {
+                foreach (var pane in new[] { DbcView, SecondaryDbcView })
+                    if (ReferenceEquals(DocumentForView(pane), document)) pane.RefreshDocument();
+                if (ReferenceEquals(Current, document)) ShowDocumentSummary(document);
+                RefreshTabs();
+                StatusText.Text = $"Structured import staged · {result.UpdatedRows:N0} updated row(s) · {result.AppendedRows:N0} appended · {result.ChangedCells:N0} cells · save still required";
+            };
+            _dbcImportViews.Add(document, view);
+        }
         OpenFeatureWorkspace(view, $"Import {Path.GetFileName(document.File.SourcePath)}");
+    }
+
+    private void CloseDbcTransferWorkspaces(DbcDocumentSession document)
+    {
+        if (_dbcExportViews.Remove(document, out var export)) { RemoveFeatureWorkspace(export); export.Dispose(); }
+        if (_dbcImportViews.Remove(document, out var import)) { RemoveFeatureWorkspace(import); import.Dispose(); }
     }
 
     private async Task<bool> SaveCurrentAsync(bool saveAs)
@@ -586,6 +602,7 @@ public partial class MainWindow : Window
             if (choice == SaveChoice.Save && !await SaveCurrentAsync(false)) return;
         }
         var closedIndex = ActiveDocumentIndex;
+        CloseDbcTransferWorkspaces(document);
         _documents.RemoveAt(closedIndex);
         DesktopCrashLogger.Debug("DBC", "document-closed", ("path", document.FullPath), ("remaining", _documents.Count));
         _primaryDocument = ReindexDocumentAfterClose(_primaryDocument, closedIndex);
@@ -612,6 +629,7 @@ public partial class MainWindow : Window
             InspectorDetail.Text = "Table metadata and selection details appear here.";
             RefreshShellContext();
         }
+        ShowSelectedWorkspace();
     }
 
     private int ReindexDocumentAfterClose(int index, int closedIndex) => index == closedIndex ? -1 : index > closedIndex ? index - 1 : index;
@@ -1656,7 +1674,7 @@ public partial class MainWindow : Window
     {
         if (!CommitPendingDbcEdits()) return;
         var id = _workspacePages.FirstOrDefault(pair => ReferenceEquals(pair.Value.View, workspace)).Key;
-        id ??= $"editor-{_workspacePages.Count}";
+        id ??= $"editor-{_nextWorkspacePageId++}";
         _workspacePages[id] = new(workspace, title, _openingCommand ?? _workspacePages.GetValueOrDefault(id)?.Command);
         _workspaceTabs.Open(id, title);
         ShowSelectedWorkspace();

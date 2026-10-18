@@ -56,14 +56,14 @@ internal sealed class DbcImportWorkspaceView : UserControl, IDisposable
         try
         {
             var path = Path.GetFullPath(_input.Text.Trim()); var options = new DbcRowImportOptions(Format(path), _append.IsChecked == true, _rawStrings.IsChecked == true);
-            var progress = new Progress<(int Done, int Total)>(value => _status.Text = $"Previewing {value.Done:N0}/{value.Total:N0} input row(s)…");
+            var progress = new Progress<(int Done, int Total)>(value => { if (ReferenceEquals(_operation, operation)) _status.Text = $"Previewing {value.Done:N0}/{value.Total:N0} input row(s)…"; });
             var plan = await Task.Run(() => DbcRowImportService.Preview(_document.File, _document.Schema, path, options, progress, operation.Token), operation.Token);
             operation.Token.ThrowIfCancellationRequested(); _plan = plan; _preview.Text = Render(plan);
             _status.Text = $"Preview ready · {plan.InputRows:N0} input row(s) · {plan.UpdatedRows:N0} existing row(s) changed · {plan.AppendedRows:N0} append(s) · {plan.ChangedCells:N0} cell change(s). The open client table is still untouched.";
             DesktopCrashLogger.Debug("DBC", "row-import-preview", ("source", _document.File.SourcePath), ("input", plan.InputPath), ("rows", plan.InputRows), ("updated", plan.UpdatedRows), ("appended", plan.AppendedRows), ("cells", plan.ChangedCells));
         }
-        catch (OperationCanceledException) { _status.Text = "Import preview cancelled; the open client table was untouched."; }
-        catch (Exception exception) { _status.Text = $"Import preview failed safely: {exception.Message}"; DesktopCrashLogger.Log("DBC import preview failed", exception); }
+        catch (OperationCanceledException) { if (ReferenceEquals(_operation, operation)) _status.Text = "Import preview cancelled; the open client table was untouched."; }
+        catch (Exception exception) { if (ReferenceEquals(_operation, operation)) _status.Text = $"Import preview failed safely: {exception.Message}"; DesktopCrashLogger.Log("DBC import preview failed", exception); }
         finally { End(operation); }
     }
 
@@ -102,13 +102,13 @@ internal sealed class DbcImportWorkspaceView : UserControl, IDisposable
     }
 
     private DbcRowImportFormat Format(string path) => _format.SelectedIndex switch { 1 => DbcRowImportFormat.Csv, 2 => DbcRowImportFormat.JsonLines, 3 => DbcRowImportFormat.Json, _ => DbcRowImportService.InferFormat(path) };
-    private void InvalidatePlan() { if (_plan is null) return; _plan = null; _confirmation.IsVisible = false; _status.Text = "Import path or options changed; build a new preview before applying."; }
-    private CancellationTokenSource Begin(string text) { _operation?.Cancel(); _operation?.Dispose(); var operation = new CancellationTokenSource(); _operation = operation; _status.Text = text; return operation; }
+    private void InvalidatePlan() { if (_plan is null && _operation is null) return; _operation?.Cancel(); _operation = null; _plan = null; _confirmation.IsVisible = false; _status.Text = "Import path or options changed; build a new preview before applying."; }
+    private CancellationTokenSource Begin(string text) { _operation?.Cancel(); _plan = null; _confirmation.IsVisible = false; var operation = new CancellationTokenSource(); _operation = operation; _status.Text = text; return operation; }
     private void End(CancellationTokenSource operation) { if (ReferenceEquals(_operation, operation)) _operation = null; operation.Dispose(); }
     private IStorageProvider Storage() => TopLevel.GetTopLevel(this)?.StorageProvider ?? throw new InvalidOperationException("The DBC import workspace is not attached to the main window.");
     private static Button Accent(string text) { var button = new Button { Content = text }; button.Classes.Add("accent"); return button; }
     private static TextBlock Status(string text) => new() { Text = text, TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") };
     private static T WithRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
     private static T WithColumn<T>(T control, int column) where T : Control { Grid.SetColumn(control, column); return control; }
-    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); }
+    public void Dispose() { _operation?.Cancel(); _operation = null; }
 }

@@ -113,8 +113,8 @@ internal sealed class DbcExportWorkspaceView : UserControl, IDisposable
             _preview.Text = JsonSerializer.Serialize(result.Rows, new JsonSerializerOptions { WriteIndented = true });
             _status.Text = $"Previewing {result.Rows.Count:N0} of {result.MatchingRows:N0} matching row(s) · {result.Columns.Count:N0} output columns · {(raw ? "raw string offsets" : "decoded strings")}. $recordKey and $rowIndex are always included.";
         }
-        catch (OperationCanceledException) { _status.Text = "Export preview cancelled."; }
-        catch (Exception exception) { _status.Text = $"Preview failed: {exception.Message}"; DesktopCrashLogger.Log("DBC export preview failed", exception); }
+        catch (OperationCanceledException) { if (ReferenceEquals(_operation, operation)) _status.Text = "Export preview cancelled."; }
+        catch (Exception exception) { if (ReferenceEquals(_operation, operation)) _status.Text = $"Preview failed: {exception.Message}"; DesktopCrashLogger.Log("DBC export preview failed", exception); }
         finally { End(operation); }
     }
 
@@ -125,13 +125,13 @@ internal sealed class DbcExportWorkspaceView : UserControl, IDisposable
         try
         {
             var format = Format(); var selected = SelectedColumns(); var keys = ParseKeys(_keys.Text); var raw = _rawStrings.IsChecked == true; var output = Path.GetFullPath(_output.Text.Trim());
-            var progress = new Progress<(int Done, int Total)>(value => _status.Text = $"Exporting {value.Done:N0}/{value.Total:N0} rows…");
+            var progress = new Progress<(int Done, int Total)>(value => { if (ReferenceEquals(_operation, operation)) _status.Text = $"Exporting {value.Done:N0}/{value.Total:N0} rows…"; });
             var result = await Task.Run(() => DbcRowExportService.Export(_document.File, _document.Schema, output, new(format, selected, keys, raw, _overwrite.IsChecked == true), progress, operation.Token), operation.Token);
-            _status.Text = $"Exported {result.ExportedRows:N0}/{result.SourceRows:N0} row(s) atomically · {result.Columns.Count:N0} columns · {result.OutputPath}";
+            if (ReferenceEquals(_operation, operation)) _status.Text = $"Exported {result.ExportedRows:N0}/{result.SourceRows:N0} row(s) atomically · {result.Columns.Count:N0} columns · {result.OutputPath}";
             DesktopCrashLogger.Debug("DBC", "row-export-success", ("source", _document.File.SourcePath), ("output", result.OutputPath), ("rows", result.ExportedRows), ("columns", result.Columns.Count), ("format", result.Format), ("raw_strings", raw));
         }
-        catch (OperationCanceledException) { _status.Text = "DBC export cancelled; no partial output was published."; }
-        catch (Exception exception) { _status.Text = $"Export failed: {exception.Message}"; DesktopCrashLogger.Log("DBC row export failed", exception); }
+        catch (OperationCanceledException) { if (ReferenceEquals(_operation, operation)) _status.Text = "DBC export cancelled; no partial output was published."; }
+        catch (Exception exception) { if (ReferenceEquals(_operation, operation)) _status.Text = $"Export failed: {exception.Message}"; DesktopCrashLogger.Log("DBC row export failed", exception); }
         finally { End(operation); }
     }
 
@@ -183,5 +183,5 @@ internal sealed class DbcExportWorkspaceView : UserControl, IDisposable
     private static T WithRow<T>(T control, int row) where T : Control { Grid.SetRow(control, row); return control; }
     private static T WithColumn<T>(T control, int column) where T : Control { Grid.SetColumn(control, column); return control; }
 
-    public void Dispose() { _operation?.Cancel(); _operation?.Dispose(); }
+    public void Dispose() { _operation?.Cancel(); _operation = null; }
 }

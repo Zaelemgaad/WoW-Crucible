@@ -347,3 +347,90 @@ Check that coverage, group counts, and file rows match that report, and that the
 view remains responsive while scrolling. This is a read-only check: do not choose
 **Apply reviewed links...** or **Restore independent files...**. An old report is
 evidence of its scan, not proof that today's files still match it.
+
+
+## Repeatable UI stress run — 2026-10-18
+
+Baseline: `9ac1480af5911a388d84c6c6c9fba63357188ace`, tested in the canonical
+checkout with the working-tree fixes accompanying this audit. Windows 11,
+.NET 10, Avalonia 12.1.0; the native embedded editor uses the installed WebView2.
+No production dependency was added. Existing unrelated model work was preserved.
+
+Run from the checkout root, one stress process at a time:
+
+```powershell
+dotnet run --project tests/WoWCrucible.Desktop.Tests -- --ui-stress 180034 3000
+```
+
+The arguments are a reproducible random seed and action count (1–100,000).
+The runner writes an action journal and JSON result/resource samples under
+`.local/ui-stress`. Its settings/browser profile belong to the test executable,
+not the installed desktop executable. It creates two small DBC fixtures and an
+export in that directory, verifies the source files remain unchanged, and never
+connects to live SQL or writes game files. It does not move the mouse, send global
+keystrokes, or show/activate the test window.
+
+Coverage:
+
+- Rapid open/select/close/reopen across 11 entry points: items, creatures,
+  gameobjects, quests, behaviors, pets, pet curves, pet abilities, textures,
+  maps, and the embedded editor. Behaviors and pets intentionally share a view.
+- Native tab button events, nested tabs, command-palette searches, pane
+  visibility/docking/reset, split-layout options, and four window dimensions.
+- Embedded spellbook/help/free-mode/split/edit controls, checking JavaScript
+  errors/rejections and browser identity across navigation.
+- Repeated DBC import/export opening, retained choices, separate editors for
+  separate documents, applying an older document's no-op import while another
+  table is selected, parent-document closure, unique tab IDs after removal,
+  30 overlapping previews per tool, changing options during preview, and
+  closing a table during preview. Closing the app must dispose its browser.
+- Dispatcher/unobserved-task failures fail the run; sampled process memory,
+  handles, and GDI/USER resources are reported rather than hidden behind an
+  arbitrary pass threshold. The journal records actions before execution.
+
+Reproduced defects and corrections:
+
+1. Seed **180028**, 50 actions: reopening export created extra tabs containing
+   already-disposed editors. Import used the same ownership pattern. Editors
+   now belong to their open document and are reused across navigation. Closing
+   the document removes its tool pages and releases them. Tab identity allocation
+   no longer depends on the current page count. Applying a retained import only
+   refreshes panes showing that document.
+2. Seed **180030**, 50 actions: overlapping export previews left the final status
+   at "Export preview cancelled" after a newer preview succeeded. Superseded
+   operations no longer overwrite current progress/status. Cancellation sources
+   remain owned by their running task until its final cleanup, including import
+   replacement and document closure.
+3. Seed **180032**, 50 actions: changing import options during preview allowed
+   the obsolete result to repopulate the apply plan. Option/path changes now
+   cancel the pending preview; starting another preview clears the previous
+   apply plan and confirmation.
+
+After fixes:
+
+| Run | Random actions | Embedded clicks within those actions | Result |
+| --- | ---: | ---: | --- |
+| Seed 180033 | 2,000 | 2,040 | PASS, including document/preview regressions |
+| Seed 180034 | 3,000 | 3,040 | PASS, also including retained-import targeting and closure during preview |
+| Workspace shell suite | deterministic navigation/layout checks | — | PASS |
+| `scripts/Test-PreviewFrameLifetime.ps1` | 500 replacement/queued-frame/disposal cycles | — | PASS |
+
+The preview-lifetime script also passed its existing pose, texture selection,
+camera/geoset/playback continuity, and depth checks. Build: zero warnings/errors.
+For seed 180034, measured handler-plus-layout P95 was **31.46 ms**, maximum
+**109.86 ms**; these are not end-to-end human input latency measurements. From
+steps 2,250–3,000, GDI objects stayed at 25, USER objects at 32–33, and native
+handles at 759–760. After the document phase and final collection, managed memory
+was 131.8 MiB and process private memory 393.7 MiB. This short run is not proof
+against long-session or dataset-dependent leaks.
+
+Harness correction: never-shown Avalonia windows normally leave composition
+inactive. The first exploratory run therefore retained dirty visuals and was
+not a valid leak measurement. The runner explicitly starts the real compositor;
+reported passing runs above use that corrected setup.
+
+Limits: this drives native controls/handlers and WebView DOM events with real
+layout/rendering, not OS mouse hit-testing, focused keyboard input, or native
+file-picker dialogs. It does not cover every editor, large live datasets, SQL
+operations, or every possible timing. Source-file integrity checks and the
+separate preview lifetime suite supplement the randomized navigation checks.

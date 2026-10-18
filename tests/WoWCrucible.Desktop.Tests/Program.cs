@@ -8,6 +8,11 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--ui-stress")
+        {
+            UiStressTestSuite.Run(args.Length > 1 ? int.Parse(args[1]) : 180026, args.Length > 2 ? int.Parse(args[2]) : 2000);
+            return;
+        }
         if (args.Contains("--workspace-shell")) { WorkspaceShellTestSuite.Run(); return; }
         if (args.Contains("--embedded-studio")) { EmbeddedStudioTestSuite.Run(args.Contains("--coa")); return; }
         TestSessionAsync().GetAwaiter().GetResult();

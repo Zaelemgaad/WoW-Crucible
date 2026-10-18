@@ -11,6 +11,7 @@ public partial class MainWindow
     private sealed record WorkspacePage(Control View, string Title, string? Command);
     private readonly WorkspaceTabState _workspaceTabs = new();
     private readonly Dictionary<string, WorkspacePage> _workspacePages = [];
+    private int _nextWorkspacePageId;
     private string? _openingCommand;
     private bool _focusEditor;
     private readonly HashSet<ResponsiveSplitGrid> _configuredSplits = [];
@@ -119,6 +120,22 @@ public partial class MainWindow
         if (!CommitPendingDbcEdits()) return;
         _workspaceTabs.Close(id);
         ShowSelectedWorkspace();
+    }
+
+    private void RemoveFeatureWorkspace(Control workspace)
+    {
+        var id = _workspacePages.FirstOrDefault(pair => ReferenceEquals(pair.Value.View, workspace)).Key;
+        if (id is null) return;
+        _workspaceTabs.Close(id);
+        _workspacePages.Remove(id);
+        foreach (var split in WalkWorkspaceControls(workspace, includeItems: true).Select(entry => entry.Control).OfType<ResponsiveSplitGrid>())
+            _configuredSplits.Remove(split);
+        if (ReferenceEquals(FeatureWorkspaceHost.Child, workspace))
+        {
+            FeatureWorkspaceHost.Child = null;
+            FeatureToolbarHost.Child = null;
+            _editorPaneLayoutMenu.Items.Clear();
+        }
     }
 
     private void ShowSelectedWorkspace()
