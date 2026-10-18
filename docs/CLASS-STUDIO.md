@@ -25,11 +25,23 @@ workspace; export it first if both designs matter.
 
 ## Realm selection and restoring data
 
-**Realm / data** on the main toolbar lists installed world configurations, using
-realm names from the shared login database. Opening the editor loads the configured
-realm automatically. The CoA installation exposes Conquest Of Azeroth, Area 52,
+The small **gear** at the upper right toggles editor settings, modes, import/export
+and source controls. It opens an overlay, so showing it does not resize boards or
+consume canvas height. Escape closes it; its visibility is remembered.
+
+**Realm / data** inside the gear lists installed world configurations, using
+realm names from the shared login database. Opening the editor restores your last
+selection, including the bundled reference or manually selected sources. A new
+session starts with the bundled reference instead of choosing CoA for you. The CoA installation exposes Conquest Of Azeroth, Area 52,
 Dawnrise, Bronzebeard and WoW Remix. Each uses its own world database and the same
 configured client. Reading them does not start or restart a server.
+
+The native **Workspace → Realm** menu and the item browser use the same discovered
+realm catalog. Selecting a realm connects its world database for SQL tools without
+starting or restarting servers. Class Studio remembers its selected dataset separately.
+
+Class buttons read the actual class icon textures from the configured client,
+using its class tokens and effective MPQ patch order.
 
 CoA shows its 21 custom classes. The classless realms show Hero; Bronzebeard shows
 its ten classes; Remix follows the core policy, excluding Priest and separating

@@ -62,6 +62,7 @@ internal static class EmbeddedStudioTestSuite
             var rejected = await Evaluate("StudioBridge.api('state',{foreign:'bad'}).then(()=>false,()=>true)");
             Require(rejected.GetBoolean(), "Invalid native state was accepted.");
             Require((await Evaluate("JSON.parse(localStorage.getItem('twc.class.open-file-test') || 'null') !== null")).GetBoolean(), "Native talent-file opening did not import its contents.");
+            Require((await Evaluate("StudioSources.ready.then(()=>document.querySelector('#realmSource').value)")).GetString()=="builtin", "Fresh editor forced a realm instead of using the reference workspace.");
             var layoutResult = await Evaluate(File.ReadAllText("tests/WoWCrucible.Desktop.Tests/workspace-layout-regression.js"));
             Console.WriteLine("PASS editor layout: " + layoutResult.GetRawText());
             await Evaluate("(() => { document.querySelector('#freeModeBtn').click(); window.retentionProbe=47; return true; })()");
@@ -93,13 +94,17 @@ internal static class EmbeddedStudioTestSuite
                 Require(!realms.GetRawText().Contains("password", StringComparison.OrdinalIgnoreCase), "Realm metadata exposed credentials.");
                 Console.WriteLine("PASS installed realm discovery: " + realms.GetRawText());
                 var request = JsonSerializer.Serialize(new { serverPath = settings.CoreDbcPath, clientPath = settings.ClientDataPath, corePath = settings.CoreSourcePath, clientOrder = "CoA", realmId = 1, includeSql = true });
-                var coverage = await Evaluate("StudioBridge.api('load'," + request + ").then(s=>{window.liveCoASnapshot=s;return {tables:s.tables.map(t=>({layer:t.layer,name:t.name,rows:t.rows.length})),notices:s.notices};})");
+                var coverage = await Evaluate("StudioBridge.api('load'," + request + ").then(s=>{window.liveCoASnapshot=s;return {icons:Object.keys(s.classIcons||{}).length,tables:s.tables.map(t=>({layer:t.layer,name:t.name,rows:t.rows.length})),notices:s.notices};})");
                 Require(coverage.GetProperty("tables").EnumerateArray().Any(t => t.GetProperty("name").GetString() == "Spell" && t.GetProperty("rows").GetInt32() > 200000), "Live CoA catalog did not reach the embedded editor.");
                 Require(coverage.GetProperty("tables").EnumerateArray().Any(t => t.GetProperty("layer").GetString() == "sql"), "Selected realm SQL was not loaded.");
-                var classes = await Evaluate("(() => {const s=window.liveCoASnapshot; const classes=StudioData.realmClasses(s,'server').map(c=>StudioData.talentClass(s,'server',c.ID));TalentStudio.useSource('live-test',classes); return classes.map(c=>({id:c.classId,name:c.name,boards:c.trees.length,talents:c.trees.reduce((n,t)=>n+t.t.length,0)}));})()");
+                Require(coverage.GetProperty("icons").GetInt32()==32, "Client class icons were not resolved for all 32 classes: " + coverage.GetRawText());
+                var classes = await Evaluate("(() => {const s=window.liveCoASnapshot;if(document.querySelector('#freeModeBtn').classList.contains('on'))document.querySelector('#freeModeBtn').click(); const classes=StudioData.realmClasses(s,'server').map(c=>Object.assign(StudioData.talentClass(s,'server',c.ID),{iconSrc:s.classIcons[c.ID]}));TalentStudio.useSource('live-test',classes); return classes.map(c=>({id:c.classId,name:c.name,boards:c.trees.length,talents:c.trees.reduce((n,t)=>n+t.t.length,0)}));})()");
                 Require(classes.GetArrayLength() == 21, "CoA did not expose its 21 custom classes.");
                 Require(classes.EnumerateArray().All(c=>c.GetProperty("boards").GetInt32()>0), "A CoA class has no source talent boards.");
                 Console.WriteLine("PASS live CoA classes, boards and selected world SQL: " + classes.GetRawText());
+                Require((await Evaluate("(async()=>{const icons=[...document.querySelectorAll('#pane0 .class-btn-wrap:not(:has(.class-edit-btn)) img')];await Promise.all(icons.map(i=>i.decode()));return icons.length===21&&icons.every(i=>i.src.startsWith('data:image/png')&&i.naturalWidth>0);})()")).GetBoolean(), "CoA class buttons did not render their client icons.");
+                await using(var iconCapture=File.Create(Path.Combine(root,"coa-class-icons.png")))
+                    await browser.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,iconCapture);
                 await Evaluate("(() => {window.liveCoASnapshot=null;return true;})()");
                 foreach (var realmId in new[] { 2, 3, 4, 5 })
                 {
@@ -113,7 +118,7 @@ internal static class EmbeddedStudioTestSuite
                 }
             }
             if(coa) {
-                await Evaluate("(() => {localStorage.setItem('twc.panes',JSON.stringify({panes:[12,null],splitView:false}));const settings=JSON.parse(localStorage.getItem('twc.settings'));settings.freeMode=false;localStorage.setItem('twc.settings',JSON.stringify(settings));StudioBridge.changed();return true;})()");
+                await Evaluate("(() => {localStorage.setItem('twc.panes',JSON.stringify({panes:[2,null],splitView:false}));localStorage.setItem('twc.studio.sources',JSON.stringify({realmId:5,selection:'5',includeSql:false}));const settings=JSON.parse(localStorage.getItem('twc.settings'));settings.freeMode=false;localStorage.setItem('twc.settings',JSON.stringify(settings));StudioBridge.changed();return true;})()");
                 await view.FlushAsync();
             }
             await using (var capture = File.Create(Path.Combine(root, "embedded.png")))
@@ -129,9 +134,9 @@ internal static class EmbeddedStudioTestSuite
             browser = resumed.Browser!;
             Require((await Evaluate("StudioBridge.ready.then(()=>localStorage.getItem('twc.test.last'))")).GetString() == "456", "Restart did not restore the last edit.");
             if(coa) {
-                var startup=await Evaluate("StudioSources.ready.then(()=>({status:document.querySelector('.studio-source-status').textContent,selected:document.querySelector('#realmSource').value,classes:document.querySelectorAll('#pane0 .class-btn-wrap:not(:has(.class-edit-btn)) .class-btn').length,active:document.querySelector('#pane0 .class-btn.active')?.textContent,boards:document.querySelectorAll('#pane0 .spec-board').length}))");
-                Require(startup.GetProperty("selected").GetString()=="1" && startup.GetProperty("classes").GetInt32()==21 && startup.GetProperty("boards").GetInt32()>0, "Automatic realm load failed: " + startup.GetRawText());
-                Console.WriteLine("PASS fresh embedded startup loads configured CoA and restores custom class selection: " + startup.GetRawText());
+                var startup=await Evaluate("StudioSources.ready.then(()=>({status:document.querySelector('.studio-source-status').textContent,selected:document.querySelector('#realmSource').value,classes:document.querySelectorAll('#pane0 .class-btn-wrap:not(:has(.class-edit-btn)) .class-btn').length,active:document.querySelector('#pane0 .class-btn.active')?.textContent,boards:document.querySelectorAll('#pane0 .spec-board').length,icons:[...document.querySelectorAll('#pane0 .class-btn-wrap:not(:has(.class-edit-btn)) img')].every(i=>i.src.startsWith('data:image/png')&&i.complete&&i.naturalWidth>0)}))");
+                Require(startup.GetProperty("selected").GetString()=="5" && startup.GetProperty("classes").GetInt32()==9 && startup.GetProperty("icons").GetBoolean() && startup.GetProperty("boards").GetInt32()>0, "Automatic realm load failed: " + startup.GetRawText());
+                Console.WriteLine("PASS embedded restart restores last realm (Remix), class selection and real client icons: " + startup.GetRawText());
                 await using var sourceCapture=File.Create(Path.Combine(root,"coa-startup.png"));
                 await browser.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,sourceCapture);
             }

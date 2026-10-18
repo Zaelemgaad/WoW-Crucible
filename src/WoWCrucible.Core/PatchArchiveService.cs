@@ -287,6 +287,24 @@ public sealed class PatchArchiveService
         }
     }
 
+    public IReadOnlyList<MpqFileEntry> ListNamedFiles(string archivePath, IEnumerable<string> paths, CancellationToken cancellationToken = default)
+    {
+        var archive = OpenArchiveWithRetry(Path.GetFullPath(archivePath), "open the MPQ archive");
+        try
+        {
+            var result = new List<MpqFileEntry>();
+            foreach (var path in paths.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var name = PatchInputMapper.NormalizeArchivePath(path);
+                if (name.IndexOfAny(['*', '?']) >= 0) throw new ArgumentException("Exact archive paths are required.", nameof(paths));
+                result.AddRange(EnumerateFiles(archive, name, null));
+            }
+            return result;
+        }
+        finally { Native.SFileCloseArchive(archive); }
+    }
+
     private static List<MpqFileEntry> EnumerateFiles(IntPtr archive, string mask, string? listFile)
     {
         var result = new List<MpqFileEntry>();

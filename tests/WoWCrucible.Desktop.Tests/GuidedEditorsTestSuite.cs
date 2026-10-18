@@ -12,12 +12,13 @@ using WoWCrucible.Desktop;
 internal static class GuidedEditorsTestSuite
 {
     private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
-    public static void Run()
+    public static void Run(bool liveItems = false)
     {
         AppBuilder.Configure<App>().UsePlatformDetect().WithInterFont().SetupWithoutStarting();
         using var session = new DesktopWorkspaceSession(new DesktopSettings());
         TestItems(session);
         TestQuests(session);
+        if (liveItems) TestLiveItems();
         var root = Path.Combine(Path.GetTempPath(), "Crucible-Guided-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try { TestOpening(root); }
@@ -56,8 +57,51 @@ internal static class GuidedEditorsTestSuite
         var draft = (ItemDraft)Call(view, "Draft")!;
         Require(draft.Subclass == 77 && draft.InventoryType == 99 && draft.DamageMin == 23, "Opening custom item silently reset data.");
         Require(Field<NumericUpDown>(view, "_damageMin").IsVisible, "Nonstandard existing value became invisible.");
+        var update=Field<TextBox>(view,"_sql").Text!;
+        Require(update.StartsWith("UPDATE `item_template` SET") && update.Contains("WHERE `entry` = 9999;") && !update.Contains("SET\n  `entry`"), "Loaded item exported INSERT or changed its primary key.");
         Select(itemClass, 2);
         Require(!Options(subtype).Contains(77) && !Options(inventory).Contains(99), "Changing item class retained invalid choice options.");
+        Field<NumericUpDown>(view,"_entry").Value=10000;Call(view,"RefreshSql");
+        Require(string.IsNullOrEmpty(Field<TextBox>(view,"_sql").Text),"Invalid primary-key edit left stale exportable SQL.");
+        view.NewItem();
+        Require(Field<TextBox>(view,"_sql").Text!.StartsWith("INSERT INTO") && Equals(Field<Button>(view,"_commit").Content,"Create item"), "New draft kept update mode.");
+        Require(((ItemDraft)Call(view,"Draft")!).DamageMin==0, "New item retained previous item stats.");
+    }
+
+    private static void TestLiveItems()
+    {
+        var settings=JsonSerializer.Deserialize<DesktopSettings>(File.ReadAllText("src/WoWCrucible.Desktop/bin/Debug/net10.0/Config/desktop.json"))!;
+        using var session=new DesktopWorkspaceSession(settings);
+        var discover=session.GetRealmsAsync();Pump(discover);
+        Require(discover.Result.Realms.Count==5,"Installed realms missing from the shared session.");
+        Pump(session.SelectRealmAsync(1));
+        var browser=new ItemBrowserWindow(session);
+        try
+        {
+            Pump((Task)Call(browser,"InitializeAsync")!);
+            Require(Field<ComboBox>(browser,"_realm").Items.Count==5,"Item browser did not show the configured realms.");
+            var search=Field<TextBox>(browser,"_search");var results=Field<ListBox>(browser,"_results");
+            search.Text="17";Pump(browser.SearchAsync());
+            var rows=((IEnumerable)results.ItemsSource!).Cast<SqlRowRecord>().ToArray();
+            Require(rows.Length==1 && Convert.ToUInt32(rows[0].Values["entry"])==17,"Exact item ID search failed: "+Field<TextBlock>(browser,"_status").Text);
+            var row=rows[0];search.Text=Convert.ToString(row.Values["name"]);Pump(browser.SearchAsync());
+            Require(((IEnumerable)results.ItemsSource!).Cast<SqlRowRecord>().Any(r=>Convert.ToUInt32(r.Values["entry"])==17),"Item name search lost the known item.");
+            using var editor=new ItemCreatorView(session);editor.LoadRow(row.Values);
+            Require(Field<TextBox>(editor,"_sql").Text!.StartsWith("UPDATE"),"Live item did not enter edit mode.");
+            search.Text="";Pump(browser.SearchAsync());
+            Require(((IEnumerable)results.ItemsSource!).Cast<SqlRowRecord>().Count()==50 && Field<Button>(browser,"_next").IsEnabled,"Existing item browse page is incomplete.");
+            foreach(var realm in discover.Result.Realms.Where(r=>r.Id!=1))
+            {
+                Pump(session.SelectRealmAsync(realm.Id));search.Text="17";Pump(browser.SearchAsync());
+                Require(((IEnumerable)results.ItemsSource!).Cast<SqlRowRecord>().Count()==1,"Item read failed in "+realm.Name);
+                Require(session.DatabaseProfile!.Database==realm.Server.WorldDatabase.Database,"Realm switch retained previous database.");
+            }
+            Call(editor,"PrepareInsert");
+            Require(Field<ItemWritePlan?>(editor,"_pendingInsert") is null && Field<TextBlock>(editor,"_status").Text!.Contains("different database"),"Cross-realm item save was not blocked.");
+            Require(DesktopSettings.Load().ActiveRealmId==5,"Last desktop realm did not persist.");
+            Console.WriteLine("PASS live item browser: ID/name search, 50-row browse page, all five realm databases, loaded-item UPDATE preview, remembered last realm and cross-realm write prevention. No database writes.");
+        }
+        finally { browser.Close(); }
     }
 
     private static void TestQuests(DesktopWorkspaceSession session)

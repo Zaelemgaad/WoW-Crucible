@@ -2,6 +2,12 @@
   const wait = () => new Promise(resolve => setTimeout(resolve, 60));
   const check = (value, message) => { if (!value) throw new Error(message); };
   await StudioBridge.ready;
+  const settings=document.querySelector('#studioSettingsPanel'),gear=document.querySelector('#studioSettings');
+  check(settings.hidden && gear.getAttribute('aria-expanded')==='false','Settings were not collapsed by default');
+  const startHeight=document.querySelector('#panesContainer').clientHeight;
+  gear.click();await wait();check(!settings.hidden,'Settings gear did not open controls');
+  check(document.querySelector('#panesContainer').clientHeight===startHeight,'Settings overlay consumed canvas height');
+  gear.click();await wait();check(settings.hidden,'Settings gear did not hide controls');
   TalentStudio.importClass({classId:'layout-test',name:'Layout test',trees:[{n:'A long talent specialization name',t:[]}],sideboard:{n:'Side Board',t:[]}});
   if (document.querySelector('#editModeBtn').textContent.includes('Off')) document.querySelector('#editModeBtn').click();
   await wait();

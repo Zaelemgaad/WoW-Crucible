@@ -64,6 +64,22 @@ internal static class ClassStudioTestSuite
             var realms = await ServerRealmCatalog.ReadAsync(serverRoot);
             Require(realms.Realms.Count == 2 && realms.Realms[1].Profile == "Season9", "Installed realm configurations were not discovered.");
             Require(realms.Realms[0].Server.DbcPath == realms.Realms[1].Server.DbcPath && realms.Realms[1].Server.WorldDatabase.Database == "world_second", "Shared DBC paths or separate realm databases were resolved incorrectly.");
+            var clientRoot=Path.Combine(root,"client");Directory.CreateDirectory(Path.Combine(clientRoot,"Data"));
+            var archive=Path.Combine(clientRoot,"Data","patch-1.MPQ");
+            new PatchArchiveService().Create(archive,[new(path,@"DBFilesClient\Spell.dbc"),new(path,@"Interface\Icons\classicon_fixture.blp")]);
+            var names=new[]{@"DBFilesClient\Spell.dbc",@"Interface\Icons\classicon_fixture.blp",@"Interface\Icons\missing.blp"};
+            var exact=new PatchArchiveService().ListNamedFiles(archive,names);
+            Require(exact.Count==2 && exact.All(e=>names.Contains(e.ArchivePath,StringComparer.OrdinalIgnoreCase)),"Batch exact archive probes lost or invented entries.");
+            var indexRoot=Path.Combine(root,"index");var clientIndex=new ClientArchiveIndexService().Build(clientRoot,indexRoot,hashArchives:false);
+            // Simulate an incomplete name index: exact probes must recover paths and retain missing-path results.
+            var summary=clientIndex.Archives.Single();var contentPath=Path.Combine(indexRoot,summary.ContentIndexFile);
+            var content=JsonSerializer.Deserialize<ArchiveContentIndex>(File.ReadAllText(contentPath))!;
+            File.WriteAllText(contentPath,JsonSerializer.Serialize(content with { Files=[] }));
+            File.WriteAllText(Path.Combine(indexRoot,"client-index.json"),JsonSerializer.Serialize(clientIndex with { Archives=[summary with { AnonymousFiles=2 }] }));
+            var assets=ClientEffectiveAssetCatalog.Load(indexRoot);
+            var resolved=assets.ResolveMany(names);
+            Require(resolved.Take(2).All(r=>r.State==ClientEffectiveAssetState.Effective) && resolved[2].State==ClientEffectiveAssetState.Missing,"Batch resolution changed missing/effective semantics.");
+            Require(File.ReadAllBytes(assets.ExtractEffective(resolved[0].Effective!,Path.Combine(root,"extracted"))).SequenceEqual(File.ReadAllBytes(path)),"Batch resolution could not extract its verified candidate.");
             if (corpus is not null)
             {
                 var real = await service.LoadAsync(corpus, client, Path.Combine(output ?? root, "client-cache"), corePath: core, clientOrder: core is null ? ClientArchiveOrderPolicy.StandardWrath : ClientArchiveOrderPolicy.CoA);

@@ -34,6 +34,13 @@ public sealed record ItemWritePlan(
         return $"INSERT INTO {QuoteIdentifier(Table)} ({names})\nVALUES ({values});";
     }
 
+    public string PreviewUpdateSql(uint entry)
+    {
+        if (Convert.ToUInt32(Values["entry"]) != entry) throw new InvalidOperationException("Changing an existing item's ID requires an explicit copy or key migration.");
+        var assignments = string.Join(",\n  ", Values.Where(p => !p.Key.Equals("entry", StringComparison.OrdinalIgnoreCase)).Select(p => $"{QuoteIdentifier(p.Key)} = {SqlLiteral(p.Value)}"));
+        return $"UPDATE {QuoteIdentifier(Table)} SET\n  {assignments}\nWHERE `entry` = {entry};";
+    }
+
     internal static string QuoteIdentifier(string value) => $"`{value.Replace("`", "``")}`";
     private static string SqlLiteral(object value) => value switch
     {

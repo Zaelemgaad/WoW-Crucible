@@ -169,6 +169,15 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable, IFeatureWork
         };
         ConfigureConnectionPopup();
         FeatureToolbar = new WrapPanel { Children = { sqlStudio, sqlFavorites, mpqMerge, _connectionToggle, _connectionPopup } };
+        var openExisting = AccentButton("Open existing item…");
+        openExisting.Click += async (_, _) =>
+        {
+            if (TopLevel.GetTopLevel(this) is not Window owner) return;
+            var row = await new ItemBrowserWindow(_session).ShowDialog<IReadOnlyDictionary<string, object?>?>(owner);
+            if (row is not null) OpenItemRow(row);
+        };
+        var newItem = new Button { Content = "New item" };
+        newItem.Click += (_, _) => { _loadedSqlRow = null; _openLoadedCompleteRow.IsEnabled = false; _creator.NewItem(); };
         var decodedItemPage = new Grid
         {
             RowDefinitions = new("Auto,*"),
@@ -181,8 +190,8 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable, IFeatureWork
                     {
                         Children =
                         {
-                            _openLoadedCompleteRow,
-                            new TextBlock { Text = "Decoded controls preserve unmapped/custom columns; the complete view exposes every live-schema field.", TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0) }
+                            openExisting, newItem, _openLoadedCompleteRow,
+                            new TextBlock { Text = "Open an item by name or ID, or start a new one.", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0) }
                         }
                     }
                 },

@@ -26,6 +26,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
     private CancellationTokenSource? _operation;
     private bool _refreshing;
     private readonly Menu _applicationMenu;
+    private readonly MenuItem _realmMenu = new() { Header = "Realm", IsVisible = false };
     private readonly Grid _context;
     private readonly List<MenuItem> _tableCommands = [];
 
@@ -94,6 +95,8 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
         var editors = new MenuItem { Header = "Editors" };
         foreach (var group in WorkspaceNavigation.Groups)
             editors.Items.Add(DomainMenu(group.Title, group.Commands.Select(id => (WorkspaceNavigation.Label(id), id)).ToArray()));
+        var workspaceMenu = DomainMenu("Workspace", ("Client & server setup", "workspace.setup"), ("Projects, classes & races", "workspace.projects"));
+        workspaceMenu.Items.Add(_realmMenu);
         return new Menu
         {
             VerticalAlignment = VerticalAlignment.Center,
@@ -105,9 +108,7 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
                     ("Projects…", "workspace.projects"),
                     ("Save current table", "action.save"),
                     ("Save current table as…", "action.save-as")),
-                DomainMenu("Workspace",
-                    ("Client & server setup", "workspace.setup"),
-                    ("Projects, classes & races", "workspace.projects")),
+                workspaceMenu,
                 editors,
                 DomainMenu("Navigate",
                     ("Previous workspace · Alt+Left", "action.back"),
@@ -227,11 +228,34 @@ internal sealed class WorkspaceRuntimeStrip : UserControl, IDisposable
 
     private void ShowWorkspace()
     {
+        _ = RefreshRealmMenuAsync();
         var name = _session?.Settings.WorkspaceName;
         _workspace.Content = new TextBlock { Text = string.IsNullOrWhiteSpace(name) ? "Workspace · choose client & server" : $"Workspace · {name}", TextTrimming = TextTrimming.CharacterEllipsis };
         ToolTip.SetTip(_workspace, string.IsNullOrWhiteSpace(_session?.Settings.WorkspaceRootPath)
             ? "Choose one top-level WoW workspace folder and let Crucible remember the install."
             : _session.Settings.WorkspaceRootPath);
+    }
+
+    private async Task RefreshRealmMenuAsync()
+    {
+        if (_session is null) return;
+        try
+        {
+            var catalog = await _session.GetRealmsAsync();
+            _realmMenu.Items.Clear(); _realmMenu.IsVisible = catalog.Realms.Count > 0;
+            foreach (var realm in catalog.Realms)
+            {
+                var item = new MenuItem { Header = realm.Name + (realm.Id == _session.Settings.ActiveRealmId ? " (current)" : "") };
+                ToolTip.SetTip(item, realm.Server.WorldDatabase.Database);
+                item.Click += async (_, _) =>
+                {
+                    try { await _session.SelectRealmAsync(realm.Id); }
+                    catch (Exception error) { _message.Text = error.Message; _operationStatus.IsVisible = true; }
+                };
+                _realmMenu.Items.Add(item);
+            }
+        }
+        catch (Exception error) { _message.Text = "Realm discovery failed: " + error.Message; _operationStatus.IsVisible = true; }
     }
 
     private void ShowStatus(ServerRuntimeStatus? status)

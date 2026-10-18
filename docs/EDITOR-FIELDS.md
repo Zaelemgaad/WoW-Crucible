@@ -24,6 +24,13 @@ problem without modifying the source.
 
 ## Items
 
+Choose **Open existing item…** at the top of the item editor. Select a realm,
+search by item name or exact ID, and double-click a result. Empty search browses
+items in pages of 50. **Save changes** updates the loaded item; its SQL export is
+also an UPDATE. Unmapped/custom columns are preserved. Switching realms blocks
+saving an item loaded from the previous database until you return or reopen it.
+**New item** clears the draft and returns to create mode.
+
 Item class controls the subtype list; subtype controls the equipment slots.
 Armor never offers weapon slots. The shared WotLK catalog also supplies subtype
 names in Item.dbc and uses **#e6cc80** for both Artifact and Heirloom quality.

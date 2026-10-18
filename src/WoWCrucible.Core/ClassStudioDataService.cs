@@ -8,7 +8,7 @@ namespace WoWCrucible.Core;
 public sealed record ClassStudioColumn(string Name, string Type, bool Key, int? ByteOffset = null);
 public sealed record ClassStudioTable(string Layer, string Name, string Source, string Fingerprint,
     IReadOnlyList<ClassStudioColumn> Columns, IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows, string Format = "dbc");
-public sealed record ClassStudioSnapshot(DateTimeOffset ReadUtc, IReadOnlyList<ClassStudioTable> Tables, IReadOnlyList<string> Notices, string? SourceIdentity = null, string? RealmProfile = null, string? RealmName = null);
+public sealed record ClassStudioSnapshot(DateTimeOffset ReadUtc, IReadOnlyList<ClassStudioTable> Tables, IReadOnlyList<string> Notices, string? SourceIdentity = null, string? RealmProfile = null, string? RealmName = null, IReadOnlyDictionary<uint, string>? ClassIcons = null);
 
 /// <summary>Read-only, schema-resolved inputs for the shared class editor. Layers stay explicit.</summary>
 public sealed class ClassStudioDataService(Func<WdbcFile, DbcSchemaResolution> resolveSchema)
@@ -26,6 +26,7 @@ public sealed class ClassStudioDataService(Func<WdbcFile, DbcSchemaResolution> r
         ClientArchiveOrderPolicy clientOrder = ClientArchiveOrderPolicy.StandardWrath)
     {
         _loaded.Clear(); _tables.Clear(); var notices = new List<string>();
+        IReadOnlyDictionary<uint, string>? classIcons = null;
         if (!string.IsNullOrWhiteSpace(serverPath)) ReadLoose(serverPath, "server", notices, cancellationToken);
         if (!string.IsNullOrWhiteSpace(clientPath))
         {
@@ -49,6 +50,8 @@ public sealed class ClassStudioDataService(Func<WdbcFile, DbcSchemaResolution> r
                     if (CoATables.Contains(table)) AddCoATable(file, "client", resolution.Effective.ArchiveRelativePath);
                     else ReadTable(file, "client", resolution.Effective.ArchiveRelativePath);
                 }
+                if (_tables.TryGetValue(("client", "ChrClasses"), out var classes))
+                    classIcons = ClassStudioIconService.Read(catalog, classes.Rows, Path.Combine(indexPath, "icons"), notices, cancellationToken);
             }
         }
         if (database is not null && capabilities is not null)
@@ -83,7 +86,7 @@ public sealed class ClassStudioDataService(Func<WdbcFile, DbcSchemaResolution> r
             foreach (var table in CoAClassStudioSource.ReadCore(corePath, notices)) _tables.Add((table.Layer, table.Name), table);
         if (_tables.Values.Any(t => t.Format == "coa-plan")) notices.Add("CoA advancement tables expose verified fields and byte offsets. Their CSV is a change-plan format, not a stock DBC import schema. Keep the JSON original values and source hashes when implementing these changes. Hidden/disabled entries remain visible for editing.");
         notices.Add("The CoA core source lists are read from source, not the running executable. Additional compiled hooks can grant spells beyond the inspected lists. SQL spell_dbc overrides remain a separate editable layer.");
-        return new(DateTimeOffset.UtcNow, _tables.Values.ToArray(), notices);
+        return new(DateTimeOffset.UtcNow, _tables.Values.ToArray(), notices, ClassIcons: classIcons);
     }
 
     public IReadOnlyDictionary<string, object?> ReadRow(string layer, string table, uint id)

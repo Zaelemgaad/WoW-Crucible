@@ -38,10 +38,13 @@ internal sealed class ClassStudioSession : IDisposable
         switch (parts[0])
         {
             case "settings" when body is null:
-                _realms = await ServerRealmCatalog.ReadAsync(_session.Settings.ServerRootPath, _stop.Token);
+                _realms = await _session.GetRealmsAsync(_stop.Token);
                 result = new { serverPath = _session.Settings.CoreDbcPath, clientPath = _session.Settings.ClientDataPath, corePath = _session.Settings.CoreSourcePath, sql = _session.DatabaseTested,
                     realms = _realms.Realms.Select(r => new { r.Id, r.Name, r.Profile, serverPath = r.Server.DbcPath, database = r.Server.WorldDatabase.Database }),
-                    notices = _realms.Notices, defaultRealmId = _realms.Realms.FirstOrDefault(r => r.Server.WorldDatabase.Database == _session.Settings.WorldDatabase)?.Id ?? _realms.Realms.FirstOrDefault()?.Id }; break;
+                    notices = _realms.Notices }; break;
+            case "realm" when body is not null:
+                await _session.SelectRealmAsync(body.Value.GetProperty("id").GetUInt32(), _stop.Token);
+                result = new { selected = _session.Settings.ActiveRealmId }; break;
             case "pick" when body is not null:
                 result = new { path = await _pick(query["kind"] ?? "server") }; break;
             case "state" when body is null:
@@ -70,7 +73,7 @@ internal sealed class ClassStudioSession : IDisposable
                     ServerRealmSource? realm = null;
                     if (sources.RealmId is not null)
                     {
-                        _realms ??= await ServerRealmCatalog.ReadAsync(_session.Settings.ServerRootPath, _stop.Token);
+                        _realms ??= await _session.GetRealmsAsync(_stop.Token);
                         realm = _realms.Realms.SingleOrDefault(r => r.Id == sources.RealmId)
                             ?? throw new InvalidDataException("The selected realm is no longer configured. Reopen Class Studio to refresh realms.");
                     }

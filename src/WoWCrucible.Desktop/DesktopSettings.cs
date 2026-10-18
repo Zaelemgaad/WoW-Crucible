@@ -27,6 +27,7 @@ internal sealed class DesktopSettings
     public string NoggitExecutablePath { get; set; } = string.Empty;
     public string MapSourcePath { get; set; } = string.Empty;
     public string ActiveProjectPath { get; set; } = string.Empty;
+    public uint? ActiveRealmId { get; set; }
     public string ServerRootPath { get; set; } = string.Empty;
     public string CoreDbcPath { get; set; } = string.Empty;
     public string ClientDataPath { get; set; } = string.Empty;

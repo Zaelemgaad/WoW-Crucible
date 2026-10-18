@@ -154,10 +154,10 @@ function init() {
     realmSelect.disabled=true;loadButton.disabled=true;results.inert=true;editor.inert=true;window.StudioSources.initialized=false;window.StudioSources.error=null;
     try {
       say('Reading source tables…');sourceStatus.textContent='Loading selected realm…';sourceStatus.classList.remove('studio-error');
-      sources.serverPath=paths.server.value;sources.clientPath=paths.client.value;sources.corePath=paths.core.value;persistSources();
+      sources.serverPath=paths.server.value;sources.clientPath=paths.client.value;sources.corePath=paths.core.value;sources.selection=realmSelect.value;persistSources();
       var loaded=await B.api('load',sources);
       var activeLayer=D.rows(loaded,'server','ChrClasses').length?'server':'client';
-      var classes=D.realmClasses(loaded,activeLayer).map(function(c){return D.talentClass(loaded,activeLayer,Number(c.ID));});
+      var classes=D.realmClasses(loaded,activeLayer).map(function(c){var result=D.talentClass(loaded,activeLayer,Number(c.ID));result.iconSrc=(loaded.classIcons||{})[c.ID];var filename=String(c.Filename||'').toLowerCase();if(['warrior','paladin','hunter','rogue','priest','deathknight','shaman','mage','warlock','druid'].includes(filename))result.file=filename;return result;});
       if(!classes.length)throw new Error('No classes found in the selected sources. Previous editor data is still open.');
       var identity=encodeURIComponent((loaded.sourceIdentity || sources.serverPath || sources.clientPath).toLowerCase());
       // Each realm owns its working edits. Switching never applies one realm's rows to another.
@@ -201,17 +201,18 @@ function init() {
     if(chosen)paths.server.value=chosen.serverPath;
     sources.selection=realmSelect.value;persistSources();
     if(realmSelect.value==='manual'){document.querySelector('#spellbook').classList.remove('hidden');return;}
-    try{await loadSources();}catch(error){fail(error);}
+    try{if(sources.realmId!=null)await B.api('realm',{id:sources.realmId});await loadSources();}catch(error){fail(error);}
   };
   window.StudioSources={ready:Promise.resolve(),reload:loadSources,initialized:!B.connected,error:null};
   if(B.connected)window.StudioSources.ready=B.api('settings').then(async function(s){
     ['server','client','core'].forEach(function(k){if(!sources[k+'Path']){paths[k].value=s[k+'Path']||'';}});
     availableRealms=s.realms||[];availableRealms.forEach(function(r){option(realmSelect,r.id,r.name+' · '+r.database);});
-    var selected=sources.selection || String(sources.realmId || s.defaultRealmId || 'builtin');
+    var selected=sources.selection || String(sources.realmId || 'builtin');
     realmSelect.value=selected;
     if(!realmSelect.value)realmSelect.value='builtin';
     sources.realmId=/^\d+$/.test(realmSelect.value)?Number(realmSelect.value):null;
     if(sources.realmId!=null){paths.server.value=availableRealms.find(function(r){return r.id===sources.realmId;}).serverPath;if(sources.includeSql==null)sources.includeSql=true;sql.checked=!!sources.includeSql;await loadSources();}
+    else if(selected==='manual'&&(sources.serverPath||sources.clientPath))await loadSources();
     (s.notices||[]).forEach(function(n){notices.appendChild(el('p',null,n));});
   }).catch(function(error){window.StudioSources.error=error.message;fail(error);}).finally(function(){window.StudioSources.initialized=true;realmSelect.disabled=false;});
   document.querySelector('#backupStudio').onclick=function(){download('class-studio-workspace.json',JSON.stringify({format:'crucible-class-studio-workspace',version:1,storage:B.storage()},null,2));};

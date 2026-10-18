@@ -24,6 +24,7 @@ public sealed class ClientEffectiveAssetCatalog
     private readonly IReadOnlyList<IndexedArchive> _archives;
     private readonly Dictionary<string, IReadOnlyList<ClientEffectiveAssetCandidate>> _known;
     private readonly Dictionary<string, ClientEffectiveAssetResolution> _resolutions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (List<ClientEffectiveAssetCandidate> Candidates, List<string> Failures)> _probes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _hashes = new(StringComparer.OrdinalIgnoreCase);
 
     public string IndexDirectory { get; }
@@ -84,18 +85,8 @@ public sealed class ClientEffectiveAssetCatalog
     {
         clientPath = Normalize(clientPath); preferredArchive = string.IsNullOrWhiteSpace(preferredArchive) ? null : PatchInputMapper.NormalizeArchivePath(preferredArchive);
         var cacheKey = preferredArchive is null ? clientPath : clientPath + "\u001f" + preferredArchive; if (_resolutions.TryGetValue(cacheKey, out var cached)) return cached;
-        var candidates = _known.TryGetValue(clientPath, out var known) ? known.ToList() : [];
-        var failures = new List<string>();
-        foreach (var archive in _archives.Where(archive => archive.RequiresExactProbe && !candidates.Any(candidate => candidate.ArchiveRelativePath.Equals(archive.Summary.RelativePath, StringComparison.OrdinalIgnoreCase))))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                foreach (var entry in new PatchArchiveService().ListFiles(archive.ArchivePath, clientPath).Where(entry => !entry.IsMetadata && Normalize(entry.ArchivePath).Equals(clientPath, StringComparison.OrdinalIgnoreCase)))
-                    candidates.Add(new(archive.Summary.RelativePath, archive.Summary.Scope, entry, archive.Precedence, archive.PrecedenceDescription));
-            }
-            catch (Exception exception) { failures.Add($"{archive.Summary.RelativePath}: {exception.Message}"); }
-        }
+        ProbePaths([clientPath], cancellationToken);
+        var (candidates, failures) = _probes[clientPath];
         candidates = candidates.DistinctBy(candidate => $"{candidate.ArchiveRelativePath}\u001f{candidate.Entry.ArchivePath}\u001f{candidate.Entry.Locale}", StringComparer.OrdinalIgnoreCase).ToList();
         ClientEffectiveAssetResolution result;
         if (preferredArchive is not null)
@@ -124,6 +115,35 @@ public sealed class ClientEffectiveAssetCatalog
         _resolutions[cacheKey] = result; return result;
     }
 
+    public IReadOnlyList<ClientEffectiveAssetResolution> ResolveMany(IEnumerable<string> paths, CancellationToken cancellationToken = default)
+    {
+        var names = paths.Select(Normalize).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        ProbePaths(names, cancellationToken);
+        return names.Select(path => Resolve(path, cancellationToken: cancellationToken)).ToArray();
+    }
+
+    private void ProbePaths(IEnumerable<string> paths, CancellationToken cancellationToken)
+    {
+        var pending = paths.Where(path => !_probes.ContainsKey(path)).Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(path => path, path => (Candidates: _known.TryGetValue(path, out var known) ? known.ToList() : new List<ClientEffectiveAssetCandidate>(), Failures: new List<string>()), StringComparer.OrdinalIgnoreCase);
+        if (pending.Count == 0) return;
+        foreach (var archive in _archives.Where(archive => archive.RequiresExactProbe))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var names = pending.Where(pair => !pair.Value.Candidates.Any(candidate => candidate.ArchiveRelativePath.Equals(archive.Summary.RelativePath, StringComparison.OrdinalIgnoreCase))).Select(pair => pair.Key).ToArray();
+            if (names.Length == 0) continue;
+            try
+            {
+                foreach (var entry in new PatchArchiveService().ListNamedFiles(archive.ArchivePath, names, cancellationToken))
+                    if (!entry.IsMetadata && pending.TryGetValue(Normalize(entry.ArchivePath), out var probe))
+                        probe.Candidates.Add(new(archive.Summary.RelativePath, archive.Summary.Scope, entry, archive.Precedence, archive.PrecedenceDescription));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception exception) { foreach (var name in names) pending[name].Failures.Add($"{archive.Summary.RelativePath}: {exception.Message}"); }
+        }
+        foreach (var pair in pending) _probes.Add(pair.Key, pair.Value);
+    }
+
     public bool ContentEquals(string sourcePath, ClientEffectiveAssetResolution resolution, CancellationToken cancellationToken = default)
     {
         sourcePath = Path.GetFullPath(sourcePath); var effective = resolution.Effective ?? throw new InvalidOperationException("An effective target candidate is required for content comparison.");
@@ -148,26 +168,44 @@ public sealed class ClientEffectiveAssetCatalog
     /// <summary>Extracts one already-resolved effective entry without weakening archive precedence.</summary>
     public string ExtractEffective(ClientEffectiveAssetCandidate candidate, string destinationRoot, bool overwrite = false,
         CancellationToken cancellationToken = default)
+        => ExtractEffectiveMany([candidate], destinationRoot, overwrite, cancellationToken).Single();
+
+    public IReadOnlyList<string> ExtractEffectiveMany(IEnumerable<ClientEffectiveAssetCandidate> candidates, string destinationRoot,
+        bool overwrite = false, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(candidate); destinationRoot = Path.GetFullPath(destinationRoot);
-        var archive = _archives.SingleOrDefault(value => value.Summary.RelativePath.Equals(candidate.ArchiveRelativePath, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidDataException($"Archive '{candidate.ArchiveRelativePath}' is not active in this client catalog.");
-        var current = Resolve(candidate.Entry.ArchivePath, candidate.ArchiveRelativePath, cancellationToken);
-        if (current.State != ClientEffectiveAssetState.Effective || current.Effective is null ||
-            current.Effective.Entry.BlockIndex != candidate.Entry.BlockIndex || current.Effective.Entry.Locale != candidate.Entry.Locale ||
-            current.Effective.Entry.Size != candidate.Entry.Size || current.Effective.Entry.CompressedSize != candidate.Entry.CompressedSize ||
-            current.Effective.Entry.Flags != candidate.Entry.Flags || !Normalize(current.Effective.Entry.ArchivePath).Equals(Normalize(candidate.Entry.ArchivePath), StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"The indexed candidate for '{candidate.Entry.ArchivePath}' no longer resolves to the requested physical archive entry.");
-        var extracted = SafeChild(destinationRoot, Normalize(candidate.Entry.ArchivePath), "effective extraction destination");
-        if (File.Exists(extracted) && !overwrite) throw new IOException($"Effective extraction destination already exists: {extracted}");
+        destinationRoot = Path.GetFullPath(destinationRoot);
+        var entries = candidates.Select(candidate =>
+        {
+            ArgumentNullException.ThrowIfNull(candidate);
+            var archive = _archives.SingleOrDefault(value => value.Summary.RelativePath.Equals(candidate.ArchiveRelativePath, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidDataException($"Archive '{candidate.ArchiveRelativePath}' is not active in this client catalog.");
+            var current = Resolve(candidate.Entry.ArchivePath, candidate.ArchiveRelativePath, cancellationToken);
+            if (current.State != ClientEffectiveAssetState.Effective || current.Effective is null ||
+                current.Effective.Entry.BlockIndex != candidate.Entry.BlockIndex || current.Effective.Entry.Locale != candidate.Entry.Locale ||
+                current.Effective.Entry.Size != candidate.Entry.Size || current.Effective.Entry.CompressedSize != candidate.Entry.CompressedSize ||
+                current.Effective.Entry.Flags != candidate.Entry.Flags || !Normalize(current.Effective.Entry.ArchivePath).Equals(Normalize(candidate.Entry.ArchivePath), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"The indexed candidate for '{candidate.Entry.ArchivePath}' no longer resolves to the requested physical archive entry.");
+            var path = SafeChild(destinationRoot, Normalize(candidate.Entry.ArchivePath), "effective extraction destination");
+            if (File.Exists(path) && !overwrite) throw new IOException($"Effective extraction destination already exists: {path}");
+            return (Candidate: candidate, Archive: archive, Destination: path);
+        }).ToArray();
+        if (entries.Select(e => e.Destination).Distinct(StringComparer.OrdinalIgnoreCase).Count() != entries.Length)
+            throw new InvalidOperationException("Batch effective extraction requires one candidate per destination path.");
         var temporaryRoot = Path.Combine(Path.GetTempPath(), $"wow-crucible-indexed-extract-{Environment.ProcessId}-{Guid.NewGuid():N}");
         try
         {
-            new PatchArchiveService().Extract(archive.ArchivePath, temporaryRoot, [candidate.Entry], cancellationToken: cancellationToken);
-            var temporary = SafeChild(temporaryRoot, Normalize(candidate.Entry.ArchivePath), "temporary effective extraction");
-            if (!File.Exists(temporary)) throw new IOException($"The effective target asset was not extracted: {candidate.Entry.ArchivePath}");
-            if (new FileInfo(temporary).Length != candidate.Entry.Size) throw new IOException($"Extracted size mismatch for {candidate.Entry.ArchivePath}.");
-            Directory.CreateDirectory(Path.GetDirectoryName(extracted)!); File.Move(temporary, extracted, overwrite); return extracted;
+            foreach (var group in entries.GroupBy(e => e.Archive.ArchivePath, StringComparer.OrdinalIgnoreCase))
+                new PatchArchiveService().Extract(group.Key, temporaryRoot, group.Select(e => e.Candidate.Entry), cancellationToken: cancellationToken, workers: 1);
+            foreach (var entry in entries)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var temporary = SafeChild(temporaryRoot, Normalize(entry.Candidate.Entry.ArchivePath), "temporary effective extraction");
+                if (!File.Exists(temporary) || new FileInfo(temporary).Length != entry.Candidate.Entry.Size)
+                    throw new IOException($"Missing or invalid extracted size for {entry.Candidate.Entry.ArchivePath}.");
+                Directory.CreateDirectory(Path.GetDirectoryName(entry.Destination)!);
+                File.Move(temporary, entry.Destination, overwrite);
+            }
+            return entries.Select(e => e.Destination).ToArray();
         }
         finally { try { if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, true); } catch { } }
     }

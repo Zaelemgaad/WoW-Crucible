@@ -57,9 +57,10 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private readonly List<MountedItemPreview> _mountedItems = [];
     private M2PreviewGeometry? _mountCharacterGeometry; private string? _mountCharacterPath;
     private readonly TextBlock _status = Status("Offline portable schema ready."); private readonly Border _confirmation = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
-    private readonly Button _commit = AccentButton("Insert into connected database");
+    private readonly Button _commit = AccentButton("Create item");
     private ItemWritePlan? _pendingInsert;
     private uint? _loadedEntry;
+    private DatabaseConnectionProfile? _loadedProfile;
     private SpellTooltipCatalog? _spellCatalog; private CancellationTokenSource? _spellDecode;
 
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
@@ -124,6 +125,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
 
     public void LoadRow(IReadOnlyDictionary<string, object?> row)
     {
+        _pendingInsert=null;_confirmation.IsVisible=false;_loadedProfile=_session.DatabaseProfile;
         _loading = true;
         try
         {
@@ -136,7 +138,13 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             for(var index=0;index<5;index++){var slot=index+1;_spellIds[index].Value=Decimal(row,$"spellid_{slot}");Set(_spellTriggers[index],Int(row,$"spelltrigger_{slot}"));_spellCharges[index].Value=Decimal(row,$"spellcharges_{slot}");_spellPpm[index].Value=Decimal(row,$"spellppmRate_{slot}");_spellCooldowns[index].Value=Decimal(row,$"spellcooldown_{slot}",-1);_spellCategories[index].Value=Decimal(row,$"spellcategory_{slot}");_spellCategoryCooldowns[index].Value=Decimal(row,$"spellcategorycooldown_{slot}",-1);}
         }
         finally { _loading = false; }
-        _loadedEntry=(uint)(_entry.Value??0);_commit.Content="Apply decoded fields to existing item";RefreshPreview();RefreshSql();_status.Text=$"Loaded live item {_loadedEntry} with decoded names. Unmapped/custom fields remain editable in SQL Studio."; _ = ResolveDisplayAsync(false); ScheduleSpellDecode();
+        _loadedEntry=(uint)(_entry.Value??0);_commit.Content="Save changes";RefreshPreview();RefreshSql();_status.Text=$"Loaded live item {_loadedEntry} with decoded names. Unmapped/custom fields remain editable in SQL Studio."; _ = ResolveDisplayAsync(false); ScheduleSpellDecode();
+    }
+
+    public void NewItem()
+    {
+        LoadRow(new Dictionary<string, object?> { ["entry"]=1, ["name"]="New Custom Item", ["Quality"]=1 });
+        _loadedEntry=null;_loadedProfile=null;_commit.Content="Create item";RefreshSql();_status.Text="New item draft. Existing IDs will not be overwritten.";
     }
 
     public void LoadClientOnlyDraft(ClientItemRecord client)
@@ -156,7 +164,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
 
     private void ResetServerOnlyDraftFields()
     {
-        _loadedEntry=null;
+        _loadedEntry=null;_loadedProfile=null;_pendingInsert=null;_confirmation.IsVisible=false;
         _buy.Value=0;_sell.Value=0;Set(_bonding,0);_flags.Value=0;_armor.Value=0;
         _damageMin.Value=0;_damageMax.Value=0;Set(_damageType,0);_delay.Value=0;_durability.Value=0;
         _itemSet.Value=0;_description.Text=string.Empty;
@@ -210,10 +218,27 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         if(item.SellPrice>0) AddTooltip($"Sell Price: {Price(item.SellPrice)}",Brushes.White); AddTooltip($"Entry {item.Entry}  •  Display {item.DisplayId}",Brush.Parse("#787882"),11);
     }
 
-    private void RefreshSql(){ try{ var plan=Plan(); _sql.Text=plan.PreviewSql()+(plan.OmittedFields.Count==0?"":$"\n\n-- Target schema omitted: {string.Join(", ",plan.OmittedFields)}")+(plan.SelectedOmittedFields.Count==0?"":$"\n-- WRITE BLOCKED; configured values would be lost: {string.Join(", ",plan.SelectedOmittedFields)}"); _status.Text=plan.LosesSelectedSemantics?$"Write blocked: target schema cannot represent configured {string.Join(", ",plan.SelectedOmittedFields)}.":$"Plan targets {plan.Table} with {plan.Values.Count:N0} columns; {plan.OmittedFields.Count:N0} unused/default field(s) unavailable."; }catch(Exception exception){_status.Text=exception.Message;} }
-    private async Task ExportAsync(){ try{RefreshSql();var file=await Storage().SaveFilePickerAsync(new FilePickerSaveOptions{Title="Export item SQL",SuggestedFileName=$"item-{(uint)(_entry.Value??0)}.sql",FileTypeChoices=[new FilePickerFileType("SQL"){Patterns=["*.sql"]}]});var path=file?.TryGetLocalPath();if(path is not null)await File.WriteAllTextAsync(path,(_sql.Text??string.Empty)+Environment.NewLine);}catch(Exception exception){_status.Text=$"Export failed: {exception.Message}";} }
-    private void PrepareInsert(){ try{ if(!_session.DatabaseTested||_session.DatabaseProfile is null){_status.Text="Connect and verify Server & SQL before writing.";return;} _pendingInsert=Plan();_pendingInsert.EnsureSelectedSemanticsAreRepresented();if(_loadedEntry is{ } loaded&&(uint)(_entry.Value??0)!=loaded)throw new InvalidOperationException("The decoded editor will not silently change a primary item ID. Use Full item copy for a variant or SQL Studio for an explicit key migration.");var editing=_loadedEntry is not null;var cancel=new Button{Content="Cancel"};var confirm=AccentButton(editing?$"Confirm update item {_loadedEntry}":$"Confirm insert item {(uint)(_entry.Value??0)}");cancel.Click+=(_,_)=>{_confirmation.IsVisible=false;_pendingInsert=null;};confirm.Click+=async(_,_)=>await CommitAsync(confirm);var unavailable=_pendingInsert.OmittedFields.Count==0?"Target schema represents every guided field.":$"The target lacks {_pendingInsert.OmittedFields.Count:N0} unused/default field(s); no configured value is affected.";_confirmation.Child=new Grid{ColumnDefinitions=new("*,Auto,Auto"),ColumnSpacing=8,Children={new TextBlock{Text=(editing?$"Update Crucible's decoded fields for '{_name.Text}' in {_session.DatabaseProfile.Database}.item_template? Custom/unmapped columns remain unchanged.":$"Insert '{_name.Text}' into {_session.DatabaseProfile.Database}.item_template? Existing IDs are refused, never replaced.")+$" {unavailable}",TextWrapping=TextWrapping.Wrap,VerticalAlignment=VerticalAlignment.Center},WithColumn(cancel,1),WithColumn(confirm,2)}};_confirmation.IsVisible=true;}catch(Exception exception){_pendingInsert=null;_status.Text=exception.Message;} }
-    private async Task CommitAsync(Button button){ if(_pendingInsert is null||_session.DatabaseProfile is null)return;try{button.IsEnabled=false;if(_loadedEntry is{ } loaded)await new SqlWorkspaceService().UpdateRowAsync(_session.DatabaseProfile,Table(),new Dictionary<string,object?>{{"entry",loaded}},_pendingInsert.Values.ToDictionary(pair=>pair.Key,pair=>(object?)pair.Value,StringComparer.OrdinalIgnoreCase));else await new ItemTemplateService().InsertAsync(_session.DatabaseProfile,_pendingInsert);_status.Text=_loadedEntry is null?"Item inserted transactionally. Restart or reload the world server as required by the detected core.":"Decoded item fields updated transactionally; custom/unmapped columns were preserved.";_confirmation.IsVisible=false;_pendingInsert=null;}catch(Exception exception){_status.Text=$"Item write failed: {exception.Message}";DesktopCrashLogger.Log("Item write failed",exception);}finally{button.IsEnabled=true;} }
+    private bool RefreshSql(){ _pendingInsert=null;_confirmation.IsVisible=false;try{ var plan=Plan(); _sql.Text=(_loadedEntry is { } existing ? plan.PreviewUpdateSql(existing) : plan.PreviewSql())+(plan.OmittedFields.Count==0?"":$"\n\n-- Target schema omitted: {string.Join(", ",plan.OmittedFields)}")+(plan.SelectedOmittedFields.Count==0?"":$"\n-- WRITE BLOCKED; configured values would be lost: {string.Join(", ",plan.SelectedOmittedFields)}"); _status.Text=plan.LosesSelectedSemantics?$"Write blocked: target schema cannot represent configured {string.Join(", ",plan.SelectedOmittedFields)}.":$"Plan targets {plan.Table} with {plan.Values.Count:N0} columns; {plan.OmittedFields.Count:N0} unused/default field(s) unavailable.";return true; }catch(Exception exception){_sql.Text=string.Empty;_status.Text=exception.Message;return false;} }
+    private async Task ExportAsync(){ try{if(!RefreshSql())return;var file=await Storage().SaveFilePickerAsync(new FilePickerSaveOptions{Title="Export item SQL",SuggestedFileName=$"item-{(uint)(_entry.Value??0)}.sql",FileTypeChoices=[new FilePickerFileType("SQL"){Patterns=["*.sql"]}]});var path=file?.TryGetLocalPath();if(path is not null)await File.WriteAllTextAsync(path,(_sql.Text??string.Empty)+Environment.NewLine);}catch(Exception exception){_status.Text=$"Export failed: {exception.Message}";} }
+    private void PrepareInsert(){ try{ if(_loadedEntry is not null && _loadedProfile != _session.DatabaseProfile)throw new InvalidOperationException("This item was opened from a different database. Return to that realm or open an item from the current realm before saving."); if(!_session.DatabaseTested||_session.DatabaseProfile is null){_status.Text="Connect and verify Server & SQL before writing.";return;} _pendingInsert=Plan();_pendingInsert.EnsureSelectedSemanticsAreRepresented();if(_loadedEntry is{ } loaded&&(uint)(_entry.Value??0)!=loaded)throw new InvalidOperationException("The decoded editor will not silently change a primary item ID. Use Full item copy for a variant or SQL Studio for an explicit key migration.");var editing=_loadedEntry is not null;var cancel=new Button{Content="Cancel"};var confirm=AccentButton(editing?$"Confirm update item {_loadedEntry}":$"Confirm insert item {(uint)(_entry.Value??0)}");cancel.Click+=(_,_)=>{_confirmation.IsVisible=false;_pendingInsert=null;};confirm.Click+=async(_,_)=>await CommitAsync(confirm);var unavailable=_pendingInsert.OmittedFields.Count==0?"Target schema represents every guided field.":$"The target lacks {_pendingInsert.OmittedFields.Count:N0} unused/default field(s); no configured value is affected.";_confirmation.Child=new Grid{ColumnDefinitions=new("*,Auto,Auto"),ColumnSpacing=8,Children={new TextBlock{Text=(editing?$"Update Crucible's decoded fields for '{_name.Text}' in {_session.DatabaseProfile.Database}.item_template? Custom/unmapped columns remain unchanged.":$"Insert '{_name.Text}' into {_session.DatabaseProfile.Database}.item_template? Existing IDs are refused, never replaced.")+$" {unavailable}",TextWrapping=TextWrapping.Wrap,VerticalAlignment=VerticalAlignment.Center},WithColumn(cancel,1),WithColumn(confirm,2)}};_confirmation.IsVisible=true;}catch(Exception exception){_pendingInsert=null;_status.Text=exception.Message;} }
+    private async Task CommitAsync(Button button)
+    {
+        if (_pendingInsert is not { } plan || _session.DatabaseProfile is not { } profile) return;
+        var editing = _loadedEntry is not null;
+        try
+        {
+            button.IsEnabled=false;
+            if (_loadedEntry is { } loaded)
+                await new SqlWorkspaceService().UpdateRowAsync(profile,Table(),new Dictionary<string,object?>{{"entry",loaded}},plan.Values.ToDictionary(pair=>pair.Key,pair=>(object?)pair.Value,StringComparer.OrdinalIgnoreCase));
+            else
+                await new ItemTemplateService().InsertAsync(profile,plan);
+            _loadedEntry=Convert.ToUInt32(plan.Values["entry"]);_loadedProfile=profile;_commit.Content="Save changes";
+            _confirmation.IsVisible=false;_pendingInsert=null;RefreshSql();
+            _status.Text=editing ? "Decoded item fields updated transactionally; custom/unmapped columns were preserved." : "Item created. Further saves update this item. Restart or reload the world server as required by the detected core.";
+        }
+        catch(Exception exception){_status.Text=$"Item write failed: {exception.Message}";DesktopCrashLogger.Log("Item write failed",exception);}
+        finally{button.IsEnabled=true;}
+    }
     private async Task LoadModelAsync(){try{var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title="Choose an extracted WotLK M2",AllowMultiple=false,FileTypeFilter=[new FilePickerFileType("WotLK M2"){Patterns=["*.m2"]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is null)return;_modelStatus.Text="Loading model…";var geometry=await Task.Run(()=>M2PreviewGeometryService.Load(path));ClearMountedPreviewState();_model.SetGeometry(geometry);RefreshAttachmentPoints(geometry);_modelStatus.Text=$"{Path.GetFileName(path)} · {geometry.Submeshes.Count(section=>section.Visible):N0}/{geometry.Submeshes.Count:N0} geosets · {geometry.VisibilityMode} · {geometry.TriangleIndices.Count/3:N0} triangles · {geometry.Attachments.Count:N0} attachment points";}catch(Exception exception){_modelStatus.Text=$"Model load failed: {exception.Message}";} }
 
     private async Task ResolveDisplayAsync(bool loadFirstModel)
@@ -492,7 +517,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             if(current is not null)control.Value=Math.Clamp(current.Value,contract.Minimum,contract.Maximum);
         }
     }
-    private void SessionChanged(object? sender,EventArgs e)=>RefreshSchemaStatus(); private void RefreshSchemaStatus(){var cap=_session.DatabaseCapabilities;var table=cap?.FindTable("item_template");ApplyNumericRanges(table);_status.Text=table is not null?$"Live schema ready · {cap!.Database}.item_template · {table.Columns.Count:N0} columns · numeric controls follow the narrower SQL/runtime width":"Offline portable schema ready · numeric controls follow safe 3.3.5 runtime widths; connect Server & SQL for live schema intersection.";}
+    private void SessionChanged(object? sender,EventArgs e){_pendingInsert=null;_confirmation.IsVisible=false;RefreshSchemaStatus();if(_loadedEntry is not null && _loadedProfile!=_session.DatabaseProfile)_status.Text="This draft belongs to a different realm. Return to that realm to save, or open another item.";} private void RefreshSchemaStatus(){var cap=_session.DatabaseCapabilities;var table=cap?.FindTable("item_template");ApplyNumericRanges(table);_status.Text=table is not null?$"Live schema ready · {cap!.Database}.item_template · {table.Columns.Count:N0} columns · numeric controls follow the narrower SQL/runtime width":"Offline portable schema ready · numeric controls follow safe 3.3.5 runtime widths; connect Server & SQL for live schema intersection.";}
     public void Dispose(){_session.Changed-=SessionChanged;_spellDecode?.Cancel();_spellDecode?.Dispose();_model.Dispose();}
     private IStorageProvider Storage()=>TopLevel.GetTopLevel(this)?.StorageProvider??throw new InvalidOperationException("Item Creator is not attached to the main window.");
     private async Task PickFileAsync(TextBox target,string title,string pattern){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType(title){Patterns=[pattern]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}

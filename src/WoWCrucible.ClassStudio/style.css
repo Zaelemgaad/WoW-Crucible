@@ -233,7 +233,7 @@ h1, h2 { font-weight: 600; }
 .board-actions { position: fixed; margin: 0; padding: 6px; width: 160px; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
 .board-actions:popover-open { display: flex; flex-direction: column; gap: 5px; }
 .board-actions .tree-copy-btn { margin: 0; padding: 6px; text-align: left; }
-.toolbars-hidden .topbar, .toolbars-hidden .class-picker, .toolbars-hidden .pane-actions,
+.toolbars-hidden .studio-settings-toggle, .toolbars-hidden .topbar, .toolbars-hidden .class-picker, .toolbars-hidden .pane-actions,
 .toolbars-hidden .summary-bar, .toolbars-hidden .canvas-tools, .toolbars-hidden .workspace-controls,
 .toolbars-hidden #editHint { display: none !important; }
 .canvas-board .tree-grid-wrap { flex: 1; min-height: 0; width: 100%; overflow: auto; scrollbar-gutter: stable; }
@@ -554,3 +554,11 @@ body.edit-mode .talent-icon:hover { border-color: #2050c0; }
 .studio-source-bar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; width:100%; }
 .studio-source-bar select { max-width: min(540px, 65vw); }
 .studio-source-status { font-size:12px; color:var(--text-dim); }
+
+.studio-settings-toggle { position:fixed; top:6px; right:6px; z-index:80; display:grid; place-items:center; width:30px; height:30px; padding:4px; border:1px solid transparent; border-radius:4px; background:var(--panel); color:var(--text-dim); cursor:pointer; }
+.studio-settings-toggle:hover, .studio-settings-toggle[aria-expanded="true"] { color:var(--gold); border-color:var(--border); }
+.studio-settings-panel { position:fixed; top:6px; right:42px; z-index:79; width:min(760px, calc(100vw - 54px)); min-width:min(320px, calc(100vw - 54px)); max-width:calc(100vw - 54px); max-height:calc(100vh - 12px); overflow:auto; resize:both; border:1px solid var(--border); border-radius:5px; box-shadow:0 10px 30px #0009; }
+.studio-settings-panel[hidden] { display:none; }
+.class-picker { padding-right:38px; }
+
+.edit-hint { margin-right:48px; }

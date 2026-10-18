@@ -6,6 +6,8 @@ namespace WoWCrucible.Desktop;
 internal sealed class DesktopWorkspaceSession : IDisposable
 {
     private ServerDatabaseConnectionSession? _serverDatabaseConnection;
+    private ServerRealmCatalog? _realmCatalog;
+    private string? _realmRoot;
     public DesktopSettings Settings { get; }
     public ServerLifecycleService Lifecycle { get; } = new();
     public CrucibleWorkspaceLayout? WorkspaceLayout { get; private set; }
@@ -60,15 +62,38 @@ internal sealed class DesktopWorkspaceSession : IDisposable
         }
     }
 
+    public async Task<ServerRealmCatalog> GetRealmsAsync(CancellationToken cancellationToken = default)
+    {
+        if (_realmCatalog is null || _realmRoot != Settings.ServerRootPath)
+        {
+            var root = Settings.ServerRootPath;
+            _realmCatalog = await ServerRealmCatalog.ReadAsync(root, cancellationToken);
+            _realmRoot = root;
+        }
+        return _realmCatalog;
+    }
+
+    public async Task SelectRealmAsync(uint id, CancellationToken cancellationToken = default)
+    {
+        var catalog = await GetRealmsAsync(cancellationToken);
+        if (!catalog.Realms.Any(r => r.Id == id)) throw new InvalidOperationException("That realm is not configured in this workspace.");
+        Settings.ActiveRealmId = id;
+        await DetectServerAndConnectAsync(Settings.ServerRootPath, cancellationToken);
+    }
+
     public async Task DetectServerAndConnectAsync(string rootPath, CancellationToken cancellationToken = default)
     {
         LastError = null;
         try
         {
-            var server = await ServerWorkspaceDetector.DetectAsync(rootPath, cancellationToken);
+            var catalog = await ServerRealmCatalog.ReadAsync(rootPath, cancellationToken);
+            _realmCatalog = catalog; _realmRoot = rootPath;
+            var selected = catalog.Realms.FirstOrDefault(r => r.Id == Settings.ActiveRealmId)
+                ?? catalog.Realms.FirstOrDefault(r => r.Server.WorldDatabase.Database == Settings.WorldDatabase);
+            var server = selected?.Server ?? await ServerWorkspaceDetector.DetectAsync(rootPath, cancellationToken);
             DisposeDatabaseTransport();
             Server = server; DatabaseProfile = server.WorldDatabase; DatabaseCapabilities = null;
-            Settings.ServerRootPath = server.RootPath; Settings.CoreDbcPath = server.DbcPath;
+            Settings.ServerRootPath = rootPath; Settings.ActiveRealmId = selected?.Id; Settings.CoreDbcPath = server.DbcPath;
             Settings.DatabaseHost = server.WorldDatabase.Host; Settings.DatabasePort = server.WorldDatabase.Port; Settings.DatabaseUser = server.WorldDatabase.User; Settings.WorldDatabase = server.WorldDatabase.Database; Settings.DatabaseSslMode = server.WorldDatabase.SslMode.ToString();
             Settings.Save();
             Changed?.Invoke(this, EventArgs.Empty);

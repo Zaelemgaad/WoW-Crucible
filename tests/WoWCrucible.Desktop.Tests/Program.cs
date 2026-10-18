@@ -14,6 +14,7 @@ internal static class Program
             UiStressTestSuite.Run(args.Length > 1 ? int.Parse(args[1]) : 180026, args.Length > 2 ? int.Parse(args[2]) : 2000);
             return;
         }
+        if (args.Contains("--item-browser-live")) { GuidedEditorsTestSuite.Run(true); return; }
         if (args.Contains("--guided-editors")) { GuidedEditorsTestSuite.Run(); return; }
         if (args.Contains("--workspace-shell")) { WorkspaceShellTestSuite.Run(); return; }
         if (args.Contains("--embedded-studio")) { EmbeddedStudioTestSuite.Run(args.Contains("--coa")); return; }

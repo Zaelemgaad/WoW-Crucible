@@ -100,7 +100,7 @@ function iconRefToSrc(ref) {
 function classMeta(classId) {
   if (BASE[classId]) {
     var b = BASE[classId];
-    return { classId: classId, name: b.name, iconSrc: b.file ? 'classicons/' + b.file + '.jpg' : 'icons/_placeholder.png', isCustom: false };
+    return { classId: classId, name: b.name, iconSrc: b.iconSrc || (b.file ? 'classicons/' + b.file + '.jpg' : 'icons/_placeholder.png'), isCustom: false };
   }
   var c = STATE.customClasses.filter(function (x) { return x.id === classId; })[0];
   if (c) return { classId: classId, name: c.name, iconSrc: iconRefToSrc(c.icon), isCustom: true };
