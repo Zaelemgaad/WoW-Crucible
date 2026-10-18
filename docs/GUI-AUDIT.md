@@ -434,3 +434,66 @@ layout/rendering, not OS mouse hit-testing, focused keyboard input, or native
 file-picker dialogs. It does not cover every editor, large live datasets, SQL
 operations, or every possible timing. Source-file integrity checks and the
 separate preview lifetime suite supplement the randomized navigation checks.
+
+## Systematic control activation audit — 2026-10-18
+
+The reproducible inventory and per-control evidence are in
+[UI activation coverage](validation/ui-coverage/README.md). Unlike the randomized
+stress test, this walk enumerates the workspace command routes, native tabs,
+realized controls and dropdown options, plus the embedded editor's DOM controls.
+A separate source callback catalog exposes definitions outside the realized
+screens without claiming they were activated.
+
+Run from the checkout root:
+
+```powershell
+dotnet run --project tests/WoWCrucible.Desktop.Tests -- --ui-coverage --activate
+python scripts/Write-UiCoverageReport.py
+```
+
+For the embedded-editor regression alone, add `--embedded-only`; it writes a
+separate local report and does not overwrite the full inventory. Test settings,
+generated fixtures and reports stay in the test executable or `.local/ui-coverage`.
+Windows remain unshown and their real compositor runs. A test-only storage
+provider cancels native pickers; picker cancellation is explicitly identified in
+the evidence, not counted as successful file import/export. Confirmations in the
+embedded editor also cancel. Existing app settings and live game data are untouched.
+
+The loaded-data scenarios use a generated BLP texture and Spell.dbc, plus a
+temporary Crucible project. They exercise texture editing controls and staging
+database creation, query, mutation preview/application, diff and publication to
+an in-memory DBC. Assertions check that the source files remain unchanged.
+
+The audit reproduced a persistent `ResizeObserver loop completed with
+undelivered notifications` error in the embedded canvas. Rounding the stage size
+up at fractional zoom, combined with a percentage minimum size, caused scrollbars
+to change the observed viewport repeatedly. Removing the rounding alone did not
+resolve the extended Free Mode scenario. Canvas fit now uses CSS percentage sizing
+against the viewport and explicit board extents, eliminating the observer that
+measured and rewrote its own layout. The regression exercises
+25%, 50%, 100%, 101%, 125% and 200% zoom and checks that viewport dimensions settle;
+browser errors still fail the audit rather than being suppressed.
+
+The loaded staging scenario also reproduced Avalonia's cross-thread-access
+exception: creation read a checkbox inside `Task.Run`; query and mutation read
+text fields there too. These operations now capture their input on the UI thread
+before scheduling the service call. The fixture checks success statuses, applies
+a mutation through the reviewed workflow, and verifies the open document becomes
+dirty while its on-disk source remains unchanged.
+
+This is not a claim of complete interaction coverage. Disabled/data-dependent
+controls, native pointer hit-testing, live SQL/deployment, Windows integration,
+and contexts not instantiated by the walk remain explicit gaps. Read-only
+outputs and menu containers are catalogued but have no input action. See the
+report for the exact tested/failed/untested breakdown and reasons.
+
+Final run: **4,763** inventoried runtime cases, **3,487** activated, **0** failed,
+**1,276** untested; **1,153** textual source callback declarations catalogued
+separately. The final full run includes the canvas geometry assertions and loaded
+staging success assertions. It exited successfully with no captured JavaScript,
+dispatcher or runner errors. WebView2 emitted a shutdown diagnostic about
+unregistering `Chrome_WidgetWin_0` (Windows error 1412) after the passing summary;
+this is recorded separately and is not a claim of a clean native stderr log.
+
+Post-fix randomized regression: seed **180035**, **2,000/2,000** actions and
+**1,940** embedded clicks passed, including the existing document/preview checks.

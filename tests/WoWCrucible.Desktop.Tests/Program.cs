@@ -8,6 +8,7 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        if (args.Contains("--ui-coverage")) { UiCoverageTestSuite.Run(args.Contains("--activate"), args.Contains("--embedded-only")); return; }
         if (args.Length > 0 && args[0] == "--ui-stress")
         {
             UiStressTestSuite.Run(args.Length > 1 ? int.Parse(args[1]) : 180026, args.Length > 2 ? int.Parse(args[2]) : 2000);

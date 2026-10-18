@@ -223,7 +223,7 @@ h1, h2 { font-weight: 600; }
 .canvas-tools { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 14px; align-items: center; padding: 6px 0; }
 .canvas-tools input[type=number] { width: 64px; }
 .board-canvas { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--bg); border: 1px solid var(--border); }
-.board-stage { position: relative; min-width: 100%; min-height: 100%; }
+.board-stage { position: absolute; top: 0; left: 0; }
 .canvas-grid { background-image: linear-gradient(#ffffff18 1px, transparent 1px), linear-gradient(90deg, #ffffff18 1px, transparent 1px); background-size: var(--canvas-grid-step) var(--canvas-grid-step); }
 .canvas-board { position: absolute; display: flex; flex-direction: column; min-width: 140px; min-height: 120px; }
 .canvas-board .tree-header { flex: 0 0 auto; flex-wrap: wrap; gap: 5px; }

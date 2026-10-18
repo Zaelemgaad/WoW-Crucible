@@ -95,7 +95,8 @@ internal sealed class DbcStagingWorkspaceView : UserControl
         SetBusy(true, "Creating the schema-bound staging database in one transaction…");
         try
         {
-            var result = await Task.Run(() => DbcStagingWorkspaceService.Create(project, _document.File, _document.Schema, _replace.IsChecked == true));
+            var replace = _replace.IsChecked == true;
+            var result = await Task.Run(() => DbcStagingWorkspaceService.Create(project, _document.File, _document.Schema, replace));
             _session.Settings.ActiveProjectPath = Path.GetFullPath(project); _session.Settings.Save(); _workspace.Text = result.WorkspacePath; _replace.IsChecked = false;
             await RefreshDiffAsync(); Succeed($"Staged {result.SourceRows:N0} rows × {result.Fields:N0} named fields. Baseline and imported identities are immutable.");
         }
@@ -106,7 +107,7 @@ internal sealed class DbcStagingWorkspaceView : UserControl
     private async Task QueryAsync()
     {
         if (!RequireWorkspace(out var path)) return; SetBusy(true, "Running bounded read-only staging query…");
-        try { var result = await Task.Run(() => DbcStagingWorkspaceService.Query(path, _sql.Text ?? string.Empty, ParseBindings(), 1000)); _output.Text = RenderQuery(result); Succeed($"Returned {result.Rows.Count:N0} row(s){(result.Truncated ? "; result is truncated at 1,000" : string.Empty)}."); }
+        try { var sql = _sql.Text ?? string.Empty; var bindings = ParseBindings(); var result = await Task.Run(() => DbcStagingWorkspaceService.Query(path, sql, bindings, 1000)); _output.Text = RenderQuery(result); Succeed($"Returned {result.Rows.Count:N0} row(s){(result.Truncated ? "; result is truncated at 1,000" : string.Empty)}."); }
         catch (Exception exception) { Fail(exception.Message); DesktopCrashLogger.Log("DBC staging query failed", exception); }
         finally { SetBusy(false); }
     }
@@ -118,7 +119,8 @@ internal sealed class DbcStagingWorkspaceView : UserControl
         SetBusy(true, apply ? "Revalidating and applying the reviewed staging mutation…" : "Running the staging mutation inside a rollback-only preview transaction…");
         try
         {
-            var result = await Task.Run(() => DbcStagingWorkspaceService.Mutate(path, _sql.Text ?? string.Empty, ParseBindings(), apply)); _output.Text = RenderDiff(result.Diff);
+            var sql = _sql.Text ?? string.Empty; var bindings = ParseBindings();
+            var result = await Task.Run(() => DbcStagingWorkspaceService.Mutate(path, sql, bindings, apply)); _output.Text = RenderDiff(result.Diff);
             if (apply) { ResetMutationReview(); Succeed($"Applied the reviewed mutation to working: {result.AffectedRows:N0} affected row(s). The source DBC is still untouched."); }
             else { _reviewedMutation = signature; _confirmMutation.IsVisible = true; _confirmMutation.IsChecked = false; Succeed($"Preview only: {result.AffectedRows:N0} affected row(s). SQLite rolled the statement back; check the exact diff before acknowledgement."); }
         }

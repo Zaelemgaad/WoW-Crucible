@@ -1,6 +1,5 @@
 (function () {
 'use strict';
-var instances = [];
 function element(tag, cls, text) {
   var el = document.createElement(tag);
   if (cls) el.className = cls;
@@ -45,15 +44,17 @@ function mount(parent, items, options) {
   control('Grid spacing', 'number', settings.step, function (v) { settings.step = v; }, 1, 64);
   control('Zoom %', 'number', settings.zoom, function (v) { settings.zoom = v; }, 25, 200);
   function bounds() {
-    var width = viewport.clientWidth / zoom, height = viewport.clientHeight / zoom;
+    var width = 0, height = 0;
     items.forEach(function (item) {
       if (!item.model.layout) return;
       var p = item.model.layout;
       width = Math.max(width, p.x + p.width);
       height = Math.max(height, p.y + p.height);
     });
-    stage.style.width = Math.ceil(width) + 'px';
-    stage.style.height = Math.ceil(height) + 'px';
+    // CSS resolves viewport fit, including scrollbars and fractional zoom.
+    // Only board extents come from script; never measure and rewrite the viewport.
+    stage.style.width = 'max(' + (100 / zoom) + '%, ' + width + 'px)';
+    stage.style.height = 'max(' + (100 / zoom) + '%, ' + height + 'px)';
   }
   function snap(value) { return settings.snap ? Math.round(value / settings.step) * settings.step : Math.round(value); }
   function availablePosition(width, height) {
@@ -156,11 +157,8 @@ function mount(parent, items, options) {
     });
   });
   applyGrid();
-  var observer = new ResizeObserver(bounds); observer.observe(viewport);
-  instances.push(observer);
 }
 window.BoardCanvas = {
-  mount: mount,
-  disposeAll: function () { instances.forEach(function (observer) { observer.disconnect(); }); instances = []; }
+  mount: mount
 };
 })();

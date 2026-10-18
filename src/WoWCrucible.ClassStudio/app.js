@@ -459,7 +459,6 @@ function enforcePointCap(cd) {
 // ----------------------------------------------------------------- render --
 
 function renderAll() {
-  BoardCanvas.disposeAll();
   qs('#panesContainer').classList.toggle('hidden', STATE.freeMode);
   qs('#freeWorkspace').classList.toggle('hidden', !STATE.freeMode);
   qs('#freeModeBtn').classList.toggle('on', STATE.freeMode);
