@@ -562,3 +562,6 @@ body.edit-mode .talent-icon:hover { border-color: #2050c0; }
 .class-picker { padding-right:38px; }
 
 .edit-hint { margin-right:48px; }
+
+.talent-choice { position:absolute; width:48px; height:17px; padding:0; font-size:9px; z-index:4; }
+#tooltip .desc { white-space:pre-line; }

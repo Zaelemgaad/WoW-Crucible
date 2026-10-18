@@ -260,6 +260,7 @@ function cloneWorkspaceTree(cd, source, name) {
     t.i = ids[t.i];
     t.k = 0;
     if (t.r) t.r = ids[t.r.reqId] != null ? { reqId: ids[t.r.reqId], reqRank: t.r.reqRank } : null;
+    if(t.connections)t.connections=t.connections.map(function(id){return ids[id];}).filter(function(id){return id!=null;});
   });
   return tree;
 }
@@ -277,14 +278,15 @@ function importWorkspace(payload) {
   }
   payload.trees.concat([payload.sideboard]).forEach(function (tree, index) {
     if (typeof tree.n !== 'string' || !Array.isArray(tree.t)) throw new Error('Invalid board');
-    var ids = new Set(), cells = new Set();
+    var ids = new Set(), cells = new Map();
     tree.t.forEach(function (t) {
       var cell = t.x + ',' + t.y;
-      if (!Number.isInteger(t.i) || ids.has(t.i) || cells.has(cell) || typeof t.n !== 'string' ||
-          !Number.isInteger(t.x) || t.x < 0 || (index < payload.trees.length && t.x >= COLS) ||
-          !Number.isInteger(t.y) || t.y < 0 || !Number.isInteger(t.m) || t.m < 1 || t.m > 10 ||
+      var occupant=cells.get(cell), choice=occupant && t.sourceFormat==='coa-plan' && t.sourceRow && t.sourceRow.Group && occupant.sourceRow && occupant.sourceRow.Group===t.sourceRow.Group;
+      if (!Number.isInteger(t.i) || ids.has(t.i) || (occupant && !choice) || typeof t.n !== 'string' ||
+          !Number.isFinite(t.x) || t.x < 0 || (index < payload.trees.length && t.x >= 64) ||
+          !Number.isFinite(t.y) || t.y < 0 || !Number.isInteger(t.m) || t.m < 1 || t.m > 10 ||
           !Array.isArray(t.d) || (t.s != null && !Array.isArray(t.s))) throw new Error('Invalid talent in ' + tree.n);
-      ids.add(t.i); cells.add(cell);
+      ids.add(t.i); cells.set(cell,t);
     });
     tree.t.forEach(function (t) {
       if (t.r && !ids.has(t.r.reqId)) throw new Error('Missing prerequisite in ' + tree.n);
@@ -354,7 +356,7 @@ function mountBoardCanvas(root, cd, workspace) {
   var items = cd.trees.map(function (tree, index) {
     var board = renderTree(cd, tree, index);
     board.classList.add('spec-board');
-    return { element: board, model: tree, cols: COLS, rows: Math.max(STATE.tiers, tree.t.reduce(function (n, t) { return Math.max(n, t.y + 1); }, 0)) };
+    return { element: board, model: tree, cols: treeColumns(tree), rows: Math.max(STATE.tiers, tree.t.reduce(function (n, t) { return Math.max(n, t.y + 1); }, 0)) };
   });
   var sideboard = renderSideboard(cd);
   items.push({ element: sideboard, model: cd.sideboard, get cols() { return sideboardCols(cd); }, get rows() { return sideboardRows(cd); }, resized: sideboard.refreshSlots });
@@ -656,7 +658,10 @@ function updateSummary(paneIndex, cd) {
     '<div class="points-left">Points left: <b>' + left + '</b></div>';
 }
 
+function treeColumns(tree) { return Math.max(COLS, Math.ceil(tree.t.reduce(function(n,t){return Math.max(n,t.x+1);},0))); }
+
 function renderTree(cd, tree, treeIdx) {
+  var columns=treeColumns(tree);
   var maxY = 0;
   tree.t.forEach(function (t) { if (t.y > maxY) maxY = t.y; });
   var tiers = Math.max(STATE.tiers, maxY + 1);
@@ -711,14 +716,14 @@ function renderTree(cd, tree, treeIdx) {
   block.appendChild(header);
 
   var wrap = ce('div', 'tree-grid-wrap');
-  wrap.style.width = (COLS * 50) + 'px';
+  wrap.style.width = (columns * 50) + 'px';
   wrap.style.height = (tiers * 50) + 'px';
   if (BASE[cd.classId] && BASE[cd.classId].file) {
     wrap.style.backgroundImage = "url('backgrounds/" + BASE[cd.classId].file + '_' + (treeIdx + 1) + ".jpg')";
   }
 
   var grid = ce('div', 'tree-grid');
-  grid.style.width = (COLS * 50) + 'px';
+  grid.style.width = (columns * 50) + 'px';
   grid.style.height = (tiers * 50) + 'px';
 
   tree.t.forEach(function (t) {
@@ -726,6 +731,7 @@ function renderTree(cd, tree, treeIdx) {
       var req = findById(tree, t.r.reqId);
       if (req) grid.appendChild(makeConnector(req, t));
     }
+    (t.connections||[]).forEach(function(id){var other=findById(tree,id);if(other)grid.appendChild(makeConnector(t,other));});
   });
 
   var occupied = {};
@@ -733,7 +739,7 @@ function renderTree(cd, tree, treeIdx) {
 
   if (STATE.editMode) {
     for (var y = 0; y < tiers; y++) {
-      for (var x = 0; x < COLS; x++) {
+      for (var x = 0; x < columns; x++) {
         if (!occupied[x + ',' + y]) {
           grid.appendChild(makeEmptySlot(cd, tree, treeIdx, x, y));
         }
@@ -741,8 +747,17 @@ function renderTree(cd, tree, treeIdx) {
     }
   }
 
-  tree.t.forEach(function (t) {
-    grid.appendChild(makeTalentCell(cd, tree, treeIdx, t));
+  var positions=new Map();
+  tree.t.forEach(function(t){var key=t.x+','+t.y;if(!positions.has(key))positions.set(key,[]);positions.get(key).push(t);});
+  positions.forEach(function(talents){
+    var cells=talents.map(function(t){var cell=makeTalentCell(cd,tree,treeIdx,t);grid.appendChild(cell);return cell;});
+    if(cells.length>1){
+      var choice=ce('select','talent-choice');choice.setAttribute('aria-label','Talent alternatives at this position');
+      choice.style.left=(talents[0].x*50)+'px';choice.style.top=(talents[0].y*50+34)+'px';
+      talents.forEach(function(t,i){var option=ce('option');option.value=i;option.textContent=t.n;choice.appendChild(option);cells[i].style.display=i?'none':'';});
+      choice.onchange=function(){cells.forEach(function(cell,i){cell.style.display=i===Number(choice.value)?'':'none';});hideTooltip();};
+      grid.appendChild(choice);
+    }
   });
 
   wrap.appendChild(grid);
@@ -899,16 +914,7 @@ function makeTalentCell(cd, bucket, treeIdx, t) {
   icon.dataset.talentId = String(t.i);
 
   var img = ce('img');
-  img.src = 'icons/' + t.iconname + (locked ? '_disabled.png' : '.png');
-  img.onerror = function () {
-    if (img.dataset.fallback !== '1') {
-      img.dataset.fallback = '1';
-      img.src = 'icons/' + t.iconname + '.png';
-    } else {
-      img.onerror = null;
-      img.src = 'icons/_placeholder.png';
-    }
-  };
+  StudioIcons.apply(img,t,locked);
   img.alt = t.n;
   icon.appendChild(img);
 
@@ -982,7 +988,7 @@ function startDrag(e, cd, bucket, t, iconEl) {
       hideTooltip();
       ghost = ce('div', 'drag-ghost');
       var img = ce('img');
-      img.src = 'icons/' + t.iconname + '.png';
+      StudioIcons.apply(img,t,false);
       ghost.appendChild(img);
       document.body.appendChild(ghost);
     }
@@ -1046,7 +1052,7 @@ function resolveDropTarget(clientX, clientY) {
 }
 
 function clearDanglingRefs(bucket, talentId) {
-  bucket.t.forEach(function (o) { if (o.r && o.r.reqId === talentId) o.r = null; });
+  bucket.t.forEach(function (o) { if (o.r && o.r.reqId === talentId) o.r = null; if(o.connections)o.connections=o.connections.filter(function(id){return id!==talentId;}); });
 }
 
 function containsTalentId(cd, id, except) {
@@ -1080,7 +1086,7 @@ function performDrop(sourceCd, sourceBucket, talent, target) {
       clearDanglingRefs(sourceBucket, talent.i);
       if (containsTalentId(targetCd, talent.i, talent)) talent.i = nextCustomId(targetCd);
       targetBucket.t.push(talent);
-      talent.r = null; // the prerequisite it pointed to doesn't exist in the new tree/side board
+      talent.r = null; talent.connections=[]; // references belong to the original board
     }
     talent.x = target.x;
     talent.y = target.y;
@@ -1089,7 +1095,7 @@ function performDrop(sourceCd, sourceBucket, talent, target) {
     copy.k = 0;
     copy.d = talent.d.slice();
     copy.s = talent.s ? talent.s.slice() : [];
-    copy.r = null;
+    copy.r = null; copy.connections=[];
     if (containsTalentId(targetCd, copy.i)) copy.i = nextCustomId(targetCd);
     copy.x = target.x;
     copy.y = target.y;
@@ -1105,28 +1111,37 @@ function performDrop(sourceCd, sourceBucket, talent, target) {
 
 // --------------------------------------------------------------- tooltip --
 
-function showTooltip(evt, cd, bucket, t, isSideboard) {
-  var tt = qs('#tooltip');
-  var html = '<b class="title">' + escapeHtml(t.n) + '</b>';
+var tooltipRequest=0;
+async function showTooltip(evt, cd, bucket, t, isSideboard) {
+  var tt = qs('#tooltip'), request=++tooltipRequest;
+  var descIdx=Math.max(0,t.k-1), rendered, prerequisite=t.r?findById(bucket,t.r.reqId):null;
+  tt.textContent='Loading tooltip…';tt.classList.remove('hidden');positionTooltip(evt);
+  try {
+    rendered=await Promise.all([t.n,stripHtml((t.t||[])[0]||''),t.d[descIdx]||'',t.d[t.k]||'',bucket.n,prerequisite?prerequisite.n:''].map(function(text,i){return StudioDescriptions.render(text,(t.s||[])[i===3?t.k:descIdx],t.sourceLayer);}));
+  } catch(error) {
+    if(request===tooltipRequest){tt.textContent='Tooltip preview unavailable. Check the selected spell data.';positionTooltip(evt);}
+    console.error('Tooltip preview failed',error);return;
+  }
+  if(request!==tooltipRequest)return;
+  var html = '<b class="title">' + escapeHtml(rendered[0]) + '</b>';
   html += '<div class="rank-line">Rank ' + t.k + '/' + t.m + '</div>';
 
   if (!isSideboard) {
     if (t.r) {
       var req = findById(bucket, t.r.reqId);
       if (req && req.k < t.r.reqRank) {
-        html += '<div class="req-line">Requires ' + t.r.reqRank + ' point' + (t.r.reqRank > 1 ? 's' : '') + ' in ' + escapeHtml(req.n) + '</div>';
+        html += '<div class="req-line">Requires ' + t.r.reqRank + ' point' + (t.r.reqRank > 1 ? 's' : '') + ' in ' + escapeHtml(rendered[5]) + '</div>';
       }
     }
     if (treeSpent(bucket) < tierFor(t.y)) {
-      html += '<div class="req-line">Requires ' + tierFor(t.y) + ' points in ' + escapeHtml(bucket.n) + ' talents</div>';
+      html += '<div class="req-line">Requires ' + tierFor(t.y) + ' points in ' + escapeHtml(rendered[4]) + ' talents</div>';
     }
   }
   if (t.t && t.t[0]) {
-    html += '<div class="meta">' + escapeHtml(stripHtml(t.t[0])).replace(/\n/g, '<br>') + '</div>';
+    html += '<div class="meta">' + escapeHtml(rendered[1]).replace(/\n/g, '<br>') + '</div>';
   }
 
-  var descIdx = Math.max(0, t.k - 1);
-  var desc = t.d[descIdx] || '';
+  var desc = rendered[2];
   html += '<div class="desc">' + escapeHtml(desc) + '</div>';
 
   if (isSideboard) {
@@ -1135,7 +1150,7 @@ function showTooltip(evt, cd, bucket, t, isSideboard) {
     if (t.k === 0) html += '<div class="hint">Click to learn</div>';
     else if (t.k === t.m) html += '<div class="hint">Right-click to unlearn</div>';
     if (t.k > 0 && t.k < t.m) {
-      html += '<span class="next-label">Next rank:</span><div class="desc">' + escapeHtml(t.d[t.k] || '') + '</div>';
+      html += '<span class="next-label">Next rank:</span><div class="desc">' + escapeHtml(rendered[3]) + '</div>';
     }
   } else {
     html += '<div class="hint">Click to edit, or drag to move/copy it</div>';
@@ -1154,7 +1169,7 @@ function positionTooltip(evt) {
   tt.style.left = Math.min(x, Math.max(10, maxX)) + 'px';
   tt.style.top = Math.min(y, Math.max(10, maxY)) + 'px';
 }
-function hideTooltip() { qs('#tooltip').classList.add('hidden'); }
+function hideTooltip() { ++tooltipRequest;qs('#tooltip').classList.add('hidden'); }
 
 // ---------------------------------------------------------------- editor --
 
@@ -1172,13 +1187,13 @@ function openTalentEditor(cd, bucket, treeIdx, talent, x, y) {
 }
 
 function editorBodyHtml(cd, bucket, t, isNew, isSideboard) {
-  var maxX = isSideboard ? sideboardCols(cd) - 1 : COLS - 1;
+  var maxX = isSideboard ? sideboardCols(cd) - 1 : treeColumns(bucket) - 1;
 
   var h = '';
   h += '<div class="ef-row">';
   h += '  <div class="ef-col" style="flex:0 0 90px">';
   h += '    <label>Icon</label>';
-  h += '    <div class="icon-picker-trigger" id="iconTrigger"><img id="iconPreview" src="icons/' + t.iconname + '.png"><span>Change</span></div>';
+  h += '    <div class="icon-picker-trigger" id="iconTrigger"><img id="iconPreview"><span>Change</span></div>';
   h += '    <div class="icon-picker-grid hidden" id="iconGrid"></div>';
   h += '  </div>';
   h += '  <div class="ef-col">';
@@ -1230,7 +1245,7 @@ function rankEditorHtml(t) {
 }
 
 function wireEditorEvents(cd, bucket, t, isNew, isSideboard) {
-  var maxX = isSideboard ? sideboardCols(cd) - 1 : COLS - 1;
+  var maxX = isSideboard ? sideboardCols(cd) - 1 : treeColumns(bucket) - 1;
   qs('#rankEditor').innerHTML = rankEditorHtml(t);
 
   qs('#efMaxRank').addEventListener('input', function () {
@@ -1240,6 +1255,7 @@ function wireEditorEvents(cd, bucket, t, isNew, isSideboard) {
     qs('#rankEditor').innerHTML = rankEditorHtml({ m: m, d: descs, s: spells });
   });
 
+  StudioIcons.apply(qs('#iconPreview'),t,false);
   var iconTrigger = qs('#iconTrigger');
   var iconGrid = qs('#iconGrid');
   var iconGridBuilt = false;
@@ -1279,11 +1295,11 @@ function wireEditorEvents(cd, bucket, t, isNew, isSideboard) {
   qs('#efSave').addEventListener('click', function () {
     var name = qs('#efName').value.trim();
     if (!name) { alert('Name is required.'); return; }
-    var x = clamp(parseInt(qs('#efX').value, 10) || 0, 0, maxX);
-    var y = clamp(parseInt(qs('#efY').value, 10) || 0, 0, isSideboard ? Number.MAX_SAFE_INTEGER : 29);
+    var x = clamp(Number(qs('#efX').value) || 0, 0, maxX);
+    var y = clamp(Number(qs('#efY').value) || 0, 0, isSideboard ? Number.MAX_SAFE_INTEGER : 29);
 
     var occupant = bucket.t.filter(function (o) { return o !== t && o.x === x && o.y === y; })[0];
-    if (occupant) { alert('That grid cell is already used by "' + occupant.n + '".'); return; }
+    if (occupant && (x !== t.x || y !== t.y || isNew)) { alert('That grid cell is already used by "' + occupant.n + '".'); return; }
 
     var m = clamp(parseInt(qs('#efMaxRank').value, 10) || 1, 1, 10);
     var descs = Array.prototype.map.call(document.querySelectorAll('.efRankDesc'), function (el) { return el.value; });

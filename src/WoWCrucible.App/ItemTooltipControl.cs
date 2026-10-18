@@ -80,6 +80,7 @@ internal sealed class ItemTooltipControl : Control
 
     private void PairedLine(Graphics graphics, string left, string right, ref float y, float x, float width)
     {
+        left=SpellDescriptionRenderer.PlainText(left); right=SpellDescriptionRenderer.PlainText(right);
         graphics.DrawString(left, _bodyFont, Brushes.White, x, y); var rightWidth = graphics.MeasureString(right, _bodyFont).Width;
         if (!string.IsNullOrWhiteSpace(right)) graphics.DrawString(right, _bodyFont, Brushes.White, x + width - rightWidth, y);
         y += _bodyFont.GetHeight(graphics) + 2;
@@ -87,6 +88,7 @@ internal sealed class ItemTooltipControl : Control
 
     private static void Line(Graphics graphics, string text, Font font, Color color, ref float y, float x, float width, float after = 1)
     {
+        text=SpellDescriptionRenderer.PlainText(text);
         using var brush = new SolidBrush(color); using var format = new StringFormat { Trimming = StringTrimming.Word, FormatFlags = StringFormatFlags.LineLimit };
         var measured = graphics.MeasureString(text, font, new SizeF(width, 500), format); graphics.DrawString(text, font, brush, new RectangleF(x, y, width, measured.Height + 2), format); y += measured.Height + after;
     }

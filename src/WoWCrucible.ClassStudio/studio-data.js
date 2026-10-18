@@ -70,7 +70,7 @@ function realmClasses(snapshot, layer) {
   if(!profile || !classes.length)return classes;
   var types=rows(snapshot,layer,'CharacterAdvancementClassTypes');
   var policy=rows(snapshot,'core','CoARemixPolicy')[0];
-  if(profile==='WoWRemix'&&!policy)throw new Error('Remix requires its core source policy to separate imported and original class entries.');
+  if(profile==='WoWRemix'&&(!policy||!rows(snapshot,'core','CoARemixPresentation').length))throw new Error('Remix requires its core admission policy and client presentation hooks. Select the matching core source.');
   if(!types.length)throw new Error('The selected realm needs CharacterAdvancementClassTypes. Check source coverage.');
   var allowed=new Set(types.filter(function(t){
     if(profile==='CoA')return t.CoA && t.ClassID>=12 && t.ClassID<=32;
@@ -96,33 +96,51 @@ function talentClass(snapshot, layer, classId) {
       return snapshot.realmProfile!=='WoWRemix'||(r.ClassGroup!==policy.PaladinClassType && r.ClassGroup!==policy.PriestClassType);
     });
     var byId=new Map(entries.map(function(r){return [r.ID,r];}));
-    var specs=rows(snapshot,layer,'ChrSpecs').filter(function(r){return byId.has(r.RootEntry);});
+    // Root entries identify custom specs; their spell names are not spec names.
+    var custom=classId>=12, seasonal=/^Season/.test(snapshot.realmProfile||'');
+    var specs=rows(snapshot,layer,'ChrSpecs').filter(function(r){return custom ? byId.has(r.RootEntry) : classId===10 ? !r.RootEntry : r.ClassToken===cls.Filename;});
+    var tabs=rows(snapshot,layer,'CharacterAdvancementTabTypes');
+    if(!tabs.length)tabs=rows(snapshot,'client','CharacterAdvancementTabTypes');
+    if(!tabs.length)throw new Error('Client CharacterAdvancementTabTypes is required to identify talent trees.');
+    var visible=entries.filter(function(r){return (seasonal?r.AvailableSeasonal:r.AvailableCoA) && !(r.Flags & 0x20809) && !(classId===10 && (r.Flags & 0x1800000));});
     var assigned=new Set();
-    function talent(r,index) {
+    function talent(r,index,parked) {
       var ids=[];for(var i=0;i<9;i++)if(r['SpellRank['+i+']'])ids.push(r['SpellRank['+i+']']);
-      var spell=spells.get(ids[0])||{};
-      return {i:r.ID,n:r.Name||label(spell)||('Entry '+r.ID),m:Math.max(1,ids.length),s:ids,x:index%4,y:Math.floor(index/4),
-        iconname:(r.TextureFilename?String(r.TextureFilename).split(/[\\/]/).pop().toLowerCase():icons.get(spell.SpellIconID))||'_placeholder',d:ids.map(function(id){return value(spells.get(id)||{},['Description[enUS]','Description_Lang[enUS]'],'');}),sourceRow:r,sourceFormat:'coa-plan'};
+      var spell=spells.get(ids[0])||{}, icon=(r.TextureFilename?String(r.TextureFilename).split(/[\\/]/).pop().toLowerCase():icons.get(spell.SpellIconID))||'_placeholder';
+      var result={i:r.ID,n:r.Name||label(spell)||('Entry '+r.ID),m:Math.max(1,ids.length),s:ids,
+        x:parked?index%12:custom?r.PositionX:Math.max(0,r.Column-1),y:parked?Math.floor(index/12):custom?r.PositionY:r.Row,
+        iconname:icon.replace(/\.blp$/i,''),d:ids.map(function(id){return value(spells.get(id)||{},['Description[enUS]','Description_Lang[enUS]'],'');}),sourceLayer:layer,sourceRow:r,sourceFormat:'coa-plan'};
+      if(!Number.isFinite(result.x)||!Number.isFinite(result.y))throw new Error('Missing source coordinates for advancement '+r.ID);
+      var parent=r['RequiredEntry[0]'] || (!custom?r['ConnectedEntry[0]']:0);
+      if(parent && byId.has(parent))result.r={reqId:parent,reqRank:Math.max(1,Array.from({length:9},function(_,i){return byId.get(parent)['SpellRank['+i+']'];}).filter(Boolean).length)};
+      if(custom)result.connections=Array.from({length:15},function(_,i){return r['ConnectedEntry['+i+']'];}).filter(Boolean);
+      return result;
     }
-    var boards=specs.map(function(spec){
-      var root=byId.get(spec.RootEntry), members=entries.filter(function(r){return r.Tab===root.Tab;});members.forEach(function(r){assigned.add(r.ID);});
-      return {n:'Spec '+spec.ID+' · '+(label(spells.get(root['SpellRank[0]'])||{})||('Entry '+root.ID)),sourceSpecId:spec.ID,sourceLayer:layer,layoutSource:'planning',t:members.map(talent)};
+    var presentation=snapshot.realmProfile==='WoWRemix'?rows(snapshot,'core','CoARemixPresentation'):[];
+    var boards=[];
+    specs.forEach(function(spec){
+      var heroGroup=classId===10?rows(snapshot,layer,'CharacterAdvancementClassTypes').find(function(g){return groups.has(g.ID) && String(g.Token).toUpperCase()===spec.ClassToken;}):null;
+      if(classId===10 && !heroGroup)return;
+      var root=byId.get(spec.RootEntry), tab=custom?tabs.find(function(t){return t.ID===root.Tab;}):tabs.find(function(t){return String(t.Token).toUpperCase()===spec.Token;});
+      if(!tab)return;
+      var members=visible.filter(function(r){return r.Tab===tab.ID && (!heroGroup || r.ClassGroup===heroGroup.ID) && (custom || r.Type==='Talent' || r.Type==='TalentAbility');});
+      if(!members.length)return;
+      // Hero specs share tokens (for example Protection); retain the class group in the board identity.
+      if(boards.some(function(b){return b.sourceTabId===tab.ID && b.sourceClassGroup===(heroGroup?heroGroup.ID:null);}))return;
+      members.forEach(function(r){assigned.add(r.ID);});
+      var rename=presentation.find(function(p){return p.ClassID===classId && p.SpecToken===spec.Token;});
+      boards.push({n:heroGroup?heroGroup.Token+' · '+spec.Name:rename?rename.SpecName:spec.Name,sourceClassGroup:heroGroup?heroGroup.ID:null,sourceSpecId:spec.ID,sourceTabId:tab.ID,sourceLayer:layer,layoutSource:custom?'coa-graph':'advancement-grid',t:members.map(function(r,i){return talent(r,i,false);})});
     });
-    if(!boards.length && (classId===10 || snapshot.realmProfile==='WarcraftReborn' || snapshot.realmProfile==='WoWRemix')) {
-      boards=Array.from(new Set(entries.map(function(r){return r.Tab;}))).sort(function(a,b){return a-b;}).map(function(tab){
-        var members=entries.filter(function(r){return r.Tab===tab;});members.forEach(function(r){assigned.add(r.ID);});
-        return {n:'Advancement tab '+tab,sourceTabId:tab,sourceLayer:layer,layoutSource:'planning',t:members.map(talent)};
-      });
-    }
-    if(!boards.length)throw new Error('Class '+classId+' has no advancement boards in the selected layer.');
-    return {classId:classId,name:label(cls),trees:boards,sideboard:{n:'Class abilities',t:entries.filter(function(r){return !assigned.has(r.ID);}).map(talent)},layoutSource:'planning'};
+    if(!boards.length)throw new Error('Class '+classId+' has no supported talent definitions in the selected realm.');
+    var rename=presentation.find(function(p){return p.ClassID===classId;});
+    return {classId:classId,name:rename?rename.ClassName:label(cls),trees:boards,sideboard:{n:'Class abilities',t:visible.filter(function(r){return !assigned.has(r.ID);}).map(function(r,i){return talent(r,i,true);})},layoutSource:custom?'coa-graph':'advancement-grid'};
   }
   var trees = rows(snapshot,layer,'TalentTab').filter(function (r) { return (r.ClassMask & Math.pow(2,classId-1)) !== 0; }).sort(function(a,b){ return a.OrderIndex-b.OrderIndex; }).map(function (tab) {
     return {n:label(tab),sourceTabId:tab.ID,sourceLayer:layer,t:rows(snapshot,layer,'Talent').filter(function(r){return r.TabID===tab.ID;}).map(function (r) {
       var ids = []; for(var i=0;i<9;i++) if(r['SpellRank['+i+']']) ids.push(r['SpellRank['+i+']']);
       var spell = spells.get(ids[0]) || {};
       var talent = {i:r.ID,n:label(spell)||('Spell '+ids[0]),m:Math.max(1,ids.length),s:ids,x:r.ColumnIndex,y:r.TierID,
-        iconname:icons.get(spell.SpellIconID)||'_placeholder',d:ids.map(function(id){return value(spells.get(id)||{},['Description[enUS]','Description_Lang[enUS]'],'');}),sourceRow:r};
+        iconname:icons.get(spell.SpellIconID)||'_placeholder',d:ids.map(function(id){return value(spells.get(id)||{},['Description[enUS]','Description_Lang[enUS]'],'');}),sourceLayer:layer,sourceRow:r};
       if(r['PrereqTalent[0]']) talent.r = {reqId:r['PrereqTalent[0]'],reqRank:Number(r['PrereqRank[0]'])+1};
       return talent;
     })};

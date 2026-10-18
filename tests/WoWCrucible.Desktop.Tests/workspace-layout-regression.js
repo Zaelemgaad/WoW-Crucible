@@ -77,5 +77,19 @@
   } finally {
     StudioBridge.api=apiBefore;document.querySelector('#realmSource').value='builtin';await StudioSources.reload();
   }
-  return {restorePreservedLayout:true,realmEditsIsolated:true,stableBoard:fitted,normalSideboardSlots:before,canvasHeight:height};
+  const alternatives=[900010,900011].map((id,i)=>({i:id,n:'Choice '+i,m:1,x:10,y:6,s:[1],d:['Readable description'],iconname:'_placeholder',sourceFormat:'coa-plan',sourceRow:{Group:7}}));
+  TalentStudio.importClass({classId:900003,name:'Wide graph test',trees:[{n:'Graph',layoutSource:'coa-graph',t:alternatives}]});
+  if(document.querySelector('#editModeBtn').textContent.includes('Off'))document.querySelector('#editModeBtn').click();
+  check(parseInt(document.querySelector('#pane0 .tree-grid').style.width)>=550,'CoA graph clipped to four columns');
+  const selector=document.querySelector('#pane0 .talent-choice');check(selector&&selector.options.length===2,'Source choice alternatives are inaccessible');
+  selector.value='1';selector.dispatchEvent(new Event('change'));
+  const second=document.querySelector('[data-talent-id="900011"]');check(second.parentElement.style.display!=='none','Choice selection did not reveal the alternative');
+  second.click();await wait();
+  check(document.querySelector('#efX').value==='10','Opening a source node clamped its coordinate');
+  document.querySelector('#iconTrigger').click();check(!document.querySelector('#iconGrid').classList.contains('hidden'),'Source icon picker did not open');
+  document.querySelector('#efName').value='Edited choice';document.querySelector('#efSave').click();await wait();
+  check(document.querySelector('#editorPanel').classList.contains('hidden'),'Shared-position node could not be edited');
+  check(document.querySelector('[data-talent-id="900011"]').dataset.x==='10','Saving clamped a source coordinate');
+  TalentStudio.useSource('',null);
+  return {wideGraphAndChoices:true,restorePreservedLayout:true,realmEditsIsolated:true,stableBoard:fitted,normalSideboardSlots:before,canvasHeight:height};
 })()

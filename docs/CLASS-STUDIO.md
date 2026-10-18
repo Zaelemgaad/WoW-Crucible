@@ -40,14 +40,16 @@ The native **Workspace → Realm** menu and the item browser use the same discov
 realm catalog. Selecting a realm connects its world database for SQL tools without
 starting or restarting servers. Class Studio remembers its selected dataset separately.
 
-Class buttons read the actual class icon textures from the configured client,
-using its class tokens and effective MPQ patch order.
+Class buttons and talent icons read actual textures from the configured client,
+using its class tokens, advancement/spell icon names and effective MPQ patch order.
 
 CoA shows its 21 custom classes. The classless realms show Hero; Bronzebeard shows
 its ten classes; Remix follows the core policy, excluding Priest and separating
-imported advancement entries from the original Bronzebeard entries. Advancement
-boards are editing/planning arrangements, not a reproduction of the native UI.
-Their original entry IDs and packed source rows remain attached to the talents.
+imported advancement entries from the original Bronzebeard entries. Remix's client
+hooks supply its Templar name and Divine/Aegis/Judgement spec names. CoA boards use
+ChrSpecs display names and graph coordinates; Bronzebeard/Remix use their actual
+advancement grid positions. Original IDs and packed rows remain attached to talents.
+Choices sharing a position have a selector. Hero trees remain separated by class.
 
 **Restore Original Data** restores the selected source's class content and points.
 It preserves board positions, sizes, stacking and scrolling, plus canvas settings.
@@ -104,9 +106,9 @@ layers remain independently selectable. `customs/` is exposed separately rather
 than assuming a particular core's overlay semantics.
 
 The editor reads Spell, ChrClasses, Talent, TalentTab, SkillLineAbility,
-SkillRaceClassInfo, SkillLine and SpellIcon with exact schemas. For CoA it also
+SkillRaceClassInfo, SkillLine, SpellIcon, SpellDuration and SpellRadius with exact schemas. For CoA it also
 reads the verified fields of CharacterAdvancement, CharacterAdvancementClassTypes,
-ChrSpecs, SpellRank and NPCTrainer. The packed advancement layout is checked as
+CharacterAdvancementTabTypes, ChrSpecs, SpellRank and NPCTrainer. The packed advancement layout is checked as
 179 fields / 692 bytes; byte flags, unaligned fields and IDs above 65535 retain
 their actual values. Unknown packed fields are not guessed.
 
@@ -125,7 +127,8 @@ does not claim a complete runtime learn list when a source is unavailable.
 The class view follows class masks, exclusions, skills, talent ranks, CoA class
 groups, known core lists and transitive learn/rank relationships. Profession recipes
 remain in **All spells** instead of appearing as class abilities. Disabled CoA
-advancement entries remain visible and labelled, so designers can edit them.
+advancement entries remain editable in source tables; the displayed talent boards
+apply the selected realm's availability and client visibility rules.
 SQL-only spells appear in the catalog; matching SQL overrides are identified and
 have an **Open server SQL override** action. Large catalogs are paged.
 
@@ -136,12 +139,17 @@ rejects invalid 32-bit values; SQL bigint/decimal text retains exact precision.
 Refresh keeps staged edits and reports changed source fingerprints.
 
 **Use class talents** imports a selected class into the working editor. Stock
-Talent/TalentTab coordinates are retained. CoA uses ChrSpecs root relationships to
-form planning boards and preserves original advancement records and requirements.
-The generated planning coordinates are explicitly not claimed to be the native
-CoA UI layout. CoA board titles identify the spec ID and root spell; they can be
-renamed. Native CoA spec presentation still needs its own implementation when
-deploying a finished design.
+Talent/TalentTab coordinates are retained. CoA uses ChrSpecs root relationships,
+real spec names, graph positions and connections. Bronzebeard/Remix map spec tokens
+to CharacterAdvancementTabTypes and retain column/row positions. All source records
+and requirements remain attached for export. The point-allocation preview remains
+an editor aid, not a complete emulator of every realm learning rule.
+
+Tooltip previews resolve spell fields, references and common client formatting.
+Character-dependent values appear as readable formulas. Unsupported instructions
+or absent data receive explicit unavailable-value notices; editable fields and
+exports retain the exact original template. See the [source and tooltip audit](class-studio-source-and-tooltip-audit.md)
+for all reviewed paths, tested counts and preview limits.
 
 ## Exports and persistence
 

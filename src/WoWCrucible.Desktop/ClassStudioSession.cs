@@ -95,6 +95,23 @@ internal sealed class ClassStudioSession : IDisposable
                 }
                 finally { _dataGate.Release(); }
                 break;
+            case "icons" when body is not null:
+                await _dataGate.WaitAsync(_stop.Token);
+                try
+                {
+                    if (_data is null) throw new InvalidOperationException("Load sources first.");
+                    var names=body.Value.Deserialize<string[]>(Json) ?? [];
+                    result=await Task.Run(()=>_data.ReadIcons(names,_stop.Token));
+                }
+                finally { _dataGate.Release(); }
+                break;
+            case "tooltip" when body is not null:
+                var tooltip=body.Value;
+                var description=tooltip.GetProperty("text").GetString() ?? "";
+                if(description.Length>32768)throw new InvalidDataException("Description exceeds the preview size limit.");
+                result=_data?.RenderTooltip(tooltip.GetProperty("layer").GetString() ?? "server",tooltip.GetProperty("spellId").GetUInt32(),description)
+                    ?? SpellDescriptionRenderer.WithoutData.Render(description);
+                break;
             case "row" when body is null:
                 if (_data is null) throw new InvalidOperationException("Load sources first.");
                 result = _data.ReadRow(query["layer"] ?? "", query["table"] ?? "", uint.Parse(query["id"] ?? "0")); break;

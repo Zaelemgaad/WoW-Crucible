@@ -157,6 +157,7 @@ function init() {
       sources.serverPath=paths.server.value;sources.clientPath=paths.client.value;sources.corePath=paths.core.value;sources.selection=realmSelect.value;persistSources();
       var loaded=await B.api('load',sources);
       var activeLayer=D.rows(loaded,'server','ChrClasses').length?'server':'client';
+      StudioDescriptions.setLayer(activeLayer);StudioIcons.reset();
       var classes=D.realmClasses(loaded,activeLayer).map(function(c){var result=D.talentClass(loaded,activeLayer,Number(c.ID));result.iconSrc=(loaded.classIcons||{})[c.ID];var filename=String(c.Filename||'').toLowerCase();if(['warrior','paladin','hunter','rogue','priest','deathknight','shaman','mage','warlock','druid'].includes(filename))result.file=filename;return result;});
       if(!classes.length)throw new Error('No classes found in the selected sources. Previous editor data is still open.');
       var identity=encodeURIComponent((loaded.sourceIdentity || sources.serverPath || sources.clientPath).toLowerCase());
@@ -170,7 +171,7 @@ function init() {
       if(stale.length)loaded.notices.unshift(stale.length+' staged edits were created against different source files. Review their fingerprints before importing.');
       loaded.notices.forEach(function(n){notices.appendChild(el('p',null,n));});
       sourceStatus.textContent=(loaded.realmName||'Selected sources')+' · '+classes.length+' classes';
-      say('Loaded '+loaded.tables.length+' tables. Source talents are now available on the main canvas. CoA advancement uses planning boards; source IDs and requirements are preserved.');
+      say('Loaded '+loaded.tables.length+' tables. Source talents are now available on the main canvas. Realm talent names, positions and visibility come from the selected source definitions.');
       if(loaded.notices.some(function(n){return n.startsWith('Selected realm SQL could not');}))sourceStatus.textContent+=' · SQL unavailable (see sources)';
     } catch(error) {window.StudioSources.error=error.message;throw error;} finally {realmSelect.disabled=false;loadButton.disabled=false;results.inert=false;editor.inert=false;window.StudioSources.initialized=true;}
   }

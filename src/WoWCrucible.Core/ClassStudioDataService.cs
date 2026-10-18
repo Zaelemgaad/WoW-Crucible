@@ -13,19 +13,23 @@ public sealed record ClassStudioSnapshot(DateTimeOffset ReadUtc, IReadOnlyList<C
 /// <summary>Read-only, schema-resolved inputs for the shared class editor. Layers stay explicit.</summary>
 public sealed class ClassStudioDataService(Func<WdbcFile, DbcSchemaResolution> resolveSchema)
 {
-    public static readonly string[] ClientTables = ["Spell", "ChrClasses", "Talent", "TalentTab", "SkillLineAbility", "SkillRaceClassInfo", "SkillLine", "SpellIcon"];
-    public static readonly string[] CoATables = ["CharacterAdvancement", "CharacterAdvancementClassTypes", "ChrSpecs", "SpellRank", "NPCTrainer"];
+    public static readonly string[] ClientTables = ["Spell", "ChrClasses", "Talent", "TalentTab", "SkillLineAbility", "SkillRaceClassInfo", "SkillLine", "SpellIcon", "SpellDuration", "SpellRadius"];
+    public static readonly string[] CoATables = ["CharacterAdvancement", "CharacterAdvancementClassTypes", "CharacterAdvancementTabTypes", "ChrSpecs", "SpellRank", "NPCTrainer"];
     public static readonly string[] LearningTables = ["playercreateinfo_spell", "playercreateinfo_spell_custom", "playercreateinfo_cast_spell",
         "player_levelup_spell", "spell_learn_spell", "spell_ranks", "spell_required", "trainer_spell", "npc_trainer", "quest_template", "spell_dbc"];
+    private ClientEffectiveAssetCatalog? _assets;
+    private string? _iconCache;
+    private readonly Dictionary<string,string?> _icons = new(StringComparer.OrdinalIgnoreCase);
     private sealed record LoadedDbc(WdbcFile File, DbcSchemaResolution Schema, IReadOnlyDictionary<uint, int> Index);
     private readonly Dictionary<(string Layer, string Table), LoadedDbc> _loaded = [];
+    private readonly Dictionary<string,SpellDescriptionRenderer> _tooltipRenderers = [];
     private readonly Dictionary<(string Layer, string Table), ClassStudioTable> _tables = [];
 
     public async Task<ClassStudioSnapshot> LoadAsync(string? serverPath, string? clientPath, string cachePath,
         DatabaseConnectionProfile? database = null, DatabaseCapabilities? capabilities = null, CancellationToken cancellationToken = default, string? corePath = null,
         ClientArchiveOrderPolicy clientOrder = ClientArchiveOrderPolicy.StandardWrath)
     {
-        _loaded.Clear(); _tables.Clear(); var notices = new List<string>();
+        _loaded.Clear(); _tables.Clear(); _tooltipRenderers.Clear(); _icons.Clear(); _assets=null; var notices = new List<string>();
         IReadOnlyDictionary<uint, string>? classIcons = null;
         if (!string.IsNullOrWhiteSpace(serverPath)) ReadLoose(serverPath, "server", notices, cancellationToken);
         if (!string.IsNullOrWhiteSpace(clientPath))
@@ -40,6 +44,7 @@ public sealed class ClassStudioDataService(Func<WdbcFile, DbcSchemaResolution> r
                 var indexPath = Path.Combine(cachePath, key);
                 new ClientArchiveIndexService().Build(root, indexPath, hashArchives: false, cancellationToken: cancellationToken);
                 var catalog = ClientEffectiveAssetCatalog.Load(indexPath, cancellationToken, clientOrder);
+                _assets=catalog; _iconCache=Path.Combine(indexPath,"icons");
                 foreach (var table in ClientTables.Concat(CoATables))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -84,9 +89,34 @@ public sealed class ClassStudioDataService(Func<WdbcFile, DbcSchemaResolution> r
         else notices.Add("SQL is not connected. Trainer, starting, quest and server-script learning rules are not a complete learn list. Connect the world database in Crucible Workspace setup, then reload sources.");
         if (!string.IsNullOrWhiteSpace(corePath))
             foreach (var table in CoAClassStudioSource.ReadCore(corePath, notices)) _tables.Add((table.Layer, table.Name), table);
-        if (_tables.Values.Any(t => t.Format == "coa-plan")) notices.Add("CoA advancement tables expose verified fields and byte offsets. Their CSV is a change-plan format, not a stock DBC import schema. Keep the JSON original values and source hashes when implementing these changes. Hidden/disabled entries remain visible for editing.");
+        if (_tables.Values.Any(t => t.Format == "coa-plan")) notices.Add("CoA advancement tables expose verified fields and byte offsets. Their CSV is a change-plan format, not a stock DBC import schema. Keep the JSON original values and source hashes when implementing these changes. Hidden/disabled entries remain in the source tables; talent boards follow realm presentation filters.");
         notices.Add("The CoA core source lists are read from source, not the running executable. Additional compiled hooks can grant spells beyond the inspected lists. SQL spell_dbc overrides remain a separate editable layer.");
         return new(DateTimeOffset.UtcNow, _tables.Values.ToArray(), notices, ClassIcons: classIcons);
+    }
+
+    public IReadOnlyDictionary<string,string?> ReadIcons(IEnumerable<string> names, CancellationToken token = default)
+    {
+        var requested=names.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if(requested.Length>512)throw new InvalidDataException("At most 512 icons per request.");
+        if(_assets is null || _iconCache is null)throw new InvalidOperationException("Select a client archive folder to read its icons.");
+        var missing=requested.Where(n=>!_icons.ContainsKey(n)).ToArray();
+        if(missing.Length>0)
+        {
+            var found=ClassStudioIconService.ReadPaths(_assets,missing,_iconCache,[],token);
+            foreach(var name in missing)_icons[name]=found.GetValueOrDefault(name);
+        }
+        return requested.ToDictionary(n=>n,n=>_icons[n]);
+    }
+
+    public SpellDescriptionPreview RenderTooltip(string layer, uint spellId, string text)
+    {
+        if(!_tooltipRenderers.TryGetValue(layer,out var renderer))
+        {
+            if(!_loaded.TryGetValue((layer,"Spell"),out var spell)) return SpellDescriptionRenderer.WithoutData.Render(text,spellId);
+            var related=_loaded.Where(p=>p.Key.Layer==layer && p.Key.Table is "SpellDuration" or "SpellRadius").ToDictionary(p=>p.Key.Table,p=>p.Value.File);
+            renderer=SpellTooltipService.CreateRenderer(spell.File,related);_tooltipRenderers.Add(layer,renderer);
+        }
+        return renderer.Render(text,spellId);
     }
 
     public IReadOnlyDictionary<string, object?> ReadRow(string layer, string table, uint id)

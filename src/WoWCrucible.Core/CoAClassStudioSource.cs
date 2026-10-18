@@ -6,7 +6,7 @@ using System.Text;
 namespace WoWCrucible.Core;
 
 /// <summary>
-/// Named offsets match CoA's AscensionCharacterBuild.h and AscensionBooks.cpp readers.
+/// Named offsets follow CoA's server readers and the matching native client metadata.
 /// Unknown fields are never invented or rewritten; exports are implementation plans.
 /// </summary>
 public static class CoAClassStudioSource
@@ -21,17 +21,24 @@ public static class CoAClassStudioSource
         {
             case "CharacterAdvancement":
                 fields = 179; size = 692;
+                columns.Add(new("Type", "StringOffset", false, 4));
+                columns.Add(new("PositionX", "Float", false, 398)); columns.Add(new("PositionY", "Float", false, 402));
                 Array("RequiredEntry", 8, 3); Array("SpellRank", 20, 9); Field("AbilityEssence", 56); Field("TalentEssence", 60);
                 columns.Add(new("Name", "StringOffset", false, 188));
                 columns.Add(new("TextureFilename", "StringOffset", false, 256));
-                Field("RequiredLevel", 104); Field("Group", 116); Field("ClassGroup", 128); Field("Tab", 132);
+                Field("RequiredLevel", 104); Field("Group", 116); Field("Column", 120); Field("Row", 124); Field("ClassGroup", 128); Field("Tab", 132);
                 Array("RequiredInvestment", 136, 6); Field("Points", 160); Field("RequiredClassPoints", 164);
                 Field("Starting", 414, flag: true); Array("ConnectedEntry", 415, 15); Field("Flags", 479);
                 Field("AvailableCoA", 483, flag: true); Field("AvailableSeasonal", 484, flag: true); Array("AdditionalRequirement", 656, 9); break;
             case "CharacterAdvancementClassTypes":
-                fields = 23; size = 92; Field("ClassID", 8); Field("Classless", 12); Field("CoA", 16); Field("WarcraftReborn", 20); break;
+                fields = 23; size = 92; columns.Add(new("Token", "StringOffset", false, 4)); Field("ClassID", 8); Field("Classless", 12); Field("CoA", 16); Field("WarcraftReborn", 20); break;
             case "ChrSpecs":
-                fields = 65; size = 260; Field("StarterSpell", 96); Field("RootEntry", 112); break;
+                fields = 65; size = 260;
+                columns.Add(new("ClassToken", "StringOffset", false, 4)); columns.Add(new("Token", "StringOffset", false, 8));
+                columns.Add(new("Name", "StringOffset", false, 116));
+                Field("StarterSpell", 96); Field("RootEntry", 112); break;
+            case "CharacterAdvancementTabTypes":
+                fields = 19; size = 76; columns.Add(new("Token", "StringOffset", false, 4)); break;
             case "SpellRank":
                 fields = 4; size = 16; Field("FirstSpellID", 4); Field("SpellID", 8); Field("Rank", 12); break;
             case "NPCTrainer":
@@ -57,6 +64,7 @@ public static class CoAClassStudioSource
                     if (end < 0) throw new InvalidDataException($"Unterminated {name} string.");
                     row.Add(column.Name, Encoding.UTF8.GetString(bytes, offset, end - offset));
                 }
+                else if (column.Type == "Float") row.Add(column.Name, BitConverter.Int32BitsToSingle((int)value));
                 else row.Add(column.Name, value);
             }
             if (!ids.Add((uint)row["ID"]!)) throw new InvalidDataException($"Duplicate {name} key {row["ID"]}.");
@@ -86,6 +94,23 @@ public static class CoAClassStudioSource
             }
             result.Add(new("core", "CoARemixPolicy", policyPath, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(policyPath))),
                 policy.Keys.Select(n => new ClassStudioColumn(n, "UInt32", false)).ToArray(), [policy], "core-plan"));
+        }
+        var presentationPath = Path.Combine(root, "modules", "mod-ascension-compat", "client", "wxl", "RemixRealm.cpp");
+        if (File.Exists(presentationPath))
+        {
+            var sourceText = File.ReadAllText(presentationPath);
+            var classBody = Regex.Match(sourceText, @"int __cdecl ClassInfo\(.*?(?=int __cdecl SpecInfo)", RegexOptions.Singleline).Value;
+            var classId = Regex.Match(classBody, @"state, -1\) == (\d+)");
+            var className = Regex.Match(classBody, "state, \"([^\"]+)\"\\)");
+            var token = Regex.Match(sourceText, "strcmp\\(string\\(state, 1, nullptr\\), \"([^\"]+)\"");
+            var specNames = Regex.Matches(sourceText, "strcmp\\(spec, \"([^\"]+)\"\\) \\? \"([^\"]+)\"");
+            if (!classId.Success || !className.Success || !token.Success || specNames.Count == 0)
+                throw new InvalidDataException("Unsupported Remix client presentation hooks; update the reader before loading this version.");
+            var presentation = specNames.Select(m => (IReadOnlyDictionary<string,object?>)new Dictionary<string,object?> {
+                ["ClassID"] = uint.Parse(classId.Groups[1].Value), ["ClassName"] = className.Groups[1].Value,
+                ["ClassToken"] = token.Groups[1].Value, ["SpecToken"] = m.Groups[1].Value, ["SpecName"] = m.Groups[2].Value }).ToArray();
+            result.Add(new("core", "CoARemixPresentation", presentationPath, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(presentationPath))),
+                new[] { "ClassID", "ClassName", "ClassToken", "SpecToken", "SpecName" }.Select(n => new ClassStudioColumn(n, n == "ClassID" ? "UInt32" : "String", false)).ToArray(), presentation, "core-plan"));
         }
         return result;
 

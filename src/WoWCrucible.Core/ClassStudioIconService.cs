@@ -1,36 +1,33 @@
-using System.Text.RegularExpressions;
-
 namespace WoWCrucible.Core;
 
-/// <summary>Uses the same class token and Interface/Icons path as the client's advancement UI.</summary>
+/// <summary>Resolves class and talent textures through the selected client's archive order.</summary>
 public static class ClassStudioIconService
 {
     public static IReadOnlyDictionary<uint, string> Read(ClientEffectiveAssetCatalog catalog,
         IReadOnlyList<IReadOnlyDictionary<string, object?>> classes, string cache, List<string> notices, CancellationToken token = default)
     {
-        var result = new Dictionary<uint, string>();
-        catalog.ResolveMany(classes.Select(row => Convert.ToString(row.GetValueOrDefault("Filename")) ?? "")
-            .Where(name => Regex.IsMatch(name, "^[A-Za-z0-9_]+$")).Select(name => $"Interface\\Icons\\classicon_{name.ToLowerInvariant()}.blp"), token);
-        var icons = new List<(uint Id, ClientEffectiveAssetCandidate Asset)>();
-        foreach (var row in classes)
+        var names = classes.ToDictionary(row => Convert.ToUInt32(row["ID"]), row => "classicon_" + Convert.ToString(row.GetValueOrDefault("Filename"))!.ToLowerInvariant());
+        var icons = ReadPaths(catalog, names.Values, cache, notices, token);
+        return names.Where(p => icons.ContainsKey(p.Value)).ToDictionary(p => p.Key, p => icons[p.Value]);
+    }
+
+    public static IReadOnlyDictionary<string, string> ReadPaths(ClientEffectiveAssetCatalog catalog,
+        IEnumerable<string> names, string cache, List<string> notices, CancellationToken token = default)
+    {
+        var requested = names.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (requested.Any(name => string.IsNullOrWhiteSpace(name) || name.IndexOfAny(['/', '\\', ':']) >= 0 || name.Contains("..")))
+            throw new InvalidDataException("Expected client icon basenames.");
+        var resolutions = catalog.ResolveMany(requested.Select(name => $"Interface\\Icons\\{name}.blp"), token);
+        var assets = resolutions.Where(r => r.State == ClientEffectiveAssetState.Effective && r.Effective is not null).Select(r => r.Effective!).ToArray();
+        foreach (var missing in resolutions.Where(r => r.State != ClientEffectiveAssetState.Effective)) notices.Add(missing.Message);
+        var files = catalog.ExtractEffectiveMany(assets, cache, overwrite: true, cancellationToken: token);
+        var result = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in files)
         {
             token.ThrowIfCancellationRequested();
-            var name = Convert.ToString(row.GetValueOrDefault("Filename")) ?? "";
-            if (!Regex.IsMatch(name, "^[A-Za-z0-9_]+$")) { notices.Add($"Class {row["ID"]} has no valid client icon token."); continue; }
-            var path = $"Interface\\Icons\\classicon_{name.ToLowerInvariant()}.blp";
-            var asset = catalog.Resolve(path, cancellationToken: token);
-            if (asset.State != ClientEffectiveAssetState.Effective || asset.Effective is null)
-            { notices.Add($"Class icon {name}: {asset.Message}"); continue; }
-            icons.Add((Convert.ToUInt32(row["ID"]), asset.Effective));
-        }
-        var paths = catalog.ExtractEffectiveMany(icons.Select(icon => icon.Asset).DistinctBy(asset => asset.Entry.ArchivePath, StringComparer.OrdinalIgnoreCase), cache, overwrite: true, cancellationToken: token)
-            .ToDictionary(path => Path.GetFileNameWithoutExtension(path), StringComparer.OrdinalIgnoreCase);
-        foreach (var icon in icons)
-        {
-            var extracted = paths[Path.GetFileNameWithoutExtension(icon.Asset.Entry.ArchivePath)];
-            var png = extracted + ".png";
-            BlpTextureService.DecodeToPng(extracted, png, overwrite: true);
-            result.Add(icon.Id, "data:image/png;base64," + Convert.ToBase64String(File.ReadAllBytes(png)));
+            var png = file + ".png";
+            BlpTextureService.DecodeToPng(file, png, overwrite: true);
+            result.Add(Path.GetFileNameWithoutExtension(file), "data:image/png;base64," + Convert.ToBase64String(File.ReadAllBytes(png)));
         }
         return result;
     }

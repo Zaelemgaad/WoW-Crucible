@@ -7,6 +7,12 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+if (args.Length is 1 or 2 && args[0] == "--tooltip-audit")
+{
+    SpellDescriptionTests.Run(args.Length == 2 ? args[1] : null);
+    return;
+}
+
 if (args.Length is 1 or 3 or 5 && args[0] == "--class-studio")
 {
     await ClassStudioTestSuite.RunAsync(args.Length >= 3 ? args[1] : null, args.Length >= 3 ? args[2] : null, args.Length == 5 ? args[3] : null, args.Length == 5 ? args[4] : null);
