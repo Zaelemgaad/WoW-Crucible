@@ -550,3 +550,7 @@ body.edit-mode .talent-icon:hover { border-color: #2050c0; }
 .studio-error { color: var(--red); }
 .studio-notices { font-size: 12px; color: var(--text-dim); max-height: 150px; overflow: auto; }
 .editor-panel-inner, .text-modal-inner { resize: both; overflow: auto; min-width: 260px; min-height: 150px; }
+
+.studio-source-bar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; width:100%; }
+.studio-source-bar select { max-width: min(540px, 65vw); }
+.studio-source-status { font-size:12px; color:var(--text-dim); }

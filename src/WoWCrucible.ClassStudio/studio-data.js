@@ -65,28 +65,56 @@ function learning(snapshot, layer, classId) {
   ['trainer_spell','npc_trainer'].forEach(function (name) { rows(snapshot,'sql',name).forEach(function (r) { var id=Number(value(r,['SpellId','SpellID'],0)); if(found.has(id)) add(id,name); }); });
   return found;
 }
+function realmClasses(snapshot, layer) {
+  var classes=rows(snapshot,layer,'ChrClasses'), profile=snapshot.realmProfile;
+  if(!profile || !classes.length)return classes;
+  var types=rows(snapshot,layer,'CharacterAdvancementClassTypes');
+  var policy=rows(snapshot,'core','CoARemixPolicy')[0];
+  if(profile==='WoWRemix'&&!policy)throw new Error('Remix requires its core source policy to separate imported and original class entries.');
+  if(!types.length)throw new Error('The selected realm needs CharacterAdvancementClassTypes. Check source coverage.');
+  var allowed=new Set(types.filter(function(t){
+    if(profile==='CoA')return t.CoA && t.ClassID>=12 && t.ClassID<=32;
+    if(profile==='Season9'||profile==='Season10')return t.Classless && t.ClassID===10;
+    if(profile==='WarcraftReborn'||profile==='WoWRemix')return t.WarcraftReborn && !t.Classless && t.ClassID>0 && t.ClassID<=11 && t.ClassID!==10;
+    throw new Error('Unsupported realm profile: '+profile);
+  }).map(function(t){return Number(t.ClassID);}));
+  return classes.filter(function(c){return allowed.has(Number(c.ID)) && !(profile==='WoWRemix' && types.some(function(t){return t.ID===policy.PriestClassType && t.ClassID===c.ID;}));});
+}
 function talentClass(snapshot, layer, classId) {
   var cls = rows(snapshot,layer,'ChrClasses').find(function (r) { return r.ID === classId; });
   if (!cls) throw new Error('ChrClasses has no selected class.');
   var spells = new Map(rows(snapshot,layer,'Spell').map(function (r) { return [r.ID,r]; }));
   var icons = new Map(rows(snapshot,layer,'SpellIcon').map(function (r) { return [r.ID,String(r.TextureFilename).split(/[\\/]/).pop().toLowerCase()]; }));
-  if(classId>=12&&rows(snapshot,layer,'CharacterAdvancement').length) {
-    var groups=new Set(rows(snapshot,layer,'CharacterAdvancementClassTypes').filter(function(r){return Number(r.ClassID)===classId;}).map(function(r){return r.ID;}));
-    var entries=rows(snapshot,layer,'CharacterAdvancement').filter(function(r){return groups.has(r.ClassGroup);});
+  if((classId>=12||snapshot.realmProfile)&&rows(snapshot,layer,'CharacterAdvancement').length) {
+    var groups=new Set(rows(snapshot,layer,'CharacterAdvancementClassTypes').filter(function(r){return Number(r.ClassID)===classId || (classId===10 && r.Classless && r.ID===1);}).map(function(r){return r.ID;}));
+    var policy=rows(snapshot,'core','CoARemixPolicy')[0];
+    var entries=rows(snapshot,layer,'CharacterAdvancement').filter(function(r){
+      if(!groups.has(r.ClassGroup))return false;
+      if(!policy)return true;
+      var imported=r.ID>=policy.FirstEntry && r.ID<=policy.LastEntry;
+      if(imported)return snapshot.realmProfile==='WoWRemix';
+      return snapshot.realmProfile!=='WoWRemix'||(r.ClassGroup!==policy.PaladinClassType && r.ClassGroup!==policy.PriestClassType);
+    });
     var byId=new Map(entries.map(function(r){return [r.ID,r];}));
     var specs=rows(snapshot,layer,'ChrSpecs').filter(function(r){return byId.has(r.RootEntry);});
     var assigned=new Set();
     function talent(r,index) {
       var ids=[];for(var i=0;i<9;i++)if(r['SpellRank['+i+']'])ids.push(r['SpellRank['+i+']']);
       var spell=spells.get(ids[0])||{};
-      return {i:r.ID,n:label(spell)||('Entry '+r.ID),m:Math.max(1,ids.length),s:ids,x:index%4,y:Math.floor(index/4),
-        iconname:icons.get(spell.SpellIconID)||'_placeholder',d:ids.map(function(id){return value(spells.get(id)||{},['Description[enUS]','Description_Lang[enUS]'],'');}),sourceRow:r,sourceFormat:'coa-plan'};
+      return {i:r.ID,n:r.Name||label(spell)||('Entry '+r.ID),m:Math.max(1,ids.length),s:ids,x:index%4,y:Math.floor(index/4),
+        iconname:(r.TextureFilename?String(r.TextureFilename).split(/[\\/]/).pop().toLowerCase():icons.get(spell.SpellIconID))||'_placeholder',d:ids.map(function(id){return value(spells.get(id)||{},['Description[enUS]','Description_Lang[enUS]'],'');}),sourceRow:r,sourceFormat:'coa-plan'};
     }
     var boards=specs.map(function(spec){
       var root=byId.get(spec.RootEntry), members=entries.filter(function(r){return r.Tab===root.Tab;});members.forEach(function(r){assigned.add(r.ID);});
       return {n:'Spec '+spec.ID+' · '+(label(spells.get(root['SpellRank[0]'])||{})||('Entry '+root.ID)),sourceSpecId:spec.ID,sourceLayer:layer,layoutSource:'planning',t:members.map(talent)};
     });
-    if(!boards.length)throw new Error('CoA class has no ChrSpecs root relationships. Check the selected layer.');
+    if(!boards.length && (classId===10 || snapshot.realmProfile==='WarcraftReborn' || snapshot.realmProfile==='WoWRemix')) {
+      boards=Array.from(new Set(entries.map(function(r){return r.Tab;}))).sort(function(a,b){return a-b;}).map(function(tab){
+        var members=entries.filter(function(r){return r.Tab===tab;});members.forEach(function(r){assigned.add(r.ID);});
+        return {n:'Advancement tab '+tab,sourceTabId:tab,sourceLayer:layer,layoutSource:'planning',t:members.map(talent)};
+      });
+    }
+    if(!boards.length)throw new Error('Class '+classId+' has no advancement boards in the selected layer.');
     return {classId:classId,name:label(cls),trees:boards,sideboard:{n:'Class abilities',t:entries.filter(function(r){return !assigned.has(r.ID);}).map(talent)},layoutSource:'planning'};
   }
   var trees = rows(snapshot,layer,'TalentTab').filter(function (r) { return (r.ClassMask & Math.pow(2,classId-1)) !== 0; }).sort(function(a,b){ return a.OrderIndex-b.OrderIndex; }).map(function (tab) {
@@ -106,6 +134,6 @@ function csv(rows, columns) {
   function cell(v) { var s=v==null?'':String(v); return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; }
   return [columns.map(cell).join(',')].concat(rows.map(function(r){return columns.map(function(c){return cell(r[c]);}).join(',');})).join('\r\n');
 }
-var api = {value:value,label:label,table:table,rows:rows,key:key,editKey:editKey,effective:effective,learning:learning,talentClass:talentClass,csv:csv,isDbc:isDbc};
+var api = {value:value,label:label,table:table,rows:rows,key:key,editKey:editKey,effective:effective,learning:learning,talentClass:talentClass,realmClasses:realmClasses,csv:csv,isDbc:isDbc};
 if (typeof module !== 'undefined' && module.exports) module.exports=api; else root.StudioData=api;
 })(typeof window === 'undefined' ? globalThis : window);

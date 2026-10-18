@@ -18,6 +18,7 @@ internal sealed class ClassStudioSession : IDisposable
     private readonly DesktopWorkspaceSession _session;
     private readonly string _statePath;
     private ClassStudioDataService? _data;
+    private ServerRealmCatalog? _realms;
 
     public ClassStudioSession(Func<WdbcFile, DbcSchemaResolution> schema, Func<string, Task<string?>> pick,
         Func<string, string, Task<bool>> export, DesktopWorkspaceSession session, string? statePath = null)
@@ -37,7 +38,10 @@ internal sealed class ClassStudioSession : IDisposable
         switch (parts[0])
         {
             case "settings" when body is null:
-                result = new { serverPath = _session.Settings.CoreDbcPath, clientPath = _session.Settings.ClientDataPath, corePath = _session.Settings.CoreSourcePath, sql = _session.DatabaseTested }; break;
+                _realms = await ServerRealmCatalog.ReadAsync(_session.Settings.ServerRootPath, _stop.Token);
+                result = new { serverPath = _session.Settings.CoreDbcPath, clientPath = _session.Settings.ClientDataPath, corePath = _session.Settings.CoreSourcePath, sql = _session.DatabaseTested,
+                    realms = _realms.Realms.Select(r => new { r.Id, r.Name, r.Profile, serverPath = r.Server.DbcPath, database = r.Server.WorldDatabase.Database }),
+                    notices = _realms.Notices, defaultRealmId = _realms.Realms.FirstOrDefault(r => r.Server.WorldDatabase.Database == _session.Settings.WorldDatabase)?.Id ?? _realms.Realms.FirstOrDefault()?.Id }; break;
             case "pick" when body is not null:
                 result = new { path = await _pick(query["kind"] ?? "server") }; break;
             case "state" when body is null:
@@ -63,11 +67,27 @@ internal sealed class ClassStudioSession : IDisposable
                 await _dataGate.WaitAsync(_stop.Token);
                 try
                 {
+                    ServerRealmSource? realm = null;
+                    if (sources.RealmId is not null)
+                    {
+                        _realms ??= await ServerRealmCatalog.ReadAsync(_session.Settings.ServerRootPath, _stop.Token);
+                        realm = _realms.Realms.SingleOrDefault(r => r.Id == sources.RealmId)
+                            ?? throw new InvalidDataException("The selected realm is no longer configured. Reopen Class Studio to refresh realms.");
+                    }
+                    var database = sources.IncludeSql ? realm?.Server.WorldDatabase ?? _session.DatabaseProfile : null;
+                    var capabilities = sources.IncludeSql ? _session.DatabaseCapabilities : null;
+                    var notices = new List<string>();
+                    if (database is not null && realm is not null)
+                    {
+                        try { capabilities = await new DatabaseCapabilityService().InspectAsync(database, _stop.Token); }
+                        catch (MySqlConnector.MySqlException ex) { database = null; capabilities = null; notices.Add("Selected realm SQL could not be read: " + ex.Message); }
+                    }
                     var candidate = new ClassStudioDataService(_schema);
-                    result = await Task.Run(() => candidate.LoadAsync(sources.ServerPath, sources.ClientPath,
-                        Path.Combine(CruciblePaths.CacheDirectory, "ClassStudio"),
-                        sources.IncludeSql ? _session.DatabaseProfile : null, sources.IncludeSql ? _session.DatabaseCapabilities : null, _stop.Token, sources.CorePath,
+                    var loaded = await Task.Run(() => candidate.LoadAsync(realm?.Server.DbcPath ?? sources.ServerPath, sources.ClientPath,
+                        Path.Combine(CruciblePaths.CacheDirectory, "ClassStudio"), database, capabilities, _stop.Token, sources.CorePath,
                         Enum.Parse<ClientArchiveOrderPolicy>(sources.ClientOrder ?? "StandardWrath", ignoreCase: true)));
+                    result = loaded with { Notices = loaded.Notices.Concat(notices).ToArray(), RealmProfile = realm?.Profile,
+                        SourceIdentity = realm?.Server.ConfigLocation, RealmName = realm?.Name };
                     _data = candidate;
                 }
                 finally { _dataGate.Release(); }
@@ -85,7 +105,7 @@ internal sealed class ClassStudioSession : IDisposable
         return result;
     }
 
-    private sealed record SourceRequest(string? ServerPath, string? ClientPath, bool IncludeSql, string? CorePath, string? ClientOrder);
+    private sealed record SourceRequest(string? ServerPath, string? ClientPath, bool IncludeSql, string? CorePath, string? ClientOrder, uint? RealmId);
     private sealed record ExportRequest(string Name, string Text);
     public void Dispose() => _stop.Cancel();
 }

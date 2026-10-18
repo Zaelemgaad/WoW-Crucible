@@ -8,7 +8,7 @@ namespace WoWCrucible.Core;
 public sealed record ClassStudioColumn(string Name, string Type, bool Key, int? ByteOffset = null);
 public sealed record ClassStudioTable(string Layer, string Name, string Source, string Fingerprint,
     IReadOnlyList<ClassStudioColumn> Columns, IReadOnlyList<IReadOnlyDictionary<string, object?>> Rows, string Format = "dbc");
-public sealed record ClassStudioSnapshot(DateTimeOffset ReadUtc, IReadOnlyList<ClassStudioTable> Tables, IReadOnlyList<string> Notices);
+public sealed record ClassStudioSnapshot(DateTimeOffset ReadUtc, IReadOnlyList<ClassStudioTable> Tables, IReadOnlyList<string> Notices, string? SourceIdentity = null, string? RealmProfile = null, string? RealmName = null);
 
 /// <summary>Read-only, schema-resolved inputs for the shared class editor. Layers stay explicit.</summary>
 public sealed class ClassStudioDataService(Func<WdbcFile, DbcSchemaResolution> resolveSchema)

@@ -74,8 +74,8 @@ internal sealed class ClassStudioView : UserControl, IDisposable
     public async Task ImportFileAsync(string path)
     {
         await Ready;
-        var deadline = DateTime.UtcNow.AddSeconds(30);
-        while (await Browser!.ExecuteScriptAsync("Boolean(window.TalentStudio && window.TalentStudio.initialized)") != "true")
+        var deadline = DateTime.UtcNow.AddMinutes(3);
+        while (await Browser!.ExecuteScriptAsync("Boolean(window.TalentStudio && window.TalentStudio.initialized && window.StudioSources && window.StudioSources.initialized)") != "true")
         {
             if (_disposed || _displayFailed) throw new InvalidOperationException("The editor closed before the file could be opened.");
             if (DateTime.UtcNow >= deadline) throw new TimeoutException("Class Studio did not finish restoring its saved workspace. The file was not imported.");

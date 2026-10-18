@@ -1,7 +1,7 @@
 (function () {
 'use strict';
 
-var BASE = window.TALENT_DATA;               // { classId: { classId, name, file, trees:[{n,t:[...]}] } }
+var BUILTIN = window.TALENT_DATA, BASE = BUILTIN, sourceKey = '';               // { classId: { classId, name, file, trees:[{n,t:[...]}] } }
 var ICONS = window.ICON_MANIFEST || [];       // list of icon base names available under icons/
 var CLASS_FILES = ['warrior','paladin','hunter','rogue','priest','deathknight','shaman','mage','warlock','druid'];
 
@@ -40,8 +40,8 @@ function lsDel(key) {
 }
 
 function settingsKey() { return 'twc.settings'; }
-function classOverrideKey(classId) { return 'twc.class.' + classId; }
-function buildKey(classId) { return 'twc.build.' + classId; }
+function classOverrideKey(classId) { return 'twc.' + (sourceKey && BASE[classId] ? 'source.' + sourceKey + '.' : '') + 'class.' + classId; }
+function buildKey(classId) { return 'twc.' + (sourceKey && BASE[classId] ? 'source.' + sourceKey + '.' : '') + 'build.' + classId; }
 function customClassesKey() { return 'twc.customClasses'; }
 function panesKey() { return 'twc.panes'; }
 
@@ -100,7 +100,7 @@ function iconRefToSrc(ref) {
 function classMeta(classId) {
   if (BASE[classId]) {
     var b = BASE[classId];
-    return { classId: classId, name: b.name, iconSrc: 'classicons/' + b.file + '.jpg', isCustom: false };
+    return { classId: classId, name: b.name, iconSrc: b.file ? 'classicons/' + b.file + '.jpg' : 'icons/_placeholder.png', isCustom: false };
   }
   var c = STATE.customClasses.filter(function (x) { return x.id === classId; })[0];
   if (c) return { classId: classId, name: c.name, iconSrc: iconRefToSrc(c.icon), isCustom: true };
@@ -111,7 +111,7 @@ function allClassIds() {
   var baseIds = Object.keys(BASE).map(Number).sort(function (a, b) {
     return BASE[a].name.localeCompare(BASE[b].name);
   });
-  var customIds = STATE.customClasses.map(function (c) { return c.id; });
+  var customIds = STATE.customClasses.filter(function(c) { return !BASE[c.id]; }).map(function (c) { return c.id; });
   return baseIds.concat(customIds);
 }
 
@@ -164,7 +164,7 @@ function getClassData(classId) {
     sideboard = normalizeTrees([deepClone(override.sideboard || { n: 'Side Board', t: [] })])[0];
   } else if (BASE[classId]) {
     trees = normalizeTrees(deepClone(BASE[classId].trees));
-    sideboard = blankSideboard();
+    sideboard = normalizeTrees([deepClone(BASE[classId].sideboard || {n:'Side Board',t:[]})])[0];
   } else {
     trees = blankTrees();
     sideboard = blankSideboard();
@@ -172,6 +172,7 @@ function getClassData(classId) {
 
   var built = { classId: classId, name: override && override.name || meta.name, trees: trees, sideboard: sideboard };
 
+  applyBoardLayouts(built);
   var build = lsGet(buildKey(classId), null);
   if (build) {
     trees.forEach(function (tree) {
@@ -191,14 +192,28 @@ function stripK(t) {
   return c;
 }
 
+// Geometry has its own persistence domain; restoring content must never delete it.
+function saveBoardLayouts(cd) {
+  lsSet('twc.layout.' + cd.classId, {trees:cd.trees.map(function(t){return t.layout || null;}),sideboard:cd.sideboard.layout || null});
+}
+function applyBoardLayouts(cd) {
+  var saved = lsGet('twc.layout.' + cd.classId, null);
+  if (saved) {
+    cd.trees.forEach(function(t,i){if(saved.trees[i])t.layout=deepClone(saved.trees[i]);});
+    if(saved.sideboard)cd.sideboard.layout=deepClone(saved.sideboard);
+  } else if(cd.trees.some(function(t){return t.layout;}) || cd.sideboard.layout) saveBoardLayouts(cd);
+}
+function contentTree(tree) {
+  var result=Object.assign({},tree,{t:tree.t.map(stripK)});
+  delete result.layout;
+  return result;
+}
+
 function saveClassOverride(classId) {
   if (classId === 'workspace') { saveWorkspace(); return; }
   var cd = STATE.data[classId];
-  var toSave = {
-    name: cd.name,
-    trees: cd.trees.map(function (tree) { return Object.assign({}, tree, { t: tree.t.map(stripK) }); }),
-    sideboard: { n: cd.sideboard.n, t: cd.sideboard.t.map(stripK), layout: cd.sideboard.layout },
-  };
+  saveBoardLayouts(cd);
+  var toSave = {name:cd.name,trees:cd.trees.map(contentTree),sideboard:contentTree(cd.sideboard)};
   lsSet(classOverrideKey(classId), toSave);
 }
 
@@ -218,6 +233,7 @@ function getWorkspace() {
     var saved = lsGet('twc.workspace', { trees: [], sideboard: { n: 'Side Board', t: [] } });
     STATE.workspace = { classId: 'workspace', name: 'Free Workspace',
       trees: normalizeTrees(saved.trees), sideboard: normalizeTrees([saved.sideboard])[0] };
+    applyBoardLayouts(STATE.workspace);
   }
   return STATE.workspace;
 }
@@ -227,7 +243,11 @@ function workspacePayload() {
   return { format: 'twc-workspace', version: 1, trees: deepClone(cd.trees), sideboard: deepClone(cd.sideboard) };
 }
 
-function saveWorkspace() { lsSet('twc.workspace', workspacePayload()); }
+function saveWorkspace() {
+  var cd=getWorkspace();saveBoardLayouts(cd);
+  var payload=workspacePayload();payload.trees.forEach(function(t){delete t.layout;});delete payload.sideboard.layout;
+  lsSet('twc.workspace', payload);
+}
 
 function cloneWorkspaceTree(cd, source, name) {
   var tree = source ? deepClone(source) : { n: name, t: [] };
@@ -343,7 +363,7 @@ function mountBoardCanvas(root, cd, workspace) {
     workspace: workspace,
     load: function () { return lsGet('twc.canvas.' + cd.classId, {}); },
     save: function (settings) { lsSet('twc.canvas.' + cd.classId, settings); },
-    changed: function () { saveClassOverride(cd.classId); }
+    changed: function () { saveBoardLayouts(cd); }
   });
 }
 
@@ -480,7 +500,6 @@ function renderPane(paneIndex) {
   paneEl.appendChild(buildClassPicker(paneIndex));
 
   if (classId == null || !classMeta(classId)) {
-    if (classId != null) { STATE.panes[paneIndex] = null; savePanes(); }
     var empty = ce('p', 'empty-state');
     empty.textContent = 'Pick a class above to begin. Left-click a talent to spend a point, right-click to remove one.';
     paneEl.appendChild(empty);
@@ -566,10 +585,11 @@ function buildPaneActions(paneIndex, classId) {
   var restoreBtn = ce('button', 'btn btn-danger');
   restoreBtn.textContent = meta.isCustom ? 'Clear Class Data' : 'Restore Original Data';
   restoreBtn.title = meta.isCustom
-    ? 'Wipes this custom class back to three empty trees'
-    : 'Discards your edits for this class and restores the original talent data';
+    ? 'Clears talents; keeps board positions and sizes'
+    : 'Restores class data from the selected source; keeps board positions and sizes';
   restoreBtn.addEventListener('click', function () {
     if (!confirm(meta.isCustom ? 'Clear all talents from "' + meta.name + '"?' : 'Discard edits and restore original data for ' + meta.name + '?')) return;
+    saveBoardLayouts(getClassData(classId));
     lsDel(classOverrideKey(classId));
     lsDel(buildKey(classId));
     delete STATE.data[classId];
@@ -693,7 +713,7 @@ function renderTree(cd, tree, treeIdx) {
   var wrap = ce('div', 'tree-grid-wrap');
   wrap.style.width = (COLS * 50) + 'px';
   wrap.style.height = (tiers * 50) + 'px';
-  if (BASE[cd.classId]) {
+  if (BASE[cd.classId] && BASE[cd.classId].file) {
     wrap.style.backgroundImage = "url('backgrounds/" + BASE[cd.classId].file + '_' + (treeIdx + 1) + ".jpg')";
   }
 
@@ -1576,6 +1596,8 @@ function exportDbcReference(classId) {
 }
 
 function importTalentData(parsed) {
+  if(window.StudioSources && (!window.StudioSources.initialized || window.StudioSources.error))
+    throw new Error(window.StudioSources.error || 'Wait for the selected source to finish loading before importing.');
   if (parsed.format === 'twc-workspace') {
     importWorkspace(parsed);
     return;
@@ -1724,12 +1746,18 @@ function applySplitViewButton() {
 
 window.TalentStudio = {
   initialized: false,
+  useSource: function (key, classes) {
+    Object.values(STATE.data).forEach(saveBoardLayouts);
+    sourceKey=key || '';
+    BASE=classes ? Object.fromEntries(classes.map(function(c){return [c.classId,c];})) : BUILTIN;
+    STATE.data={};
+    renderAll();
+  },
   importData: importTalentData,
   setToolbarsVisible: function (visible) { document.body.classList.toggle('toolbars-hidden', !visible); },
   importClass: function (payload) {
     var classId = payload.classId;
     if (!BASE[classId] && !classMeta(classId)) { STATE.customClasses.push({id:classId,name:payload.name,icon:'spell:_placeholder'}); saveCustomClasses(); }
-    if (BASE[classId]) BASE[classId].name = payload.name;
     lsSet(classOverrideKey(classId), {name:payload.name,trees:payload.trees,sideboard:payload.sideboard||{n:'Side Board',t:[]}});
     lsDel(buildKey(classId)); delete STATE.data[classId]; STATE.panes[0] = classId;
     STATE.freeMode = false; saveSettings(); savePanes(); renderAll();

@@ -1,19 +1,21 @@
 (function () {
 'use strict';
 var D=window.StudioData, B=window.StudioBridge, snapshot=null, edits={}, selectedTable=null, page=0;
-var host, status, layer, classSelect, mode, search, tableSelect, results, editor, sources, count;
+var host, status, layer, classSelect, mode, search, tableSelect, results, editor, sources, count, sourceStatus, realmSelect;
+var availableRealms=[];
+var editStorageKey='twc.studio.edits';
 function el(tag, cls, text) { var e=document.createElement(tag); if(cls)e.className=cls; if(text!=null)e.textContent=text; return e; }
 function button(text, fn) { var b=el('button','btn',text); b.type='button'; b.onclick=function(){Promise.resolve().then(fn).catch(fail);}; return b; }
-function fail(error) { status.textContent=error.message; status.classList.add('studio-error'); }
+function fail(error) { status.textContent=error.message; status.classList.add('studio-error');if(sourceStatus){sourceStatus.textContent=error.message;sourceStatus.classList.add('studio-error');} }
 function say(text) { status.textContent=text; status.classList.remove('studio-error'); }
-function save() { localStorage.setItem('twc.studio.edits',JSON.stringify(edits)); B.changed(); updateCount(); }
+function save() { localStorage.setItem(editStorageKey,JSON.stringify(edits)); B.changed(); updateCount(); }
 function download(name,text,type) { return B.download(name,text,type); }
 function option(select,value,text) { var o=el('option',null,text);o.value=value;select.appendChild(o); }
 function field(parent,label,input) { var l=el('label','studio-field',label);input.setAttribute('aria-label',label);l.appendChild(input);parent.appendChild(l);return input; }
 function select(parent,label) { return field(parent,label,el('select')); }
 function updateCount() { count.textContent=Object.keys(edits).length+' staged row changes'; }
 function persistSources() { localStorage.setItem('twc.studio.sources',JSON.stringify(sources));B.changed(); }
-function editedSnapshot() { return {tables:snapshot.tables.map(function(t){return Object.assign({},t,{rows:D.effective(t,edits)});})}; }
+function editedSnapshot() { return Object.assign({},snapshot,{tables:snapshot.tables.map(function(t){return Object.assign({},t,{rows:D.effective(t,edits)});})}); }
 function currentTable() { return snapshot && snapshot.tables[Number(tableSelect.value)]; }
 function populate() {
   layer.replaceChildren(); var layers=Array.from(new Set(snapshot.tables.filter(function(t){return t.name==='Spell';}).map(function(t){return t.layer;})));
@@ -23,7 +25,7 @@ function populate() {
 }
 function populateClasses() {
   classSelect.replaceChildren(); option(classSelect,'','All spells');
-  D.rows(snapshot,layer.value,'ChrClasses').forEach(function(r){option(classSelect,r.ID,D.label(r)||('Class '+r.ID));});
+  D.realmClasses(snapshot,layer.value).forEach(function(r){option(classSelect,r.ID,D.label(r)||('Class '+r.ID));});
 }
 function showRows() {
   if(!snapshot)return;
@@ -141,21 +143,38 @@ function init() {
   var sourcePanel=el('details','studio-sources');sourcePanel.open=true;sourcePanel.appendChild(el('summary',null,'Data sources'));
   var paths={};['server','client','core'].forEach(function(kind){
     var line=el('div','studio-source-line'), input=el('input');input.value=sources[kind+'Path']||'';input.placeholder=kind==='server'?'Server data / DBC folder':kind==='core'?'CoA core source (compiled class learn lists)':'Client root / Data / extracted DBC folder';
-    input.setAttribute('aria-label',kind+' folder');input.onchange=function(){sources[kind+'Path']=input.value;persistSources();};
+    input.setAttribute('aria-label',kind+' folder');input.onchange=function(){sources[kind+'Path']=input.value;if(kind==='server' && sources.realmId!=null){sources.realmId=null;sources.selection='manual';realmSelect.value='manual';}persistSources();};
     paths[kind]=input;line.append(el('span',null,kind),input,button('Browse',async function(){var result=await B.api('pick?kind='+kind,{});if(result.path){input.value=result.path;input.onchange();}}));sourcePanel.appendChild(line);
   });
   var sql=el('input');sql.type='checkbox';sql.checked=!!sources.includeSql;sql.onchange=function(){sources.includeSql=sql.checked;persistSources();};field(sourcePanel,'Include connected world SQL',sql);
   var order=select(sourcePanel,'Client loader');option(order,'CoA','CoA / Ascension');option(order,'StandardWrath','Standard Wrath');order.value=sources.clientOrder||'CoA';sources.clientOrder=order.value;
   order.onchange=function(){sources.clientOrder=order.value;persistSources();};
-  sourcePanel.appendChild(button('Load / refresh sources',async function(){
-    say('Reading source tables…'); sources.serverPath=paths.server.value;sources.clientPath=paths.client.value;sources.corePath=paths.core.value;persistSources();
-    var loaded=await B.api('load',sources);snapshot=loaded;populate();
-    notices.replaceChildren(el('summary',null,'Source coverage and limitations'));
-    var stale=Object.values(edits).filter(function(e){var t=D.table(loaded,e.layer,e.table);return !t||(e.fingerprint&&e.fingerprint!==t.fingerprint);});
-    if(stale.length)loaded.notices.unshift(stale.length+' staged edits were created against different source files. Their original values and fingerprints remain in the JSON plan; review them before importing.');
-    loaded.notices.forEach(function(n){notices.appendChild(el('p',null,n));});
-    say('Loaded '+loaded.tables.length+' tables. Staged edits were retained.');
-  }));
+  async function loadSources() {
+    if(realmSelect.value==='builtin') {window.StudioSources.error=null;window.TalentStudio.useSource('',null);sourceStatus.textContent='Bundled Wrath reference data';return;}
+    realmSelect.disabled=true;loadButton.disabled=true;results.inert=true;editor.inert=true;window.StudioSources.initialized=false;window.StudioSources.error=null;
+    try {
+      say('Reading source tables…');sourceStatus.textContent='Loading selected realm…';sourceStatus.classList.remove('studio-error');
+      sources.serverPath=paths.server.value;sources.clientPath=paths.client.value;sources.corePath=paths.core.value;persistSources();
+      var loaded=await B.api('load',sources);
+      var activeLayer=D.rows(loaded,'server','ChrClasses').length?'server':'client';
+      var classes=D.realmClasses(loaded,activeLayer).map(function(c){return D.talentClass(loaded,activeLayer,Number(c.ID));});
+      if(!classes.length)throw new Error('No classes found in the selected sources. Previous editor data is still open.');
+      var identity=encodeURIComponent((loaded.sourceIdentity || sources.serverPath || sources.clientPath).toLowerCase());
+      // Each realm owns its working edits. Switching never applies one realm's rows to another.
+      editStorageKey='twc.studio.edits.'+identity;
+      edits=JSON.parse(localStorage.getItem(editStorageKey)||'{}');
+      snapshot=loaded;populate();updateCount();editor.replaceChildren();
+      window.TalentStudio.useSource(identity,classes);
+      notices.replaceChildren(el('summary',null,'Source coverage and limitations'));
+      var stale=Object.values(edits).filter(function(e){var t=D.table(loaded,e.layer,e.table);return !t||(e.fingerprint&&e.fingerprint!==t.fingerprint);});
+      if(stale.length)loaded.notices.unshift(stale.length+' staged edits were created against different source files. Review their fingerprints before importing.');
+      loaded.notices.forEach(function(n){notices.appendChild(el('p',null,n));});
+      sourceStatus.textContent=(loaded.realmName||'Selected sources')+' · '+classes.length+' classes';
+      say('Loaded '+loaded.tables.length+' tables. Source talents are now available on the main canvas. CoA advancement uses planning boards; source IDs and requirements are preserved.');
+      if(loaded.notices.some(function(n){return n.startsWith('Selected realm SQL could not');}))sourceStatus.textContent+=' · SQL unavailable (see sources)';
+    } catch(error) {window.StudioSources.error=error.message;throw error;} finally {realmSelect.disabled=false;loadButton.disabled=false;results.inert=false;editor.inert=false;window.StudioSources.initialized=true;}
+  }
+  var loadButton=button('Load / refresh sources',function(){if(realmSelect.value==='builtin'){realmSelect.value='manual';sources.realmId=null;sources.selection='manual';}return loadSources();});sourcePanel.appendChild(loadButton);
   var notices=el('details','studio-notices');notices.appendChild(el('summary',null,'Source coverage and limitations'));
   sourcePanel.appendChild(notices);host.appendChild(sourcePanel);
   status=el('p','studio-status',B.connected?'Select sources, then Load / refresh.':'Open Class Studio from Crucible to load folders and SQL. Existing talent designs still work here.');status.setAttribute('role','status');host.appendChild(status);
@@ -167,11 +186,34 @@ function init() {
     button('New row',function(){if(!snapshot)throw new Error('Load sources first.');var t=mode.value==='spells'?D.table(snapshot,layer.value,'Spell'):currentTable();if(!t)throw new Error('Load sources first.');return openRow(t,null,true);}),
     button('Use class talents',function(){if(!snapshot||!classSelect.value)throw new Error('Choose a class first.');var payload=D.talentClass(editedSnapshot(),layer.value,Number(classSelect.value));
       var note=payload.layoutSource==='planning'?' CoA entries will be arranged as planning boards; native UI coordinates are not inferred. Source IDs and requirement fields are preserved.':'';
-      if(confirm('Replace the working '+payload.name+' talent layout with these source tables? Export your existing design first if you want to retain both.'+note))window.TalentStudio.importClass(payload);}),
+      if(confirm('Replace the working '+payload.name+' talent data with these source tables? Board positions and sizes stay unchanged. Export first to keep both designs.'+note))window.TalentStudio.importClass(payload);}),
     button('Export changes JSON',exportPlan),button('Export table CSV',exportCsv),button('Discard all row edits',function(){if(confirm('Discard all staged spell/table edits?')){edits={};save();showRows();editor.replaceChildren();}}),count);
   host.appendChild(actions);updateCount();
   var split=el('div','studio-split');results=el('div','studio-results');editor=el('div','studio-editor');split.append(results,editor);host.appendChild(split);
-  if(B.connected) B.api('settings').then(function(s){['server','client','core'].forEach(function(k){if(!sources[k+'Path']){paths[k].value=s[k+'Path']||'';}});}).catch(fail);
+  var sourceBar=el('div','studio-source-bar');
+  realmSelect=select(sourceBar,'Realm / data');realmSelect.id='realmSource';realmSelect.parentElement.classList.add('field');realmSelect.disabled=B.connected;
+  option(realmSelect,'builtin','Bundled Wrath reference');option(realmSelect,'manual','Choose source folders');
+  sourceStatus=el('span','studio-source-status','Bundled Wrath reference data');sourceStatus.setAttribute('role','status');sourceBar.appendChild(sourceStatus);
+  document.querySelector('.topbar').appendChild(sourceBar);
+  realmSelect.onchange=async function(){
+    sources.realmId=/^\d+$/.test(realmSelect.value)?Number(realmSelect.value):null;
+    var chosen=availableRealms.find(function(r){return r.id===sources.realmId;});
+    if(chosen)paths.server.value=chosen.serverPath;
+    sources.selection=realmSelect.value;persistSources();
+    if(realmSelect.value==='manual'){document.querySelector('#spellbook').classList.remove('hidden');return;}
+    try{await loadSources();}catch(error){fail(error);}
+  };
+  window.StudioSources={ready:Promise.resolve(),reload:loadSources,initialized:!B.connected,error:null};
+  if(B.connected)window.StudioSources.ready=B.api('settings').then(async function(s){
+    ['server','client','core'].forEach(function(k){if(!sources[k+'Path']){paths[k].value=s[k+'Path']||'';}});
+    availableRealms=s.realms||[];availableRealms.forEach(function(r){option(realmSelect,r.id,r.name+' · '+r.database);});
+    var selected=sources.selection || String(sources.realmId || s.defaultRealmId || 'builtin');
+    realmSelect.value=selected;
+    if(!realmSelect.value)realmSelect.value='builtin';
+    sources.realmId=/^\d+$/.test(realmSelect.value)?Number(realmSelect.value):null;
+    if(sources.realmId!=null){paths.server.value=availableRealms.find(function(r){return r.id===sources.realmId;}).serverPath;if(sources.includeSql==null)sources.includeSql=true;sql.checked=!!sources.includeSql;await loadSources();}
+    (s.notices||[]).forEach(function(n){notices.appendChild(el('p',null,n));});
+  }).catch(function(error){window.StudioSources.error=error.message;fail(error);}).finally(function(){window.StudioSources.initialized=true;realmSelect.disabled=false;});
   document.querySelector('#backupStudio').onclick=function(){download('class-studio-workspace.json',JSON.stringify({format:'crucible-class-studio-workspace',version:1,storage:B.storage()},null,2));};
   document.querySelector('#restoreStudio').onclick=function(){document.querySelector('#restoreStudioFile').click();};
   document.querySelector('#restoreStudioFile').onchange=async function(){try{

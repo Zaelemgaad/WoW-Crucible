@@ -13,7 +13,7 @@ internal static class EmbeddedStudioTestSuite
     public static void Run(bool coa)
     {
         AppBuilder.Configure<App>().UsePlatformDetect().WithInterFont().SetupWithoutStarting();
-        using var stop = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        using var stop = new CancellationTokenSource(TimeSpan.FromMinutes(8));
         Exception? failure = null;
         var completed = false;
         Dispatcher.UIThread.Post(async () =>
@@ -84,10 +84,37 @@ internal static class EmbeddedStudioTestSuite
             if (coa)
             {
                 var settings = JsonSerializer.Deserialize<DesktopSettings>(File.ReadAllText("src/WoWCrucible.Desktop/bin/Debug/net10.0/Config/desktop.json"))!;
-                var request = JsonSerializer.Serialize(new { serverPath = settings.CoreDbcPath, clientPath = settings.ClientDataPath, corePath = settings.CoreSourcePath, clientOrder = "CoA" });
-                var coverage = await Evaluate("StudioBridge.api('load'," + request + ").then(s=>s.tables.map(t=>({layer:t.layer,name:t.name,rows:t.rows.length})))");
-                Require(coverage.EnumerateArray().Any(t => t.GetProperty("name").GetString() == "Spell" && t.GetProperty("rows").GetInt32() > 200000), "Live CoA catalog did not reach the embedded editor.");
-                Console.WriteLine("PASS live CoA catalog through the real embedded bridge: " + coverage.GetRawText());
+                workspace.Settings.ServerRootPath = settings.ServerRootPath;
+                workspace.Settings.CoreDbcPath = settings.CoreDbcPath;
+                workspace.Settings.ClientDataPath = settings.ClientDataPath;
+                workspace.Settings.CoreSourcePath = settings.CoreSourcePath;
+                var realms = await Evaluate("StudioBridge.api('settings').then(s=>s.realms)");
+                Require(realms.GetArrayLength() == 5, "Expected all five installed realms.");
+                Require(!realms.GetRawText().Contains("password", StringComparison.OrdinalIgnoreCase), "Realm metadata exposed credentials.");
+                Console.WriteLine("PASS installed realm discovery: " + realms.GetRawText());
+                var request = JsonSerializer.Serialize(new { serverPath = settings.CoreDbcPath, clientPath = settings.ClientDataPath, corePath = settings.CoreSourcePath, clientOrder = "CoA", realmId = 1, includeSql = true });
+                var coverage = await Evaluate("StudioBridge.api('load'," + request + ").then(s=>{window.liveCoASnapshot=s;return {tables:s.tables.map(t=>({layer:t.layer,name:t.name,rows:t.rows.length})),notices:s.notices};})");
+                Require(coverage.GetProperty("tables").EnumerateArray().Any(t => t.GetProperty("name").GetString() == "Spell" && t.GetProperty("rows").GetInt32() > 200000), "Live CoA catalog did not reach the embedded editor.");
+                Require(coverage.GetProperty("tables").EnumerateArray().Any(t => t.GetProperty("layer").GetString() == "sql"), "Selected realm SQL was not loaded.");
+                var classes = await Evaluate("(() => {const s=window.liveCoASnapshot; const classes=StudioData.realmClasses(s,'server').map(c=>StudioData.talentClass(s,'server',c.ID));TalentStudio.useSource('live-test',classes); return classes.map(c=>({id:c.classId,name:c.name,boards:c.trees.length,talents:c.trees.reduce((n,t)=>n+t.t.length,0)}));})()");
+                Require(classes.GetArrayLength() == 21, "CoA did not expose its 21 custom classes.");
+                Require(classes.EnumerateArray().All(c=>c.GetProperty("boards").GetInt32()>0), "A CoA class has no source talent boards.");
+                Console.WriteLine("PASS live CoA classes, boards and selected world SQL: " + classes.GetRawText());
+                await Evaluate("(() => {window.liveCoASnapshot=null;return true;})()");
+                foreach (var realmId in new[] { 2, 3, 4, 5 })
+                {
+                    var realmRequest = JsonSerializer.Serialize(new { corePath = settings.CoreSourcePath, clientOrder = "CoA", realmId, includeSql = true });
+                    var summary = await Evaluate("StudioBridge.api('load'," + realmRequest + ").then(s=>({name:s.realmName,profile:s.realmProfile,notices:s.notices,sql:s.tables.filter(t=>t.layer==='sql').map(t=>t.source),classes:StudioData.realmClasses(s,'server').map(c=>{const p=StudioData.talentClass(s,'server',c.ID);return {id:p.classId,boards:p.trees.length,imported:p.trees.flatMap(t=>t.t).filter(t=>t.i>=47000&&t.i<=47999).length};})}))");
+                    Require(summary.GetProperty("sql").GetArrayLength()>0, "Realm SQL was not loaded: " + summary.GetRawText());
+                    Require(summary.GetProperty("sql").EnumerateArray().All(t=>t.GetString()!.StartsWith("acore_" + (realmId==2?"s9":realmId==3?"s10":realmId==4?"reborn":"remix") + "_world.")), "Wrong realm SQL loaded.");
+                    if(realmId==4) Require(summary.GetProperty("classes").EnumerateArray().All(c=>c.GetProperty("imported").GetInt32()==0), "Bronzebeard contains Remix entries.");
+                    if(realmId==5) Require(summary.GetProperty("classes").GetArrayLength()==9 && summary.GetProperty("classes").EnumerateArray().Single(c=>c.GetProperty("id").GetInt32()==2).GetProperty("imported").GetInt32()>0, "Remix policy was not applied.");
+                    Console.WriteLine("PASS realm source isolation: " + summary.GetProperty("name") + " / " + summary.GetProperty("classes").GetRawText());
+                }
+            }
+            if(coa) {
+                await Evaluate("(() => {localStorage.setItem('twc.panes',JSON.stringify({panes:[12,null],splitView:false}));const settings=JSON.parse(localStorage.getItem('twc.settings'));settings.freeMode=false;localStorage.setItem('twc.settings',JSON.stringify(settings));StudioBridge.changed();return true;})()");
+                await view.FlushAsync();
             }
             await using (var capture = File.Create(Path.Combine(root, "embedded.png")))
                 await browser.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, capture);
@@ -101,6 +128,13 @@ internal static class EmbeddedStudioTestSuite
             await resumed.Ready.WaitAsync(TimeSpan.FromSeconds(25));
             browser = resumed.Browser!;
             Require((await Evaluate("StudioBridge.ready.then(()=>localStorage.getItem('twc.test.last'))")).GetString() == "456", "Restart did not restore the last edit.");
+            if(coa) {
+                var startup=await Evaluate("StudioSources.ready.then(()=>({status:document.querySelector('.studio-source-status').textContent,selected:document.querySelector('#realmSource').value,classes:document.querySelectorAll('#pane0 .class-btn-wrap:not(:has(.class-edit-btn)) .class-btn').length,active:document.querySelector('#pane0 .class-btn.active')?.textContent,boards:document.querySelectorAll('#pane0 .spec-board').length}))");
+                Require(startup.GetProperty("selected").GetString()=="1" && startup.GetProperty("classes").GetInt32()==21 && startup.GetProperty("boards").GetInt32()>0, "Automatic realm load failed: " + startup.GetRawText());
+                Console.WriteLine("PASS fresh embedded startup loads configured CoA and restores custom class selection: " + startup.GetRawText());
+                await using var sourceCapture=File.Create(Path.Combine(root,"coa-startup.png"));
+                await browser.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png,sourceCapture);
+            }
             Console.WriteLine("PASS real embedded WebView: local assets, existing state, workspace settings, folders, source/row reads, CSV export, validation, retained tabs, immediate shutdown save, blocked external navigation, restart restoration and native capture. No listener or browser launch.");
 
             void Arrange()

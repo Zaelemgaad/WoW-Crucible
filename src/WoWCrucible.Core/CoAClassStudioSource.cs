@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using System.Text;
 
 namespace WoWCrucible.Core;
 
@@ -21,12 +22,14 @@ public static class CoAClassStudioSource
             case "CharacterAdvancement":
                 fields = 179; size = 692;
                 Array("RequiredEntry", 8, 3); Array("SpellRank", 20, 9); Field("AbilityEssence", 56); Field("TalentEssence", 60);
+                columns.Add(new("Name", "StringOffset", false, 188));
+                columns.Add(new("TextureFilename", "StringOffset", false, 256));
                 Field("RequiredLevel", 104); Field("Group", 116); Field("ClassGroup", 128); Field("Tab", 132);
                 Array("RequiredInvestment", 136, 6); Field("Points", 160); Field("RequiredClassPoints", 164);
                 Field("Starting", 414, flag: true); Array("ConnectedEntry", 415, 15); Field("Flags", 479);
                 Field("AvailableCoA", 483, flag: true); Field("AvailableSeasonal", 484, flag: true); Array("AdditionalRequirement", 656, 9); break;
             case "CharacterAdvancementClassTypes":
-                fields = 23; size = 92; Field("ClassID", 8); Field("Classless", 12); Field("CoA", 16); break;
+                fields = 23; size = 92; Field("ClassID", 8); Field("Classless", 12); Field("CoA", 16); Field("WarcraftReborn", 20); break;
             case "ChrSpecs":
                 fields = 65; size = 260; Field("StarterSpell", 96); Field("RootEntry", 112); break;
             case "SpellRank":
@@ -43,7 +46,19 @@ public static class CoAClassStudioSource
         for (var i = 0; i < Word(4); i++)
         {
             var start = checked(20 + i * size); var row = new Dictionary<string, object?>();
-            foreach (var column in columns) row.Add(column.Name, column.Type == "Byte" ? (uint)bytes[start + column.ByteOffset!.Value] : Word(start + column.ByteOffset!.Value));
+            foreach (var column in columns)
+            {
+                var value = column.Type == "Byte" ? (uint)bytes[start + column.ByteOffset!.Value] : Word(start + column.ByteOffset!.Value);
+                if (column.Type == "StringOffset")
+                {
+                    if (value >= Word(16)) throw new InvalidDataException($"Invalid {name} string offset.");
+                    var offset = checked(20 + (int)Word(4) * size + (int)value);
+                    var end = System.Array.IndexOf(bytes, (byte)0, offset);
+                    if (end < 0) throw new InvalidDataException($"Unterminated {name} string.");
+                    row.Add(column.Name, Encoding.UTF8.GetString(bytes, offset, end - offset));
+                }
+                else row.Add(column.Name, value);
+            }
             if (!ids.Add((uint)row["ID"]!)) throw new InvalidDataException($"Duplicate {name} key {row["ID"]}.");
             rows.Add(row);
         }
@@ -58,6 +73,20 @@ public static class CoAClassStudioSource
         Read("AscensionCustomClassData.h", "ClassSpells", "CoAClassSpells", ["ClassID", "RequiredLevel", "SpellID"], 3);
         Read("AscensionSpellProgressionData.h", "Ranks", "CoARankSpells", ["ClassID", "FirstSpellID", "SpellID", "RequiredLevel"], 4);
         Read("AscensionTaughtAbilityData.h", "TaughtAbilities", "CoATaughtAbilities", ["ClassID", "SpecID", "RequiredLevel", "ParentSpellID", "SpellID", "RequiredSpellID", "RankWithLevel"], 5);
+        var policyPath = Path.Combine(directory, "AscensionRemixPolicy.h");
+        if (File.Exists(policyPath))
+        {
+            var policyText = File.ReadAllText(policyPath);
+            var policy = new Dictionary<string, object?>();
+            foreach (var name in new[] { "FirstEntry", "LastEntry", "PaladinClassType", "PriestClassType" })
+            {
+                var match = Regex.Match(policyText, @"constexpr\s+std::uint32_t\s+" + name + @"\s*=\s*(\d+)\s*;");
+                if (!match.Success) throw new InvalidDataException($"Unsupported Remix policy constant: {name}.");
+                policy.Add(name, uint.Parse(match.Groups[1].Value));
+            }
+            result.Add(new("core", "CoARemixPolicy", policyPath, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(policyPath))),
+                policy.Keys.Select(n => new ClassStudioColumn(n, "UInt32", false)).ToArray(), [policy], "core-plan"));
+        }
         return result;
 
         void Read(string filename, string array, string table, string[] names, int minimum)

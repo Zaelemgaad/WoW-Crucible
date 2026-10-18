@@ -51,6 +51,19 @@ internal static class ClassStudioTestSuite
             Word(12, 716); File.WriteAllBytes(packedPath, packed);
             try { CoAClassStudioSource.ReadTable(packedPath, "server", packedPath); throw new Exception("Wrong packed CoA layout accepted."); }
             catch (InvalidDataException) { }
+            var serverRoot = Path.Combine(root, "installed-server");
+            var mainConfig = Path.Combine(serverRoot, "configs");
+            var realmConfig = Path.Combine(serverRoot, "realms", "second", "configs");
+            Directory.CreateDirectory(mainConfig); Directory.CreateDirectory(realmConfig);
+            Directory.CreateDirectory(Path.Combine(serverRoot, "data", "dbc"));
+            File.WriteAllText(Path.Combine(mainConfig, "worldserver.conf"), "RealmID = 1\nDataDir = \"./data\"\nWorldDatabaseInfo = \"127.0.0.1;3306;fixture;unused;world_first\"");
+            File.WriteAllText(Path.Combine(realmConfig, "worldserver-second.conf"), "RealmID = 2\nDataDir = \"../../data\"\nWorldDatabaseInfo = \"127.0.0.1;3306;fixture;unused;world_second\"");
+            File.WriteAllText(Path.Combine(realmConfig, "worldserver.conf.dist"), "This template must never be selected.");
+            Directory.CreateDirectory(Path.Combine(realmConfig, "modules"));
+            File.WriteAllText(Path.Combine(realmConfig, "modules", "mod_ascension_compat.conf"), "Ascension.RealmProfile = \"Season9\"");
+            var realms = await ServerRealmCatalog.ReadAsync(serverRoot);
+            Require(realms.Realms.Count == 2 && realms.Realms[1].Profile == "Season9", "Installed realm configurations were not discovered.");
+            Require(realms.Realms[0].Server.DbcPath == realms.Realms[1].Server.DbcPath && realms.Realms[1].Server.WorldDatabase.Database == "world_second", "Shared DBC paths or separate realm databases were resolved incorrectly.");
             if (corpus is not null)
             {
                 var real = await service.LoadAsync(corpus, client, Path.Combine(output ?? root, "client-cache"), corePath: core, clientOrder: core is null ? ClientArchiveOrderPolicy.StandardWrath : ClientArchiveOrderPolicy.CoA);

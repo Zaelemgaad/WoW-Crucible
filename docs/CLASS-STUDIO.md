@@ -23,6 +23,31 @@ workspace** in the old page, then **Restore workspace** in Class Studio. Individ
 talent JSON files still use **Import JSON**. Restore replaces the current editor
 workspace; export it first if both designs matter.
 
+## Realm selection and restoring data
+
+**Realm / data** on the main toolbar lists installed world configurations, using
+realm names from the shared login database. Opening the editor loads the configured
+realm automatically. The CoA installation exposes Conquest Of Azeroth, Area 52,
+Dawnrise, Bronzebeard and WoW Remix. Each uses its own world database and the same
+configured client. Reading them does not start or restart a server.
+
+CoA shows its 21 custom classes. The classless realms show Hero; Bronzebeard shows
+its ten classes; Remix follows the core policy, excluding Priest and separating
+imported advancement entries from the original Bronzebeard entries. Advancement
+boards are editing/planning arrangements, not a reproduction of the native UI.
+Their original entry IDs and packed source rows remain attached to the talents.
+
+**Restore Original Data** restores the selected source's class content and points.
+It preserves board positions, sizes, stacking and scrolling, plus canvas settings.
+Geometry is stored separately and existing layouts migrate when read. **Restore
+workspace** is the distinct action that deliberately restores an entire backup.
+
+Class edits and staged table changes are saved separately per realm. Free Mode
+remains a shared design workspace. **Bundled Wrath reference** opens the original
+offline reference and pre-existing reference-class drafts; it is explicitly labeled
+and does not masquerade as connected server content. **Choose source folders**
+allows loading another dataset. Existing custom classes remain available.
+
 ## Canvas and windows
 
 - Each spec and the sideboard has a grip at the upper left and a resize handle at
@@ -77,8 +102,9 @@ From the selected CoA core it reads the current `ClassSpells`, progression `Rank
 and `TaughtAbilities` arrays. These are source definitions, not proof of which
 binary is running. Additional compiled hooks may grant spells beyond these lists.
 
-Connect the world database in Crucible Workspace setup, then enable **Include
-connected world SQL** and refresh to include inspected starting, trainer, quest,
+For a selected realm, **Include connected world SQL** reads that realm’s configured
+world database. For manual folders it uses the connection from Workspace setup.
+Enable the option and refresh to include inspected starting, trainer, quest,
 rank, prerequisite, learned-spell and `spell_dbc` rows. Credentials never enter the
 browser. This uses read-only SELECTs. No server restart or game-file write occurs.
 Missing tables and missing connections are listed under source coverage; the editor

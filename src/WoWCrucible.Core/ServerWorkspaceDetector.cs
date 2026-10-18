@@ -89,7 +89,7 @@ public static partial class ServerWorkspaceDetector
             authConfig.Success ? authConfig.Groups[1].Value : $"{installRoot}/etc/authserver.conf");
     }
 
-    private static Dictionary<string, string> ParseSettings(string text)
+    internal static Dictionary<string, string> ParseSettings(string text)
     {
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var sourceLine in text.Replace("\r", string.Empty).Split('\n'))
