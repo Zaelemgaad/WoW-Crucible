@@ -41,7 +41,7 @@ try {
     $link.TargetPath = $executable.FullName
     $link.WorkingDirectory = $executable.DirectoryName
     $link.IconLocation = $executable.FullName + ',0'
-    $link.Description = 'WoW Crucible - latest successful local build (' + $executable.VersionInfo.ProductVersion + ')'
+    $link.Description = 'WoW Crucible (' + $executable.VersionInfo.ProductVersion + ')'
     $link.WindowStyle = 1
     $link.Save()
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link)

@@ -26,7 +26,7 @@ try {
     & $update -ExecutablePath $executable -SettingsPath $settings
     Remove-Item -LiteralPath $shortcut
     & $update -ExecutablePath $executable -SettingsPath $settings
-    if (!(Test-Path -LiteralPath $shortcut)) { throw 'A subsequent build could not restore the registered shortcut.' }
+    if (!(Test-Path -LiteralPath $shortcut)) { throw 'A subsequent update could not restore the registered shortcut.' }
     $before = (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash
     $rejected = $false
     try { & $update -ExecutablePath (Join-Path $root 'missing.exe') -SettingsPath $settings }
