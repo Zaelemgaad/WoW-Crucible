@@ -85,8 +85,61 @@ internal static class WireProtocolTestSuite
         Refused("\"const\": \"PROTO\"", "\"const\": \"NOTHING\"", "An unknown const stops.");
         Refused("\"of\": \"block\"", "\"of\": \"group\"", "A tagged block needs a magic.");
 
+        var proposal = Definition.Replace("\"name\": \"pong\", ", "\"name\": \"pong\", \"status\": \"client_proposal\", \"doc\": \"Later.\", ");
+        var proposed = WireProtocolGenerator.Generate(WireProtocolGenerator.Parse(proposal), proposal, "sample.json");
+        Check(proposed.CppCodec.Contains("// Client proposal, not yet on the server. Later.", StringComparison.Ordinal) && proposed.Rust.Contains("/// Client proposal, not yet on the server. Later.", StringComparison.Ordinal), "A proposal says so in both languages.");
+        Refused("\"name\": \"pong\", ", "\"name\": \"pong\", \"status\": \"soon\", ", "An unknown status stops.");
+
+        var wrapped = new System.Text.StringBuilder();
+        WireNames.Comment(wrapped, string.Join(' ', Enumerable.Repeat("word", 60)), "    ");
+        Check(wrapped.ToString().Split('\n').All(line => line.Length <= 120) && wrapped.ToString().Contains('\n'), "A long C++ comment wraps within the column limit.");
+
+        Tables();
         Outputs();
         Console.WriteLine("Wire protocol generator checks passed.");
+    }
+
+    private const string TableDefinition = """
+        // A small table definition using every column kind.
+        {
+          "schema_format": 1, "generator_version": 1, "name": "sample_tables", "catalog_version": 2,
+          "cpp": { "namespace": "Sample::Tables", "header": "SampleTables.h", "dump_header": "SampleTablesDump.h" },
+          "rust": { "file": "src/sample_tables.rs", "pin_dir": "protocol" },
+          "fixtures": "sample_tables.tsv",
+          "merged_id": { "shift": 28, "sources": [1, 2] },
+          "tables": [
+            { "name": "manifest", "file": "manifest.tsv", "rows": "one", "columns": [
+              { "name": "family", "type": "u32", "check": "nonzero" }, { "name": "note", "type": "text" } ] },
+            { "name": "body", "file": "body.tsv", "rows": "some", "row_checks": ["namespace:id=source"], "columns": [
+              { "name": "id", "type": "u32", "check": "merged_id" }, { "name": "source", "type": "u32" } ] }
+          ]
+        }
+        """;
+
+    private static void Tables()
+    {
+        Check(WireTableGenerator.IsTableDefinition(TableDefinition) && !WireTableGenerator.IsTableDefinition(Definition), "A definition's kind is read from it.");
+        var set = WireTableGenerator.Parse(TableDefinition);
+        var first = WireTableGenerator.Generate(set, TableDefinition, "t.json");
+        Check(first == WireTableGenerator.Generate(WireTableGenerator.Parse(TableDefinition), TableDefinition, "t.json"), "Tables generate the same bytes twice.");
+        Check(first.CppCodec.Contains("// schema-format: 1, generator: " + WireProtocolGenerator.GeneratorVersion + ", catalog: 2\n", StringComparison.Ordinal), "Table output records its versions.");
+        foreach (var needle in new[] { "inline bool ReadBody(std::istream& stream", "Detail::IsMergedId(row.Id)", "row.Source != (row.Id >> 28)", "expected exactly one manifest row", "family must not be zero", "table.Fail(\"no rows\")" })
+            Check(first.CppCodec.Contains(needle, StringComparison.Ordinal), $"C++ tables have {needle}.");
+        foreach (var needle in new[] { "pub fn read_body(text: &str)", "is_merged_id(id)", "source != id >> 28", "expected exactly one manifest row", "family must not be zero", "t.fail(\"no rows\")" })
+            Check(first.Rust.Contains(needle, StringComparison.Ordinal), $"Rust tables have {needle}.");
+        void Stops(string find, string replacement, string message)
+        {
+            if (!TableDefinition.Contains(find, StringComparison.Ordinal)) throw new InvalidOperationException($"The test's anchor is gone: {find}");
+            try { WireTableGenerator.Parse(TableDefinition.Replace(find, replacement)); }
+            catch (InvalidDataException) { return; }
+            throw new InvalidOperationException(message);
+        }
+        Stops("\"generator_version\": 1", "\"generator_version\": 99", "A table definition pinned to another generator stops.");
+        Stops("\"rows\": \"one\"", "\"rows\": \"several\"", "An unknown row rule stops.");
+        Stops("\"type\": \"text\"", "\"type\": \"float\"", "An unknown column type stops.");
+        Stops("namespace:id=source", "namespace:id=nothing", "A row check on a missing column stops.");
+        Stops("\"check\": \"nonzero\"", "\"check\": \"odd\"", "An unknown cell check stops.");
+        Stops("\"name\": \"sample_tables\",", "\"name\": \"sample_tables\", \"surprise\": 1,", "An unknown key stops.");
     }
 
     private static void Outputs()
