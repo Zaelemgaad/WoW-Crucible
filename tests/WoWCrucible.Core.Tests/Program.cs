@@ -56,6 +56,12 @@ if (args is ["--cache-discovery"])
     return;
 }
 
+if (args is ["--tact-fetch"])
+{
+    TactCdnFetchTestSuite.Run();
+    return;
+}
+
 if (args is ["--batch-export"])
 {
     DbcBatchExportTestSuite.Run();
@@ -128,6 +134,7 @@ DbcEditorTestSuite.Run(requiredCorpus);
 DbcBatchExportTestSuite.Run();
 
 ClientCorpusHardLinkTestSuite.Run();
+TactCdnFetchTestSuite.Run();
 AddonAuditTests.Run();
 ArtifactOwnershipTestSuite.Run();
 RollingTextLogWriterTests.Run();
