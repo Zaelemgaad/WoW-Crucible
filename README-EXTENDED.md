@@ -259,7 +259,7 @@ Specialized editors will follow the principles in [docs/UX-PRINCIPLES.md](docs/U
 
 Requirements: Windows x64 and the .NET 10 SDK.
 
-The high-performance Avalonia desktop is the active application. It has a static themed workspace, multi-file DBC staging, per-document undo/redo, guided item and spell editing, shared Server & SQL detection, MPQ building/browsing/deployment, legacy database recovery, background loading/search, a direct-rendered virtual WDBC viewport, responsive single-window feature routing, and an interactive native M2/SKIN mesh preview. The older WinForms source remains only as a behavior reference while each remaining capability is rebuilt natively; it is not the intended long-term shell or a runtime dependency.
+The high-performance Avalonia desktop is the active application. It has a static themed workspace, multi-file DBC staging, per-document undo/redo, guided item and spell editing, shared Server & SQL detection, MPQ building/browsing/deployment, legacy database recovery, background loading/search, a direct-rendered virtual WDBC viewport, responsive single-window feature routing, and an interactive native M2/SKIN mesh preview.
 
 Turn on **DEVBUG ON** in the header for persistent diagnostic mode, or launch once with `--devbug`. Normal mode creates no routine logs. Devbug logs and its live terminal use structured action/result entries and retain only the newest three sessions.
 
@@ -325,16 +325,10 @@ Open gossip, trainers, conditions, and SmartAI directly:
 dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- --behaviors
 ```
 
-Run the legacy WinForms reference shell (development comparison only):
-
-```powershell
-dotnet run --project src/WoWCrucible.App/WoWCrucible.App.csproj
-```
-
 Open a DBC directly:
 
 ```powershell
-dotnet run --project src/WoWCrucible.App/WoWCrucible.App.csproj -- "C:\path\to\Spell.dbc"
+dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- "C:\path\to\Spell.dbc"
 ```
 
 ## Build

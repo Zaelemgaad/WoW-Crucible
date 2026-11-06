@@ -24,7 +24,6 @@ Source-wide searches covered `ToolTip`, `SetToolTip`, `ToolTipText`, `MouseHover
 | --- | --- |
 | Class Studio talents, sideboard, free workspace, current rank, next rank | All call `showTooltip`; names, metadata, descriptions, prerequisites and tree names pass through the shared native renderer before HTML escaping. Stale asynchronous hover results cannot reopen a hidden/replaced tooltip. |
 | Native item preview | `SpellTooltipService` resolves spell names, rank labels, description and aura description using the selected Spell/Duration/Radius tables. `ItemCreatorView.AddTooltip` and `AddPair` render name/flavor/other preview strings. |
-| Older WinForms item preview | `ItemTooltipControl.Line` and `PairedLine` use the same presentation renderer. |
 | Icon pickers | Titles are bundled icon filenames, not spell descriptions. Missing native icons use fixed explanatory titles. |
 | Class Studio board handles, empty cells, copy/restore/export controls | Fixed action help; no spell-template inputs. |
 | Item/quest/game-object/SQL field help | `ItemCreatorView`, `QuestWorkspaceView`, `GameObjectWorkspaceView`, `SqlWorkspaceView`, `ItemCreatorForm`: schema/catalog descriptions, flag meanings, numeric contracts and static help; no spell templates. |
