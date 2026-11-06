@@ -56,6 +56,12 @@ if (args is ["--cache-discovery"])
     return;
 }
 
+if (args is ["--wire-protocol"])
+{
+    WireProtocolTestSuite.Run();
+    return;
+}
+
 if (args is ["--tact-fetch"])
 {
     TactCdnFetchTestSuite.Run();
@@ -135,6 +141,7 @@ DbcBatchExportTestSuite.Run();
 
 ClientCorpusHardLinkTestSuite.Run();
 TactCdnFetchTestSuite.Run();
+WireProtocolTestSuite.Run();
 AddonAuditTests.Run();
 ArtifactOwnershipTestSuite.Run();
 RollingTextLogWriterTests.Run();
@@ -403,7 +410,7 @@ if (!PlayableBundleSqlService.RequiresGuardedMaskExpansion("RaceMask", ["ID"]) |
     !guardedMaskSql.Contains("UPDATE `skilllineability_dbc` SET `RaceMask`=", StringComparison.Ordinal) || !guardedMaskSql.Contains("`ID` <=>", StringComparison.Ordinal) || !guardedMaskSql.Contains("`RaceMask` <=>", StringComparison.Ordinal))
     throw new InvalidOperationException("Guarded playable-bundle mask expansion planning or SQL rendering regressed.");
 
-var cliGroups = new[] { "workspace", "asset", "project", "tools", "knowledge", "cache", "client", "server", "db", "dbc", "mpq", "casc", "manifest" };
+var cliGroups = new[] { "workspace", "asset", "project", "tools", "knowledge", "cache", "client", "server", "db", "dbc", "mpq", "casc", "manifest", "protocol" };
 if (CliHelpRouting.Resolve(["--help"]) != CliHelpRouting.Root ||
     CliHelpRouting.Resolve(["help"]) != CliHelpRouting.Root ||
     CliHelpRouting.Resolve(["help", "mpq"]) != "mpq" ||

@@ -19,7 +19,7 @@ public static class CliCommandAbbreviationService
     private static readonly string[] Groups =
     [
         "workspace", "asset", "project", "tools", "knowledge", "cache", "client",
-        "server", "db", "dbc", "mpq", "casc", "manifest"
+        "server", "db", "dbc", "mpq", "casc", "manifest", "protocol"
     ];
 
     private static readonly IReadOnlyDictionary<string, string[]> Operations =
@@ -35,6 +35,7 @@ public static class CliCommandAbbreviationService
             ["mpq"] = Words("list tree extract extract-folder create update put merge"),
             ["casc"] = Words("list tree extract extract-folder"),
             ["manifest"] = Words("create list validate build"),
+            ["protocol"] = Words("gen check"),
             ["db"] = Words("draft-template schemas inspect favorites rows pet-curve pet-compare pet-preview pet-graph table-admin table-design process-list user-list account join index query export import dependency-snapshot content-plan snapshot snapshot-inspect recovery-audit recovery-inspect reference-search item-audit item-inspect item-clone spell-inspect object-compose objects object-show object-dependencies object-export object-drop object-set object-rollback view-set event-state sync-bridge sync-bridge-inspect sync-plan sync-inspect sync-apply sync-rollback"),
             ["dbc"] =
             [

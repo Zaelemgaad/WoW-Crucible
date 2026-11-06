@@ -29,6 +29,15 @@ wowcrucible tools commands [search words...] [--format=text|json]
 
 The command catalog is the same source used by the desktop's same-window `Ctrl+K` palette. Search accepts multiple intent terms rather than requiring an exact feature name, so queries such as `cut items`, `Heidi favorites`, `MPQ merge`, `model viewer animation`, and `server restart` resolve to their native workspaces. Cut-item, favorites, and merge results activate the exact child tab, not merely the containing workspace. Empty search lists all commands in navigation order; no matches return review exit code `3`. Launch `WoWCrucible.Desktop-latest.exe --command-palette="search words"` to open the desktop directly into the filtered palette. Direct desktop routes are also available as `--cut-items` or `--cut-items=17,17802`, `--sql-favorites`, and `--mpq-merge`.
 
+## Shared wire protocols
+
+```text
+wowcrucible protocol gen <definition.json> [--cpp-out=<dir>] [--no-cpp] [--client=<crate-root>]
+wowcrucible protocol check <definition.json> [--cpp-out=<dir>] [--no-cpp] [--client=<crate-root>]
+```
+
+One JSON definition (comments allowed; unknown keys refused) holds a protocol's opcodes, field order, little-endian widths, limits, optional-field conditions and constants. `gen` writes a C++ codec and test-support header (default `generated` beside the definition) and, with `--client`, a Rust module plus a pinned copy of the definition and its fixtures. Output is deterministic and stamped with the definition's SHA-256, the schema, generator and protocol versions, and a hash of its own body, so a consumer can detect a stale or hand-edited file without this tool. The definition pins its generator version: a mismatch stops instead of quietly changing output. `check` writes nothing and exits 1 when a file is missing or differs. Generated files are checked in as plain source, so neither side's build needs Crucible.
+
 ## Tool consolidation inventory
 
 ```text

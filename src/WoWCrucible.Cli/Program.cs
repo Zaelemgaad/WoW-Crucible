@@ -41,6 +41,7 @@ try
         "mpq" => Mpq(commandArguments[1..]),
         "casc" => Casc(commandArguments[1..], cancellation.Token),
         "manifest" => Manifest(commandArguments[1..]),
+        "protocol" => Protocol(commandArguments[1..]),
         _ => Fail($"Unknown command: {commandArguments[0]}")
     };
 }
@@ -79,8 +80,46 @@ static int RoutedHelp(string group) => group switch
     "mpq" => MpqHelp(),
     "casc" => CascHelp(),
     "manifest" => ManifestHelp(),
+    "protocol" => ProtocolHelp(),
     _ => Fail($"Unknown command group for help: {group}")
 };
+
+static int Protocol(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ProtocolHelp();
+    var operation = args[0].ToLowerInvariant();
+    if (operation is not ("gen" or "check")) return Fail($"Unknown protocol operation: {args[0]}");
+    var positional = args[1..].Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    var options = args[1..].Where(option => option.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    var unknown = options.Where(option => !option.StartsWith("--cpp-out=", StringComparison.OrdinalIgnoreCase) && !option.StartsWith("--client=", StringComparison.OrdinalIgnoreCase) && !option.Equals("--no-cpp", StringComparison.OrdinalIgnoreCase)).ToArray();
+    if (unknown.Length > 0) return Fail($"Unknown protocol {operation} option: {unknown[0]}");
+    if (positional.Length != 1) return Fail($"protocol {operation} requires <definition.json>.");
+    if (!File.Exists(positional[0])) return Fail($"No definition at {positional[0]}.");
+    var client = options.FirstOrDefault(option => option.StartsWith("--client=", StringComparison.OrdinalIgnoreCase))?["--client=".Length..];
+    var cppOption = options.FirstOrDefault(option => option.StartsWith("--cpp-out=", StringComparison.OrdinalIgnoreCase))?["--cpp-out=".Length..];
+    var noCpp = options.Any(option => option.Equals("--no-cpp", StringComparison.OrdinalIgnoreCase));
+    var cpp = noCpp ? null : cppOption ?? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(positional[0]))!, "generated");
+    var paths = new WireProtocolPaths(positional[0], cpp, client);
+    if (operation == "gen")
+    {
+        var written = WireProtocolOutputs.Write(paths);
+        foreach (var path in written) Console.WriteLine($"WROTE\t{path}");
+        Console.WriteLine($"Generated: {written.Count} changed.");
+        return 0;
+    }
+    var states = WireProtocolOutputs.Check(paths);
+    foreach (var state in states) Console.WriteLine($"{state.State.ToUpperInvariant()}\t{state.Path}");
+    var outOfDate = states.Count(state => state.State != "current");
+    if (outOfDate == 0) { Console.WriteLine("All generated files match the definition."); return 0; }
+    Console.Error.WriteLine($"{outOfDate} file(s) do not match the definition. Run: wowcrucible protocol gen");
+    return 1;
+}
+
+static int ProtocolHelp(int code = 0)
+{
+    Console.WriteLine("Usage:\n  wowcrucible protocol gen <definition.json> [--cpp-out=<dir>] [--no-cpp] [--client=<crate-root>]\n  wowcrucible protocol check <definition.json> [--cpp-out=<dir>] [--no-cpp] [--client=<crate-root>]\n\nGenerates C++ and Rust wire codecs from one definition. C++ defaults to a generated folder beside the definition. --client also writes the Rust codec and a pinned copy of the definition and fixtures under that crate. check writes nothing and exits 1 when a file is missing or differs. The output is deterministic plain source: nothing needs Crucible to compile it.");
+    return code;
+}
 
 static int Workspace(string[] args)
 {
@@ -4170,7 +4209,7 @@ static int GroupHelp(string message, int code)
 
 static int Help()
 {
-    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  workspace discover and remember one complete WoW development install\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  tools     search native commands and inventory the local legacy-tool corpus\n  knowledge search the local wiki for fields, flags, commands, and systems\n  cache     inspect and export WDB/WCH2 ADB client cache tables read-only\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  casc      browse and extract later-client CASC storage read-only\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible workspace init G:\\WotLK\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible cache info creaturecache.wdb --definitions=WDB.xml\n  wowcrucible cache info Item-sparse.adb --definitions=adb-definitions.xml\n  wowcrucible casc list \"D:\\World of Warcraft\" \"**\\*.m2\" --local-only\n  wowcrucible tools commands \"cut items\"\n  wowcrucible knowledge search item_template flags\n  wowcrucible tools inventory --unassigned-only\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
+    Console.WriteLine("WoW Crucible CLI\n\nGlobal options:\n  --devbug   mirror terminal output and diagnostics to Logs\\Debug (newest 3 CLI sessions retained)\n\nCommand groups (run wowcrucible <group> --help for full syntax):\n  workspace discover and remember one complete WoW development install\n  asset     inspect/preview models and build resumable extracted/PNG asset libraries\n  project   create portable content projects and reserve collision-checked IDs\n  protocol  generate matching C++ and Rust wire codecs from one definition\n  tools     search native commands and inventory the local legacy-tool corpus\n  knowledge search the local wiki for fields, flags, commands, and systems\n  cache     inspect and export WDB/WCH2 ADB client cache tables read-only\n  client    install patches, clear cache, index/extract clients, and plan fusion\n  server    detect installed cores, audit DBC/SQL bindings, and stage client changes\n  db        inspect schemas, recover legacy SQL changes offline, audit items, and clone complete items\n  dbc       inspect/edit/validate/compare/promote DBCs and author item sets\n  mpq       list, extract, create, merge, and safely update small patch archives\n  casc      browse and extract later-client CASC storage read-only\n  manifest  define, verify, and build tiny reviewable patch MPQs\n\nExamples:\n  wowcrucible workspace init G:\\WotLK\n  wowcrucible --devbug mpq list patch-H.MPQ\n  wowcrucible cache info creaturecache.wdb --definitions=WDB.xml\n  wowcrucible cache info Item-sparse.adb --definitions=adb-definitions.xml\n  wowcrucible casc list \"D:\\World of Warcraft\" \"**\\*.m2\" --local-only\n  wowcrucible tools commands \"cut items\"\n  wowcrucible knowledge search item_template flags\n  wowcrucible tools inventory --unassigned-only\n  wowcrucible project --help\n  wowcrucible db --help\n  wowcrucible dbc --help\n  wowcrucible asset --help\n\nThe full copy-paste guide ships as docs\\CLI-REFERENCE.md beside the application.");
     return 0;
 }
 
