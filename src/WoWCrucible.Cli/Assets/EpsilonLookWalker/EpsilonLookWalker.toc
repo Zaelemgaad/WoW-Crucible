@@ -1,0 +1,6 @@
+## Interface: 90207
+## Title: Epsilon Look Walker
+## Notes: Steps through every barber choice so the client streams its files. Preview only.
+## SavedVariables: EpsilonLookWalkerDB
+
+EpsilonLookWalker.lua
