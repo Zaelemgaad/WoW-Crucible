@@ -100,6 +100,7 @@ public partial class MainWindow : Window
         RefreshShellContext();
         _commandRoutes = BuildCommandRoutes();
         InitializeWorkspaceShell();
+        InitializeFileDrop();
         SizeChanged += (_, _) => ApplyShellPaneState();
         var unrouted = CrucibleCommandCatalog.All.Where(command => !_commandRoutes.ContainsKey(command.Id)).Select(command => command.Id).ToArray();
         if (unrouted.Length > 0 || _commandRoutes.Count != CrucibleCommandCatalog.All.Count) throw new InvalidOperationException($"Desktop command routes do not exactly match the shared catalog. Missing: {string.Join(", ", unrouted)}");
@@ -156,7 +157,8 @@ public partial class MainWindow : Window
         DragDrop.AddDragOverHandler(view, (_, e) =>
         {
             var payload = e.DataTransfer.TryGetValue(DbcRangeFormat);
-            e.DragEffects = payload is not null && !ReferenceEquals(payload.Document, DocumentForView(view)) ? DragDropEffects.Copy : DragDropEffects.None;
+            if (payload is null) return; // Dropped files bubble to the window's file routing.
+            e.DragEffects = !ReferenceEquals(payload.Document, DocumentForView(view)) ? DragDropEffects.Copy : DragDropEffects.None;
             e.Handled = true;
         });
         DragDrop.AddDropHandler(view, async (_, e) =>

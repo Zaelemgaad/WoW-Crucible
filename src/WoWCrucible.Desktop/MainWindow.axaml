@@ -80,6 +80,7 @@
                             <ToggleButton x:Name="SplitDbcToggle" Margin="0,0,4,0" Content="Split" Padding="8,4" Click="SplitDbcClick" ToolTip.Tip="Show two staged DBC tabs side by side. Click a pane, then click a tab to load it there." />
                             <Button Margin="0,0,4,0" Content="Spell workspace" Padding="8,4" Click="OpenSpellWorkspaceClick" />
                             <Button Margin="0,0,4,0" Content="Staging database" Padding="8,4" Click="OpenDbcStagingClick" />
+                            <Button Margin="0,0,4,0" Content="Sync to core data…" Padding="8,4" Click="SyncToCoreDataClick" ToolTip.Tip="Copy the saved DBC into a core's data\dbc folder, backing up the file it replaces" />
                             <ToggleSwitch x:Name="DecodedToggle" OnContent="Decoded" OffContent="Raw" IsChecked="True" Margin="4,0" IsCheckedChanged="DecodedChanged" />
                         </WrapPanel>
                     </ScrollViewer>

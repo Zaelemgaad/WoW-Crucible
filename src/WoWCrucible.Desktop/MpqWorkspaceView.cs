@@ -33,6 +33,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private readonly TextBox _required = new() { AcceptsReturn = true, PlaceholderText = "Optional required globs, one per line" };
     private readonly NumericUpDown _expectedCount = new() { Minimum = 0, Maximum = 10_000_000, AllowSpin = true };
     private readonly TextBlock _builderStatus = StatusText("Build a tiny manifest-driven patch. Large source archives remain immutable.");
+    private readonly Border _builderReview = new() { IsVisible = false, BorderBrush = Brush.Parse("#6E5426"), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly TextBlock _bindingStatus = StatusText("No client executable binding.");
     private string? _existingPatch;
     private string? _requiredClientExecutableSha256;
@@ -196,7 +197,8 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         var saveManifest = new Button { Content = "Save manifest" }; saveManifest.Click += async (_, _) => await SaveManifestAsync();
         var bind = new Button { Content = "Bind client Wow.exe" }; bind.Click += async (_, _) => await BindClientAsync();
         var build = AccentButton("Build / update MPQ"); build.Click += async (_, _) => await BuildPatchAsync();
-        var toolbar = new WrapPanel { Children = { addFiles, addFolder, addLocaleVariant, openExisting, remove, clear, loadManifest, saveManifest, bind, build } };
+        var validate = new Button { Content = "Validate MPQ…" }; validate.Click += async (_, _) => await ChooseArchiveToValidateAsync();
+        var toolbar = new WrapPanel { Children = { addFiles, addFolder, addLocaleVariant, openExisting, remove, clear, loadManifest, saveManifest, bind, build, validate } };
         var policy = new Expander { Header = "Manifest content policy", Content = new Grid { ColumnDefinitions = new("*,*,*,Auto"), ColumnSpacing = 8, Children = { _allowed, WithColumn(_forbidden, 1), WithColumn(_required, 2), WithColumn(new StackPanel { Children = { new TextBlock { Text = "Expected count" }, _expectedCount } }, 3) } } };
         var dropTarget = new Border
         {
@@ -230,7 +232,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
             if (paths.Length > 0) AddPaths(paths);
             args.Handled = true;
         });
-        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto,Auto"), Margin = new Thickness(8), RowSpacing = 8, Children = { toolbar, WithRow(policy, 1), WithRow(dropTarget, 2), WithRow(_bindingStatus, 3), WithRow(_builderStatus, 4) } };
+        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto,Auto,Auto"), Margin = new Thickness(8), RowSpacing = 8, Children = { toolbar, WithRow(policy, 1), WithRow(dropTarget, 2), WithRow(_bindingStatus, 3), WithRow(_builderStatus, 4), WithRow(_builderReview, 5) } };
     }
 
     private Control BuildDependencyPage()
@@ -498,10 +500,11 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private async Task ChooseExistingPatchAsync() { var path = await PickFileAsync("Select a deliberately small patch MPQ to update", ["*.mpq"]); if (path is null) return; _existingPatch = path; _targetClientRequirement = null; _builderStatus.Text = $"Updating {path}. Existing entries remain; matching internal paths are replaced. Archives above {PatchArchiveService.MaximumSafeUpdateBytes / (1024 * 1024):N0} MiB are refused."; }
     private async Task BindClientAsync() { var path = await PickFileAsync("Bind a compatible build-12340 Wow.exe", ["Wow.exe", "*.exe"]); if (path is null) return; _requiredClientExecutableSha256 = await Task.Run(() => PatchManifestService.ComputeExecutableSha256(path)); _bindingStatus.Text = $"Bound {Path.GetFileName(path)} · SHA-256 {_requiredClientExecutableSha256}"; }
 
-    private async Task SaveManifestAsync()
+    private async Task SaveManifestAsync(bool reviewed = false)
     {
         try
         {
+            if (!reviewed && ReviewEntries(ManifestReviewMessages(CurrentEntries()), "Save anyway", () => SaveManifestAsync(true))) return;
             var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Save Crucible patch manifest", SuggestedFileName = "patch.crucible-patch.json", FileTypeChoices = [new FilePickerFileType("Crucible patch manifest") { Patterns = ["*.crucible-patch.json", "*.json"] }] }); var path = file?.TryGetLocalPath(); if (path is null) return;
             PatchManifestService.Save(path, Path.GetFileNameWithoutExtension(path), _existingPatch is null ? "patch-W.mpq" : Path.GetFileName(_existingPatch), CurrentEntries(), _requiredClientExecutableSha256, CurrentPolicy(), _targetClientRequirement); _builderStatus.Text = $"Saved manifest {path}{(_targetClientRequirement is null ? string.Empty : $" bound to target fingerprint {_targetClientRequirement.IndexFingerprint}")}";
         }
@@ -520,11 +523,50 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
 
     private void ApplyPolicy(PatchManifestPolicy? policy) { _allowed.Text = string.Join(Environment.NewLine, policy?.AllowedGlobs ?? []); _forbidden.Text = string.Join(Environment.NewLine, policy?.ForbiddenGlobs ?? []); _required.Text = string.Join(Environment.NewLine, policy?.RequiredGlobs ?? []); _expectedCount.Value = policy?.ExpectedEntryCount ?? 0; }
 
-    private async Task BuildPatchAsync()
+    private async Task ChooseArchiveToValidateAsync() { var path = await PickFileAsync("Validate an MPQ against the current manifest", ["*.mpq", "*"]); if (path is not null) ValidateArchive(path); }
+
+    internal void ValidateArchive(string path)
+    {
+        try
+        {
+            var manifest = new PatchManifest(3, "Current Patch Builder", Path.GetFileName(path), CurrentEntries(), _requiredClientExecutableSha256, CurrentPolicy(), _targetClientRequirement);
+            var validation = PatchManifestService.Validate(manifest, path);
+            _builderStatus.Text = validation.Passed
+                ? $"Validation passed. The archive exactly matches all {manifest.Entries.Count:N0} manifest paths, source sizes, and content policies."
+                : $"Validation failed with {validation.Errors.Count:N0} error(s):\n{string.Join(Environment.NewLine, validation.Errors.Take(20).Select(error => "• " + error.Message))}";
+        }
+        catch (Exception exception) { _builderStatus.Text = $"Validation failed: {exception.Message}"; DesktopCrashLogger.Log("MPQ validation failed", exception); }
+    }
+
+    internal IReadOnlyList<string> ManifestReviewMessages(IReadOnlyList<PatchEntry> entries) => PatchManifestService.GetCompatibilityIssues(entries, _requiredClientExecutableSha256)
+        .Where(issue => issue.Code == "ProtectedGlueXmlUnbound").Select(issue => issue.Message).ToArray();
+
+    internal IReadOnlyList<string> BuildReviewMessages(IReadOnlyList<PatchEntry> entries)
+    {
+        var warnings = entries.Select(entry => (entry, check: PatchInputMapper.AssessArchivePath(entry.ArchivePath)))
+            .Where(item => item.check.HasWarning && !PatchInputMapper.NormalizeArchivePath(item.entry.ArchivePath).StartsWith("Interface\\GlueXML\\", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var messages = warnings.Take(6).Select(item => $"{item.entry.ArchivePath}: {item.check.Message}").ToList();
+        if (warnings.Length > 6) messages.Add($"…and {warnings.Length - 6:N0} more archive path(s) need review.");
+        messages.AddRange(ManifestReviewMessages(entries));
+        return messages;
+    }
+
+    private bool ReviewEntries(IReadOnlyList<string> messages, string action, Func<Task> proceed)
+    {
+        _builderReview.IsVisible = messages.Count > 0;
+        if (messages.Count == 0) return false;
+        var cancel = new Button { Content = "Cancel" }; cancel.Click += (_, _) => _builderReview.IsVisible = false;
+        var confirm = AccentButton(action); confirm.Click += async (_, _) => { _builderReview.IsVisible = false; await proceed(); };
+        _builderReview.Child = new Grid { ColumnDefinitions = new("*,Auto,Auto"), ColumnSpacing = 8, Children = { new TextBlock { Text = string.Join(Environment.NewLine, messages), TextWrapping = TextWrapping.Wrap }, WithColumn(cancel, 1), WithColumn(confirm, 2) } };
+        return true;
+    }
+
+    private async Task BuildPatchAsync(bool reviewed = false)
     {
         try
         {
             var entries = CurrentEntries(); var validation = PatchManifestService.ValidateEntries(entries, CurrentPolicy()); if (!validation.Passed) throw new InvalidDataException(string.Join(Environment.NewLine, validation.Errors.Select(error => error.Message)));
+            if (!reviewed && ReviewEntries(BuildReviewMessages(entries), "Build anyway", () => BuildPatchAsync(true))) return;
             var output = _existingPatch;
             if (output is null) { var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Build tiny patch MPQ", SuggestedFileName = "patch-W.MPQ", FileTypeChoices = [new FilePickerFileType("MPQ patch") { Patterns = ["*.mpq"] }] }); output = file?.TryGetLocalPath(); if (output is null) return; }
             _builderStatus.Text = $"Building {entries.Length:N0} manifest entries…"; var service = new PatchArchiveService(); var update = _existingPatch is not null; await Task.Run(() => { if (update) service.Update(output, entries); else service.Create(output, entries); });

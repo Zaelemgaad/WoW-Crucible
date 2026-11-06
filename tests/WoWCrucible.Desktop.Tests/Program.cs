@@ -19,6 +19,7 @@ internal static class Program
         if (args.Contains("--guided-editors")) { GuidedEditorsTestSuite.Run(); return; }
         if (args.Length > 1 && args[0] == "--item-tooltip-live") { GuidedEditorsTestSuite.RenderLiveTooltips(args[1], args.Skip(2)); return; }
         if (args.Contains("--workspace-shell")) { WorkspaceShellTestSuite.Run(); return; }
+        if (args.Contains("--ported-workflows")) { PortedWorkflowsTestSuite.Run(); return; }
         if (args.Contains("--embedded-studio")) { EmbeddedStudioTestSuite.Run(args.Contains("--coa")); return; }
         TestSessionAsync().GetAwaiter().GetResult();
     }

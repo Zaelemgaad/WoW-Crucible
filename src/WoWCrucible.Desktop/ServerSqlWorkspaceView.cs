@@ -108,6 +108,9 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
     private readonly TextBox _syncSchema = new() { PlaceholderText = "Matching WotLK schema XML" };
     private readonly TextBox _syncBundle = new() { PlaceholderText = "New or existing deployment-bundle folder" };
     private readonly TextBox _syncReceipt = new() { PlaceholderText = "Deployment receipt for rollback" };
+    private readonly ListBox _syncAuditRows = new() { Height = 320, IsVisible = false };
+    private readonly Button _syncExportMigration = new() { Content = "Export DBC → SQL migration…", IsEnabled = false };
+    private DbcSqlAuditResult? _syncAudit;
     private readonly TextBlock _syncStatus = new() { TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#99A5B8")) };
     private readonly Border _syncConfirmation = new() { IsVisible = false, BorderBrush = new SolidColorBrush(Color.Parse("#6E5426")), BorderThickness = new Thickness(1), Padding = new Thickness(10) };
     private readonly Button _detect = AccentButton("Detect server and connect");
@@ -313,6 +316,13 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
         var fields = new Grid { ColumnDefinitions = new("*,Auto"), RowDefinitions = new("Auto,Auto,Auto,Auto"), ColumnSpacing = 7, RowSpacing = 7 };
         AddPickerRow(fields, _syncSourceDbc, source, 0); AddPickerRow(fields, _syncSchema, schema, 1); AddPickerRow(fields, _syncBundle, bundle, 2); AddPickerRow(fields, _syncReceipt, receipt, 3);
         var plan = AccentButton("Audit and create frozen bundle"); plan.Click += async (_, _) => await CreateSyncBundleAsync();
+        var auditRows = new Button { Content = "Compare rows with live SQL" }; auditRows.Click += async (_, _) => await AuditSyncRowsAsync();
+        _syncExportMigration.Click += async (_, _) => await ChooseSyncMigrationFileAsync();
+        _syncAuditRows.ItemTemplate = new FuncDataTemplate<DbcSqlAuditRow>((row, _) => row is null ? new TextBlock() : new TextBlock
+        {
+            Text = FormatAuditRow(row), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4, 2),
+            Foreground = new SolidColorBrush(Color.Parse(row.Status is DbcSqlRowStatus.SqlOverridesDbc or DbcSqlRowStatus.MissingDbcRow ? "#E15A64" : "#C8D0DC"))
+        });
         var apply = AccentButton("Review synchronized apply"); apply.Click += (_, _) => ReviewSyncApply();
         var rollback = new Button { Content = "Review exact rollback" }; rollback.Click += (_, _) => ReviewSyncRollback();
         var module = new Button { Content = "Export module migration…" }; module.Click += async (_, _) => await ExportModuleMigrationAsync();
@@ -330,12 +340,64 @@ internal sealed class ServerSqlWorkspaceView : UserControl, IDisposable
                         TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.Parse("#9AA5B7"))
                     },
                     fields,
-                    new WrapPanel { Children = { plan, apply, rollback, module } },
+                    new WrapPanel { Children = { plan, apply, rollback, module, auditRows, _syncExportMigration } },
                     _syncConfirmation,
+                    _syncAuditRows,
                     new Border { Padding = new Thickness(12), BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Child = _syncStatus }
                 }
             }
         };
+    }
+
+    private async Task AuditSyncRowsAsync()
+    {
+        if (_session.Server is not { } server || _session.DatabaseProfile is not { } profile || _session.DatabaseCapabilities is not { } capabilities)
+        { _syncStatus.Text = "Detect the installed server and verify SQL before comparing DBC rows."; return; }
+        BeginOperation("Reading the SQL overlay and comparing effective rows…");
+        try
+        {
+            var dbcPath = Path.GetFullPath(_syncSourceDbc.Text ?? string.Empty);
+            var dbc = WdbcFile.Load(dbcPath); var resolution = DbcSchemaCatalog.Load(Path.GetFullPath(_syncSchema.Text ?? string.Empty)).ResolveColumns(Path.GetFileNameWithoutExtension(dbcPath), dbc.FieldCount);
+            var sourceRoot = Directory.Exists(_session.Settings.CoreSourcePath) ? _session.Settings.CoreSourcePath : null;
+            var binding = ServerTableBindingCatalog.ApplySchemaKey(ServerTableBindingCatalog.ResolveFile(server.CoreFamily, dbcPath, sourceRoot), resolution);
+            if (binding.Consumption != ServerTableConsumption.SqlOverlayed || binding.SqlTableName is null)
+            {
+                ShowSyncAudit(null);
+                _syncStatus.Text = $"{Path.GetFileName(dbcPath)}\nConsumption: {binding.Consumption}\nProfile: {binding.Profile}\nDeployment: {binding.Destinations}\nRestart: {binding.Restart}\nNo SQL overlay rows apply to this table.";
+                return;
+            }
+            var table = capabilities.FindTable(binding.SqlTableName) ?? throw new InvalidDataException($"The connected world database has no expected overlay table {binding.SqlTableName}.");
+            ShowSyncAudit(await new DbcSqlAuditService().AuditAsync(profile, binding, dbcPath, resolution, table, _operation!.Token));
+        }
+        catch (OperationCanceledException) { _syncStatus.Text = "DBC/SQL comparison cancelled."; }
+        catch (Exception exception) { _syncStatus.Text = $"DBC/SQL comparison failed: {exception.Message}"; DesktopCrashLogger.Log("DBC/SQL audit failed", exception); }
+        finally { EndOperation(); }
+    }
+
+    internal void ShowSyncAudit(DbcSqlAuditResult? audit)
+    {
+        _syncAudit = audit; _syncAuditRows.ItemsSource = audit?.Rows; _syncAuditRows.IsVisible = audit is not null; _syncExportMigration.IsEnabled = audit?.MismatchCount > 0;
+        if (audit is null) return;
+        _syncStatus.Text = $"{audit.Binding.Consumption} · {audit.Binding.SqlTableName} · {audit.Binding.KeyStrategy.Kind} · {audit.Binding.Restart}\n{audit.Rows.Count:N0} rows · {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.Same):N0} SQL same · {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.SqlOverridesDbc):N0} SQL overrides · {audit.Rows.Count(row => row.Status == DbcSqlRowStatus.DbcOnly):N0} DBC-only. SQL overrides only rows present in the overlay.";
+    }
+
+    internal static string FormatAuditRow(DbcSqlAuditRow row)
+    {
+        static string Format(IReadOnlyDictionary<string, object?> values) => values.Count == 0 ? "<missing>" : string.Join(", ", values.Select(pair => $"{pair.Key}={pair.Value}"));
+        return $"{row.Status} · {row.Key} · {row.Dimensions}\nServer DBC: {Format(row.DbcValues)}\nSQL / effective server: {Format(row.SqlValues)}";
+    }
+
+    private async Task ChooseSyncMigrationFileAsync()
+    {
+        if (_syncAudit is null) return;
+        var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = "Export DBC → SQL migration", SuggestedFileName = $"sync_{Path.GetFileNameWithoutExtension(_syncAudit.DbcPath).ToLowerInvariant()}_{DateTime.UtcNow:yyyyMMdd_HHmmss}.sql", DefaultExtension = "sql", FileTypeChoices = [new FilePickerFileType("SQL migration") { Patterns = ["*.sql"] }] });
+        if (file?.TryGetLocalPath() is { } path) ExportSyncMigration(path);
+    }
+
+    internal void ExportSyncMigration(string path)
+    {
+        try { File.WriteAllText(path, DbcSqlAuditService.CreateIdempotentMigration(_syncAudit!)); _syncStatus.Text = $"Exported previewable, idempotent migration: {path}. No database rows were modified."; }
+        catch (Exception exception) { _syncStatus.Text = $"Migration export failed: {exception.Message}"; DesktopCrashLogger.Log("DBC/SQL migration export failed", exception); }
     }
 
     private async Task CreateSyncBundleAsync()

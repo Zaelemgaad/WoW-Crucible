@@ -28,6 +28,7 @@ internal sealed class DesktopSettings
     public string MapSourcePath { get; set; } = string.Empty;
     public string ActiveProjectPath { get; set; } = string.Empty;
     public uint? ActiveRealmId { get; set; }
+    public string SelectedTargetProfileId { get; set; } = string.Empty;
     public string ServerRootPath { get; set; } = string.Empty;
     public string CoreDbcPath { get; set; } = string.Empty;
     public string ClientDataPath { get; set; } = string.Empty;
@@ -69,6 +70,7 @@ internal sealed class DesktopSettings
                 settings.ActiveProjectPath = Fill(settings.ActiveProjectPath, root, "ActiveProjectPath"); settings.ServerRootPath = Fill(settings.ServerRootPath, root, "ServerRootPath"); settings.CoreDbcPath = Fill(settings.CoreDbcPath, root, "CoreDbcPath"); settings.ClientDataPath = Fill(settings.ClientDataPath, root, "ClientDataPath");
                 settings.ClientExecutablePath = Fill(settings.ClientExecutablePath, root, "ClientExecutablePath"); settings.ClientIndexPath = Fill(settings.ClientIndexPath, root, "ClientIndexPath"); settings.CoreSourcePath = Fill(settings.CoreSourcePath, root, "CoreSourcePath"); settings.SchemaDefinitionPath = Fill(settings.SchemaDefinitionPath, root, "SchemaDefinitionPath"); settings.DbdDefinitionsPath = Fill(settings.DbdDefinitionsPath, root, "DbdDefinitionsPath");
                 settings.ProcessedAssetLibraryPath = Fill(settings.ProcessedAssetLibraryPath, root, "ProcessedAssetLibraryPath");
+                settings.SelectedTargetProfileId = Fill(settings.SelectedTargetProfileId, root, "SelectedTargetProfileId");
                 settings.BaseDbcPath = Fill(settings.BaseDbcPath, root, "BaseDbcPath"); settings.OverrideDbcPath = Fill(settings.OverrideDbcPath, root, "OverrideDbcPath");
                 if (!desktopSettingsExist)
                 {

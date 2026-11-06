@@ -81,9 +81,11 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         _session = session;
         var profiles = TargetProfileCatalog.Load();
         _serverTarget.ItemsSource = profiles;
-        _serverTarget.SelectedItem = TargetProfileCatalog.Find(profiles, TargetProfileCatalog.DefaultProfileId);
+        _serverTarget.SelectedItem = TargetProfileCatalog.Find(profiles, session.Settings.SelectedTargetProfileId);
         _fusionTarget.ItemsSource = profiles;
-        _fusionTarget.SelectedItem = TargetProfileCatalog.Find(profiles, TargetProfileCatalog.DefaultProfileId);
+        _fusionTarget.SelectedItem = TargetProfileCatalog.Find(profiles, session.Settings.SelectedTargetProfileId);
+        _serverTarget.SelectionChanged += (_, _) => RememberTarget(_serverTarget);
+        _fusionTarget.SelectionChanged += (_, _) => RememberTarget(_fusionTarget);
         LoadDefaults();
         ConfigureTemplates();
 
@@ -205,6 +207,8 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var cancel = new Button { Content = "Cancel operation" }; cancel.Click += (_, _) => _operation?.Cancel();
         var open = AccentButton("Browse files / extract selected…");
         open.Click += (_, _) => OpenSelectedArchive(); Register(open);
+        var extract = new Button { Content = "Extract resolved files…" }; extract.Click += async (_, _) => await ChooseExtractionFolderAsync(); Register(extract);
+        ToolTip.SetTip(extract, "Extract the selected MPQ's named files. Internal paths are preserved and a repeat run resumes past matching files.");
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
         AddPath(paths, 0, "Client root", _clientRoot, chooseClient, null); AddPath(paths, 1, "Index folder", _indexRoot, chooseIndex, load); AddPath(paths, 2, "Path corpus", _externalListfile, chooseList, null);
         var inventory = new TabControl { Items = { new TabItem { Header = "MPQ archives", Content = _archives }, new TabItem { Header = "Loose runtime / AddOns / config", Content = _looseFiles } } };
@@ -288,10 +292,11 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var core = Button("Core source…", async () => { var path = await PickFolderAsync("Select optional current core source"); if (path is not null) { _coreSourceRoot.Text = path; _session.Settings.CoreSourcePath = path; _session.Settings.Save(); } });
         var analyze = AccentButton("Analyze client against server"); analyze.Click += async (_, _) => await AnalyzeServerPlanAsync(); Register(analyze);
         var stage = AccentButton("Stage reviewed plan…"); stage.Click += async (_, _) => await StageServerPlanAsync(); Register(stage);
+        var savePlan = new Button { Content = "Save plan…" }; savePlan.Click += async (_, _) => await ChooseServerPlanFileAsync(); Register(savePlan);
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
         AddPath(paths, 0, "Client table root", _clientDbcRoot, clientDbc, null); AddPath(paths, 1, "Core source", _coreSourceRoot, core, null);
         AddPath(paths, 2, "Target client", _serverTarget, null, null);
-        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, stage } }, 1), WithRow(_serverPlanItems, 2), WithRow(Card(_serverPlanSummary), 3) } };
+        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, stage, savePlan } }, 1), WithRow(_serverPlanItems, 2), WithRow(Card(_serverPlanSummary), 3) } };
     }
 
     private Control FusionPage()
@@ -304,10 +309,11 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var planRemap = AccentButton("Plan ID + reference remap"); planRemap.Click += async (_, _) => await AnalyzeFusionDbcRemapAsync(); Register(planRemap);
         var writeRemap = AccentButton("Write dependency-safe DBCs…"); writeRemap.Click += async (_, _) => await ApplyFusionDbcRemapAsync(); Register(writeRemap);
         var stage = AccentButton("Stage reviewed patch…"); stage.Click += async (_, _) => await StageFusionAsync(); Register(stage);
+        var savePlan = new Button { Content = "Save plan…" }; savePlan.Click += async (_, _) => await ChooseFusionPlanFileAsync(); Register(savePlan);
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
         AddPath(paths, 0, "Effective base", _fusionBase, chooseBase, null); AddPath(paths, 1, "Override sources", _fusionSources, addSource, null);
         AddPath(paths, 2, "Target client", _fusionTarget, null, null);
-        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, analyzeDbcs, writeDbcs, planRemap, writeRemap, stage } }, 1), WithRow(_fusionItems, 2), WithRow(Card(_fusionSummary), 3) } };
+        return new Grid { RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children = { paths, WithRow(new WrapPanel { Children = { analyze, analyzeDbcs, writeDbcs, planRemap, writeRemap, stage, savePlan } }, 1), WithRow(_fusionItems, 2), WithRow(Card(_fusionSummary), 3) } };
     }
 
     private Control ReleasePage()
@@ -669,6 +675,64 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
             ClientLooseFileScope.Volatile => $"Generated/volatile: {file.RelativePath}. Inventoried for completeness but excluded from reusable content by default.",
             _ => $"Loose file: {file.RelativePath}. Review its role before treating the client as reproducible."
         };
+    }
+
+    private void RememberTarget(ComboBox picker)
+    {
+        if (picker.SelectedItem is not TargetProfile target || target.Id == _session.Settings.SelectedTargetProfileId) return;
+        _session.Settings.SelectedTargetProfileId = target.Id; _session.Settings.Save();
+    }
+
+    private async Task ChooseExtractionFolderAsync()
+    {
+        if (_loadedIndex is null || _archives.SelectedItem is not ClientArchiveSummary archive) { _operationStatus.Text = "Select an indexed MPQ first."; return; }
+        var destination = await PickFolderAsync("Choose an empty or resumable extraction folder");
+        if (destination is not null) await ExtractArchiveAsync(archive, destination);
+    }
+
+    internal async Task ExtractArchiveAsync(ClientArchiveSummary archive, string destination)
+    {
+        Begin("Reading indexed content…");
+        try
+        {
+            var index = _indexRoot.Text ?? string.Empty; var token = _operation!.Token;
+            var progress = new Progress<(int Done, int Total, string Path)>(value => _operationStatus.Text = $"{value.Done:N0}/{value.Total:N0} · {value.Path}");
+            var result = await Task.Run(() => ClientArchiveIndexService.ExtractIndexed(index, archive.RelativePath, destination, resolvedOnly: true, progress: progress, cancellationToken: token), token);
+            _operationStatus.Text = $"Extracted {result.ExtractedFiles:N0}; resumed past {result.SkippedExistingFiles:N0}; selected {result.SelectedFiles:N0}.";
+        }
+        catch (OperationCanceledException) { _operationStatus.Text = "Cancelled safely; extraction can be resumed."; }
+        catch (Exception exception) { Fail("Indexed extraction failed", exception); }
+        finally { End(); }
+    }
+
+    private async Task<string?> PickPlanFileAsync(string title, string suggested)
+    {
+        var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions { Title = title, SuggestedFileName = suggested, DefaultExtension = "json", FileTypeChoices = [new FilePickerFileType("Crucible plan") { Patterns = ["*.json"] }] });
+        return file?.TryGetLocalPath();
+    }
+
+    private async Task ChooseServerPlanFileAsync()
+    {
+        if (_serverPlan is null) { _serverPlanSummary.Text = "Analyze first, then export the reviewed result."; return; }
+        if (await PickPlanFileAsync("Save the reviewed client/server plan", "client-server-plan.json") is { } path) SaveServerPlan(path);
+    }
+
+    internal void SaveServerPlan(string path)
+    {
+        try { ClientServerDeploymentPlanner.Save(path, _serverPlan!); _serverPlanSummary.Text = $"Plan saved: {path}"; }
+        catch (Exception exception) { Fail("Client/server plan save failed", exception); }
+    }
+
+    private async Task ChooseFusionPlanFileAsync()
+    {
+        if (_fusionPlan is null) { _fusionSummary.Text = "Analyze a fusion plan first."; return; }
+        if (await PickPlanFileAsync("Save the reviewed fusion plan", "client-fusion-plan.json") is { } path) SaveFusionPlan(path);
+    }
+
+    internal void SaveFusionPlan(string path)
+    {
+        try { ClientFusionPlanner.Save(path, _fusionPlan!); _fusionSummary.Text = $"Fusion plan saved: {path}"; }
+        catch (Exception exception) { Fail("Fusion plan save failed", exception); }
     }
 
     private void OpenSelectedArchive()
