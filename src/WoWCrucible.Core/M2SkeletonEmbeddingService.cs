@@ -24,6 +24,7 @@ public static class M2SkeletonEmbeddingService
         private readonly HashSet<string> _sources = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<(ushort Id, ushort Variation), uint> _animationIds = [];
         private byte[] _sequences = [];
+        private int[] _resolvedSequences = [];
         private int _globals;
         private string _stem = string.Empty;
 
@@ -50,6 +51,7 @@ public static class M2SkeletonEmbeddingService
                 var sequenceData = Required(skeleton, "SKS1");
                 _sequences = ArrayBytes(sequenceData, 8, 64);
                 if (_sequences.Length == 0) throw new InvalidDataException("The skeleton has no animation sequences.");
+                _resolvedSequences = Enumerable.Range(0, _sequences.Length / 64).Select(ResolveAlias).ToArray();
                 _globals = checked((int)U32(sequenceData, 0));
                 var model = Append(modelBytes);
                 var sequenceBlock = Append(sequenceData);
@@ -129,17 +131,36 @@ public static class M2SkeletonEmbeddingService
                 Pointer(owner.Base + array + 4, count == 0 ? 0u : checked((uint)(owner.Base + descriptorOffset)));
                 for (var index = 0; index < count; index++)
                 {
-                    var keys = U32(descriptors, index * 8);
-                    var keyOffset = U32(descriptors, index * 8 + 4);
+                    // Alias slots do not own keys. Flatten their terminal series before marking
+                    // sequences resident; otherwise external offsets become pointers into SKB1.
+                    var resolved = global < 0 ? _resolvedSequences[index] : index;
+                    var keys = resolved < count ? U32(descriptors, resolved * 8) : 0;
+                    var keyOffset = resolved < count ? U32(descriptors, resolved * 8 + 4) : 0;
                     var pointer = owner.Base + descriptorOffset + index * 8 + 4;
+                    Pointer(pointer - 4, keys);
                     if (keys == 0) { Pointer(pointer, 0); continue; }
                     var payload = owner;
-                    if (global < 0 && (U32(_sequences, index * 64 + 12) & 0x60u) == 0)
-                        payload = Animation(index, part);
+                    if (global < 0 && (U32(_sequences, resolved * 64 + 12) & 0x20u) == 0)
+                        payload = Animation(resolved, part);
                     Require(payload.Bytes, keyOffset, checked((long)keys * elementWidth));
                     Pointer(pointer, checked((uint)payload.Base + keyOffset));
                 }
             }
+        }
+
+        private int ResolveAlias(int index)
+        {
+            var visited = new HashSet<int>();
+            while ((U32(_sequences, index * 64 + 12) & 0x40u) != 0)
+            {
+                if (!visited.Add(index))
+                    throw new InvalidDataException($"M2 animation alias chain contains a cycle at sequence {index:N0}.");
+                var next = BinaryPrimitives.ReadUInt16LittleEndian(_sequences.AsSpan(index * 64 + 62));
+                if (next >= _sequences.Length / 64)
+                    throw new InvalidDataException($"M2 animation sequence {index:N0} aliases missing sequence {next:N0}.");
+                index = next;
+            }
+            return index;
         }
 
         private Block Animation(int sequence, string part)

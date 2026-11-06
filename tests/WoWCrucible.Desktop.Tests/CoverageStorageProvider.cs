@@ -8,6 +8,9 @@ internal class CoverageStorageProvider : DispatchProxy
     public static IStorageProvider Create() => Create<IStorageProvider, CoverageStorageProvider>();
     public int Calls { get; private set; }
     public FilePickerOpenOptions? LastOpenOptions { get; private set; }
+    public FilePickerSaveOptions? LastSaveOptions { get; private set; }
+    public FolderPickerOpenOptions? LastFolderOptions { get; private set; }
+    public IStorageFile? SaveResult { get; set; }
     protected override object? Invoke(MethodInfo? method, object?[]? args)
     {
         switch (method!.Name)
@@ -15,9 +18,9 @@ internal class CoverageStorageProvider : DispatchProxy
             case "get_CanOpen": case "get_CanSave": case "get_CanPickFolder": return true;
             case "OpenFilePickerAsync": Calls++; LastOpenOptions = (FilePickerOpenOptions)args![0]!; return Task.FromResult<IReadOnlyList<IStorageFile>>([]);
             case "OpenFilePickerWithResultAsync": Calls++; return Task.FromResult(new OpenFilePickerResult());
-            case "SaveFilePickerAsync": Calls++; return Task.FromResult<IStorageFile?>(null);
-            case "SaveFilePickerWithResultAsync": Calls++; return Task.FromResult(new SaveFilePickerResult());
-            case "OpenFolderPickerAsync": Calls++; return Task.FromResult<IReadOnlyList<IStorageFolder>>([]);
+            case "SaveFilePickerAsync": Calls++; LastSaveOptions = (FilePickerSaveOptions)args![0]!; return Task.FromResult(SaveResult);
+            case "SaveFilePickerWithResultAsync": Calls++; LastSaveOptions = (FilePickerSaveOptions)args![0]!; return Task.FromResult(new SaveFilePickerResult { File = SaveResult });
+            case "OpenFolderPickerAsync": Calls++; LastFolderOptions = (FolderPickerOpenOptions)args![0]!; return Task.FromResult<IReadOnlyList<IStorageFolder>>([]);
             case "OpenFileBookmarkAsync": return Task.FromResult<IStorageBookmarkFile?>(null);
             case "OpenFolderBookmarkAsync": return Task.FromResult<IStorageBookmarkFolder?>(null);
             case "TryGetFileFromPathAsync": return Task.FromResult<IStorageFile?>(null);

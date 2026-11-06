@@ -120,7 +120,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { RuntimeStrip.Dispose(); _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); foreach (var view in _dbcExportViews.Values) view.Dispose(); foreach (var view in _dbcImportViews.Values) view.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
+        Closed += (_, _) => { DisposeArchiveDocuments(); RuntimeStrip.Dispose(); _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); foreach (var view in _dbcExportViews.Values) view.Dispose(); foreach (var view in _dbcImportViews.Values) view.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.WorkspaceRootPath) || Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -179,6 +179,7 @@ public partial class MainWindow : Window
         SecondaryDbcPane.BorderBrush = Brush.Parse(_secondaryPaneActive ? "#C58A2B" : "#39455A");
         ShowDocumentSummary(_documents[active]);
         if (changed) RestoreDbcFilter(_documents[active]);
+        if (!FeatureWorkspaceHost.IsVisible) _workspaceTabs.Open(_documents[active].TabId, _documents[active].DisplayName);
         RefreshTabs();
         return true;
     }
@@ -310,7 +311,7 @@ public partial class MainWindow : Window
         RuntimeStrip.IsVisible = !_focusEditor && (layout.MenuVisible || layout.RuntimeVisible);
         WorkspaceBar.IsVisible = !_focusEditor && layout.TabsVisible;
         RestoreChromeButton.IsVisible = !WorkspaceBar.IsVisible;
-        MainHeader.IsVisible = toolbars && !FeatureWorkspaceHost.IsVisible && _workspaceTabs.SelectedId == "tables";
+        MainHeader.IsVisible = toolbars && !FeatureWorkspaceHost.IsVisible && (_workspaceTabs.SelectedId == "tables" || _workspaceTabs.SelectedId.StartsWith("dbc-", StringComparison.Ordinal));
         DbcDocumentToolbar.IsVisible = toolbars && tables;
         FeatureToolbarHost.IsVisible = toolbars && FeatureWorkspaceHost.IsVisible && FeatureToolbarHost.Child is not null;
         MainStatusBar.IsVisible = !_focusEditor && layout.StatusVisible && !FeatureWorkspaceHost.IsVisible;
@@ -329,8 +330,8 @@ public partial class MainWindow : Window
         GoToIdBox.IsEnabled = GoToIdButton.IsEnabled = editingDbc && Current!.Schema.KeyStrategy.Kind != DbcRecordKeyKind.NoStableKey;
         if (!FeatureWorkspaceHost.IsVisible)
         {
-            if (editingDbc) _workspaceTabs.Select("tables");
-            MainHeader.IsVisible = _workspaceTabs.SelectedId == "tables";
+            if (editingDbc) _workspaceTabs.Open(Current!.TabId, Current.DisplayName);
+            MainHeader.IsVisible = (_workspaceTabs.SelectedId == "tables" || _workspaceTabs.SelectedId.StartsWith("dbc-", StringComparison.Ordinal));
             WorkspaceTabs.Refresh(_workspaceTabs);
         }
         ApplyShellPaneState();
@@ -388,7 +389,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task LoadDbcAsync(string path)
+    private async Task LoadDbcAsync(string path, MpqDocumentSource? archiveSource = null)
     {
         if (!CommitPendingDbcEdits()) return;
         path = Path.GetFullPath(path);
@@ -403,13 +404,13 @@ public partial class MainWindow : Window
             {
                 var file = WdbcFile.Load(path);
                 var resolved = _tableSchemas.Resolve(file);
-                return new DbcDocumentSession(file, resolved.Schema, resolved.Source);
+                return new DbcDocumentSession(file, resolved.Schema, resolved.Source) { ArchiveSource = archiveSource };
             });
             if (_workspaceSession.Settings.DbcColumnWidths.TryGetValue(session.ColumnLayoutKey, out var widths))
                 session.ColumnLayout.RestoreWidths(widths);
             _documents.Add(session);
             ActivateDocument(_documents.Count - 1);
-            RememberDbcDirectory(path);
+            if (archiveSource is null) RememberDbcDirectory(path);
             StatusText.Text = $"{Path.GetFileName(path)} · {session.File.RowCount:N0} records · {session.File.FieldCount:N0} fields · loaded in {stopwatch.Elapsed.TotalMilliseconds:0} ms";
             DesktopCrashLogger.Debug("DBC", "open-success", ("path", path), ("rows", session.File.RowCount), ("fields", session.File.FieldCount), ("schema", session.Schema.MatchKind), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds));
         }
@@ -425,7 +426,7 @@ public partial class MainWindow : Window
     {
         if (index < 0 || index >= _documents.Count) return;
         if (!CommitPendingDbcEdits()) return;
-        if (FeatureWorkspaceHost.IsVisible) ShowTableWorkspace();
+        ShowTableWorkspace(selectTables: false);
         if (SecondaryDbcPane.IsVisible && _secondaryPaneActive) _secondaryDocument = index;
         else { _primaryDocument = index; _secondaryPaneActive = false; }
         var document = _documents[index];
@@ -444,25 +445,9 @@ public partial class MainWindow : Window
 
     private void RefreshTabs()
     {
-        DocumentTabsPanel.Children.Clear();
-        for (var index = 0; index < _documents.Count; index++)
-        {
-            var captured = index;
-            var locations = SecondaryDbcPane.IsVisible ? (index == _primaryDocument ? "L" : string.Empty) + (index == _secondaryDocument ? "R" : string.Empty) : string.Empty;
-            var active = index == ActiveDocumentIndex;
-            var button = new Button
-            {
-                Content = locations.Length == 0 ? _documents[index].DisplayName : $"{locations} · {_documents[index].DisplayName}",
-                Padding = new Thickness(12, 6),
-                CornerRadius = new CornerRadius(0),
-                Background = active ? new SolidColorBrush(Color.Parse("#202B3C")) : Brushes.Transparent,
-                BorderBrush = active ? new SolidColorBrush(Color.Parse("#C58A2B")) : Brushes.Transparent,
-                BorderThickness = new Thickness(0, 0, 0, active ? 2 : 0)
-            };
-            button.Click += (_, _) => ActivateDocument(captured);
-            ToolTip.SetTip(button, _documents[index].FullPath);
-            DocumentTabsPanel.Children.Add(button);
-        }
+        foreach (var document in _documents)
+            _workspaceTabs.Rename(document.TabId, document.DisplayName);
+        WorkspaceTabs.Refresh(_workspaceTabs);
     }
 
     private void UpdateDbcPaneTitles()
@@ -502,7 +487,7 @@ public partial class MainWindow : Window
         InspectorTitle.Text = Path.GetFileName(document.File.SourcePath);
         InspectorSummary.Text = $"{document.File.RowCount:N0} records · {document.File.FieldCount:N0} fields";
         var db2 = document.File.Db2Metadata;
-        InspectorDetail.Text = $"Container  {document.File.ContainerKind.ToString().ToUpperInvariant()}\nRecord     {document.File.RecordSize:N0} bytes\nStrings    {document.File.StringTableSize:N0} bytes{(db2 is null ? string.Empty : $"\nBuild      {db2.Build:N0}\nTable hash 0x{db2.TableHash:X8}\nID range   {db2.MinId:N0}..{db2.MaxId:N0}\nCopy rows  {db2.CopyRows:N0}\nStructural {(document.File.AllowsStructuralMutation ? "editable" : "locked by side tables")}")}\nSchema     {document.Schema.MatchKind}\nDefinition {document.SchemaSource}\nRow key    {document.Schema.KeyStrategy.DisplayName(document.Schema.Columns)}\nSource     {document.File.SourcePath}";
+        InspectorDetail.Text = $"Container  {document.File.ContainerKind.ToString().ToUpperInvariant()}\nRecord     {document.File.RecordSize:N0} bytes\nStrings    {document.File.StringTableSize:N0} bytes{(db2 is null ? string.Empty : $"\nBuild      {db2.Build:N0}\nTable hash 0x{db2.TableHash:X8}\nID range   {db2.MinId:N0}..{db2.MaxId:N0}\nCopy rows  {db2.CopyRows:N0}\nStructural {(document.File.AllowsStructuralMutation ? "editable" : "locked by side tables")}")}\nSchema     {document.Schema.MatchKind}\nDefinition {document.SchemaSource}\nRow key    {document.Schema.KeyStrategy.DisplayName(document.Schema.Columns)}\nSource     {document.DisplayPath}";
     }
 
     private async void SaveClick(object? sender, RoutedEventArgs e) => await SaveCurrentAsync(false);
@@ -561,13 +546,24 @@ public partial class MainWindow : Window
             {
                 Title = $"Save {extension.ToUpperInvariant()} As",
                 SuggestedFileName = Path.GetFileName(path),
-                SuggestedStartLocation = await StorageProvider.TryGetFolderFromPathAsync(Path.GetDirectoryName(path)!),
+                SuggestedStartLocation = await StorageProvider.TryGetFolderFromPathAsync(Path.GetDirectoryName(document.ArchiveSource?.ArchivePath ?? path)!),
                 DefaultExtension = extension,
                 FileTypeChoices = [new FilePickerFileType($"{extension.ToUpperInvariant()} files (*.{extension})") { Patterns = [$"*.{extension}"] }]
             });
             path = destination?.TryGetLocalPath();
             if (path is null) return false;
             var fullDestination = Path.GetFullPath(path);
+            if (_archiveDocuments.Any(source => source.ArchivePath.Equals(fullDestination, StringComparison.OrdinalIgnoreCase)))
+            {
+                await ShowErrorAsync("Choose a table file", "Save As cannot replace an open MPQ archive with a table. Use Save to update the archive entry.");
+                return false;
+            }
+            if (_archiveDocuments.Any(source => fullDestination.StartsWith(
+                Path.GetDirectoryName(source.WorkingPath)! + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
+            {
+                await ShowErrorAsync("Choose a permanent destination", "Save As must use a folder outside Crucible's temporary archive working copies.");
+                return false;
+            }
             if (_documents.Any(other => !ReferenceEquals(other, document) && other.FullPath.Equals(fullDestination, StringComparison.OrdinalIgnoreCase)))
             {
                 await ShowErrorAsync("File already open", "Another open document already uses that destination. Close it or choose a different path before Save As.");
@@ -581,15 +577,19 @@ public partial class MainWindow : Window
         {
             _savingDbc = true;
             RootLayout.IsEnabled = false;
-            if (saveAs) await Task.Run(() => document.File.SaveAs(path, true));
-            else await Task.Run(() => document.File.Save(path, true));
-            RememberDbcDirectory(path);
+            if (saveAs)
+            {
+                await Task.Run(() => document.File.SaveAs(path, true));
+                ReleaseArchiveSource(document);
+            }
+            else await Task.Run(document.Save);
+            if (document.ArchiveSource is null) RememberDbcDirectory(path);
             UpdateDbcPaneTitles();
             ShowDocumentSummary(document);
             RefreshTabs();
             var backup = document.File.LastBackupPath;
-            StatusText.Text = $"Saved {path}";
-            ToolTip.SetTip(StatusText, backup is null ? $"{path}\n{CrucibleBackupService.LastDecision}" : $"{path}\nBackup: {backup}");
+            StatusText.Text = $"Saved {document.DisplayPath}";
+            ToolTip.SetTip(StatusText, backup is null ? $"{document.DisplayPath}\n{CrucibleBackupService.LastDecision}" : $"{document.DisplayPath}\nBackup: {backup}");
             DesktopCrashLogger.Debug("DBC", "save-success", ("path", path), ("rows", document.File.RowCount), ("duration_ms", stopwatch.Elapsed.TotalMilliseconds), ("backup", backup));
             return true;
         }
@@ -619,6 +619,8 @@ public partial class MainWindow : Window
         var closedIndex = ActiveDocumentIndex;
         CloseDbcTransferWorkspaces(document);
         _documents.RemoveAt(closedIndex);
+        _workspaceTabs.Close(document.TabId);
+        ReleaseArchiveSource(document);
         DesktopCrashLogger.Debug("DBC", "document-closed", ("path", document.FullPath), ("remaining", _documents.Count));
         _primaryDocument = ReindexDocumentAfterClose(_primaryDocument, closedIndex);
         _secondaryDocument = ReindexDocumentAfterClose(_secondaryDocument, closedIndex);
@@ -1482,6 +1484,7 @@ public partial class MainWindow : Window
         {
             _mpqWorkspaceView = new MpqWorkspaceView(_workspaceSession);
             _mpqWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
+            _mpqWorkspaceView.OpenFileRequested += async (_, request) => await OpenArchiveFileAsync(request.Archive, request.Entry);
         }
         OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
     }
@@ -1548,34 +1551,19 @@ public partial class MainWindow : Window
 
     private async Task OpenIndexedArchiveAsync(string path)
     {
-        if (_mpqWorkspaceView is null)
-        {
-            _mpqWorkspaceView = new MpqWorkspaceView(_workspaceSession);
-            _mpqWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
-        }
-        OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
-        await _mpqWorkspaceView.OpenArchiveAsync(path);
+        OpenMpqWorkspace();
+        await _mpqWorkspaceView!.OpenArchiveAsync(path);
     }
 
     private void OpenPatchBuilderWithPaths(IReadOnlyList<string> paths)
     {
-        if (_mpqWorkspaceView is null)
-        {
-            _mpqWorkspaceView = new MpqWorkspaceView(_workspaceSession);
-            _mpqWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
-        }
-        _mpqWorkspaceView.StagePaths(paths);
-        OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
+        OpenMpqWorkspace();
+        _mpqWorkspaceView!.StagePaths(paths);
     }
     private void OpenPatchBuilderWithEntries(IReadOnlyList<PatchEntry> entries)
     {
-        if (_mpqWorkspaceView is null)
-        {
-            _mpqWorkspaceView = new MpqWorkspaceView(_workspaceSession);
-            _mpqWorkspaceView.BackRequested += (_, _) => CloseFeatureWorkspace();
-        }
-        _mpqWorkspaceView.StageEntries(entries);
-        OpenFeatureWorkspace(_mpqWorkspaceView, "MPQ Patches & Archives");
+        OpenMpqWorkspace();
+        _mpqWorkspaceView!.StageEntries(entries);
     }
     private void OpenWorkspaceSetup()
     {
@@ -2010,7 +1998,7 @@ public partial class MainWindow : Window
         }
         if (e.KeyModifiers.HasFlag(KeyModifiers.Alt) && e.Key == Key.Left) { CloseFeatureWorkspace(); e.Handled = true; return; }
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
-        if (e.Key == Key.W && FeatureWorkspaceHost.IsVisible) CloseWorkspaceTab(_workspaceTabs.SelectedId);
+        if (e.Key == Key.W && FeatureWorkspaceHost.IsVisible) _ = CloseWorkspaceTabAsync(_workspaceTabs.SelectedId);
         else if (e.Key == Key.O) _ = OpenGameFilesAsync();
         else if (!FeatureWorkspaceHost.IsVisible && !WelcomePanel.IsVisible)
         {
@@ -2044,7 +2032,7 @@ public partial class MainWindow : Window
                 if (!await EnsureBackupChoiceAsync()) return;
                 foreach (var document in dirty)
                 {
-                    try { await Task.Run(() => document.File.Save(document.File.SourcePath, true)); }
+                    try { await Task.Run(document.Save); }
                     catch (Exception exception) { DesktopCrashLogger.Log("Shutdown DBC save failed", exception); await ShowErrorAsync("Could not save all DBCs", exception.Message); return; }
                 }
             }

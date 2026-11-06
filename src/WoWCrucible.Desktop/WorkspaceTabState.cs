@@ -10,6 +10,12 @@ internal sealed class WorkspaceTabState
     public IReadOnlyList<WorkspaceTab> Tabs => _tabs;
     public string SelectedId { get; private set; } = "home";
 
+    public void Rename(string id, string title)
+    {
+        var index = _tabs.FindIndex(tab => tab.Id == id);
+        if (index >= 0) _tabs[index] = _tabs[index] with { Title = title };
+    }
+
     public void Open(string id, string title)
     {
         var index = _tabs.FindIndex(tab => tab.Id == id);

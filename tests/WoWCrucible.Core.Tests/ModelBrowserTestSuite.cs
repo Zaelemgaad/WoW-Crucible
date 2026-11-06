@@ -346,10 +346,88 @@ internal static class ModelBrowserTestSuite
         var series = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(body[(weightTrack + 16)..]));
         var values = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(body[(series + 4)..]));
         Require(BinaryPrimitives.ReadUInt16LittleEndian(body[values..]) == 1234, "Non-bone keys use AFM2, not AFSB.");
+
+        var externalGeometry = M2PreviewGeometryService.LoadForViewing(externalSource);
+        var externalPose = M2AnimationService.CreatePose(externalGeometry);
+        M2AnimationService.SampleInto(externalGeometry, 0, 1500, externalPose);
+        M2AnimationService.SampleInto(geometry, 0, 1500, pose);
+        Require(Math.Abs(externalPose.Vertices[0].X - 3) < 0.001f && Math.Abs(pose.Vertices[0].X - 3) < 0.001f,
+            "Looping external and embedded sequences both wrap independently of storage flags.");
+        U32(skeleton, 8 + 36, 1);
+        File.WriteAllBytes(Path.Combine(root, "Embed.skel"), skeleton);
+        result = M2SkeletonEmbeddingService.Embed(externalSource);
+        File.WriteAllBytes(output, result.ModelData);
+        using (var onceSource = new ModelBrowserSource(new(output, null, "Baked.m2", result.ModelData.Length, "MD21", 274, null)))
+        {
+            var onceGeometry = M2PreviewGeometryService.LoadForViewing(onceSource);
+            var oncePose = M2AnimationService.CreatePose(onceGeometry);
+            M2AnimationService.SampleInto(onceGeometry, 0, 1500, oncePose);
+            Require(Math.Abs(oncePose.Vertices[0].X - 6) < 0.001f, "Embedding preserves a play-once animation's final pose.");
+        }
+        U32(skeleton, 8 + 36, 0);
+        File.WriteAllBytes(Path.Combine(root, "Embed.skel"), skeleton);
+        File.WriteAllBytes(animation, Chunk("AFSB", afsb));
+        using (var boneOnlySource = new ModelBrowserSource(new(path, null, "Embed.m2", new FileInfo(path).Length, "MD21", 274, null)))
+        {
+            var boneOnlyGeometry = M2PreviewGeometryService.LoadForViewing(boneOnlySource);
+            var boneOnlyPose = M2AnimationService.CreatePose(boneOnlyGeometry);
+            M2AnimationService.SampleInto(boneOnlyGeometry, 0, 500, boneOnlyPose);
+            Require(Math.Abs(boneOnlyPose.Vertices[0].X - 3) < 0.001f,
+                "Bone-only external animation does not require an unused AFM2 pose payload.");
+        }
+        File.WriteAllBytes(animation, Chunk("AFM2", afm2).Concat(Chunk("AFSB", afsb)).ToArray());
+
+        // A native reader visits every resident descriptor, including aliases. Checking only
+        // the preview pose misses stale alias offsets because the preview resolves aliases first.
+        var aliasSequences = new byte[224]; U32(aliasSequences, 8, 3); U32(aliasSequences, 12, 24);
+        U32(aliasSequences, 0, 2); U32(aliasSequences, 4, 216);
+        U32(aliasSequences, 216, 1000); U32(aliasSequences, 220, 1500);
+        for (var index = 0; index < 3; index++)
+        {
+            var record = 24 + index * 64;
+            U32(aliasSequences, record + 4, 1000);
+            U32(aliasSequences, record + 12, index < 2 ? 0x40u : 0u);
+            U16(aliasSequences, record + 62, (ushort)(index + 1));
+        }
+        var aliasBones = new byte[248]; Array.Copy(skeleton, bonePayload, aliasBones, 0, 200);
+        U32(aliasBones, 36, 3); U32(aliasBones, 40, 200);
+        U32(aliasBones, 44, 3); U32(aliasBones, 48, 224);
+        for (var index = 0; index < 3; index++)
+        {
+            U32(aliasBones, 200 + index * 8, index == 2 ? 2u : 1u);
+            U32(aliasBones, 204 + index * 8, index == 2 ? 0u : 128u);
+            U32(aliasBones, 224 + index * 8, index == 2 ? 2u : 1u);
+            U32(aliasBones, 228 + index * 8, index == 2 ? 8u : 128u);
+        }
+        File.WriteAllBytes(path, Chunk("MD21", Model()).Concat(Chunk("SKID", UInt(987))).ToArray());
+        File.WriteAllBytes(Path.Combine(root, "Embed.skel"), Chunk("SKS1", aliasSequences).Concat(Chunk("SKB1", aliasBones)).ToArray());
+        result = M2SkeletonEmbeddingService.Embed(externalSource);
+        body = result.ModelData.AsSpan(8);
+        var bone = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(body[0x30..]));
+        var times = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(body[(bone + 24)..]));
+        var keys = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(body[(bone + 32)..]));
+        for (var index = 0; index < 3; index++)
+        {
+            var timeKeys = body[(times + index * 8)..]; var valueKeys = body[(keys + index * 8)..];
+            Require(BinaryPrimitives.ReadUInt32LittleEndian(timeKeys) == 2 && BinaryPrimitives.ReadUInt32LittleEndian(valueKeys) == 2,
+                "Alias descriptor counts come from the terminal sequence.");
+            var time = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(timeKeys[4..]));
+            var value = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(valueKeys[4..]));
+            Require(BinaryPrimitives.ReadUInt32LittleEndian(body[(time + 4)..]) == 1000 &&
+                Math.Abs(BinaryPrimitives.ReadSingleLittleEndian(body[(value + 12)..]) - 6) < 0.001f,
+                "Alias chains embed terminal AFSB timestamps and values, not plausible in-bounds SKB1 bytes.");
+        }
+        U16(aliasSequences, 24 + 62, 9);
+        File.WriteAllBytes(Path.Combine(root, "Embed.skel"), Chunk("SKS1", aliasSequences).Concat(Chunk("SKB1", aliasBones)).ToArray());
+        Expect<InvalidDataException>(() => M2SkeletonEmbeddingService.Embed(externalSource));
+        U16(aliasSequences, 24 + 62, 0);
+        File.WriteAllBytes(Path.Combine(root, "Embed.skel"), Chunk("SKS1", aliasSequences).Concat(Chunk("SKB1", aliasBones)).ToArray());
+        Expect<InvalidDataException>(() => M2SkeletonEmbeddingService.Embed(externalSource));
+        File.WriteAllBytes(Path.Combine(root, "Embed.skel"), skeleton);
         File.WriteAllBytes(animation, Chunk("AFM2", afm2));
         Expect<InvalidDataException>(() => M2SkeletonEmbeddingService.Embed(externalSource));
         Expect<OperationCanceledException>(() => M2SkeletonEmbeddingService.Embed(externalSource, cancellationToken: new(true)));
-        Console.WriteLine("PASS skeleton embedding: nested offsets, embedded animation poses, separate AFM2/AFSB address spaces, missing payload rejection, cancellation.");
+        Console.WriteLine("PASS skeleton embedding: nested offsets, embedded poses, AFM2/AFSB address spaces, alias chains, invalid alias rejection, missing payload rejection, cancellation.");
     }
 
     private static byte[] LargeSkin()

@@ -11,7 +11,17 @@ public sealed record ItemDraft(
     uint ItemLevel, uint RequiredLevel, uint BuyPrice, uint SellPrice, uint Bonding, uint Flags,
     uint Armor, float DamageMin, float DamageMax, uint Delay, uint MaxDurability, string Description,
     IReadOnlyList<ItemStatDraft>? Stats = null, IReadOnlyList<ItemSpellDraft>? Spells = null, uint ItemSetId = 0,
-    int DamageType = 0, int SoundOverrideSubclassId = -1, int Material = 0, int SheatheType = 0);
+    int DamageType = 0, int SoundOverrideSubclassId = -1, int Material = 0, int SheatheType = 0,
+    float DamageMin2 = 0, float DamageMax2 = 0, int DamageType2 = 0, uint Block = 0,
+    IReadOnlyList<int>? Resistances = null, IReadOnlyList<int>? SocketColors = null, uint SocketBonus = 0,
+    int MaxCount = 0, int AllowableClass = -1, int AllowableRace = -1,
+    uint RequiredSkill = 0, uint RequiredSkillRank = 0, uint RequiredSpell = 0, uint StartQuest = 0, uint ContainerSlots = 0)
+{
+    /// <summary>item_template resistance columns, in client school order (holy, fire, nature, frost, shadow, arcane).</summary>
+    public static readonly string[] ResistanceColumns = ["holy_res", "fire_res", "nature_res", "frost_res", "shadow_res", "arcane_res"];
+    public int Resistance(int school) => Resistances is { } values && school < values.Count ? values[school] : 0;
+    public int SocketColor(int slot) => SocketColors is { } values && slot < values.Count ? values[slot] : 0;
+}
 
 public sealed record ItemWritePlan(
     string Table,
@@ -56,7 +66,9 @@ public static class ItemTemplateAdapter
 {
     public static DatabaseTableCapability CreatePortableTable()
     {
-        var names = new List<string> { "entry", "class", "subclass", "SoundOverrideSubclass", "Material", "name", "displayid", "Quality", "InventoryType", "sheath", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description", "itemset" };
+        var names = new List<string> { "entry", "class", "subclass", "SoundOverrideSubclass", "Material", "name", "displayid", "Quality", "InventoryType", "sheath", "ItemLevel", "RequiredLevel", "BuyPrice", "SellPrice", "bonding", "Flags", "armor", "dmg_min1", "dmg_max1", "dmg_type1", "delay", "MaxDurability", "description", "itemset",
+            "dmg_min2", "dmg_max2", "dmg_type2", "block", "socketColor_1", "socketColor_2", "socketColor_3", "socketBonus", "maxcount", "AllowableClass", "AllowableRace", "RequiredSkill", "RequiredSkillRank", "requiredspell", "startquest", "ContainerSlots" };
+        names.AddRange(ItemDraft.ResistanceColumns);
         for (var slot = 1; slot <= 10; slot++) { names.Add($"stat_type{slot}"); names.Add($"stat_value{slot}"); }
         for (var slot = 1; slot <= 5; slot++) names.AddRange([$"spellid_{slot}", $"spelltrigger_{slot}", $"spellcharges_{slot}", $"spellppmRate_{slot}", $"spellcooldown_{slot}", $"spellcategory_{slot}", $"spellcategorycooldown_{slot}"]);
         return new("item_template", names.Select((name, index) =>
@@ -80,8 +92,14 @@ public static class ItemTemplateAdapter
             ("ItemLevel", draft.ItemLevel, draft.ItemLevel != 0), ("RequiredLevel", draft.RequiredLevel, draft.RequiredLevel != 0), ("BuyPrice", draft.BuyPrice, draft.BuyPrice != 0),
             ("SellPrice", draft.SellPrice, draft.SellPrice != 0), ("bonding", draft.Bonding, draft.Bonding != 0), ("Flags", draft.Flags, draft.Flags != 0), ("armor", draft.Armor, draft.Armor != 0),
             ("dmg_min1", draft.DamageMin, draft.DamageMin != 0), ("dmg_max1", draft.DamageMax, draft.DamageMax != 0), ("dmg_type1", draft.DamageType, draft.DamageType != 0), ("delay", draft.Delay, draft.Delay != 0),
-            ("MaxDurability", draft.MaxDurability, draft.MaxDurability != 0), ("description", draft.Description ?? string.Empty, !string.IsNullOrWhiteSpace(draft.Description)), ("itemset", draft.ItemSetId, draft.ItemSetId != 0)
-        };
+            ("MaxDurability", draft.MaxDurability, draft.MaxDurability != 0), ("description", draft.Description ?? string.Empty, !string.IsNullOrWhiteSpace(draft.Description)), ("itemset", draft.ItemSetId, draft.ItemSetId != 0),
+            ("dmg_min2", draft.DamageMin2, draft.DamageMin2 != 0), ("dmg_max2", draft.DamageMax2, draft.DamageMax2 != 0), ("dmg_type2", draft.DamageType2, draft.DamageType2 != 0), ("block", draft.Block, draft.Block != 0),
+            ("socketColor_1", draft.SocketColor(0), draft.SocketColor(0) != 0), ("socketColor_2", draft.SocketColor(1), draft.SocketColor(1) != 0), ("socketColor_3", draft.SocketColor(2), draft.SocketColor(2) != 0),
+            ("socketBonus", draft.SocketBonus, draft.SocketBonus != 0), ("maxcount", draft.MaxCount, draft.MaxCount != 0),
+            ("AllowableClass", draft.AllowableClass, draft.AllowableClass != -1), ("AllowableRace", draft.AllowableRace, draft.AllowableRace != -1),
+            ("RequiredSkill", draft.RequiredSkill, draft.RequiredSkill != 0), ("RequiredSkillRank", draft.RequiredSkillRank, draft.RequiredSkillRank != 0),
+            ("requiredspell", draft.RequiredSpell, draft.RequiredSpell != 0), ("startquest", draft.StartQuest, draft.StartQuest != 0), ("ContainerSlots", draft.ContainerSlots, draft.ContainerSlots != 0)
+        }.Concat(ItemDraft.ResistanceColumns.Select((name, school) => (name, (object)draft.Resistance(school), draft.Resistance(school) != 0))).ToArray();
         var values = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         var omitted = new List<string>();
         var selectedOmitted = new List<string>();

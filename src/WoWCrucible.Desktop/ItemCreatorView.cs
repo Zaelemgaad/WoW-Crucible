@@ -32,14 +32,24 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     private readonly ComboBox _material = Choice((-1,"Unspecified"),(0,"None"),(1,"Metal"),(2,"Wood"),(3,"Liquid"),(4,"Jewelry"),(5,"Chain"),(6,"Plate"),(7,"Cloth"),(8,"Leather"));
     private readonly ComboBox _sheath = Choice((0,"None"),(1,"Two-hand weapon"),(2,"Staff"),(3,"One-hand weapon"),(4,"Shield"),(5,"Enchanter rod"),(6,"Off hand"),(7,"Ranged"));
     private readonly NumericUpDown _flags = ItemNumber("Flags"); private readonly NumericUpDown _armor = ItemNumber("armor");
-    private readonly NumericUpDown _damageMin = ItemNumber("dmg_min1"); private readonly NumericUpDown _damageMax = ItemNumber("dmg_max1"); private readonly ComboBox _damageType = Choice((0,"Physical"),(1,"Holy"),(2,"Fire"),(3,"Nature"),(4,"Frost"),(5,"Shadow"),(6,"Arcane")); private readonly NumericUpDown _delay = ItemNumber("delay"); private readonly NumericUpDown _durability = ItemNumber("MaxDurability");
+    private readonly NumericUpDown _damageMin = ItemNumber("dmg_min1"); private readonly NumericUpDown _damageMax = ItemNumber("dmg_max1"); private readonly ComboBox _damageType = SchoolChoice(); private readonly NumericUpDown _delay = ItemNumber("delay"); private readonly NumericUpDown _durability = ItemNumber("MaxDurability");
     private readonly NumericUpDown _itemSet = ItemNumber("itemset");
+    private readonly NumericUpDown _damageMin2 = ItemNumber("dmg_min2"); private readonly NumericUpDown _damageMax2 = ItemNumber("dmg_max2"); private readonly ComboBox _damageType2 = SchoolChoice(); private readonly NumericUpDown _block = ItemNumber("block");
+    private readonly NumericUpDown[] _resistances = ItemDraft.ResistanceColumns.Select(column => ItemNumber(column)).ToArray();
+    private readonly NumericUpDown _maxCount = ItemNumber("maxcount"); private readonly NumericUpDown _startQuest = ItemNumber("startquest"); private readonly NumericUpDown _containerSlots = ItemNumber("ContainerSlots");
+    private readonly CheckBox _heroic = new() { Content = "Heroic" }; private readonly CheckBox _uniqueEquipped = new() { Content = "Unique-Equipped" }; private readonly CheckBox _accountBound = new() { Content = "Binds to account" };
+    private readonly ComboBox[] _socketColors = Enumerable.Range(0,3).Select(_ => Choice((0,"No socket"),(1,"Meta"),(2,"Red"),(4,"Yellow"),(8,"Blue"),(14,"Prismatic"))).ToArray(); private readonly NumericUpDown _socketBonus = ItemNumber("socketBonus");
+    private readonly NumericUpDown _requiredSkill = ItemNumber("RequiredSkill"); private readonly NumericUpDown _requiredSkillRank = ItemNumber("RequiredSkillRank"); private readonly NumericUpDown _requiredSpell = ItemNumber("requiredspell");
+    private readonly CheckBox[] _classChecks = ItemTooltipBuilder.Classes.Select(entry => new CheckBox { Content = entry.Name, Tag = entry.Id }).ToArray();
+    private readonly CheckBox[] _raceChecks = ItemTooltipBuilder.Races.Select(entry => new CheckBox { Content = entry.Name, Tag = entry.Id }).ToArray();
+    private int _classMask = -1, _raceMask = -1;
+    private ItemTooltipNameCatalog? _tooltipNames; private string? _tooltipNamesFolder;
     private readonly ComboBox[] _statTypes = Enumerable.Range(0,10).Select(_ => StatChoice()).ToArray(); private readonly NumericUpDown[] _statValues = Enumerable.Range(1,10).Select(slot => ItemNumber($"stat_value{slot}")).ToArray();
     private readonly NumericUpDown[] _spellIds = Enumerable.Range(1,5).Select(slot => ItemNumber($"spellid_{slot}")).ToArray(); private readonly ComboBox[] _spellTriggers = Enumerable.Range(0,5).Select(_ => SpellTriggerChoice()).ToArray();
     private readonly NumericUpDown[] _spellCharges = Enumerable.Range(1,5).Select(slot => ItemNumber($"spellcharges_{slot}")).ToArray(); private readonly NumericUpDown[] _spellPpm = Enumerable.Range(1,5).Select(slot => ItemNumber($"spellppmRate_{slot}")).ToArray();
     private readonly NumericUpDown[] _spellCooldowns = Enumerable.Range(1,5).Select(slot => ItemNumber($"spellcooldown_{slot}",-1)).ToArray(); private readonly NumericUpDown[] _spellCategories = Enumerable.Range(1,5).Select(slot => ItemNumber($"spellcategory_{slot}")).ToArray(); private readonly NumericUpDown[] _spellCategoryCooldowns = Enumerable.Range(1,5).Select(slot => ItemNumber($"spellcategorycooldown_{slot}",-1)).ToArray();
     private readonly TextBox _description = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
-    private readonly StackPanel _tooltip = new() { Spacing = 3, Margin = new Thickness(16) };
+    private readonly ItemTooltipView _tooltip = new() { Margin = new Thickness(16) };
     private readonly TextBox _sql = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.NoWrap, FontFamily = new FontFamily("Cascadia Mono,Consolas") };
     private readonly M2PreviewView _model = new(); private readonly TextBlock _modelStatus = Status("Load an extracted WotLK M2 with its companion SKIN to preview geometry.");
     private readonly CheckBox _showAttachments = new() { Content = "Show native attachment points" };
@@ -75,14 +85,20 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         _class.SelectionChanged += (_, _) => { if (_loading || _updatingChoices) return; UpdateSubclassChoices(); RefreshPreview(); };
         _subclass.SelectionChanged += (_, _) => { if (_loading || _updatingChoices) return; UpdateInventoryChoices(); RefreshPreview(); };
         foreach (var number in Numbers()) number.ValueChanged += (_, _) => RefreshPreview();
-        foreach (var spellId in _spellIds) spellId.ValueChanged += (_, _) => ScheduleSpellDecode();
+        foreach (var spellId in _spellIds.Append(_requiredSpell).Append(_requiredSkill).Append(_socketBonus)) spellId.ValueChanged += (_, _) => ScheduleSpellDecode();
         foreach (var combo in Combos().Where(combo => !ReferenceEquals(combo, _class))) combo.SelectionChanged += (_, _) => RefreshPreview();
         foreach (var text in new[] { _name, _description }) text.TextChanged += (_, _) => RefreshPreview();
+        foreach (var (check, bit) in new[] { (_heroic, ItemTooltipBuilder.FlagHeroic), (_uniqueEquipped, ItemTooltipBuilder.FlagUniqueEquipped), (_accountBound, ItemTooltipBuilder.FlagBindToAccount) })
+            check.Click += (_, _) => _flags.Value = check.IsChecked == true ? (uint)(_flags.Value ?? 0) | bit : (uint)(_flags.Value ?? 0) & ~bit;
+        _flags.ValueChanged += (_, _) => SyncFlagChecks();
+        foreach (var check in _classChecks) check.Click += (_, _) => { _classMask = MaskFromChecks(_classChecks, _classMask, 0x5FF); RefreshPreview(); };
+        foreach (var check in _raceChecks) check.Click += (_, _) => { _raceMask = MaskFromChecks(_raceChecks, _raceMask, 0x6FF); RefreshPreview(); };
 
-        var basics = Form(("Entry ID",_entry),("Name",_name),("Item class",_class),("Subclass",_subclass),("Display ID",_display),("Quality",_quality),("Inventory slot",_inventory),("Material",_material),("Sheath position",_sheath),("Weapon sound override (-1 = default)",_soundOverride),("Item level",_itemLevel),("Required level",_requiredLevel),("Binding",_bonding),("Item set ID",_itemSet),("Description",_description));
-        var combat = Form(("Buy price (copper)",_buy),("Sell price (copper)",_sell),("Armor",_armor),("Minimum damage",_damageMin),("Maximum damage",_damageMax),("Damage school",_damageType),("Weapon delay (ms)",_delay),("Durability",_durability),("Raw flags",_flags));
+        var basics = Form(("Entry ID",_entry),("Name",_name),("Item class",_class),("Subclass",_subclass),("Display ID",_display),("Quality",_quality),("Inventory slot",_inventory),("Material",_material),("Sheath position",_sheath),("Weapon sound override (-1 = default)",_soundOverride),("Item level (0 hides it)",_itemLevel),("Required level",_requiredLevel),("Binding",_bonding),("Bag slots",_containerSlots),("Tooltip flags",new WrapPanel { Children = { _heroic, _uniqueEquipped, _accountBound } }),("Max count (1 = Unique)",_maxCount),("Starts quest ID",_startQuest),("Item set ID",_itemSet),("Description",_description));
+        var combat = Form(("Buy price (copper)",_buy),("Sell price (copper)",_sell),("Armor",_armor),("Shield block",_block),("Minimum damage",_damageMin),("Maximum damage",_damageMax),("Damage school",_damageType),("Bonus damage minimum",_damageMin2),("Bonus damage maximum",_damageMax2),("Bonus damage school",_damageType2),("Weapon delay (ms)",_delay),("Durability",_durability),
+            ("Holy resistance",_resistances[0]),("Fire resistance",_resistances[1]),("Nature resistance",_resistances[2]),("Frost resistance",_resistances[3]),("Shadow resistance",_resistances[4]),("Arcane resistance",_resistances[5]),("Raw flags",_flags));
         _statsTab.Content = StatsPage();
-        var editTabs = new TabControl { Items = { new TabItem { Header="Basics", Content=new ScrollViewer { Content=basics } }, new TabItem { Header="Combat & value", Content=new ScrollViewer { Content=combat } }, _statsTab, new TabItem { Header="5 spell effects", Content=SpellsPage() } } };
+        var editTabs = new TabControl { Items = { new TabItem { Header="Basics", Content=new ScrollViewer { Content=basics } }, new TabItem { Header="Combat & value", Content=new ScrollViewer { Content=combat } }, _statsTab, new TabItem { Header="Requirements & sockets", Content=RequirementsPage() }, new TabItem { Header="5 spell effects", Content=SpellsPage() } } };
 
         var resolveDisplay = AccentButton("Resolve current display ID"); resolveDisplay.Click += async (_, _) => await ResolveDisplayAsync(true);
         var loadResolved = new Button { Content = "Load selected resolved model" }; loadResolved.Click += async (_, _) => await LoadResolvedModelAsync();
@@ -105,7 +121,8 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         var attachmentControls = new Expander { Header = "Native equipment/effect attachment points", Content = new StackPanel { Spacing = 6, Children = { new TextBlock { Text = "Highlights the exact WotLK attachment record where helmets, shoulders, weapons, sheaths, and effects bind. Changing this selector immediately remounts a single previewed item. Shoulder model slots 0/1 instead stay mounted on the native left/right pair from one provenance source.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7") }, _showAttachments, _attachmentPicker } } };
         var modelHeader = new StackPanel { Spacing = 7, Children = { new TextBlock { Text="Live item display resolution", FontWeight=FontWeight.SemiBold }, resolverPaths, new WrapPanel { Children = { resolveDisplay, loadResolved, mountResolved, loadModel, clearModel } }, _resolvedModels, _displayDetails, attachmentControls, new Separator(), new TextBlock { Text="Equipped character preview", FontWeight=FontWeight.SemiBold }, new TextBlock { Text="Choose a playable character M2. Load decoded choices to build its real CharSections skin, face, underwear, facial features, hair texture, and hair geosets. Wearable armor composes atlas/geoset changes; helmets, weapons, shields, bows, cloaks, and quivers can mount their real child M2 on a native attachment point.",TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#9AA5B7") }, characterPaths, appearanceChoices, _appearanceStatus, _wearSources, new WrapPanel { Children = { fillCharacter, loadAppearance, previewEquipped } } } };
         var modelPage = new Grid { RowDefinitions = new("2*,Auto,3*,Auto"), Children = { new ScrollViewer { Content=modelHeader }, WithRow(new GridSplitter { ResizeDirection=GridResizeDirection.Rows, Background=Brush.Parse("#2B3445") },1), WithRow(new Border { Background=Brush.Parse("#090D14"), Child=_model },2), WithRow(_modelStatus,3) } };
-        var previewTabs = new TabControl { Items = { new TabItem { Header="Tooltip", Content=new ScrollViewer { Content=new Border { Background=Brush.Parse("#080911"), BorderBrush=Brush.Parse("#7C6639"), BorderThickness=new Thickness(1), Margin=new Thickness(8), Child=_tooltip } } }, new TabItem { Header="3D model", Content=modelPage }, new TabItem { Header="SQL preview", Content=_sql } } };
+        var previewTabs = new TabControl { Items = { new TabItem { Header="Tooltip", Content=new ScrollViewer { Content=_tooltip } }, new TabItem { Header="3D model", Content=modelPage }, new TabItem { Header="SQL preview", Content=_sql } } };
+        _tooltip.UseClientAssets(session.Settings.ClientDataPath);
 
         var workspace = new ResponsiveSplitGrid(editTabs, previewTabs, 3, 2);
         var preview = new Button { Content="Refresh change plan" }; preview.Click += (_, _) => RefreshSql();
@@ -136,6 +153,12 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             var declaredStats=Math.Clamp(Int(row,"StatsCount"),0,10);
             for(var index=0;index<10;index++){var value=Int(row,$"stat_value{index+1}");var active=index<declaredStats||value!=0;Set(_statTypes[index],active?Int(row,$"stat_type{index+1}"):-1);_statValues[index].Value=value;}
             for(var index=0;index<5;index++){var slot=index+1;_spellIds[index].Value=Decimal(row,$"spellid_{slot}");Set(_spellTriggers[index],Int(row,$"spelltrigger_{slot}"));_spellCharges[index].Value=Decimal(row,$"spellcharges_{slot}");_spellPpm[index].Value=Decimal(row,$"spellppmRate_{slot}");_spellCooldowns[index].Value=Decimal(row,$"spellcooldown_{slot}",-1);_spellCategories[index].Value=Decimal(row,$"spellcategory_{slot}");_spellCategoryCooldowns[index].Value=Decimal(row,$"spellcategorycooldown_{slot}",-1);}
+            _damageMin2.Value=Decimal(row,"dmg_min2");_damageMax2.Value=Decimal(row,"dmg_max2");Set(_damageType2,Int(row,"dmg_type2"));_block.Value=Decimal(row,"block");
+            for(var school=0;school<6;school++)_resistances[school].Value=Decimal(row,ItemDraft.ResistanceColumns[school]);
+            for(var slot=0;slot<3;slot++)Set(_socketColors[slot],Int(row,$"socketColor_{slot+1}"));
+            _socketBonus.Value=Decimal(row,"socketBonus");_maxCount.Value=Decimal(row,"maxcount");_startQuest.Value=Decimal(row,"startquest");_containerSlots.Value=Decimal(row,"ContainerSlots");
+            _requiredSkill.Value=Decimal(row,"RequiredSkill");_requiredSkillRank.Value=Decimal(row,"RequiredSkillRank");_requiredSpell.Value=Decimal(row,"requiredspell");
+            _classMask=(int)Decimal(row,"AllowableClass",-1);_raceMask=(int)Decimal(row,"AllowableRace",-1);SyncMaskChecks();SyncFlagChecks();
         }
         finally { _loading = false; }
         _loadedEntry=(uint)(_entry.Value??0);_commit.Content="Save changes";RefreshPreview();RefreshSql();_status.Text=$"Loaded live item {_loadedEntry} with decoded names. Unmapped/custom fields remain editable in SQL Studio."; _ = ResolveDisplayAsync(false); ScheduleSpellDecode();
@@ -174,6 +197,40 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             _spellIds[index].Value=0;Set(_spellTriggers[index],0);_spellCharges[index].Value=0;_spellPpm[index].Value=0;
             _spellCooldowns[index].Value=-1;_spellCategories[index].Value=0;_spellCategoryCooldowns[index].Value=-1;
         }
+        _damageMin2.Value=0;_damageMax2.Value=0;Set(_damageType2,0);_block.Value=0;
+        foreach(var resistance in _resistances)resistance.Value=0;
+        foreach(var socket in _socketColors)Set(socket,0);
+        _socketBonus.Value=0;_maxCount.Value=0;_startQuest.Value=0;_containerSlots.Value=0;_requiredSkill.Value=0;_requiredSkillRank.Value=0;_requiredSpell.Value=0;
+        _classMask=-1;_raceMask=-1;SyncMaskChecks();
+    }
+
+    private Control RequirementsPage()
+    {
+        var findSpell=new Button{Content="Find…"};findSpell.Click+=(_,_)=>ReferenceLookupRequested?.Invoke(this,new(ReferenceDomain.Spell,"Required spell",(uint)(_requiredSpell.Value??0),selected=>_requiredSpell.Value=selected));
+        var classes=new WrapPanel();foreach(var check in _classChecks)classes.Children.Add(check);
+        var races=new WrapPanel();foreach(var check in _raceChecks)races.Children.Add(check);
+        return new ScrollViewer{Content=Form(("Classes",classes),("Races",races),("Required skill ID",_requiredSkill),("Required skill rank",_requiredSkillRank),("Required spell",Row(_requiredSpell,findSpell)),
+            ("Socket 1",_socketColors[0]),("Socket 2",_socketColors[1]),("Socket 3",_socketColors[2]),("Socket bonus enchantment ID",_socketBonus))};
+    }
+
+    private void SyncMaskChecks()
+    {
+        foreach(var check in _classChecks)check.IsChecked=_classMask==-1||(_classMask&(1<<((int)check.Tag!-1)))!=0;
+        foreach(var check in _raceChecks)check.IsChecked=_raceMask==-1||(_raceMask&(1<<((int)check.Tag!-1)))!=0;
+    }
+
+    private void SyncFlagChecks()
+    {
+        var flags=(uint)(_flags.Value??0);
+        _heroic.IsChecked=(flags&ItemTooltipBuilder.FlagHeroic)!=0;_uniqueEquipped.IsChecked=(flags&ItemTooltipBuilder.FlagUniqueEquipped)!=0;_accountBound.IsChecked=(flags&ItemTooltipBuilder.FlagBindToAccount)!=0;
+    }
+
+    /// <summary>Every playable box checked means unrestricted (-1). Bits outside the playable set are kept as loaded.</summary>
+    private static int MaskFromChecks(CheckBox[] checks,int previous,int playable)
+    {
+        if(checks.All(check=>check.IsChecked==true))return -1;
+        var mask=checks.Where(check=>check.IsChecked==true).Aggregate(0,(value,check)=>value|1<<((int)check.Tag!-1));
+        return previous==-1?mask:mask|(previous&~playable);
     }
 
     private Control StatsPage()
@@ -198,7 +255,11 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         return new ScrollViewer { Content=stack };
     }
 
-    private ItemDraft Draft() => new((uint)(_entry.Value??1),_name.Text??string.Empty,Selected(_class),Selected(_subclass),(uint)(_display.Value??0),Selected(_quality),Selected(_inventory),(uint)(_itemLevel.Value??1),(uint)(_requiredLevel.Value??0),(uint)(_buy.Value??0),(uint)(_sell.Value??0),(uint)Selected(_bonding),(uint)(_flags.Value??0),(uint)(_armor.Value??0),(float)(_damageMin.Value??0),(float)(_damageMax.Value??0),(uint)(_delay.Value??0),(uint)(_durability.Value??0),_description.Text??string.Empty,_statTypes.Select((type,index)=>new ItemStatDraft(Selected(type),(int)(_statValues[index].Value??0))).ToArray(),_spellIds.Select((id,index)=>new ItemSpellDraft((int)(id.Value??0),Selected(_spellTriggers[index]),(int)(_spellCharges[index].Value??0),(float)(_spellPpm[index].Value??0),(int)(_spellCooldowns[index].Value??-1),(int)(_spellCategories[index].Value??0),(int)(_spellCategoryCooldowns[index].Value??-1))).ToArray(),(uint)(_itemSet.Value??0),Selected(_damageType),(int)(_soundOverride.Value??-1),Selected(_material),Selected(_sheath));
+    private ItemDraft Draft() => new((uint)(_entry.Value??1),_name.Text??string.Empty,Selected(_class),Selected(_subclass),(uint)(_display.Value??0),Selected(_quality),Selected(_inventory),(uint)(_itemLevel.Value??1),(uint)(_requiredLevel.Value??0),(uint)(_buy.Value??0),(uint)(_sell.Value??0),(uint)Selected(_bonding),(uint)(_flags.Value??0),(uint)(_armor.Value??0),(float)(_damageMin.Value??0),(float)(_damageMax.Value??0),(uint)(_delay.Value??0),(uint)(_durability.Value??0),_description.Text??string.Empty,_statTypes.Select((type,index)=>new ItemStatDraft(Selected(type),(int)(_statValues[index].Value??0))).ToArray(),_spellIds.Select((id,index)=>new ItemSpellDraft((int)(id.Value??0),Selected(_spellTriggers[index]),(int)(_spellCharges[index].Value??0),(float)(_spellPpm[index].Value??0),(int)(_spellCooldowns[index].Value??-1),(int)(_spellCategories[index].Value??0),(int)(_spellCategoryCooldowns[index].Value??-1))).ToArray(),(uint)(_itemSet.Value??0),Selected(_damageType),(int)(_soundOverride.Value??-1),Selected(_material),Selected(_sheath),
+        DamageMin2:(float)(_damageMin2.Value??0),DamageMax2:(float)(_damageMax2.Value??0),DamageType2:Selected(_damageType2),Block:(uint)(_block.Value??0),
+        Resistances:_resistances.Select(value=>(int)(value.Value??0)).ToArray(),SocketColors:_socketColors.Select(Selected).ToArray(),SocketBonus:(uint)(_socketBonus.Value??0),
+        MaxCount:(int)(_maxCount.Value??0),AllowableClass:_classMask,AllowableRace:_raceMask,RequiredSkill:(uint)(_requiredSkill.Value??0),RequiredSkillRank:(uint)(_requiredSkillRank.Value??0),
+        RequiredSpell:(uint)(_requiredSpell.Value??0),StartQuest:(uint)(_startQuest.Value??0),ContainerSlots:(uint)(_containerSlots.Value??0));
     private DatabaseTableCapability Table() => _session.DatabaseCapabilities?.FindTable("item_template") ?? ItemTemplateAdapter.CreatePortableTable();
     private ItemWritePlan Plan() => ItemTemplateAdapter.CreatePlan(Draft(),Table());
 
@@ -206,16 +267,8 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
     {
         if (_loading || _updatingChoices) return;
         UpdateApplicableFields();
-        _confirmation.IsVisible=false; _pendingInsert=null; var item=Draft(); _tooltip.Children.Clear();
-        AddTooltip(string.IsNullOrWhiteSpace(item.Name)?"Unnamed Item":item.Name,QualityBrush(item.Quality),16,FontWeight.Bold);
-        AddTooltip($"Item Level {item.ItemLevel}",Brush.Parse("#D2BE78")); if(item.Bonding!=0) AddTooltip(BondingName(item.Bonding),Brushes.White);
-        if(item.InventoryType!=0) AddPair(SelectedName(_inventory),SelectedName(_subclass)); if(item.Armor>0) AddTooltip($"{item.Armor:0.##} Armor",Brushes.White);
-        if(item.DamageMin>0||item.DamageMax>0){ var speed=item.Delay/1000f; var school=item.DamageType==0?"":$" {SelectedName(_damageType)}"; AddPair($"{item.DamageMin:0.##} - {item.DamageMax:0.##}{school} Damage",speed>0?$"Speed {speed:0.00}":""); if(speed>0) AddTooltip($"({(item.DamageMin+item.DamageMax)/2f/speed:0.0} damage per second)",Brushes.White); }
-        foreach(var stat in (item.Stats??[]).Take(10).Where(stat=>stat.Value!=0)){ var primary=stat.Type is 0 or 1 or 3 or 4 or 5 or 6 or 7; AddTooltip(primary?$"{(stat.Value>0?"+":"")}{stat.Value} {StatName(stat.Type)}":SecondaryStatText(stat.Type,stat.Value),primary?Brushes.White:Brush.Parse("#1EFF00")); }
-        if(item.RequiredLevel>0) AddTooltip($"Requires Level {item.RequiredLevel}",Brushes.White); if(item.MaxDurability>0) AddTooltip($"Durability {item.MaxDurability} / {item.MaxDurability}",Brushes.White);
-        foreach(var spell in (item.Spells??[]).Take(5).Where(spell=>spell.SpellId!=0)){ var prefix=spell.Trigger switch{0 or 5=>"Use",1=>"Equip",2=>"Chance on hit",4=>"Use",6=>"Use",_=>"Effect"};SpellTooltipRecord? decoded=null;if(_spellCatalog is not null)_spellCatalog.Records.TryGetValue((uint)spell.SpellId,out decoded);var label=decoded is null?$"Spell #{spell.SpellId}":decoded.Name+(string.IsNullOrWhiteSpace(decoded.Subtext)?string.Empty:$" ({decoded.Subtext})");var text=spell.Trigger==6?$"Use: Teaches {label}.":$"{prefix}: {label}.";var detail=decoded?.PreferredItemText(spell.Trigger);if(!string.IsNullOrWhiteSpace(detail))text+=$" {detail}";if(spell.Charges!=0)text+=$" ({Math.Abs(spell.Charges)} charge{(Math.Abs(spell.Charges)==1?"":"s")}{(spell.Charges<0?"; item consumed when depleted":"; item remains when depleted")})";AddTooltip(text,Brush.Parse("#1EFF00")); }
-        if(item.ItemSetId>0) AddTooltip($"Item Set: {item.ItemSetId}",Brush.Parse("#FFD100")); if(!string.IsNullOrWhiteSpace(item.Description)) AddTooltip($"\"{item.Description.Trim()}\"",Brush.Parse("#FFD100"));
-        if(item.SellPrice>0) AddTooltip($"Sell Price: {Price(item.SellPrice)}",Brushes.White); AddTooltip($"Entry {item.Entry}  •  Display {item.DisplayId}",Brush.Parse("#787882"),11);
+        _confirmation.IsVisible=false; _pendingInsert=null;
+        _tooltip.Display(ItemTooltipBuilder.Build(Draft(), new(id=>_spellCatalog?.Records.GetValueOrDefault(id), id=>Named(_tooltipNames?.Skills, id), id=>Named(_tooltipNames?.Enchantments, id))));
     }
 
     private bool RefreshSql(){ _pendingInsert=null;_confirmation.IsVisible=false;try{ var plan=Plan(); _sql.Text=(_loadedEntry is { } existing ? plan.PreviewUpdateSql(existing) : plan.PreviewSql())+(plan.OmittedFields.Count==0?"":$"\n\n-- Target schema omitted: {string.Join(", ",plan.OmittedFields)}")+(plan.SelectedOmittedFields.Count==0?"":$"\n-- WRITE BLOCKED; configured values would be lost: {string.Join(", ",plan.SelectedOmittedFields)}"); _status.Text=plan.LosesSelectedSemantics?$"Write blocked: target schema cannot represent configured {string.Join(", ",plan.SelectedOmittedFields)}.":$"Plan targets {plan.Table} with {plan.Values.Count:N0} columns; {plan.OmittedFields.Count:N0} unused/default field(s) unavailable.";return true; }catch(Exception exception){_sql.Text=string.Empty;_status.Text=exception.Message;return false;} }
@@ -446,6 +499,7 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         try
         {
             if(!announce)await Task.Delay(350,token);var dbcFolder=Path.GetDirectoryName(_displayDbcPath.Text?.Trim()??string.Empty)??string.Empty;var path=Path.Combine(dbcFolder,"Spell.dbc");if(!File.Exists(path)){if(announce)_status.Text="Spell.dbc is not beside ItemDisplayInfo.dbc; configure the server DBC folder first.";return;}
+            if(_tooltipNamesFolder!=dbcFolder){_tooltipNames=await Task.Run(()=>ItemTooltipNameCatalog.Load(dbcFolder),token);_tooltipNamesFolder=dbcFolder;}
             var catalog=_spellCatalog is not null&&_spellCatalog.Matches(path)?_spellCatalog:await Task.Run(()=>SpellTooltipService.Load(path),token);token.ThrowIfCancellationRequested();_spellCatalog=catalog;RefreshPreview();
             if(announce){var ids=_spellIds.Select(value=>(uint)(value.Value??0)).Where(value=>value!=0).Distinct().ToArray();var found=ids.Count(id=>catalog.Records.ContainsKey(id));_status.Text=$"Decoded {found:N0}/{ids.Length:N0} configured item spell ID(s) from {catalog.Records.Count:N0} WotLK spells. Raw client $-tokens remain visible when their value depends on runtime context.";}
         }
@@ -486,11 +540,12 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         foreach (var field in _conditionalFields)
         {
             var input = field.Input;
-            var applicable = input == _damageMin || input == _damageMax || input == _damageType ? ItemSemanticCatalog.UsesWeaponDamage(itemClass)
+            var applicable = input == _damageMin || input == _damageMax || input == _damageType || input == _damageMin2 || input == _damageMax2 || input == _damageType2 ? ItemSemanticCatalog.UsesWeaponDamage(itemClass)
                 : input == _delay ? itemClass == 2
                 : input == _sheath ? ItemSemanticCatalog.UsesSheath(itemClass, Selected(_inventory))
                 : input == _soundOverride ? itemClass == 2
-                : input == _armor || input == _durability || input == _itemSet ? equipment
+                : input == _containerSlots ? itemClass is 1 or 11
+                : input == _armor || input == _durability || input == _itemSet || input == _block || _resistances.Contains(input) ? equipment
                 : true;
             // Nonstandard data must stay visible and editable, including existing CoA custom items.
             var hasValue = input is NumericUpDown number ? number.Value != (input == _soundOverride ? -1 : 0)
@@ -510,6 +565,9 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         Apply(_soundOverride,"SoundOverrideSubclass");Apply(_flags,"Flags");Apply(_armor,"armor");Apply(_damageMin,"dmg_min1");Apply(_damageMax,"dmg_max1");Apply(_delay,"delay");Apply(_durability,"MaxDurability");Apply(_itemSet,"itemset");
         for(var index=0;index<10;index++)Apply(_statValues[index],$"stat_value{index+1}");
         for(var index=0;index<5;index++){var slot=index+1;Apply(_spellIds[index],$"spellid_{slot}");Apply(_spellCharges[index],$"spellcharges_{slot}");Apply(_spellPpm[index],$"spellppmRate_{slot}");Apply(_spellCooldowns[index],$"spellcooldown_{slot}");Apply(_spellCategories[index],$"spellcategory_{slot}");Apply(_spellCategoryCooldowns[index],$"spellcategorycooldown_{slot}");}
+        Apply(_damageMin2,"dmg_min2");Apply(_damageMax2,"dmg_max2");Apply(_block,"block");Apply(_socketBonus,"socketBonus");Apply(_maxCount,"maxcount");Apply(_startQuest,"startquest");Apply(_containerSlots,"ContainerSlots");
+        Apply(_requiredSkill,"RequiredSkill");Apply(_requiredSkillRank,"RequiredSkillRank");Apply(_requiredSpell,"requiredspell");
+        for(var school=0;school<6;school++)Apply(_resistances[school],ItemDraft.ResistanceColumns[school]);
         void Apply(NumericUpDown control,string field)
         {
             var contract=ItemNumericFieldCatalog.Resolve(field,table?.Find(field));var current=control.Value;
@@ -517,21 +575,20 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
             if(current is not null)control.Value=Math.Clamp(current.Value,contract.Minimum,contract.Maximum);
         }
     }
-    private void SessionChanged(object? sender,EventArgs e){_pendingInsert=null;_confirmation.IsVisible=false;RefreshSchemaStatus();if(_loadedEntry is not null && _loadedProfile!=_session.DatabaseProfile)_status.Text="This draft belongs to a different realm. Return to that realm to save, or open another item.";} private void RefreshSchemaStatus(){var cap=_session.DatabaseCapabilities;var table=cap?.FindTable("item_template");ApplyNumericRanges(table);_status.Text=table is not null?$"Live schema ready · {cap!.Database}.item_template · {table.Columns.Count:N0} columns · numeric controls follow the narrower SQL/runtime width":"Offline portable schema ready · numeric controls follow safe 3.3.5 runtime widths; connect Server & SQL for live schema intersection.";}
+    private void SessionChanged(object? sender,EventArgs e){_tooltip.UseClientAssets(_session.Settings.ClientDataPath);_pendingInsert=null;_confirmation.IsVisible=false;RefreshSchemaStatus();if(_loadedEntry is not null && _loadedProfile!=_session.DatabaseProfile)_status.Text="This draft belongs to a different realm. Return to that realm to save, or open another item.";} private void RefreshSchemaStatus(){var cap=_session.DatabaseCapabilities;var table=cap?.FindTable("item_template");ApplyNumericRanges(table);_status.Text=table is not null?$"Live schema ready · {cap!.Database}.item_template · {table.Columns.Count:N0} columns · numeric controls follow the narrower SQL/runtime width":"Offline portable schema ready · numeric controls follow safe 3.3.5 runtime widths; connect Server & SQL for live schema intersection.";}
     public void Dispose(){_session.Changed-=SessionChanged;_spellDecode?.Cancel();_spellDecode?.Dispose();_model.Dispose();}
     private IStorageProvider Storage()=>TopLevel.GetTopLevel(this)?.StorageProvider??throw new InvalidOperationException("Item Creator is not attached to the main window.");
     private async Task PickFileAsync(TextBox target,string title,string pattern){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType(title){Patterns=[pattern]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
     private async Task PickTextureAsync(TextBox target,string title){var files=await Storage().OpenFilePickerAsync(new FilePickerOpenOptions{Title=title,AllowMultiple=false,FileTypeFilter=[new FilePickerFileType("Character texture"){Patterns=["*.blp","*.png","*.jpg","*.jpeg","*.bmp","*.tga"]}]});var path=files.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
     private async Task PickFolderAsync(TextBox target,string title){var folders=await Storage().OpenFolderPickerAsync(new FolderPickerOpenOptions{Title=title,AllowMultiple=false});var path=folders.FirstOrDefault()?.TryGetLocalPath();if(path is not null)target.Text=path;}
-    private IEnumerable<NumericUpDown> Numbers()=>new[]{_entry,_display,_itemLevel,_requiredLevel,_buy,_sell,_soundOverride,_flags,_armor,_damageMin,_damageMax,_delay,_durability,_itemSet}.Concat(_statValues).Concat(_spellIds).Concat(_spellCharges).Concat(_spellPpm).Concat(_spellCooldowns).Concat(_spellCategories).Concat(_spellCategoryCooldowns);
-    private IEnumerable<ComboBox> Combos()=>new[]{_class,_subclass,_quality,_inventory,_material,_sheath,_bonding,_damageType}.Concat(_statTypes).Concat(_spellTriggers);
-    private void AddTooltip(string text,IBrush brush,double fontSize=13,FontWeight? weight=null)=>_tooltip.Children.Add(new TextBlock{Text=SpellDescriptionRenderer.PlainText(text),TextWrapping=TextWrapping.Wrap,Foreground=brush,FontSize=fontSize,FontWeight=weight??FontWeight.Normal});
-    private void AddPair(string left,string right)=>_tooltip.Children.Add(new Grid{ColumnDefinitions=new("*,Auto"),Children={new TextBlock{Text=SpellDescriptionRenderer.PlainText(left),Foreground=Brushes.White},WithColumn(new TextBlock{Text=SpellDescriptionRenderer.PlainText(right),Foreground=Brushes.White},1)}});
+    private IEnumerable<NumericUpDown> Numbers()=>new[]{_entry,_display,_itemLevel,_requiredLevel,_buy,_sell,_soundOverride,_flags,_armor,_damageMin,_damageMax,_delay,_durability,_itemSet,_damageMin2,_damageMax2,_block,_socketBonus,_maxCount,_startQuest,_containerSlots,_requiredSkill,_requiredSkillRank,_requiredSpell}.Concat(_resistances).Concat(_statValues).Concat(_spellIds).Concat(_spellCharges).Concat(_spellPpm).Concat(_spellCooldowns).Concat(_spellCategories).Concat(_spellCategoryCooldowns);
+    private IEnumerable<ComboBox> Combos()=>new[]{_class,_subclass,_quality,_inventory,_material,_sheath,_bonding,_damageType,_damageType2}.Concat(_socketColors).Concat(_statTypes).Concat(_spellTriggers);
+    private static string? Named(IReadOnlyDictionary<uint,string>? names,uint id)=>names is not null&&names.TryGetValue(id,out var name)&&name.Length>0?name:null;
     private static Grid Form(params(string Label,Control Input)[] rows){var grid=new Grid{ColumnDefinitions=new("Auto,*"),RowDefinitions=new(string.Join(',',Enumerable.Repeat("Auto",rows.Length))),RowSpacing=7,ColumnSpacing=10,Margin=new Thickness(12)};for(var index=0;index<rows.Length;index++){AddText(grid,rows[index].Label,index,0);AddControl(grid,rows[index].Input,index,1);}return grid;}
     private static Grid Row(Control field,Control button)=>new(){ColumnDefinitions=new("*,Auto"),ColumnSpacing=7,Children={field,WithColumn(button,1)}};
     private static void AddText(Grid grid,string text,int row,int column,bool bold=false){var value=new TextBlock{Text=text,VerticalAlignment=VerticalAlignment.Center,FontWeight=bold?FontWeight.Bold:FontWeight.Normal};Grid.SetRow(value,row);Grid.SetColumn(value,column);grid.Children.Add(value);}private static void AddControl(Grid grid,Control control,int row,int column){Grid.SetRow(control,row);Grid.SetColumn(control,column);grid.Children.Add(control);}
-    private static NumericUpDown Number(decimal min,decimal max,decimal value=0,decimal increment=1)=>new(){Minimum=min,Maximum=max,Value=value,Increment=increment};private static NumericUpDown ItemNumber(string field,decimal value=0,decimal? minimum=null){var contract=ItemNumericFieldCatalog.Resolve(field);var control=Number(minimum??contract.Minimum,contract.Maximum,value,contract.Increment);ToolTip.SetTip(control,contract.Tooltip);return control;}private static ComboBox Choice(params(int Value,string Name)[] values)=>new(){ItemsSource=Values(values),SelectedIndex=0};private static ComboBox StatChoice()=>Choice((-1,"Unused slot"),(0,"Mana"),(1,"Health"),(3,"Agility"),(4,"Strength"),(5,"Intellect"),(6,"Spirit"),(7,"Stamina"),(12,"Defense rating"),(13,"Dodge rating"),(14,"Parry rating"),(15,"Block rating"),(16,"Melee hit rating"),(17,"Ranged hit rating"),(18,"Spell hit rating"),(19,"Melee critical rating"),(20,"Ranged critical rating"),(21,"Spell critical rating"),(22,"Melee hit avoidance"),(23,"Ranged hit avoidance"),(24,"Spell hit avoidance"),(25,"Melee critical avoidance"),(26,"Ranged critical avoidance"),(27,"Spell critical avoidance"),(28,"Melee haste rating"),(29,"Ranged haste rating"),(30,"Spell haste rating"),(31,"Hit rating"),(32,"Critical strike rating"),(33,"Hit avoidance rating"),(34,"Critical avoidance rating"),(35,"Resilience rating"),(36,"Haste rating"),(37,"Expertise rating"),(38,"Attack power"),(39,"Ranged attack power"),(40,"Feral attack power (legacy)"),(41,"Spell healing (legacy)"),(42,"Spell damage (legacy)"),(43,"Mana regeneration"),(44,"Armor penetration rating"),(45,"Spell power"),(46,"Health regeneration"),(47,"Spell penetration"),(48,"Block value"));private static ComboBox SpellTriggerChoice()=>Choice((0,"Use"),(1,"Equip"),(2,"Chance on hit"),(4,"Soulstone"),(5,"Use (no delay)"),(6,"Learn spell"));
-    private static NamedValue[] Values(params(int Value,string Name)[] values)=>values.Select(value=>new NamedValue(value.Value,value.Name)).ToArray();private static int Selected(ComboBox combo)=>combo.SelectedItem is NamedValue value?value.Value:0;private static string SelectedName(ComboBox combo)=>combo.SelectedItem is NamedValue value?value.Name:string.Empty;
+    private static NumericUpDown Number(decimal min,decimal max,decimal value=0,decimal increment=1)=>new(){Minimum=min,Maximum=max,Value=value,Increment=increment};private static NumericUpDown ItemNumber(string field,decimal value=0,decimal? minimum=null){var contract=ItemNumericFieldCatalog.Resolve(field);var control=Number(minimum??contract.Minimum,contract.Maximum,value,contract.Increment);ToolTip.SetTip(control,contract.Tooltip);return control;}private static ComboBox Choice(params(int Value,string Name)[] values)=>new(){ItemsSource=Values(values),SelectedIndex=0};private static ComboBox StatChoice()=>Choice((-1,"Unused slot"),(0,"Mana"),(1,"Health"),(3,"Agility"),(4,"Strength"),(5,"Intellect"),(6,"Spirit"),(7,"Stamina"),(12,"Defense rating"),(13,"Dodge rating"),(14,"Parry rating"),(15,"Block rating"),(16,"Melee hit rating"),(17,"Ranged hit rating"),(18,"Spell hit rating"),(19,"Melee critical rating"),(20,"Ranged critical rating"),(21,"Spell critical rating"),(22,"Melee hit avoidance"),(23,"Ranged hit avoidance"),(24,"Spell hit avoidance"),(25,"Melee critical avoidance"),(26,"Ranged critical avoidance"),(27,"Spell critical avoidance"),(28,"Melee haste rating"),(29,"Ranged haste rating"),(30,"Spell haste rating"),(31,"Hit rating"),(32,"Critical strike rating"),(33,"Hit avoidance rating"),(34,"Critical avoidance rating"),(35,"Resilience rating"),(36,"Haste rating"),(37,"Expertise rating"),(38,"Attack power"),(39,"Ranged attack power"),(40,"Feral attack power (legacy)"),(41,"Spell healing (legacy)"),(42,"Spell damage (legacy)"),(43,"Mana regeneration"),(44,"Armor penetration rating"),(45,"Spell power"),(46,"Health regeneration"),(47,"Spell penetration"),(48,"Block value"));private static ComboBox SchoolChoice()=>Choice((0,"Physical"),(1,"Holy"),(2,"Fire"),(3,"Nature"),(4,"Frost"),(5,"Shadow"),(6,"Arcane"));private static ComboBox SpellTriggerChoice()=>Choice((0,"Use"),(1,"Equip"),(2,"Chance on hit"),(4,"Soulstone"),(5,"Use (no delay)"),(6,"Learn spell"));
+    private static NamedValue[] Values(params(int Value,string Name)[] values)=>values.Select(value=>new NamedValue(value.Value,value.Name)).ToArray();private static int Selected(ComboBox combo)=>combo.SelectedItem is NamedValue value?value.Value:0;
     private static void Set(ComboBox combo,int value)
     {
         if (combo.ItemsSource is not IEnumerable<NamedValue> values) return;
@@ -545,8 +602,6 @@ internal sealed class ItemCreatorView : UserControl, IDisposable
         combo.SelectedItem = selected;
     }
     private static object? Value(IReadOnlyDictionary<string,object?> row,string name)=>row.FirstOrDefault(pair=>pair.Key.Equals(name,StringComparison.OrdinalIgnoreCase)).Value;private static decimal Decimal(IReadOnlyDictionary<string,object?> row,string name,decimal fallback=0){try{return Convert.ToDecimal(Value(row,name)??fallback,System.Globalization.CultureInfo.InvariantCulture);}catch{return fallback;}}private static int Int(IReadOnlyDictionary<string,object?> row,string name){try{return Convert.ToInt32(Value(row,name)??0,System.Globalization.CultureInfo.InvariantCulture);}catch{return 0;}}private static string Text(IReadOnlyDictionary<string,object?> row,string name)=>Convert.ToString(Value(row,name),System.Globalization.CultureInfo.InvariantCulture)??string.Empty;
-    private static IBrush QualityBrush(int quality)=>Brush.Parse(ItemSemanticCatalog.QualityColor(quality));private static string BondingName(uint bonding)=>bonding switch{1=>"Binds when picked up",2=>"Binds when equipped",3=>"Binds when used",4 or 5=>"Quest Item",_=>""};
-    private static string StatName(int type)=>type switch{0=>"Mana",1=>"Health",3=>"Agility",4=>"Strength",5=>"Intellect",6=>"Spirit",7=>"Stamina",12=>"Defense Rating",13=>"Dodge Rating",14=>"Parry Rating",15=>"Block Rating",31=>"Hit Rating",32=>"Critical Strike Rating",35=>"Resilience Rating",36=>"Haste Rating",37=>"Expertise Rating",38=>"Attack Power",39=>"Ranged Attack Power",43=>"Mana per 5 sec",44=>"Armor Penetration Rating",45=>"Spell Power",46=>"Health Regeneration",47=>"Spell Penetration",48=>"Block Value",_=>$"Stat {type}"};private static string SecondaryStatText(int type,int value)=>type switch{38=>$"Equip: Increases attack power by {value}.",39=>$"Equip: Increases ranged attack power by {value}.",43=>$"Equip: Restores {value} mana per 5 sec.",45=>$"Equip: Increases spell power by {value}.",46=>$"Equip: Restores {value} health per 5 sec.",47=>$"Equip: Increases spell penetration by {value}.",48=>$"Equip: Increases the block value of your shield by {value}.",_=>$"Equip: Improves your {StatName(type).ToLowerInvariant()} by {value}."};
-    private static string Price(uint copper){var gold=copper/10000;var silver=copper%10000/100;var rest=copper%100;return $"{(gold>0?$"{gold}g ":"")}{(silver>0?$"{silver}s ":"")}{rest}c";}private static TextBlock Status(string text)=>new(){Text=text,TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#99A5B8")};private static Button AccentButton(string text){var button=new Button{Content=text};button.Classes.Add("accent");return button;}private static T WithColumn<T>(T control,int column)where T:Control{Grid.SetColumn(control,column);return control;}private static T WithRow<T>(T control,int row)where T:Control{Grid.SetRow(control,row);return control;}
+private static TextBlock Status(string text)=>new(){Text=text,TextWrapping=TextWrapping.Wrap,Foreground=Brush.Parse("#99A5B8")};private static Button AccentButton(string text){var button=new Button{Content=text};button.Classes.Add("accent");return button;}private static T WithColumn<T>(T control,int column)where T:Control{Grid.SetColumn(control,column);return control;}private static T WithRow<T>(T control,int row)where T:Control{Grid.SetRow(control,row);return control;}
     private static string? EmptyNull(string? value)=>string.IsNullOrWhiteSpace(value)?null:value.Trim();
 }

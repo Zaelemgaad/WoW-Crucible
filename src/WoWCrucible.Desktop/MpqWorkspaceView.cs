@@ -59,9 +59,12 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private readonly ComboBox _extractionWorkers = new() { ItemsSource = new[] { $"Auto (up to {PatchArchiveService.RecommendedExtractionWorkers})", "1 worker", "2 workers", "4 workers", "8 workers", "16 workers" }, SelectedIndex = 0 };
     private readonly ListBox _browserItems = new() { SelectionMode = SelectionMode.Multiple };
     private readonly ListBox _treeItems = new() { SelectionMode = SelectionMode.Multiple };
+    private readonly Button _extractTreeSelection = AccentButton("Extract selected");
+    private readonly Button _extractFlatSelection = AccentButton("Extract selected");
     private readonly WrapPanel _treeBreadcrumb = new() { VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _browserStatus = StatusText("Open an MPQ to browse it.");
     private IReadOnlyList<MpqFileEntry> _allArchiveEntries = [];
+    private string? _openedArchivePath;
     private string _treeFolder = string.Empty;
     private readonly TextBox _cascStoragePath = new() { PlaceholderText = "CASC client/storage folder" };
     private readonly TextBox _cascListfile = new() { PlaceholderText = "Optional external CASC listfile" };
@@ -80,6 +83,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private CancellationTokenSource? _operation;
 
     public event EventHandler? BackRequested;
+    public event EventHandler<(string Archive, MpqFileEntry Entry)>? OpenFileRequested;
 
     public MpqWorkspaceView(DesktopWorkspaceSession session)
     {
@@ -87,6 +91,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         _builderItems.ItemTemplate = new FuncDataTemplate<PatchRow>((row, _) => row is null ? new Grid() : BuildPatchRow(row));
         _browserItems.ItemTemplate = new FuncDataTemplate<MpqFileEntry>((entry, _) => entry is null ? new Grid() : new Grid
         {
+            ContextMenu = FileContextMenu(entry),
             ColumnDefinitions = new("*,Auto,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(3,2), Children =
             {
                 new TextBlock { Text = entry.ArchivePath, TextTrimming = TextTrimming.CharacterEllipsis },
@@ -97,18 +102,23 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
             }
         });
         _browserSearch.TextChanged += (_, _) => FilterArchive();
-        _treeItems.ItemTemplate = new FuncDataTemplate<MpqBrowserNode>((node, _) => node is null ? new Grid() : new Grid
+        _treeItems.ItemTemplate = new FuncDataTemplate<MpqBrowserNode>((node, _) =>
         {
-            ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(3, 2), Children =
-            {
-                new TextBlock { Text = node.IsFolder ? "▸" : node.Kind == "anonymous" ? "?" : "·", Foreground = Brush.Parse(node.IsFolder ? "#D2A95F" : node.Kind == "anonymous" ? "#D47B67" : "#8290A6") },
-                WithColumn(new TextBlock { Text = node.Name, TextTrimming = TextTrimming.CharacterEllipsis }, 1),
-                WithColumn(new TextBlock { Text = node.IsFolder ? $"{node.FileCount:N0} files" : node.Entry?.Locale is > 0 ? $"{node.Kind} · locale 0x{node.Entry.Locale:X}" : node.Kind }, 2),
-                WithColumn(new TextBlock { Text = FormatBytes(node.Size) }, 3),
-                WithColumn(new TextBlock { Text = node.IsFolder || node.Size == 0 ? FormatBytes(node.CompressedSize) : $"{100d * node.CompressedSize / node.Size:0.#}%" }, 4)
-            }
+            if (node is null) return new Grid();
+            var row = BuildBrowserNodeRow(node);
+            row.ContextMenu = NodeContextMenu(node);
+            return row;
         });
-        _treeItems.DoubleTapped += (_, _) => OpenSelectedTreeFolder();
+        _treeItems.DoubleTapped += (_, _) =>
+        {
+            if (_treeItems.SelectedItem is MpqBrowserNode { IsFolder: false, Entry: not null } file)
+                OpenEntry(file.Entry);
+            else OpenSelectedTreeFolder();
+        };
+        _browserItems.DoubleTapped += (_, _) => { if (_browserItems.SelectedItem is MpqFileEntry entry) OpenEntry(entry); };
+        _treeItems.SelectionChanged += (_, _) => UpdateExtractionSelection();
+        _browserItems.SelectionChanged += (_, _) => UpdateExtractionSelection();
+        UpdateExtractionSelection();
         _cascItems.ItemTemplate = new FuncDataTemplate<CascFileEntry>((entry, _) => entry is null ? new Grid() : new Grid
         {
             ColumnDefinitions = new("*,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(3, 2), Children =
@@ -119,7 +129,8 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
                 WithColumn(new TextBlock { Text = entry.IsAvailableLocally ? entry.NameType.ToString() : $"remote · {entry.NameType}" }, 3)
             }
         });
-        _cascTreeItems.ItemTemplate = _treeItems.ItemTemplate;
+        _cascTreeItems.ItemTemplate = new FuncDataTemplate<MpqBrowserNode>((node, _) =>
+            node is null ? new Grid() : BuildBrowserNodeRow(node));
         _cascTreeItems.DoubleTapped += (_, _) => OpenSelectedCascTreeFolder();
         _cascSearch.TextChanged += (_, _) => FilterCasc();
         _dependencyNodes.ItemTemplate = new FuncDataTemplate<ClientAssetDependencyNode>((node, _) => node is null ? new Grid() : BuildDependencyRow(node));
@@ -319,17 +330,17 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private Control BuildFolderBrowser()
     {
         var root = new Button { Content = "Root" }; root.Click += (_, _) => NavigateTree(string.Empty); var up = new Button { Content = "↑ Up" }; up.Click += (_, _) => NavigateTree(MpqArchiveBrowser.Parent(_treeFolder)); var open = new Button { Content = "Open selected folder" }; open.Click += (_, _) => OpenSelectedTreeFolder();
-        var extractSelected = new Button { Content = "Extract selected files/folders" }; extractSelected.Click += async (_, _) => await ExtractAsync(MpqArchiveBrowser.Select(_allArchiveEntries, _treeItems.SelectedItems?.OfType<MpqBrowserNode>() ?? []));
-        var extractFolder = AccentButton("Extract current folder recursively"); extractFolder.Click += async (_, _) => await ExtractAsync(MpqArchiveBrowser.SelectFolder(_allArchiveEntries, _treeFolder));
-        var controls = new WrapPanel { Children = { root, up, open, extractSelected, extractFolder, _treeBreadcrumb } };
+        _extractTreeSelection.Click += async (_, _) => await ExtractAsync(SelectedTreeEntries());
+        var extractFolder = new Button { Content = "Extract entire current folder…" }; extractFolder.Click += async (_, _) => await ExtractAsync(MpqArchiveBrowser.SelectFolder(_allArchiveEntries, _treeFolder));
+        var controls = new WrapPanel { Children = { root, up, open, _extractTreeSelection, extractFolder, _treeBreadcrumb } };
         return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 6, Children = { controls, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _treeItems }, 1) } };
     }
 
     private Control BuildFlatBrowser()
     {
-        var extractSelected = new Button { Content = "Extract selected" }; extractSelected.Click += async (_, _) => await ExtractAsync(_browserItems.SelectedItems?.OfType<MpqFileEntry>().ToArray() ?? []);
-        var extractAll = AccentButton("Extract all visible"); extractAll.Click += async (_, _) => await ExtractAsync((_browserItems.ItemsSource as IEnumerable<MpqFileEntry>)?.ToArray() ?? []);
-        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 6, Children = { new WrapPanel { Children = { extractSelected, extractAll, new TextBlock { Text = "The search box above filters this global path list. Folder mode stays at its current location.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _browserItems }, 1) } };
+        _extractFlatSelection.Click += async (_, _) => await ExtractAsync(_browserItems.SelectedItems?.OfType<MpqFileEntry>().ToArray() ?? []);
+        var extractAll = new Button { Content = "Extract all visible…" }; extractAll.Click += async (_, _) => await ExtractAsync((_browserItems.ItemsSource as IEnumerable<MpqFileEntry>)?.ToArray() ?? []);
+        return new Grid { RowDefinitions = new("Auto,*"), RowSpacing = 6, Children = { new WrapPanel { Children = { _extractFlatSelection, extractAll, new TextBlock { Text = "Select one file to save it directly, or select several to extract them to a folder.", TextWrapping = TextWrapping.Wrap, Foreground = Brush.Parse("#9AA5B7"), VerticalAlignment = VerticalAlignment.Center } } }, WithRow(new Border { BorderBrush = Brush.Parse("#293347"), BorderThickness = new Thickness(1), Child = _browserItems }, 1) } };
     }
 
     private Control BuildCascBrowserPage()
@@ -529,7 +540,7 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
     private async Task LoadArchiveAsync()
     {
         BeginOperation();
-        try { _browserStatus.Text = "Reading archive index or app-local cache…"; var archive = _archivePath.Text ?? string.Empty; var listfile = string.IsNullOrWhiteSpace(_externalListfile.Text) ? null : _externalListfile.Text; var indexed = await Task.Run(() => MpqArchiveIndexCache.LoadOrCreate(archive, listfile, () => new PatchArchiveService().ListFiles(archive, "*", listfile), _operation!.Token), _operation!.Token); _allArchiveEntries = indexed.Entries; FilterArchive(); NavigateTree(string.Empty); var anonymous = _allArchiveEntries.Count(entry => !entry.IsMetadata && ClientArchiveIndexService.IsAnonymous(entry.ArchivePath)); _browserStatus.Text = $"Loaded {_allArchiveEntries.Count:N0} entries from {(indexed.Cached ? "app-local index cache" : "the MPQ")} · {archive}.{(anonymous == 0 ? string.Empty : $" {anonymous:N0} anonymous hash-table name(s) remain; load an external listfile to attempt name recovery.")}"; }
+        try { _browserStatus.Text = "Reading archive index or app-local cache…"; var archive = _archivePath.Text ?? string.Empty; var listfile = string.IsNullOrWhiteSpace(_externalListfile.Text) ? null : _externalListfile.Text; var indexed = await Task.Run(() => MpqArchiveIndexCache.LoadOrCreate(archive, listfile, () => new PatchArchiveService().ListFiles(archive, "*", listfile), _operation!.Token), _operation!.Token); _openedArchivePath = Path.GetFullPath(archive); _allArchiveEntries = indexed.Entries; FilterArchive(); NavigateTree(string.Empty); var anonymous = _allArchiveEntries.Count(entry => !entry.IsMetadata && ClientArchiveIndexService.IsAnonymous(entry.ArchivePath)); _browserStatus.Text = $"Loaded {_allArchiveEntries.Count:N0} entries from {(indexed.Cached ? "app-local index cache" : "the MPQ")} · {archive}.{(anonymous == 0 ? string.Empty : $" {anonymous:N0} anonymous hash-table name(s) remain; load an external listfile to attempt name recovery.")}"; }
         catch (Exception exception) { _browserStatus.Text = $"Open failed: {exception.Message}"; DesktopCrashLogger.Log("MPQ open failed", exception); }
     }
 
@@ -545,12 +556,101 @@ internal sealed class MpqWorkspaceView : UserControl, IDisposable
         _treeBreadcrumb.Children.Clear(); var root = new Button { Content = "MPQ" }; root.Click += (_, _) => NavigateTree(string.Empty); _treeBreadcrumb.Children.Add(root);
         foreach (var path in page.Breadcrumbs) { _treeBreadcrumb.Children.Add(new TextBlock { Text = "›", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(3, 0) }); var button = new Button { Content = path.Split('\\')[^1] }; button.Click += (_, _) => NavigateTree(path); _treeBreadcrumb.Children.Add(button); }
     }
-    private async Task ExtractAsync(IReadOnlyList<MpqFileEntry> entries)
+    private static Grid BuildBrowserNodeRow(MpqBrowserNode node) => new Grid
+        {
+            ColumnDefinitions = new("Auto,*,Auto,Auto,Auto"), ColumnSpacing = 10, Margin = new Thickness(3, 2), Children =
+            {
+                new TextBlock { Text = node.IsFolder ? "▸" : node.Kind == "anonymous" ? "?" : "·", Foreground = Brush.Parse(node.IsFolder ? "#D2A95F" : node.Kind == "anonymous" ? "#D47B67" : "#8290A6") },
+                WithColumn(new TextBlock { Text = node.Name, TextTrimming = TextTrimming.CharacterEllipsis }, 1),
+                WithColumn(new TextBlock { Text = node.IsFolder ? $"{node.FileCount:N0} files" : node.Entry?.Locale is > 0 ? $"{node.Kind} · locale 0x{node.Entry.Locale:X}" : node.Kind }, 2),
+                WithColumn(new TextBlock { Text = FormatBytes(node.Size) }, 3),
+                WithColumn(new TextBlock { Text = node.IsFolder || node.Size == 0 ? FormatBytes(node.CompressedSize) : $"{100d * node.CompressedSize / node.Size:0.#}%" }, 4)
+            }
+        };
+
+    private ContextMenu FileContextMenu(MpqFileEntry entry)
     {
-        if (entries.Count == 0) { _browserStatus.Text = "Select at least one archive entry."; return; } var destination = await PickFolderAsync("Select extraction destination"); if (destination is null) return; BeginOperation();
-        try { var archivePath = _archivePath.Text ?? string.Empty; var workers = _extractionWorkers.SelectedIndex switch { 1 => 1, 2 => 2, 3 => 4, 4 => 8, 5 => 16, _ => 0 }; var workerLabel = workers == 0 ? $"auto (up to {PatchArchiveService.RecommendedExtractionWorkers})" : workers.ToString(); var progress = new Progress<(int Done, int Total, string Path)>(value => _browserStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}"); await Task.Run(() => new PatchArchiveService().Extract(archivePath, destination, entries, progress, _operation!.Token, preserveLocaleVariants: true, workers: workers)); _browserStatus.Text = $"Extracted {entries.Count:N0} entries to {destination} using {workerLabel} worker(s). Same-path locale variants received explicit locale suffixes instead of overwriting one another."; }
+        var archive = _openedArchivePath;
+        var extract = new MenuItem { Header = "Extract file…" };
+        extract.Click += async (_, _) => await ExtractAsync([entry], archive);
+        var menu = new ContextMenu();
+        if (FileOpenCatalog.CanOpen(entry.ArchivePath))
+        {
+            var open = new MenuItem { Header = "Open in new tab" };
+            open.Click += (_, _) => OpenEntry(entry, archive);
+            menu.Items.Add(open);
+        }
+        menu.Items.Add(extract);
+        return menu;
+    }
+
+    private void OpenEntry(MpqFileEntry entry, string? archive = null)
+    {
+        archive ??= _openedArchivePath;
+        if (archive is not null && FileOpenCatalog.CanOpen(entry.ArchivePath))
+            OpenFileRequested?.Invoke(this, (archive, entry));
+        else _browserStatus.Text = "No editor supports this file type. Use Extract file from its context menu.";
+    }
+
+    private ContextMenu NodeContextMenu(MpqBrowserNode node)
+    {
+        if (node.Entry is { } entry) return FileContextMenu(entry);
+        var archive = _openedArchivePath;
+        var entries = _allArchiveEntries;
+        var extract = new MenuItem { Header = "Extract folder…" };
+        extract.Click += async (_, _) => await ExtractAsync(MpqArchiveBrowser.Select(entries, [node]), archive);
+        return new ContextMenu { Items = { extract } };
+    }
+
+    private async Task ExtractAsync(IReadOnlyList<MpqFileEntry> entries, string? sourceArchive = null)
+    {
+        if (entries.Count == 0) { _browserStatus.Text = "Select at least one archive entry."; return; }
+        var archivePath = sourceArchive ?? _openedArchivePath;
+        if (archivePath is null) { _browserStatus.Text = "Open an MPQ before extracting files."; return; }
+        string? destination;
+        if (entries.Count == 1)
+        {
+            var entry = entries[0];
+            var file = await Storage().SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = $"Extract {entry.ArchivePath}",
+                SuggestedFileName = Path.GetFileName(entry.ArchivePath.Replace('\\', Path.DirectorySeparatorChar))
+            });
+            destination = file?.TryGetLocalPath();
+        }
+        else destination = await PickFolderAsync($"Extract {entries.Count:N0} selected files to…");
+        if (destination is null) return;
+        BeginOperation();
+        var cancellationToken = _operation!.Token;
+        try
+        {
+            if (entries.Count == 1)
+            {
+                await Task.Run(() => new PatchArchiveService().ExtractFile(archivePath, destination, entries[0], cancellationToken));
+                _browserStatus.Text = $"Extracted {entries[0].ArchivePath} to {destination}.";
+                return;
+            }
+            var workers = _extractionWorkers.SelectedIndex switch { 1 => 1, 2 => 2, 3 => 4, 4 => 8, 5 => 16, _ => 0 };
+            var progress = new Progress<(int Done, int Total, string Path)>(value => _browserStatus.Text = $"Extracting {value.Done:N0}/{value.Total:N0} · {value.Path}");
+            await Task.Run(() => new PatchArchiveService().Extract(archivePath, destination, entries, progress, cancellationToken, preserveLocaleVariants: true, workers: workers));
+            _browserStatus.Text = $"Extracted {entries.Count:N0} entries to {destination}. Same-path locale variants received explicit locale suffixes.";
+        }
         catch (OperationCanceledException) { _browserStatus.Text = "Extraction cancelled."; }
         catch (Exception exception) { _browserStatus.Text = $"Extraction failed: {exception.Message}"; DesktopCrashLogger.Log("MPQ extraction failed", exception); }
+    }
+
+    private IReadOnlyList<MpqFileEntry> SelectedTreeEntries() =>
+        MpqArchiveBrowser.Select(_allArchiveEntries, _treeItems.SelectedItems?.OfType<MpqBrowserNode>() ?? []);
+
+    private void UpdateExtractionSelection()
+    {
+        SetSelection(_extractTreeSelection, SelectedTreeEntries().Count);
+        SetSelection(_extractFlatSelection, _browserItems.SelectedItems?.Count ?? 0);
+        static void SetSelection(Button button, int count)
+        {
+            button.IsEnabled = count > 0;
+            button.Content = count == 1 ? "Extract selected file…" : $"Extract selected ({count:N0} files)…";
+        }
     }
 
     private async Task ChooseCascStorageAsync()

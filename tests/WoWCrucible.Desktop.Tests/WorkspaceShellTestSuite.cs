@@ -108,7 +108,7 @@ internal static class WorkspaceShellTestSuite
             Invoke(window, "OpenFeatureWorkspace", second, "Test world editor");
             Invoke(window, "SelectWorkspaceTab", firstId);
             Require(ReferenceEquals(host.Child, first) && browser.IsVisible, "Switching editors lost the control or hid navigation.");
-            Invoke(window, "CloseWorkspaceTab", firstId);
+            Invoke(window, "CloseWorkspaceTabAsync", firstId);
             Invoke(window, "OpenFeatureWorkspace", first, "Test record editor");
             Require(tabState.SelectedId == firstId && draft.Text == "Unapplied record edits", "Reopening discarded the editor session.");
             Invoke(window, "SelectWorkspaceTab", "home");
@@ -183,7 +183,7 @@ internal static class WorkspaceShellTestSuite
             var studio = host.Child;
             var studioTab = tabState.SelectedId;
             Require(studio is ClassStudioView && tabState.Tabs.Single(tab => tab.Id == studioTab).Title == "Class Studio", "Class Studio did not open inside the editor shell.");
-            Invoke(window, "CloseWorkspaceTab", studioTab);
+            Invoke(window, "CloseWorkspaceTabAsync", studioTab);
             window.OpenClassStudio();
             Require(ReferenceEquals(studio, host.Child) && tabState.SelectedId == studioTab, "Reopening Class Studio duplicated its session or tab.");
             var configured = (HashSet<ResponsiveSplitGrid>)typeof(MainWindow).GetField("_configuredSplits", Private)!.GetValue(window)!;
@@ -215,7 +215,7 @@ internal static class WorkspaceShellTestSuite
         Require(load.IsCompleted, "Fixture data table did not load.");
         load.GetAwaiter().GetResult();
         var documents = (List<DbcDocumentSession>)typeof(MainWindow).GetField("_documents", Private)!.GetValue(window)!;
-        Require(documents.Count == 1 && tabs.SelectedId == "tables", "Loading a table did not activate its workspace.");
+        Require(documents.Count == 1 && tabs.SelectedId == documents[0].TabId, "Loading a table did not activate its workspace.");
         Require(((MenuItem)typeof(MainWindow).GetField("_inspectorMenu", Private)!.GetValue(window)!).IsVisible, "Table inspector command was missing from a loaded table.");
         Invoke(window, "OpenFeatureWorkspace", editor, "Test record editor");
         foreach (var key in new[] { Key.S, Key.Z, Key.Y })

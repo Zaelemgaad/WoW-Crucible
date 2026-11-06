@@ -25,7 +25,8 @@ public partial class MainWindow
         ToolBrowser.CommandRequested += async (_, id) => await ExecuteRuntimeCommandAsync(id);
         StartPage.CommandRequested += async (_, id) => await ExecuteRuntimeCommandAsync(id);
         WorkspaceTabs.Selected += (_, id) => SelectWorkspaceTab(id);
-        WorkspaceTabs.Closed += (_, id) => CloseWorkspaceTab(id);
+        WorkspaceTabs.Closed += async (_, id) => await CloseWorkspaceTabAsync(id);
+        WorkspaceTabs.NewRequested += (_, _) => OpenNewTab();
         WorkspaceTabs.Moved += (_, move) => { _workspaceTabs.Move(move.Id, move.Delta); WorkspaceTabs.Refresh(_workspaceTabs); };
         NavigationSplitter.AddHandler(PointerReleasedEvent, (_, _) => SaveShellPaneSizes(), RoutingStrategies.Tunnel);
         InspectorSplitter.AddHandler(PointerReleasedEvent, (_, _) => SaveShellPaneSizes(), RoutingStrategies.Tunnel);
@@ -134,6 +135,28 @@ public partial class MainWindow
         }
     }
 
+    private void OpenNewTab()
+    {
+        var start = new WorkspaceStartPage();
+        var open = new Button { Content = "Open file…", Margin = new Thickness(24, 16, 24, 0) };
+        var panel = new DockPanel();
+        DockPanel.SetDock(open, Dock.Top);
+        panel.Children.Add(open);
+        panel.Children.Add(start);
+        var page = new UserControl { Content = panel };
+        open.Click += async (_, _) =>
+        {
+            await OpenGameFilesAsync();
+            if (!ReferenceEquals(FeatureWorkspaceHost.Child, page)) RemoveFeatureWorkspace(page);
+        };
+        start.CommandRequested += async (_, command) =>
+        {
+            RemoveFeatureWorkspace(page);
+            await ExecuteRuntimeCommandAsync(command);
+        };
+        OpenFeatureWorkspace(page, "New tab");
+    }
+
     private void SelectWorkspaceTab(string id)
     {
         if (!CommitPendingDbcEdits()) return;
@@ -141,8 +164,16 @@ public partial class MainWindow
         ShowSelectedWorkspace();
     }
 
-    private void CloseWorkspaceTab(string id)
+    private async Task CloseWorkspaceTabAsync(string id)
     {
+        var index = _documents.FindIndex(document => document.TabId == id);
+        if (index >= 0)
+        {
+            if (_savingDbc || !CommitPendingDbcEdits()) return;
+            ActivateDocument(index);
+            await CloseCurrentDocumentAsync();
+            return;
+        }
         if (!CommitPendingDbcEdits()) return;
         _workspaceTabs.Close(id);
         ShowSelectedWorkspace();
@@ -170,6 +201,8 @@ public partial class MainWindow
         var id = _workspaceTabs.SelectedId;
         if (id == "home") { ShowHome(); return; }
         if (id == "tables") { OpenEditorWorkspaceClick(null, new RoutedEventArgs()); return; }
+        var documentIndex = _documents.FindIndex(document => document.TabId == id);
+        if (documentIndex >= 0) { ActivateDocument(documentIndex); return; }
         var page = _workspacePages[id];
         if (FeatureWorkspaceHost.Child is AssetComparisonView previous && !ReferenceEquals(previous, page.View)) previous.Suspend();
         FeatureWorkspaceHost.Child = page.View;

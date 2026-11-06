@@ -483,7 +483,8 @@ public sealed class WdbcFile
         return false;
     }
 
-    public void Save(string path, bool createBackup = true)
+    // Container-backed documents publish the working file before acknowledging a successful save.
+    public void Save(string path, bool createBackup = true, Action<string>? publish = null)
     {
         var fullPath = Path.GetFullPath(path);
         RebuildWdb2SideTablesIfNeeded();
@@ -498,6 +499,7 @@ public sealed class WdbcFile
                 stream.Write(bytes); stream.Flush(true);
             }
             File.Move(temp, fullPath, true);
+            publish?.Invoke(fullPath);
             _wdc1.Commit(bytes); RowCount = _wdc1.RowCount; FieldCount = _wdc1.FieldCount; RecordSize = _wdc1.RecordSize;
             IsDirty = false; return;
         }
@@ -530,6 +532,7 @@ public sealed class WdbcFile
         }
         File.Move(temp, fullPath, true);
         WriteIdentity(fullPath);
+        publish?.Invoke(fullPath);
         IsDirty = false;
     }
 

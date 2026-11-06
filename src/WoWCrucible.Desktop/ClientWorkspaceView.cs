@@ -104,7 +104,7 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
             Margin = new Thickness(10),
             Items =
             {
-                new TabItem { Header = "Inspect / index / extract", Content = InspectorPage() },
+                new TabItem { Header = "Inspect / index", Content = InspectorPage() },
                 new TabItem { Header = "Client storage", Content = HardLinkPage() },
                 new TabItem { Header = "Client → server DBC plan", Content = ServerPlanPage() },
                 new TabItem { Header = "Additive client fusion", Content = FusionPage() },
@@ -203,8 +203,8 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
         var load = Button("Load existing index", () => { LoadIndex(); return Task.CompletedTask; });
         var index = AccentButton("Index or resume"); index.Click += async (_, _) => await BuildIndexAsync(); Register(index);
         var cancel = new Button { Content = "Cancel operation" }; cancel.Click += (_, _) => _operation?.Cancel();
-        var open = Button("Open selected archive", () => { OpenSelectedArchive(); return Task.CompletedTask; });
-        var extract = AccentButton("Extract selected archive"); extract.Click += async (_, _) => await ExtractSelectedAsync(); Register(extract);
+        var open = AccentButton("Browse files / extract selected…");
+        open.Click += (_, _) => OpenSelectedArchive(); Register(open);
         var paths = new Grid { ColumnDefinitions = new("Auto,*,Auto,Auto"), RowDefinitions = new("Auto,Auto,Auto"), ColumnSpacing = 8, RowSpacing = 7 };
         AddPath(paths, 0, "Client root", _clientRoot, chooseClient, null); AddPath(paths, 1, "Index folder", _indexRoot, chooseIndex, load); AddPath(paths, 2, "Path corpus", _externalListfile, chooseList, null);
         var inventory = new TabControl { Items = { new TabItem { Header = "MPQ archives", Content = _archives }, new TabItem { Header = "Loose runtime / AddOns / config", Content = _looseFiles } } };
@@ -213,7 +213,7 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
             RowDefinitions = new("Auto,Auto,*,Auto"), RowSpacing = 8, Margin = new Thickness(8), Children =
             {
                 paths,
-                WithRow(new WrapPanel { Children = { index, cancel, open, extract } }, 1),
+                WithRow(new WrapPanel { Children = { index, cancel, open } }, 1),
                 WithRow(inventory, 2),
                 WithRow(new Grid { ColumnDefinitions = new("*,*"), ColumnSpacing = 8, Children = { Card(_clientSummary), WithColumn(Card(_clientGuidance), 1) } }, 3)
             }
@@ -675,23 +675,6 @@ internal sealed class ClientWorkspaceView : UserControl, IDisposable
     {
         if (_loadedIndex is null || _archives.SelectedItem is not ClientArchiveSummary archive) { _operationStatus.Text = "Select an indexed MPQ first."; return; }
         OpenArchiveRequested?.Invoke(this, Path.Combine(_loadedIndex.ClientRoot, archive.RelativePath));
-    }
-
-    private async Task ExtractSelectedAsync()
-    {
-        if (_loadedIndex is null || _archives.SelectedItem is not ClientArchiveSummary archive) { _operationStatus.Text = "Select an indexed MPQ first."; return; }
-        var destination = await PickFolderAsync("Select an empty or resumable extraction folder"); if (destination is null) return;
-        Begin("Extracting resolved paths from the indexed archive…");
-        try
-        {
-            var indexRoot = _indexRoot.Text!;
-            var progress = new Progress<(int Done, int Total, string Path)>(value => _operationStatus.Text = $"{value.Done:N0}/{value.Total:N0} · {value.Path}");
-            var result = await Task.Run(() => ClientArchiveIndexService.ExtractIndexed(indexRoot, archive.RelativePath, destination, resolvedOnly: true, progress: progress, cancellationToken: _operation!.Token), _operation!.Token);
-            _operationStatus.Text = $"Extracted {result.ExtractedFiles:N0}; resumed past {result.SkippedExistingFiles:N0}; selected {result.SelectedFiles:N0}.";
-        }
-        catch (OperationCanceledException) { _operationStatus.Text = "Extraction cancelled safely and can be resumed."; }
-        catch (Exception exception) { Fail("Indexed extraction failed", exception); }
-        finally { End(); }
     }
 
     private async Task AnalyzeServerPlanAsync()

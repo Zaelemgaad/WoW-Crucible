@@ -94,6 +94,11 @@ public sealed partial class SpellDescriptionRenderer(Func<uint, string, object?>
             _ => null };
         if (code == "M" && number is not null) number=N($"EffectBasePoints[{index}]")+Math.Max(0,N($"EffectDieSides[{index}]")??0);
         if (number is null) return Unknown();
+        // The client prints a rolled effect as its full range ("8750 to 11250"); formulas still use the minimum.
+        if (code.Equals("s",StringComparison.OrdinalIgnoreCase) && !formula && N($"EffectDieSides[{index}]") is > 1 and var sides)
+            return new(null,$"{Value.Number(Math.Abs(number.Value)).Text} to {Value.Number(Math.Abs(number.Value + sides - 1)).Text}");
+        // Descriptions state magnitudes: a -25 resistance effect reads "reduces ... by 25".
+        if (code.Equals("s",StringComparison.OrdinalIgnoreCase) || code.Equals("m",StringComparison.OrdinalIgnoreCase)) number=formula ? number : Math.Abs(number.Value);
         if (code.Equals("d",StringComparison.OrdinalIgnoreCase) && !formula)
             return new(null,number<0 ? "until cancelled" : Value.Number(number.Value).Text + (number==1 ? " second" : " seconds"));
         return Value.Number(number.Value);

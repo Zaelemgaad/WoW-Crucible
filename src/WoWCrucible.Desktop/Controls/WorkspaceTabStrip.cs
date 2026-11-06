@@ -10,6 +10,7 @@ internal sealed class WorkspaceTabStrip : UserControl
 {
     private readonly StackPanel _tabs = new() { Orientation = Orientation.Horizontal, Spacing = 2 };
     private readonly Button _overflow = new() { Content = "▾", Padding = new Thickness(9, 5) };
+    public event EventHandler? NewRequested;
     public event EventHandler<string>? Selected;
     public event EventHandler<string>? Closed;
     public event EventHandler<(string Id, int Delta)>? Moved;
@@ -18,15 +19,20 @@ internal sealed class WorkspaceTabStrip : UserControl
     {
         AutomationProperties.SetName(_overflow, "All open workspaces");
         ToolTip.SetTip(_overflow, "All open workspaces");
-        Grid.SetColumn(_overflow, 1);
+        var add = new Button { Content = "+", Padding = new Thickness(12, 5) };
+        AutomationProperties.SetName(add, "New tab");
+        ToolTip.SetTip(add, "New tab");
+        add.Click += (_, _) => NewRequested?.Invoke(this, EventArgs.Empty);
+        Grid.SetColumn(add, 1);
+        Grid.SetColumn(_overflow, 2);
         Content = new Grid
         {
-            ColumnDefinitions = new("*,Auto"),
+            ColumnDefinitions = new("*,Auto,Auto"),
             Children =
             {
                 new ScrollViewer { Content = _tabs, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
                     VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled },
-                _overflow
+                add, _overflow
             }
         };
     }
@@ -46,7 +52,7 @@ internal sealed class WorkspaceTabStrip : UserControl
             {
                 var close = new Button { Content = "×", Padding = new Thickness(6, 5), Background = Brushes.Transparent, BorderThickness = new Thickness(0) };
                 AutomationProperties.SetName(close, $"Close {tab.Title} tab");
-                ToolTip.SetTip(close, "Close tab. Reopen from the tool browser; this session's editor stays intact.");
+                ToolTip.SetTip(close, tab.Id.StartsWith("dbc-", StringComparison.Ordinal) ? "Close document (prompts to save changes)." : "Close tab. Reopen from the tool browser; this session's editor stays intact.");
                 close.Click += (_, _) => Closed?.Invoke(this, tab.Id);
                 content.Children.Add(close);
                 var context = new ContextMenu();

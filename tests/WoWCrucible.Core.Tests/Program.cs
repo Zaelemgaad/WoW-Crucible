@@ -19,6 +19,12 @@ if (args.Length is 1 or 3 or 5 && args[0] == "--class-studio")
     return;
 }
 
+if (args is ["--item-tooltip", ..])
+{
+    ItemTooltipTestSuite.Run(args.Length > 1 ? args[1] : null, args.Length > 2 ? args[2] : null);
+    return;
+}
+
 if (args is ["--addon-audit"])
 {
     AddonAuditTests.Run();

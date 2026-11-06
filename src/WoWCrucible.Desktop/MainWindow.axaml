@@ -68,11 +68,8 @@
 
         <Grid x:Name="EditorWorkspace" Grid.Row="3" Grid.Column="2" RowDefinitions="Auto,*" Background="#090C11">
             <Border x:Name="DbcDocumentToolbar" IsVisible="False" BorderBrush="#2B3445" BorderThickness="0,0,0,1" Background="#0E131C">
-                <Grid RowDefinitions="Auto,Auto">
+                <Grid>
                     <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
-                        <StackPanel x:Name="DocumentTabsPanel" Orientation="Horizontal" VerticalAlignment="Bottom" />
-                    </ScrollViewer>
-                    <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                         <WrapPanel Margin="6,4" Orientation="Horizontal">
                             <Button Margin="0,0,4,0" Content="↶" Padding="8,4" Click="UndoClick" AutomationProperties.Name="Undo" ToolTip.Tip="Undo (Ctrl+Z)" />
                             <Button Margin="0,0,4,0" Content="↷" Padding="8,4" Click="RedoClick" AutomationProperties.Name="Redo" ToolTip.Tip="Redo (Ctrl+Y)" />

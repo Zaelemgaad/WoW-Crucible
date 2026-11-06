@@ -16,7 +16,8 @@ public sealed record M2PreviewRenderFlag(int Index, ushort Flags, ushort BlendMo
 public sealed record M2PreviewBone(int Index, uint Flags, short ParentIndex, ushort SubmeshId, Vector3 Pivot);
 public sealed record M2PreviewSequence(int Index, ushort AnimationId, ushort SubAnimationId, uint DurationMilliseconds, float MoveSpeed, uint Flags, short Probability, uint MinimumRepetitions, uint MaximumRepetitions, uint BlendMilliseconds, short NextSequence, ushort AliasSequence)
 {
-    public bool Loops => (Flags & 0x20) != 0;
+    // 0x01 is play-once. 0x20 describes resident track storage, not playback.
+    public bool Loops => (Flags & 0x01) == 0;
     public bool IsAlias => (Flags & 0x40) != 0;
     public override string ToString() => M2AnimationNames.Label(this);
 }

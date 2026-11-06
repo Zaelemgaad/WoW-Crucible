@@ -237,6 +237,14 @@ public sealed class PatchArchiveService
         finally { Native.SFileCloseArchive(archive); }
     }
 
+    /// <summary>Returns which of <paramref name="internalPaths"/> the archive contains, opening it once.</summary>
+    public IReadOnlyList<string> ContainsAll(string archivePath, IEnumerable<string> internalPaths, uint locale = 0)
+    {
+        var archive = OpenArchiveWithRetry(Path.GetFullPath(archivePath), "open the MPQ archive");
+        try { return internalPaths.Where(path => WithLocale(locale, () => Native.SFileHasFile(archive, PatchInputMapper.NormalizeArchivePath(path)))).ToArray(); }
+        finally { Native.SFileCloseArchive(archive); }
+    }
+
     public IReadOnlyList<MpqFileEntry> ListFiles(string archivePath, string mask = "*", string? externalListFile = null)
     {
         archivePath = Path.GetFullPath(archivePath);
@@ -367,10 +375,7 @@ public sealed class PatchArchiveService
             var relativeDestination = Path.GetRelativePath(destinationRoot, destination);
             if (relativeDestination.Equals("..", StringComparison.Ordinal) || relativeDestination.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
                 throw new InvalidOperationException($"Unsafe archive path: {internalPath}");
-            var extensionForLookup = Path.GetExtension(internalPath);
-            if (string.IsNullOrEmpty(extensionForLookup)) extensionForLookup = ".bin";
-            var lookupPath = entries[index].BlockIndex <= 99_999_999 ? $"File{entries[index].BlockIndex:D8}{extensionForLookup}" : internalPath;
-            work.Add(new(entries[index], internalPath, outputPath, destination, lookupPath));
+            work.Add(CreateExtractionItem(entries[index], internalPath, outputPath, destination));
         }
 
         Directory.CreateDirectory(destinationRoot);
@@ -436,6 +441,40 @@ public sealed class PatchArchiveService
             fatal?.Throw();
         }
         finally { foreach (var archive in archives) if (archive != IntPtr.Zero) Native.SFileCloseArchive(archive); }
+    }
+
+    /// <summary>Extracts exactly one selected archive entry to the chosen filename.</summary>
+    public void ExtractFile(string archivePath, string destinationPath, MpqFileEntry entry,
+        CancellationToken cancellationToken = default)
+    {
+        archivePath = Path.GetFullPath(archivePath);
+        destinationPath = Path.GetFullPath(destinationPath);
+        if (archivePath.Equals(destinationPath, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The extraction destination cannot replace the source MPQ.");
+        var internalPath = PatchInputMapper.NormalizeArchivePath(entry.ArchivePath);
+        var item = CreateExtractionItem(entry, internalPath, internalPath, destinationPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        var archive = OpenArchiveWithRetry(archivePath, "open the MPQ archive for single-file extraction");
+        try
+        {
+            ExtractFileAtomically(destinationPath, true, temporary =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var extracted = ExtractNative(archive, item, temporary);
+                cancellationToken.ThrowIfCancellationRequested();
+                return extracted;
+            }, () => ThrowNative($"extract '{internalPath}'"));
+        }
+        finally { Native.SFileCloseArchive(archive); }
+    }
+
+    private static ExtractionItem CreateExtractionItem(MpqFileEntry entry, string internalPath,
+        string outputPath, string destination)
+    {
+        var extension = Path.GetExtension(internalPath);
+        if (string.IsNullOrEmpty(extension)) extension = ".bin";
+        var lookupPath = entry.BlockIndex <= 99_999_999 ? $"File{entry.BlockIndex:D8}{extension}" : internalPath;
+        return new(entry, internalPath, outputPath, destination, lookupPath);
     }
 
     private static bool ExtractNative(IntPtr archive, ExtractionItem item, string temporary)

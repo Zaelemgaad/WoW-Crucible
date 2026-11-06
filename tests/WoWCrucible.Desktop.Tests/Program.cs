@@ -8,6 +8,7 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        if (args.Contains("--mpq-extraction")) { MpqExtractionTestSuite.Run(); return; }
         if (args.Contains("--ui-coverage")) { UiCoverageTestSuite.Run(args.Contains("--activate"), args.Contains("--embedded-only")); return; }
         if (args.Length > 0 && args[0] == "--ui-stress")
         {
@@ -16,6 +17,7 @@ internal static class Program
         }
         if (args.Contains("--item-browser-live")) { GuidedEditorsTestSuite.Run(true); return; }
         if (args.Contains("--guided-editors")) { GuidedEditorsTestSuite.Run(); return; }
+        if (args.Length > 1 && args[0] == "--item-tooltip-live") { GuidedEditorsTestSuite.RenderLiveTooltips(args[1], args.Skip(2)); return; }
         if (args.Contains("--workspace-shell")) { WorkspaceShellTestSuite.Run(); return; }
         if (args.Contains("--embedded-studio")) { EmbeddedStudioTestSuite.Run(args.Contains("--coa")); return; }
         TestSessionAsync().GetAwaiter().GetResult();

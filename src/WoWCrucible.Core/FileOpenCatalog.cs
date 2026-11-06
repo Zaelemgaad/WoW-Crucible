@@ -40,6 +40,13 @@ public static class FileOpenCatalog
             }
             return new(FileEditorKind.StructuredRows, "JSON data — choose its destination");
         }
+        return DetectExtension(extension);
+    }
+
+    public static bool CanOpen(string path) => DetectExtension(Path.GetExtension(path).ToLowerInvariant()).Kind != FileEditorKind.Unknown;
+
+    private static FileOpenDetection DetectExtension(string extension)
+    {
         return extension switch
         {
             ".dbc" or ".db2" => new(FileEditorKind.Table, "Client data table"),

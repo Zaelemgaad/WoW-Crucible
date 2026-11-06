@@ -302,9 +302,9 @@ public static class M2AnimationService
         if (rig.ClipCache.TryGetValue(sequenceIndex, out var cached)) return cached;
         var sequence = rig.Sequences[sequenceIndex];
         var modelSequenceIndex = rig.ModelSequenceIndex?.Invoke(sequence) ?? sequenceIndex;
-        var sequenceData = ResolveSequenceData(modelPath, rig, sequence);
+        var sequenceData = PoseSequenceData(modelPath, rig, sequence);
         var boneRig = rig.BoneTrackRig ?? rig;
-        var boneSequenceData = ReferenceEquals(boneRig, rig) ? sequenceData : ResolveSequenceData(modelPath, boneRig, sequence);
+        var boneSequenceData = ReferenceEquals(boneRig, rig) ? sequenceData : PoseSequenceData(modelPath, boneRig, sequence);
         var bones = new M2BoneClip[rig.Bones.Length];
         for (var index = 0; index < bones.Length; index++)
         {
@@ -327,6 +327,26 @@ public static class M2AnimationService
         if (rig.ClipCache.Count >= MaximumCachedClips) rig.ClipCache.Remove(rig.ClipCache.Keys.First());
         rig.ClipCache[sequenceIndex] = clip;
         return clip;
+    }
+
+    private static byte[] PoseSequenceData(string modelPath, M2AnimationRig rig, M2PreviewSequence sequence)
+    {
+        // A split animation may contain only AFSB. Do not require AFM2 when this pose has
+        // no per-sequence model tracks; global camera/light tracks remain in their owner.
+        var index = rig.ModelSequenceIndex?.Invoke(sequence) ?? sequence.Index;
+        bool Keys(M2TrackHeader track)
+        {
+            if (track.GlobalSequence >= 0) return false;
+            return ((uint)index < track.TimestampSeriesCount && UInt(rig.ModelData,
+                       checked((int)track.TimestampSeriesOffset + index * 8)) != 0) ||
+                   ((uint)index < track.ValueSeriesCount && UInt(rig.ModelData,
+                       checked((int)track.ValueSeriesOffset + index * 8)) != 0);
+        }
+        var needed = rig.BoneTrackRig is null && rig.Bones.Any(b => Keys(b.Translation) || Keys(b.Rotation) || Keys(b.Scale));
+        needed |= rig.Cameras.Any(c => Keys(c.PositionTranslation) || Keys(c.TargetTranslation) || Keys(c.Roll));
+        needed |= rig.Lights.Any(l => Keys(l.AmbientColor) || Keys(l.AmbientIntensity) || Keys(l.DiffuseColor) ||
+            Keys(l.DiffuseIntensity) || Keys(l.AttenuationStart) || Keys(l.AttenuationEnd) || Keys(l.UseAttenuation));
+        return needed ? ResolveSequenceData(modelPath, rig, sequence) : rig.ModelData;
     }
 
     internal static byte[] ResolveSequenceData(string modelPath, M2AnimationRig rig, M2PreviewSequence sequence)

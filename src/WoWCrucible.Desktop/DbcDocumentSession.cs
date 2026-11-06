@@ -8,6 +8,14 @@ namespace WoWCrucible.Desktop;
 
 internal sealed class DbcDocumentSession(WdbcFile file, DbcSchemaResolution schema, string schemaSource)
 {
+    public string TabId { get; } = "dbc-" + Guid.NewGuid().ToString("N");
+    public MpqDocumentSource? ArchiveSource { get; set; }
+    public string DisplayPath => ArchiveSource?.DisplayPath ?? FullPath;
+    public void Save()
+    {
+        if (ArchiveSource is { } archive) archive.Save(File);
+        else File.Save(File.SourcePath, true);
+    }
     public WdbcFile File { get; } = file;
     public DbcSchemaResolution Schema { get; } = schema;
     public string SchemaSource { get; } = schemaSource;
@@ -18,7 +26,9 @@ internal sealed class DbcDocumentSession(WdbcFile file, DbcSchemaResolution sche
     public string ColumnLayoutKey { get; } = file.LogicalTableName + ":" +
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { schema.Columns, schema.KeyStrategy }))));
     public string FullPath => Path.GetFullPath(File.SourcePath);
-    public string DisplayName => Path.GetFileName(File.SourcePath) + (File.IsDirty ? " *" : string.Empty);
+    public string DisplayName => Path.GetFileName(File.SourcePath) +
+        (ArchiveSource is { } archive ? $" [{Path.GetFileName(archive.ArchivePath)} · {MpqLocale.Token(archive.Entry.Locale)}]" : "") +
+        (File.IsDirty ? " *" : string.Empty);
     public DbcColumn? IdColumn => DbcRecordIdentity.PhysicalColumn(Schema.Columns, Schema.KeyStrategy);
 }
 
