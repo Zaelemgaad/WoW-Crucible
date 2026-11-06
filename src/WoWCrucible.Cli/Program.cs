@@ -42,6 +42,7 @@ try
         "casc" => Casc(commandArguments[1..], cancellation.Token),
         "manifest" => Manifest(commandArguments[1..]),
         "protocol" => Protocol(commandArguments[1..]),
+        "customization" => Customization(commandArguments[1..]),
         _ => Fail($"Unknown command: {commandArguments[0]}")
     };
 }
@@ -81,8 +82,65 @@ static int RoutedHelp(string group) => group switch
     "casc" => CascHelp(),
     "manifest" => ManifestHelp(),
     "protocol" => ProtocolHelp(),
+    "customization" => CustomizationHelp(),
     _ => Fail($"Unknown command group for help: {group}")
 };
+
+static int Customization(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return CustomizationHelp();
+    var operation = args[0].ToLowerInvariant();
+    if (args.Length < 2) return Fail($"customization {operation} requires the folder holding merged_*.tsv and user/.");
+    var folder = args[1];
+    if (!Directory.Exists(folder)) return Fail($"No folder at {folder}.");
+    var options = args[2..].Where(option => option.StartsWith("--", StringComparison.Ordinal)).ToDictionary(
+        option => option[2..].Split('=', 2)[0].ToLowerInvariant(), option => option.Contains('=') ? option.Split('=', 2)[1] : "", StringComparer.Ordinal);
+    var positional = args[2..].Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    static int Report(IReadOnlyList<CustomizationProblem> problems)
+    {
+        foreach (var problem in problems) Console.WriteLine(problem);
+        var errors = problems.Count(problem => problem.Severity == "ERROR");
+        Console.WriteLine(errors == 0 ? $"Valid, with {problems.Count:N0} note(s)." : $"{errors:N0} error(s).");
+        return errors == 0 ? 0 : 1;
+    }
+    switch (operation)
+    {
+        case "list":
+            foreach (var line in CustomizationExtensionService.DescribeCatalog(folder)) Console.WriteLine($"CATALOG\t{line}");
+            foreach (var file in CustomizationExtensionService.Columns.Keys)
+                foreach (var row in CustomizationExtensionService.ReadRows(folder, file))
+                    Console.WriteLine($"{file}:{row.Line}\t{string.Join('\t', CustomizationExtensionService.Columns[file].Select(column => row[column]))}");
+            return 0;
+        case "validate":
+        {
+            var assets = options.TryGetValue("assets", out var given) ? given.Split(';', StringSplitOptions.RemoveEmptyEntries) : [];
+            return Report(CustomizationExtensionService.Validate(folder, assets));
+        }
+        case "add":
+        {
+            if (positional.Length != 1 || !CustomizationExtensionService.Columns.ContainsKey(positional[0] + ".tsv")) return Fail("customization add needs a kind: subjects, options, choices or items.");
+            var id = CustomizationExtensionService.AddRow(folder, positional[0] + ".tsv", options, out var problems);
+            var code = Report(problems);
+            if (id.Length > 0) Console.WriteLine($"ADDED\t{positional[0]}\t{id}");
+            else Console.Error.WriteLine("Refused; nothing was written.");
+            return id.Length > 0 ? 0 : Math.Max(code, 1);
+        }
+        case "export":
+        {
+            if (!options.TryGetValue("out", out var target) || target.Length == 0) return Fail("customization export requires --out=<server customization folder>.");
+            var written = CustomizationExtensionService.Export(folder, target, out var problems);
+            foreach (var path in written) Console.WriteLine($"WROTE\t{path}");
+            return Report(problems);
+        }
+    }
+    return Fail($"Unknown customization operation: {args[0]}");
+}
+
+static int CustomizationHelp(int code = 0)
+{
+    Console.WriteLine("Usage:\n  wowcrucible customization list <folder>\n  wowcrucible customization validate <folder> [--assets=<dir;dir>]\n  wowcrucible customization add <folder> <subjects|options|choices|items> --<column>=<value> ...\n  wowcrucible customization export <folder> --out=<server customization folder>\n\n<folder> holds merged_*.tsv and user/. A row is proved before it is written, and a folder with an error does not export.");
+    return code;
+}
 
 static int Protocol(string[] args)
 {

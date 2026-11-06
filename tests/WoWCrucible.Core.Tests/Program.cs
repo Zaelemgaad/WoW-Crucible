@@ -141,6 +141,7 @@ DbcBatchExportTestSuite.Run();
 
 ClientCorpusHardLinkTestSuite.Run();
 TactCdnFetchTestSuite.Run();
+CustomizationExtensionTestSuite.Run();
 WireProtocolTestSuite.Run();
 AddonAuditTests.Run();
 ArtifactOwnershipTestSuite.Run();
@@ -410,7 +411,7 @@ if (!PlayableBundleSqlService.RequiresGuardedMaskExpansion("RaceMask", ["ID"]) |
     !guardedMaskSql.Contains("UPDATE `skilllineability_dbc` SET `RaceMask`=", StringComparison.Ordinal) || !guardedMaskSql.Contains("`ID` <=>", StringComparison.Ordinal) || !guardedMaskSql.Contains("`RaceMask` <=>", StringComparison.Ordinal))
     throw new InvalidOperationException("Guarded playable-bundle mask expansion planning or SQL rendering regressed.");
 
-var cliGroups = new[] { "workspace", "asset", "project", "tools", "knowledge", "cache", "client", "server", "db", "dbc", "mpq", "casc", "manifest", "protocol" };
+var cliGroups = new[] { "workspace", "asset", "project", "tools", "knowledge", "cache", "client", "server", "db", "dbc", "mpq", "casc", "manifest", "protocol", "customization" };
 if (CliHelpRouting.Resolve(["--help"]) != CliHelpRouting.Root ||
     CliHelpRouting.Resolve(["help"]) != CliHelpRouting.Root ||
     CliHelpRouting.Resolve(["help", "mpq"]) != "mpq" ||

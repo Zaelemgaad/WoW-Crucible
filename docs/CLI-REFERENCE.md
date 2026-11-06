@@ -29,6 +29,17 @@ wowcrucible tools commands [search words...] [--format=text|json]
 
 The command catalog is the same source used by the desktop's same-window `Ctrl+K` palette. Search accepts multiple intent terms rather than requiring an exact feature name, so queries such as `cut items`, `Heidi favorites`, `MPQ merge`, `model viewer animation`, and `server restart` resolve to their native workspaces. Cut-item, favorites, and merge results activate the exact child tab, not merely the containing workspace. Empty search lists all commands in navigation order; no matches return review exit code `3`. Launch `WoWCrucible.Desktop-latest.exe --command-palette="search words"` to open the desktop directly into the filtered palette. Direct desktop routes are also available as `--cut-items` or `--cut-items=17,17802`, `--sql-favorites`, and `--mpq-merge`.
 
+## Customization extensions
+
+```text
+wowcrucible customization list <folder>
+wowcrucible customization validate <folder> [--assets=<dir;dir>]
+wowcrucible customization add <folder> <subjects|options|choices|items> --<column>=<value> ...
+wowcrucible customization export <folder> --out=<server customization folder>
+```
+
+`<folder>` holds benilla's `merged_*.tsv` and `wardrobe_*.tsv`, and the user's `user/` beside them, which regenerating the merge never touches. `list` also shows the wardrobe's subjects and their option ids. `add` numbers the row, proves the folder with it valid and writes nothing otherwise; `export` refuses a folder with an error. Ids spell `u12` (user), `r966` (retail), `e966` (Epsilon) or a whole merged id. The format is benilla's `docs/wotlk/CUSTOMIZATION-EXTENSIONS.md`.
+
 ## Shared wire protocols
 
 ```text

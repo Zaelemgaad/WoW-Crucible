@@ -19,7 +19,7 @@ internal static class WorkspaceNavigation
         new("World & artwork", ["workspace.maps", "workspace.lighting", "workspace.models", "workspace.textures", "workspace.assets", "workspace.conversion"]),
         new("Data & packaging", ["workspace.dbc", "workspace.sql", "workspace.dbc-layers", "workspace.mpq", "workspace.mpq-merge", "workspace.cache", "workspace.dbd", "workspace.item-acquisition", "workspace.sql-favorites"]),
         new("Workspace & delivery", ["workspace.setup", "workspace.server", "workspace.client", "workspace.compatibility-lab", "workspace.addons"]),
-        new("Help & reference", ["workspace.knowledge", "workspace.tools", "workspace.cli-guide"])
+        new("Help & reference", ["workspace.knowledge", "workspace.tools", "workspace.customization", "workspace.cli-guide"])
     ];
 
     public static CrucibleCommandDescriptor Command(string id) => CrucibleCommandCatalog.All.Single(command => command.Id == id);
