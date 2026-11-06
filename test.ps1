@@ -33,6 +33,16 @@ if ([string]::IsNullOrWhiteSpace($SchemaPath) -or [string]::IsNullOrWhiteSpace($
     exit 2
 }
 
+function Invoke-TestSuite([string]$Project, [string[]]$Arguments) {
+    Write-Host ''
+    Write-Host "=== $Project $Arguments"
+    & dotnet run --project "tests\$Project\$Project.csproj" -c Release --no-build -- @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAILED: $Project $Arguments (exit $LASTEXITCODE)"
+        exit $LASTEXITCODE
+    }
+}
+
 $SchemaPath = [IO.Path]::GetFullPath($SchemaPath)
 $DbcDirectory = [IO.Path]::GetFullPath($DbcDirectory)
 
@@ -41,14 +51,26 @@ $previousTemp = $env:TEMP
 $previousTmp = $env:TMP
 try {
     New-Item -ItemType Directory -Path $runScratch -Force | Out-Null
-    $env:TEMP = $runScratch
-    $env:TMP = $runScratch
     Write-Host "Test scratch: $runScratch"
+    # Before the scratch TEMP: build servers outlive this script and would keep the scratch folder in use.
     & dotnet build WoWCrucible.slnx -c Release
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $env:TEMP = $runScratch
+    $env:TMP = $runScratch
 
-    & dotnet run --project tests\WoWCrucible.Core.Tests\WoWCrucible.Core.Tests.csproj -c Release --no-build -- $SchemaPath $DbcDirectory
-    exit $LASTEXITCODE
+    Invoke-TestSuite WoWCrucible.Core.Tests @($SchemaPath, $DbcDirectory)
+    # Without their optional client, corpus or 7-Zip inputs, these run on built-in fixtures.
+    foreach ($suite in '--item-tooltip', '--model-browser', '--tooltip-audit', '--class-studio') {
+        Invoke-TestSuite WoWCrucible.Core.Tests @($suite)
+    }
+
+    # Headless, never-shown windows with isolated settings. Keep the flags that reach a live server or
+    # activate every control out of this list: --item-browser-live, --item-tooltip-live, --coa, --activate.
+    foreach ($suite in @(), @('--mpq-extraction'), @('--guided-editors'), @('--workspace-shell'), @('--ui-coverage'),
+        @('--embedded-studio'), @('--ported-workflows'), @('--ui-stress', '180026', '2000')) {
+        Invoke-TestSuite WoWCrucible.Desktop.Tests $suite
+    }
+    exit 0
 }
 finally {
     $env:TEMP = $previousTemp

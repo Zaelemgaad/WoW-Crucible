@@ -7,7 +7,8 @@ public static class CruciblePaths
     // Crucible is deliberately portable: every file it owns lives beside the
     // executable. If that directory is not writable, saving must fail clearly
     // instead of silently scattering state through AppData or a workspace.
-    public static string DataRoot => ApplicationDirectory;
+    public static string DataRoot => _isolatedDataRoot ?? ApplicationDirectory;
+    private static string? _isolatedDataRoot;
     public static bool IsPortable => true;
     public static string SettingsDirectory => Path.Combine(DataRoot, "Config");
     public static string SettingsFile => Path.Combine(SettingsDirectory, "settings.json");
@@ -29,11 +30,14 @@ public static class CruciblePaths
     public static string CacheServerPlanDirectory => Path.Combine(DataRoot, "Plans", "CacheServer");
     public static string CacheServerReceiptDirectory => Path.Combine(DataRoot, "Receipts", "CacheServer");
     public static string ReceiptDirectory => Path.Combine(DataRoot, "Receipts");
-    public static string LegacySettingsFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), ProductFolder, "settings.json");
-    public static string LegacyPortableSettingsFile => Path.Combine(ApplicationDirectory, "Settings", "settings.json");
-    public static string LegacyPortableDesktopSettingsFile => Path.Combine(ApplicationDirectory, "Settings", "desktop.json");
+    public static string LegacySettingsFile => Path.Combine(_isolatedDataRoot ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), ProductFolder, "settings.json");
+    public static string LegacyPortableSettingsFile => Path.Combine(DataRoot, "Settings", "settings.json");
+    public static string LegacyPortableDesktopSettingsFile => Path.Combine(DataRoot, "Settings", "desktop.json");
 
     public static string SettingsFileForRead => File.Exists(SettingsFile) ? SettingsFile : File.Exists(LegacyPortableSettingsFile) ? LegacyPortableSettingsFile : LegacySettingsFile;
+
+    /// <summary>For test suites: every settings, cache and log path moves here, so saved realm settings are never read.</summary>
+    public static void UseIsolatedDataRoot(string root) => _isolatedDataRoot = Path.GetFullPath(root);
 
     private static string ResolveApplicationDirectory()
     {

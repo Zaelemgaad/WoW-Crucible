@@ -136,7 +136,7 @@ The corpus suite is intentionally a real-data executable rather than an empty `d
 .\test.ps1 "C:\path\to\WotLK 3.3.5 (12340).xml" "C:\path\to\full-dbc-directory"
 ```
 
-`test.cmd` provides the same entry point for Command Prompt. CI can instead set `WOW_CRUCIBLE_TEST_SCHEMA` and `WOW_CRUCIBLE_TEST_DBC`. The runner builds Release first, lists every missing required corpus fixture, and returns a normal usage exit code instead of an unhandled exception.
+`test.cmd` provides the same entry point for Command Prompt. CI can instead set `WOW_CRUCIBLE_TEST_SCHEMA` and `WOW_CRUCIBLE_TEST_DBC`. The runner builds Release first, lists every missing required corpus fixture, and returns a normal usage exit code instead of an unhandled exception. After the corpus run it runs the fixture-only Core suites and the headless Desktop suites, stopping at the first failure. Desktop suites never show a window and use a throwaway settings directory, so a saved `Config/desktop.json` cannot point them at a server; the live modes (`--item-browser-live`, `--item-tooltip-live`, `--embedded-studio --coa`) and `--ui-coverage --activate` remain manual.
 
 For small, repeatable GUI checks with explicit expected results, see [GUI audit](docs/GUI-AUDIT.md). The cleanup regression runner also supports `--artifact-ownership` without a game-data corpus. Native Skia/HarfBuzz debugger symbols remain in the NuGet cache instead of being copied into every desktop build; use `-p:IncludeNativeDependencySymbols=true` only when debugging those native libraries.
 
@@ -337,16 +337,18 @@ dotnet run --project src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj -- "C:\p
 dotnet build WoWCrucible.slnx -c Release
 ```
 
-On Windows, optionally register one normal shortcut that follows successful local
-Desktop builds and publishes, including switches between Debug and Release:
+On Windows, optionally register one normal shortcut. Only that explicit command and
+a later `dotnet publish -c Release` of the Desktop project update it; ordinary builds
+and test runs never do:
 
 ```powershell
 .\scripts\Update-DesktopShortcut.ps1 -ExecutablePath .\src\WoWCrucible.Desktop\bin\Release\net10.0\WoWCrucible.Desktop.exe -ShortcutPath "$env:USERPROFILE\Desktop\WoW Crucible.lnk"
 ```
 
 The destination is remembered only in `.local/desktop-shortcut.json` (not Git).
-Builds without that file do not create shortcuts. Failed builds leave the existing
-link intact. No application is launched or closed by the update. Delete the local
+To repoint it later, run the same command without `-ShortcutPath`. Publishes without
+that file do not create shortcuts. Failed publishes leave the existing link intact.
+No application is launched or closed by the update. Delete the local
 settings file to opt out. This uses Windows PowerShell and Windows Script Host,
 already provided by Windows; it does not install a launcher or another service.
 

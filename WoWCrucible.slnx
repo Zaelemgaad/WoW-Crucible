@@ -6,4 +6,5 @@
   <Project Path="src/WoWCrucible.Cli/WoWCrucible.Cli.csproj" />
   <Project Path="src/WoWCrucible.Desktop/WoWCrucible.Desktop.csproj" />
   <Project Path="tests/WoWCrucible.Core.Tests/WoWCrucible.Core.Tests.csproj" />
+  <Project Path="tests/WoWCrucible.Desktop.Tests/WoWCrucible.Desktop.Tests.csproj" />
 </Solution>

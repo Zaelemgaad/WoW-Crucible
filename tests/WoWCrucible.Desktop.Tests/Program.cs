@@ -8,6 +8,32 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        // The live modes deliberately use saved realm settings. Every other suite gets a throwaway
+        // data root, so a Config/desktop.json beside this executable cannot point it at a server.
+        if (args.Contains("--item-browser-live") || args.Contains("--item-tooltip-live") || args.Contains("--coa")) { RunSuite(args); return; }
+        var dataRoot = Path.Combine(Path.GetTempPath(), "Crucible-TestData-" + Guid.NewGuid().ToString("N"));
+        CruciblePaths.UseIsolatedDataRoot(dataRoot);
+        Require(string.IsNullOrEmpty(DesktopSettings.Load().ServerRootPath), "Test settings are not isolated from saved realm settings.");
+        try { RunSuite(args); }
+        finally { DeleteDataRoot(dataRoot); }
+    }
+
+    // WebView2 helper processes outlive the view by a moment and keep its profile locked until they exit.
+    private static void DeleteDataRoot(string dataRoot)
+    {
+        for (var attempt = 1; Directory.Exists(dataRoot); attempt++)
+        {
+            try { Directory.Delete(dataRoot, true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                if (attempt == 40) { Console.WriteLine("Could not remove " + dataRoot + ": " + error.Message); return; }
+                Thread.Sleep(250);
+            }
+        }
+    }
+
+    private static void RunSuite(string[] args)
+    {
         if (args.Contains("--mpq-extraction")) { MpqExtractionTestSuite.Run(); return; }
         if (args.Contains("--ui-coverage")) { UiCoverageTestSuite.Run(args.Contains("--activate"), args.Contains("--embedded-only")); return; }
         if (args.Length > 0 && args[0] == "--ui-stress")

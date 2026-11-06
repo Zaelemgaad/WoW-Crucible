@@ -39,7 +39,7 @@ internal static class EmbeddedStudioTestSuite
         string? export = null;
         var session = new ClassStudioSession(f => schemas.ResolveColumns(f.LogicalTableName, f.FieldCount),
             _ => Task.FromResult<string?>(root), (name, text) => { export = name + ":" + text; return Task.FromResult(true); }, workspace, statePath);
-        using var view = new ClassStudioView(Path.GetFullPath("src/WoWCrucible.Desktop/bin/Debug/net10.0/ClassStudio"), session, Path.Combine(root, "WebView"));
+        using var view = new ClassStudioView(Path.Combine(AppContext.BaseDirectory, "ClassStudio"), session, Path.Combine(root, "WebView"));
         var rootPanel = new Grid { Children = { view } };
         var window = new Window { Width = 1400, Height = 900, ShowActivated = false, ShowInTaskbar = false, Content = rootPanel };
         try
@@ -134,7 +134,7 @@ internal static class EmbeddedStudioTestSuite
             view.Dispose();
             var resumedSession = new ClassStudioSession(f => schemas.ResolveColumns(f.LogicalTableName, f.FieldCount),
                 _ => Task.FromResult<string?>(root), (_, _) => Task.FromResult(false), workspace, statePath);
-            using var resumed = new ClassStudioView(Path.GetFullPath("src/WoWCrucible.Desktop/bin/Debug/net10.0/ClassStudio"), resumedSession, Path.Combine(root, "WebView"));
+            using var resumed = new ClassStudioView(Path.Combine(AppContext.BaseDirectory, "ClassStudio"), resumedSession, Path.Combine(root, "WebView"));
             rootPanel.Children.Add(resumed);
             Arrange();
             await resumed.Ready.WaitAsync(TimeSpan.FromSeconds(25));
