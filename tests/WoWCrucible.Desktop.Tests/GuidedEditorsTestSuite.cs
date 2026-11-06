@@ -115,7 +115,7 @@ internal static class GuidedEditorsTestSuite
         var realms = session.GetRealmsAsync(); Pump(realms);
         if (settings.ActiveRealmId is { } realm) Pump(session.SelectRealmAsync(realm));
         Directory.CreateDirectory(outputDirectory);
-        var browser = new ItemBrowserWindow(session);
+        var browser = new ItemBrowserView(session);
         try
         {
             Pump((Task)Call(browser, "InitializeAsync")!);
@@ -158,7 +158,7 @@ internal static class GuidedEditorsTestSuite
             var sockets = (System.Collections.ICollection)assets.GetType().GetProperty("Sockets")!.GetValue(assets)!;
             Console.WriteLine($"Font: {font?.Name ?? "fallback (client font not found)"}; socket textures: {sockets.Count}/5");
         }
-        finally { browser.Close(); }
+        finally { browser.Dispose(); }
     }
 
     private static void TestLiveItems()
@@ -168,7 +168,7 @@ internal static class GuidedEditorsTestSuite
         var discover=session.GetRealmsAsync();Pump(discover);
         Require(discover.Result.Realms.Count==5,"Installed realms missing from the shared session.");
         Pump(session.SelectRealmAsync(1));
-        var browser=new ItemBrowserWindow(session);
+        var browser=new ItemBrowserView(session);
         try
         {
             Pump((Task)Call(browser,"InitializeAsync")!);
@@ -194,7 +194,46 @@ internal static class GuidedEditorsTestSuite
             Require(DesktopSettings.Load().ActiveRealmId==5,"Last desktop realm did not persist.");
             Console.WriteLine("PASS live item browser: ID/name search, 50-row browse page, all five realm databases, loaded-item UPDATE preview, remembered last realm and cross-realm write prevention. No database writes.");
         }
-        finally { browser.Close(); }
+        finally { browser.Dispose(); }
+    }
+
+    private static void TestItemBrowserPage(MainWindow window)
+    {
+        var workbench = Field<ItemWorkbenchView>(window, "_itemWorkbenchView");
+        var host = window.FindControl<Border>("FeatureWorkspaceHost")!;
+        var tabs = Field<WorkspaceTabState>(window, "_workspaceTabs");
+        var workbenchTab = tabs.SelectedId; var tabCount = tabs.Tabs.Count;
+        var open = Walk(workbench).OfType<Button>().Single(button => button.Content as string == "Open existing item…");
+        open.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        var browser = host.Child as ItemBrowserView ?? throw new InvalidOperationException("Open existing item did not open in the workspace host.");
+        Require(tabs.Tabs.Count == tabCount + 1 && tabs.Tabs.Single(tab => tab.Id == tabs.SelectedId).Title == "Open existing item", "The item browser did not get its own workspace tab.");
+        var status = Field<TextBlock>(browser, "_status");
+        var search = Field<TextBox>(browser, "_search");
+        bool Settled() => !Field<bool>(browser, "_busy") && status.Text is { } text && text.Contains("Connect a world database");
+        PumpUntil(Settled);
+        status.Text = "";
+        search.Text = "Thunderfury";
+        search.RaiseEvent(new Avalonia.Input.KeyEventArgs { RoutedEvent = Avalonia.Input.InputElement.KeyDownEvent, Key = Avalonia.Input.Key.Enter });
+        PumpUntil(Settled);
+        window.OpenItemWorkbench();
+        open.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        Require(ReferenceEquals(host.Child, browser) && tabs.Tabs.Count == tabCount + 1 && search.Text == "Thunderfury", "Reopening the item browser duplicated its tab or lost its search.");
+        PumpUntil(Settled);
+        var opened = Field<EventHandler<IReadOnlyDictionary<string, object?>>>(browser, "ItemOpened");
+        opened.Invoke(browser, new Dictionary<string, object?> { ["entry"] = 19019u, ["name"] = "Thunderfury" });
+        Require(ReferenceEquals(host.Child, workbench) && tabs.SelectedId == workbenchTab && tabs.Tabs.Count == tabCount, "Choosing an item did not return to the item editor and close the browser tab.");
+        Require(Field<IReadOnlyDictionary<string, object?>>(workbench, "_loadedSqlRow")?.ContainsKey("entry") == true && Field<Button>(workbench, "_openLoadedCompleteRow").IsEnabled, "The chosen item did not reach the item editor.");
+        Require(Field<ItemBrowserView?>(window, "_itemBrowserView") is null, "A completed item browser was retained.");
+    }
+
+    private static void PumpUntil(Func<bool> condition, int seconds = 45)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(seconds);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("Timed out waiting for the UI.");
+            Dispatcher.UIThread.RunJobs(); Thread.Sleep(5);
+        }
     }
 
     private static void TestQuests(DesktopWorkspaceSession session)
@@ -258,6 +297,7 @@ internal static class GuidedEditorsTestSuite
             Select(Field<ComboBox>(item, "_class"), 4);
             Select(Field<ComboBox>(item, "_subclass"), 4);
             Capture(window, "item-armor.png");
+            TestItemBrowserPage(window);
             Pump(window.LoadPathAsync(script));
             var sql = Field<SqlWorkspaceView>(window, "_sqlWorkspaceView");
             Require(Field<TextBox>(sql, "_query").Text == "SELECT 42;", "Open did not populate the SQL editor.");

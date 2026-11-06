@@ -46,6 +46,7 @@ public partial class MainWindow : Window
     private AddonAuditView? _addonAuditView;
     private CompatibilityLabView? _compatibilityLabView;
     private ItemWorkbenchView? _itemWorkbenchView;
+    private ItemBrowserView? _itemBrowserView;
     private MpqWorkspaceView? _mpqWorkspaceView;
     private ClientWorkspaceView? _clientWorkspaceView;
     private TextureWorkspaceView? _textureWorkspaceView;
@@ -120,7 +121,7 @@ public partial class MainWindow : Window
             }, DispatcherPriority.Background);
         };
         Closing += WindowClosing;
-        Closed += (_, _) => { DisposeArchiveDocuments(); RuntimeStrip.Dispose(); _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); foreach (var view in _dbcExportViews.Values) view.Dispose(); foreach (var view in _dbcImportViews.Values) view.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
+        Closed += (_, _) => { _itemBrowserView?.Dispose(); DisposeArchiveDocuments(); RuntimeStrip.Dispose(); _assetComparisonView?.Dispose(); _nativeConversionWorkspaceView?.Dispose(); foreach (var view in _dbcExportViews.Values) view.Dispose(); foreach (var view in _dbcImportViews.Values) view.Dispose(); _projectWorkspaceView?.Dispose(); _itemWorkbenchView?.Dispose(); _mpqWorkspaceView?.Dispose(); _clientWorkspaceView?.Dispose(); _textureWorkspaceView?.Dispose(); _mapWorkspaceView?.Dispose(); _layeredDbcWorkspaceView?.Dispose(); _creatureWorkspaceView?.Dispose(); _gameObjectWorkspaceView?.Dispose(); _questWorkspaceView?.Dispose(); _behaviorWorkspaceView?.Dispose(); _petLevelCurveView?.Dispose(); _serverSqlWorkspaceView?.Dispose(); _sqlWorkspaceView?.Dispose(); _workspaceSession.Dispose(); };
         if (Directory.Exists(_workspaceSession.Settings.WorkspaceRootPath) || Directory.Exists(_workspaceSession.Settings.ServerRootPath)) Dispatcher.UIThread.Post(async () => await RestoreWorkspaceSessionAsync(), DispatcherPriority.Background);
     }
 
@@ -1295,8 +1296,28 @@ public partial class MainWindow : Window
             _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace();
             _itemWorkbenchView.FullSqlEditRequested += async (_, request) => await OpenCompleteSqlRowAsync(request);
             _itemWorkbenchView.ReferenceLookupRequested += (_, request) => _ = OpenReferencePickerAsync(request);
+            _itemWorkbenchView.ItemBrowserRequested += (_, _) => OpenItemBrowser();
         }
         OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
+    }
+
+    private void OpenItemBrowser()
+    {
+        if (_itemBrowserView is null)
+        {
+            _itemBrowserView = new ItemBrowserView(_workspaceSession);
+            _itemBrowserView.ItemOpened += (_, row) =>
+            {
+                if (_itemBrowserView is not { } view) return;
+                _itemWorkbenchView!.OpenItemRow(row);
+                RemoveFeatureWorkspace(view);
+                view.Dispose();
+                _itemBrowserView = null;
+                OpenItemWorkbench();
+            };
+        }
+        OpenFeatureWorkspace(_itemBrowserView, "Open existing item");
+        if (ReferenceEquals(FeatureWorkspaceHost.Child, _itemBrowserView)) _ = _itemBrowserView.InitializeAsync();
     }
     public void OpenItemAcquisition(string? exactIds = null)
     {
@@ -1624,7 +1645,7 @@ public partial class MainWindow : Window
     {
         if (request.Table.Equals("item_template", StringComparison.OrdinalIgnoreCase))
         {
-            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace(); _itemWorkbenchView.SqlFavoritesRequested += (_, _) => OpenSqlFavorites(); _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqMergeWorkspace(); _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); _itemWorkbenchView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); }
+            if (_itemWorkbenchView is null) { _itemWorkbenchView = new ItemWorkbenchView(_workspaceSession); _itemWorkbenchView.SqlStudioRequested += (_, _) => OpenSqlWorkspace(); _itemWorkbenchView.SqlFavoritesRequested += (_, _) => OpenSqlFavorites(); _itemWorkbenchView.MpqWorkspaceRequested += (_, _) => OpenMpqMergeWorkspace(); _itemWorkbenchView.ProjectWorkspaceRequested += (_, _) => OpenProjectWorkspace(); _itemWorkbenchView.FullSqlEditRequested += async (_, sqlRequest) => await OpenCompleteSqlRowAsync(sqlRequest); _itemWorkbenchView.ReferenceLookupRequested += (_, lookupRequest) => _ = OpenReferencePickerAsync(lookupRequest); _itemWorkbenchView.ItemBrowserRequested += (_, _) => OpenItemBrowser(); }
             _itemWorkbenchView.OpenItemRow(request.Row); OpenFeatureWorkspace(_itemWorkbenchView, "Items & Sets");
         }
         else if (request.Table.Equals("creature_template", StringComparison.OrdinalIgnoreCase))

@@ -43,7 +43,7 @@ internal sealed class AddonAuditView : UserControl
         });
         _packages.SelectionChanged += (_, _) => ShowSelection();
         _search.TextChanged += (_, _) => Filter(); _filter.SelectionChanged += (_, _) => Filter();
-        var body = new Grid { ColumnDefinitions = new("3*,6,2*"), Children = { _packages, Cell(new GridSplitter { ResizeDirection = GridResizeDirection.Columns, HorizontalAlignment = HorizontalAlignment.Stretch }, 0, 1), Cell(_details, 0, 2) } };
+        var body = new ResponsiveSplitGrid(_packages, _details, 3, 2);
         Content = new Grid
         {
             Margin = new Thickness(12), RowSpacing = 8, RowDefinitions = new("Auto,Auto,Auto,Auto,*,Auto"), Children =

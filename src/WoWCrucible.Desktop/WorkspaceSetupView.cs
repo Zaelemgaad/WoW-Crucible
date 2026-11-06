@@ -4,6 +4,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using WoWCrucible.Core;
+using WoWCrucible.Desktop.WindowsIntegration;
 
 namespace WoWCrucible.Desktop;
 
@@ -120,7 +121,7 @@ internal sealed class WorkspaceSetupView : UserControl
                             _pairingPanel,
                             new Border { BorderBrush = new SolidColorBrush(Color.Parse("#293347")), BorderThickness = new Thickness(1), Padding = new Thickness(12), Child = _summary },
                             backupSettings,
-                            new Expander { Header = "Windows Explorer", IsVisible = OperatingSystem.IsWindows(), Content = new WindowsIntegration.ExplorerIntegrationSettings() },
+                            new Expander { Header = "Windows Explorer", IsVisible = OperatingSystem.IsWindows(), Content = new ExplorerIntegrationSettings() },
                             advanced,
                             new WrapPanel { Children = { apply } },
                             _status

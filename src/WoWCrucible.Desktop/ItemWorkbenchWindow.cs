@@ -84,6 +84,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable, IFeatureWork
     public event EventHandler? ProjectWorkspaceRequested;
     public event EventHandler<SqlGuidedEditRequest>? FullSqlEditRequested;
     public event EventHandler<ReferencePickerRequest>? ReferenceLookupRequested;
+    public event EventHandler? ItemBrowserRequested;
     public Control? FeatureToolbar { get; }
 
     public ItemWorkbenchView(DesktopWorkspaceSession session)
@@ -170,12 +171,7 @@ internal sealed class ItemWorkbenchView : UserControl, IDisposable, IFeatureWork
         ConfigureConnectionPopup();
         FeatureToolbar = new WrapPanel { Children = { sqlStudio, sqlFavorites, mpqMerge, _connectionToggle, _connectionPopup } };
         var openExisting = AccentButton("Open existing item…");
-        openExisting.Click += async (_, _) =>
-        {
-            if (TopLevel.GetTopLevel(this) is not Window owner) return;
-            var row = await new ItemBrowserWindow(_session).ShowDialog<IReadOnlyDictionary<string, object?>?>(owner);
-            if (row is not null) OpenItemRow(row);
-        };
+        openExisting.Click += (_, _) => ItemBrowserRequested?.Invoke(this, EventArgs.Empty);
         var newItem = new Button { Content = "New item" };
         newItem.Click += (_, _) => { _loadedSqlRow = null; _openLoadedCompleteRow.IsEnabled = false; _creator.NewItem(); };
         var decodedItemPage = new Grid

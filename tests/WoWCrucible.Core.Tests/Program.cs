@@ -2744,6 +2744,9 @@ if (Directory.Exists(desktopSourceRoot))
     var desktopSettingsSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("DesktopSettings.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var workspaceSetupSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorkspaceSetupView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var runtimeStripSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorkspaceRuntimeStrip.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var workspaceNavigatorSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorkspaceNavigator.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var editorLayoutSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("EditorLayoutSettings.cs", StringComparison.OrdinalIgnoreCase)).Value;
+    var workspaceShellSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("MainWindow.WorkspaceShell.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingWorkspaceSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingEditorSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingBandEditorView.cs", StringComparison.OrdinalIgnoreCase)).Value;
     var lightingEnvironmentSource = desktopSources.Single(pair => Path.GetFileName(pair.Key).Equals("WorldLightingEnvironmentView.cs", StringComparison.OrdinalIgnoreCase)).Value;
@@ -2758,14 +2761,15 @@ if (Directory.Exists(desktopSourceRoot))
     var serverLifecycleSource = File.ReadAllText(Path.Combine(repositoryRoot, "src", "WoWCrucible.Core", "ServerLifecycleService.cs"));
     var sqlWorkspaceServiceSource = File.ReadAllText(Path.Combine(repositoryRoot, "src", "WoWCrucible.Core", "SqlWorkspaceService.cs"));
     if (!runtimeStripSource.Contains("failed · hover for details", StringComparison.Ordinal) ||
-        !runtimeStripSource.Contains("FeatureBackRequested", StringComparison.Ordinal) ||
-        !runtimeStripSource.Contains("DomainMenu(\"CRUCIBLE\"", StringComparison.Ordinal) ||
-        !runtimeStripSource.Contains("DomainMenu(\"CREATE\"", StringComparison.Ordinal) ||
-        !runtimeStripSource.Contains("DomainMenu(\"CLIENT\"", StringComparison.Ordinal) ||
-        !runtimeStripSource.Contains("DomainMenu(\"SERVER\"", StringComparison.Ordinal) ||
-        !runtimeStripSource.Contains("DomainMenu(\"WORLD & ASSETS\"", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("(\"Previous workspace · Alt+Left\", \"action.back\")", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("e.Key == Key.Left) { CloseFeatureWorkspace();", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(group.Title, group.Commands", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(\"File\"", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(\"Workspace\"", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(\"Navigate\"", StringComparison.Ordinal) ||
+        !runtimeStripSource.Contains("DomainMenu(\"Help\"", StringComparison.Ordinal) ||
         !runtimeStripSource.Contains("CommandRequested", StringComparison.Ordinal) ||
-        !runtimeStripSource.Contains("ShowFeature(string title, Control? toolbar)", StringComparison.Ordinal) ||
+        !workspaceShellSource.Contains("FeatureToolbarHost.Child = (page.View as IFeatureWorkspaceToolbar)?.FeatureToolbar;", StringComparison.Ordinal) ||
         !serverLifecycleSource.Contains("RunWslScriptAsync", StringComparison.Ordinal) ||
         !serverLifecycleSource.Contains("WaitForWslStableStateAsync", StringComparison.Ordinal) ||
         !serverLifecycleSource.Contains("wow-crucible-{name}-startup.log", StringComparison.Ordinal) ||
@@ -2855,24 +2859,24 @@ if (Directory.Exists(desktopSourceRoot))
         !mainWindowSource.Contains("_workspaceSession.Dispose()", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("ApplyShellPaneState", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("SuppressLegacyFeatureNavigation", StringComparison.Ordinal) ||
-        !mainWindowSource.Contains("RootLayout.ColumnDefinitions[0].Width", StringComparison.Ordinal) ||
-        !mainWindowSource.Contains("RootLayout.ColumnDefinitions[4].Width", StringComparison.Ordinal) ||
-        !desktopSettingsSource.Contains("NavigationPaneOpen", StringComparison.Ordinal) ||
-        !desktopSettingsSource.Contains("InspectorPaneOpen", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("RootLayout.ColumnDefinitions[navigationColumn].Width", StringComparison.Ordinal) ||
+        !mainWindowSource.Contains("RootLayout.ColumnDefinitions[inspectorColumn].Width", StringComparison.Ordinal) ||
+        !editorLayoutSource.Contains("public bool BrowserVisible", StringComparison.Ordinal) ||
+        !desktopSettingsSource.Contains("public bool DbcRowEditorOpen", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"ToolsPaneToggle\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"DetailsPaneToggle\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"RowEditor\"", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"RuntimeStrip\"", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("Text=\"No file selected\"", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("Header=\"START HERE\"", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("Header=\"CREATE GAME CONTENT\"", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("Header=\"CLIENT TABLES &amp; PATCHES\"", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("Header=\"SERVER &amp; DATABASE\"", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("Header=\"VISUALS &amp; WORLD · ADVANCED\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("Text=\"Open a DBC / DB2 to inspect or edit its records.\"", StringComparison.Ordinal) ||
+        !workspaceNavigatorSource.Contains("foreach (var group in WorkspaceNavigation.Groups)", StringComparison.Ordinal) ||
+        !workspaceNavigatorSource.Contains("new(\"Game content\", [", StringComparison.Ordinal) ||
+        !workspaceNavigatorSource.Contains("new(\"Data & packaging\", [", StringComparison.Ordinal) ||
+        !workspaceNavigatorSource.Contains("new(\"Workspace & delivery\", [", StringComparison.Ordinal) ||
+        !workspaceNavigatorSource.Contains("new(\"World & artwork\", [", StringComparison.Ordinal) ||
         !mainWindowMarkup.Contains("x:Name=\"DbcDocumentToolbar\" IsVisible=\"False\"", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("private void ShowHome()", StringComparison.Ordinal) ||
         !mainWindowSource.Contains("RefreshShellContext", StringComparison.Ordinal) ||
-        !mainWindowMarkup.Contains("Grid.Row=\"1\" Grid.RowSpan=\"3\"", StringComparison.Ordinal) ||
+        !mainWindowMarkup.Contains("x:Name=\"FeatureWorkspaceHost\" Grid.Row=\"3\" Grid.RowSpan=\"2\" Grid.Column=\"2\" Grid.ColumnSpan=\"3\"", StringComparison.Ordinal) ||
         !workspaceSetupSource.Contains("CrucibleWorkspaceLayoutService.Discover", StringComparison.Ordinal) ||
         !workspaceSetupSource.Contains("ConfigureWorkspaceAsync", StringComparison.Ordinal) ||
         !workspaceSetupSource.Contains("Use this workspace", StringComparison.Ordinal) ||

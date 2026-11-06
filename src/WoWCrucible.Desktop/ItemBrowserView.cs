@@ -3,11 +3,12 @@ using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Layout;
+using Avalonia.Threading;
 using WoWCrucible.Core;
 
 namespace WoWCrucible.Desktop;
 
-internal sealed class ItemBrowserWindow : Window
+internal sealed class ItemBrowserView : UserControl, IDisposable
 {
     private readonly DesktopWorkspaceSession _session;
     private readonly TextBox _search = new() { PlaceholderText = "Item name or exact ID" };
@@ -22,13 +23,14 @@ internal sealed class ItemBrowserWindow : Window
     private DatabaseConnectionProfile? _resultProfile;
     private DatabaseTableCapability? _table;
     private int _offset;
-    private bool _initializing = true;
+    private bool _initializing;
     private bool _busy;
     internal sealed record RealmChoice(uint Id, string Name) { public override string ToString() => Name; }
+    public event EventHandler<IReadOnlyDictionary<string, object?>>? ItemOpened;
 
-    public ItemBrowserWindow(DesktopWorkspaceSession session)
+    public ItemBrowserView(DesktopWorkspaceSession session)
     {
-        _session=session;Title="Open existing item";Width=850;Height=560;MinWidth=540;MinHeight=320;
+        _session=session;
         _results.ItemTemplate=new FuncDataTemplate<SqlRowRecord>((row,_)=>new TextBlock {
             Text=row is null ? "" : $"{row.Values.GetValueOrDefault("entry")}    {row.Values.GetValueOrDefault("name")}    · item level {row.Values.GetValueOrDefault("ItemLevel")}",
             Margin=new Thickness(6) });
@@ -43,11 +45,16 @@ internal sealed class ItemBrowserWindow : Window
         _results.SelectionChanged+=(_,_)=>_open.IsEnabled=_results.SelectedItem is SqlRowRecord;
         _results.DoubleTapped+=async(_,_)=>await OpenAsync();_open.Click+=async(_,_)=>await OpenAsync();
         _realm.SelectionChanged+=async(_,_)=>{if(_initializing||_realm.SelectedItem is not RealmChoice choice)return;try{SetBusy(true);_results.ItemsSource=null;_resultProfile=null;await _session.SelectRealmAsync(choice.Id,_stop.Token);_offset=0;}catch(Exception e){_status.Text="Realm connection failed: "+e.Message;return;}finally{SetBusy(false);}await SearchAsync();};
-        Opened+=async(_,_)=>await InitializeAsync();Closed+=(_,_)=>_stop.Cancel();
     }
 
-    private async Task InitializeAsync()
+    public void Dispose() => _stop.Cancel();
+
+    // Runs whenever the page is opened, as the former dialog did, so a returning tab reflects the current realm.
+    internal async Task InitializeAsync()
     {
+        if(_busy)return;
+        _initializing=true;
+        Dispatcher.UIThread.Post(()=>_search.Focus(),DispatcherPriority.Input);
         SetBusy(true);
         try {
             var catalog=await _session.GetRealmsAsync(_stop.Token);
@@ -83,7 +90,7 @@ internal sealed class ItemBrowserWindow : Window
             if(_resultProfile!=_session.DatabaseProfile)throw new InvalidOperationException("The selected realm changed. Search again before opening an item.");
             var row=await new SqlWorkspaceService().ReadRowAsync(_resultProfile,_table,selected.Key,_stop.Token) ?? throw new InvalidOperationException("This item no longer exists.");
             if(_resultProfile!=_session.DatabaseProfile)throw new InvalidOperationException("The realm changed while reading this item.");
-            Close(row.Values);
+            ItemOpened?.Invoke(this,row.Values);
         } catch(OperationCanceledException) { } catch(Exception e){_status.Text=e.Message;} finally{SetBusy(false);}
     }
     private void SetBusy(bool value){_busy=value;_search.IsEnabled=!value;_find.IsEnabled=_realm.IsEnabled=_results.IsEnabled=!value;_open.IsEnabled=!value&&_results.SelectedItem is SqlRowRecord;if(value){_previous.IsEnabled=false;_next.IsEnabled=false;_status.Text="Reading database…";}}

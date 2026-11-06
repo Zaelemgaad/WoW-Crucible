@@ -69,7 +69,7 @@ internal sealed class ModelBrowserTextures : UserControl
         var generation = _generation;
         var title = new TextBlock { Text = $"{ModelBrowserTextureService.SlotName(slot.Type)} [{slot.Index}]", FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap };
         ToolTip.SetTip(title, $"Material slot {slot.Index}" + (slot.FileDataId == 0 ? "" : $", FileDataID {slot.FileDataId}"));
-        var picker = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 0, MaxDropDownHeight = 330 };
+        var picker = new ComboBox { HorizontalAlignment = HorizontalAlignment.Stretch, MaxDropDownHeight = 330 };
         picker.SelectionBoxItemTemplate = new FuncDataTemplate<TextureChoice>((choice, _) =>
         {
             var label = new TextBlock { Text = choice?.ToString() ?? "", TextTrimming = TextTrimming.CharacterEllipsis };
