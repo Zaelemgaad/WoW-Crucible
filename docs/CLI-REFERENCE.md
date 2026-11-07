@@ -38,7 +38,7 @@ wowcrucible customization add <folder> <subjects|options|choices|items> --<colum
 wowcrucible customization export <folder> --out=<server customization folder>
 ```
 
-`<folder>` holds benilla's `merged_*.tsv` and `wardrobe_*.tsv`, and the user's `user/` beside them, which regenerating the merge never touches. `list` also shows the wardrobe's subjects and their option ids. `add` numbers the row, proves the folder with it valid and writes nothing otherwise; `export` refuses a folder with an error. Ids spell `u12` (user), `r966` (retail), `e966` (Epsilon) or a whole merged id. The format is benilla's `docs/wotlk/CUSTOMIZATION-EXTENSIONS.md`.
+`<folder>` holds benilla's `merged_*.tsv` and `wardrobe_*.tsv`, and the user's `user/` beside them, which regenerating the merge never touches. `list` also shows the wardrobe's subjects and their option ids. `add` numbers the row, proves the folder with it valid and writes nothing otherwise; `export` refuses a folder with an error. Ids spell `u12` (user), `r966` (retail), `e966` (Epsilon) or a whole merged id. The format is benilla's `docs/wotlk/CUSTOMIZATION-EXTENSIONS.md`. The client skips and logs a bad row while the server refuses it, so validate first.
 
 ## Shared wire protocols
 

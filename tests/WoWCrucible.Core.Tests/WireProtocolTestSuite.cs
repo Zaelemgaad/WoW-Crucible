@@ -125,7 +125,7 @@ internal static class WireProtocolTestSuite
         Check(first.CppCodec.Contains("// schema-format: 1, generator: " + WireProtocolGenerator.GeneratorVersion + ", catalog: 2\n", StringComparison.Ordinal), "Table output records its versions.");
         foreach (var needle in new[] { "inline bool ReadBody(std::istream& stream", "Detail::IsMergedId(row.Id)", "row.Source != (row.Id >> 28)", "expected exactly one manifest row", "family must not be zero", "table.Fail(\"no rows\")" })
             Check(first.CppCodec.Contains(needle, StringComparison.Ordinal), $"C++ tables have {needle}.");
-        foreach (var needle in new[] { "pub fn read_body(text: &str)", "is_merged_id(id)", "source != id >> 28", "expected exactly one manifest row", "family must not be zero", "t.fail(\"no rows\")" })
+        foreach (var needle in new[] { "pub fn read_body_rows(text: &str, file: &'static str)", "errors.extend(t.error.take())", "pub fn read_body(text: &str)", "is_merged_id(id)", "source != id >> 28", "expected exactly one manifest row", "family must not be zero", "t.fail(\"no rows\")" })
             Check(first.Rust.Contains(needle, StringComparison.Ordinal), $"Rust tables have {needle}.");
         void Stops(string find, string replacement, string message)
         {

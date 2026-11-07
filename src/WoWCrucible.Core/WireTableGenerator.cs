@@ -242,6 +242,30 @@ public static class WireTableGenerator
             if (table.Rows == "one") o.Append($"    if rows.is_empty() {{\n        t.fail(\"expected exactly one {table.Name} row\");\n    }}\n");
             if (table.Rows == "some") o.Append("    if rows.is_empty() {\n        t.fail(\"no rows\");\n    }\n");
             o.Append("    t.finish(rows)\n}\n\n");
+
+            // The client's reader: one bad row costs that row, and is named. `file` is what its message says,
+            // as other files share a table's shape.
+            o.Append($"/// The rows that read, and each bad one's `file:line: reason`, for a reader that must survive a typo.\n/// A bad header costs the file's rows. The strict [`read_{table.Name}`] is what a server loads with.\npub fn read_{table.Name}_rows(text: &str, file: &'static str) -> (Vec<{pascal}Row>, Vec<String>) {{\n");
+            o.Append("    let mut t = Table::new(text, file);\n    let (mut rows, mut errors) = (Vec::new(), Vec::new());\n");
+            o.Append($"    if !t.header(&[{string.Join(", ", table.Columns.Select(column => $"\"{column.Name}\""))}]) {{\n        errors.extend(t.error.take());\n        return (rows, errors);\n    }}\n");
+            o.Append($"    loop {{\n        if !t.next({table.Columns.Count}) {{\n            match t.error.take() {{\n                Some(error) => {{\n                    errors.push(error);\n                    continue;\n                }}\n                None => break,\n            }}\n        }}\n");
+            if (table.Rows == "one") o.Append($"        if !rows.is_empty() {{\n            t.fail(\"expected exactly one {table.Name} row\");\n            errors.extend(t.error.take());\n            continue;\n        }}\n");
+            for (var index = 0; index < table.Columns.Count; index++)
+            {
+                var column = table.Columns[index];
+                if (column.Type == "text") { o.Append($"        let {column.Name} = t.text_cell({index});\n"); continue; }
+                o.Append($"        let Some({column.Name}) = t.number_cell({index}) else {{\n            errors.extend(t.error.take());\n            continue;\n        }};\n");
+                if (column.Check == "merged_id") o.Append($"        if !is_merged_id({column.Name}) {{\n            t.fail(\"{MergedMessage}\");\n            errors.extend(t.error.take());\n            continue;\n        }}\n");
+                if (column.Check == "nonzero") o.Append($"        if {column.Name} == 0 {{\n            t.fail(\"{column.Name} must not be zero\");\n            errors.extend(t.error.take());\n            continue;\n        }}\n");
+            }
+            foreach (var check in table.RowChecks)
+            {
+                var parts = check.Split(':', '=');
+                o.Append($"        if {parts[2]} != {parts[1]} >> {set.MergedShift} {{\n            t.fail(\"{parts[2]} does not match {parts[1]}'s namespace\");\n            errors.extend(t.error.take());\n            continue;\n        }}\n");
+            }
+            o.Append($"        rows.push({pascal}Row {{ {string.Join(", ", table.Columns.Select(column => column.Name))} }});\n    }}\n");
+            if (table.Rows is "one" or "some") o.Append($"    if rows.is_empty() {{\n        t.fail(\"{(table.Rows == "one" ? $"expected exactly one {table.Name} row" : "no rows")}\");\n        errors.extend(t.error.take());\n    }}\n");
+            o.Append("    (rows, errors)\n}\n\n");
         }
         o.Append("/// Test support: canonical text of a table's rows, compared with the fixtures and across languages.\n#[doc(hidden)]\npub mod dump {\n    use super::*;\n\n");
         o.Append("    /// The rows' text, or \"error: \" and the reason. An unknown table reads as empty text.\n    pub fn by_name(table: &str, text: &str) -> String {\n        match table {\n");
