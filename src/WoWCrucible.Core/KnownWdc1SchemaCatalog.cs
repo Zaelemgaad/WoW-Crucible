@@ -31,4 +31,24 @@ internal static class KnownWdc1SchemaCatalog
         resolution = null!;
         return false;
     }
+
+    public static bool TryCorrectLayout(string tableName, Wdc1Metadata metadata, DbdLayout layout, out DbdLayout corrected)
+    {
+        // WoWDBDefs files 7.3.5 SpellAuraOptions under the 8.0.1 layout hash E05BE94F with
+        // ProcTypeMask[2], but the 7.3.5 file (and LegionCore/TrinityCore 7.3.5) stores one
+        // 32-bit ProcTypeMask. Only apply when the file's own field storage proves that.
+        if (tableName.Equals("SpellAuraOptions", StringComparison.OrdinalIgnoreCase) &&
+            metadata.LayoutHash == 0xE05BE94F &&
+            metadata.TotalFieldCount == 7 &&
+            metadata.FieldStorage.Count == 7 &&
+            metadata.FieldStorage[1] is { Mode: Wdc1StorageMode.None, ElementBitWidth: 32, ArrayCount: 1 } &&
+            layout.Fields.Any(field => field.Name == "ProcTypeMask" && field.ArraySize == 2))
+        {
+            corrected = layout with { Fields = layout.Fields.Select(field => field.Name == "ProcTypeMask" ? field with { ArraySize = 1 } : field).ToArray() };
+            return true;
+        }
+
+        corrected = null!;
+        return false;
+    }
 }

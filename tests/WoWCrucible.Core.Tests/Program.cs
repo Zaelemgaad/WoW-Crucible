@@ -2614,6 +2614,25 @@ File.WriteAllText(exactHashDbd, "COLUMNS\nint ID\nint Value\n\nBUILD 7.3.5.26972
 var exactHashResolution = DbdSchemaService.ResolveFile(exactHashDbd, 26972, WdbcFile.Load(exactHashWdc1));
 if (exactHashResolution.Columns.Count != 1 || exactHashResolution.Columns[0].Name != "Value")
     throw new InvalidOperationException("An exact WDC1 layout hash did not take precedence over a conflicting generic build layout.");
+var auraOptionsWdc1 = Path.Combine(targetCompatibilityRoot, "SpellAuraOptions.db2");
+var auraOptionsBytes = new byte[84 + 7 * 4];
+"WDC1"u8.CopyTo(auraOptionsBytes);
+BinaryPrimitives.WriteInt32LittleEndian(auraOptionsBytes.AsSpan(8, 4), 7);
+BinaryPrimitives.WriteInt32LittleEndian(auraOptionsBytes.AsSpan(12, 4), 20);
+BinaryPrimitives.WriteUInt32LittleEndian(auraOptionsBytes.AsSpan(24, 4), 0xE05BE94F);
+BinaryPrimitives.WriteInt32LittleEndian(auraOptionsBytes.AsSpan(48, 4), 7);
+foreach (var (field, bits, offset) in new[] { (0, 32, 0), (1, 32, 4), (2, 32, 8), (3, 16, 12), (4, 16, 14), (5, 8, 16), (6, 8, 17) })
+{
+    BinaryPrimitives.WriteInt16LittleEndian(auraOptionsBytes.AsSpan(84 + field * 4, 2), checked((short)(32 - bits)));
+    BinaryPrimitives.WriteUInt16LittleEndian(auraOptionsBytes.AsSpan(84 + field * 4 + 2, 2), checked((ushort)offset));
+}
+File.WriteAllBytes(auraOptionsWdc1, auraOptionsBytes);
+var auraOptionsDbd = Path.Combine(targetCompatibilityRoot, "SpellAuraOptions.dbd");
+File.WriteAllText(auraOptionsDbd, "COLUMNS\nint ID\nint ProcTypeMask\nint ProcCharges\nint CumulativeAura\nint SpellProcsPerMinuteID\nint DifficultyID\nint ProcChance\n\n" +
+    "LAYOUT E05BE94F\nBUILD 7.3.5.26972\n$id$ID<32>\nProcTypeMask<32>[2]\nProcCharges<32>\nCumulativeAura<u16>\nSpellProcsPerMinuteID<u16>\nDifficultyID<u8>\nProcChance<u8>\n");
+var auraOptionsResolution = DbdSchemaService.ResolveFile(auraOptionsDbd, 26972, WdbcFile.Load(auraOptionsWdc1));
+if (auraOptionsResolution.Columns.Count != 7 || auraOptionsResolution.Columns[1].Name != "ProcTypeMask")
+    throw new InvalidOperationException("7.3.5 SpellAuraOptions did not use the single ProcTypeMask its WDC1 field storage proves.");
 if (CrossBuildFieldAliasCatalog.DonorField(mopProfile.Id, legionProfile.Id, "ITEMSPARSE", "Quality") != "OverallQualityID" ||
     CrossBuildFieldAliasCatalog.DonorField(mopProfile.Id, legionProfile.Id, "ITEMSPARSE", "ItemStatValue[9]") != "StatModifier_bonusAmount[9]" ||
     CrossBuildFieldAliasCatalog.DonorField(legionProfile.Id, mopProfile.Id, "ITEMSPARSE", "Quality") is not null)

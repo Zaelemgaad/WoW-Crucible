@@ -154,6 +154,7 @@ public static partial class DbdSchemaService
             file.ConfigureWdc1Schema(knownResolution.Columns);
             return knownResolution;
         }
+        if (KnownWdc1SchemaCatalog.TryCorrectLayout(definition.TableName, metadata, layout, out var corrected)) layout = corrected;
         var resolution = ResolveWdc1(definition, layout, metadata);
         file.ConfigureWdc1Schema(resolution.Columns);
         return resolution;
@@ -282,7 +283,8 @@ public static partial class DbdSchemaService
                     ? definition.ForLayoutHash(wdcMetadata.LayoutHash) ?? definition.ForBuild(build)
                     : definition.ForBuild(build);
                 var knownWdc1Layout = file.ContainerKind == ClientTableContainerKind.Wdc1 && file.Wdc1Metadata is { } exactMetadata &&
-                    KnownWdc1SchemaCatalog.TryResolve(definition.TableName, build, exactMetadata, out _);
+                    (KnownWdc1SchemaCatalog.TryResolve(definition.TableName, build, exactMetadata, out _) ||
+                     layout is not null && KnownWdc1SchemaCatalog.TryCorrectLayout(definition.TableName, exactMetadata, layout, out _));
                 var provenBuild = 0;
                 var knownFixedLayout = file.ContainerKind != ClientTableContainerKind.Wdc1 && layout is null &&
                     KnownFixedLayoutSchemaCatalog.TryResolve(definition, build, actual, recordSize, out layout, out provenBuild);
