@@ -49,5 +49,36 @@ internal static class UnrealGameLocatorTestSuite
         {
             File.Delete(file);
         }
+
+        // The community key list: sections, key formats, variants, bad lines. Made-up keys.
+        var hex = (char c) => "0x" + new string(c, 64);
+        var keyFile = Path.Combine(Path.GetTempPath(), "crucible-aes-keys-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            File.WriteAllText(keyFile,
+                "﻿    Absolver    " + Convert.ToBase64String(Enumerable.Repeat((byte)7, 32).ToArray()) + "\n" +
+                "    Dragon Ball FighterZ    " + hex('1') + "\n" +
+                "    Dragon Ball: Sparking! Zero (switch)    " + hex('2') + "\n" +
+                "    Dragon Ball: Sparking! Zero (PC)    " + hex('3') + "\n" +
+                "    Old Game\t" + new string('a', 32) + "\n" +
+                "    Wuthering Waves (old keys)  see here: https://example.invalid/keys\n" +
+                "    Broken Game 0x1234\n" +
+                "\t\n\tUSM KEYS\n" +
+                "\tDragon Ball: Sparking! Zero 0123456789ABCDEF\n");
+            var list = AesKeyList.Load(keyFile);
+            Require(list.Entries.Count == 5, "five pak keys: " + string.Join(" | ", list.Entries.Select(e => e.Name)));
+            Require(list.Skipped == 2, "a note and a fragment are passed over");
+            Require(list.Other.Single() == ("USM KEYS", "Dragon Ball: Sparking! Zero"), "a video key is kept apart");
+            Require(list.Entries[0].Key.All(b => b == 7) && list.Entries[4].Key.SequenceEqual(System.Text.Encoding.ASCII.GetBytes(new string('a', 32))), "base64 and an old 32-character key");
+            var sz = list.Candidates("DRAGON BALL Sparking! ZERO", "SparkingZERO");
+            Require(sz.Select(c => c.Entry).SequenceEqual(["Dragon Ball: Sparking! Zero (PC)", "Dragon Ball: Sparking! Zero (switch)"]), "PC before switch, no video key: " + string.Join(" | ", sz.Select(c => c.Entry)));
+            Require(sz[0].Key.All(b => b == 0x33), "the PC key's bytes");
+            Require(list.Candidates("Stellar Blade™", "SB").Count == 0, "nothing for a game not listed");
+            Require(AesKeyList.Load(keyFile + ".missing") is { Path: null, Entries.Count: 0 }, "no list");
+        }
+        finally
+        {
+            File.Delete(keyFile);
+        }
     }
 }

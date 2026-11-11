@@ -73,6 +73,8 @@ internal sealed class UnrealModImporter
         public Dictionary<string, GameFile> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
         public List<(string Name, string Folder)> Looks { get; } = [];
         public string? Project { get; set; }
+        /// <summary>The game it was read over.</summary>
+        public string GameName { get; set; } = "";
     }
 
     private const int MaxTextureSide = 2048;
@@ -110,20 +112,21 @@ internal sealed class UnrealModImporter
     }
 
     /// <summary>
-    /// <c>import-mods</c>: the mods of <paramref name="jobs"/> mounted together in that order over their game, the later
-    /// winning; each one marked for export written to <c>&lt;cache&gt;\&lt;id&gt;\</c>. 0 when every exported mod became
-    /// at least one look, 3 when one needs the user, 1 otherwise.
+    /// <c>import-mods</c>: the mods of <paramref name="jobs"/> grouped by the game each is for, each game's mounted
+    /// together in that order over that game, the later winning; each one marked for export written to
+    /// <c>&lt;cache&gt;\&lt;id&gt;\</c>. 0 when every exported mod became at least one look, 3 when one needs the user,
+    /// 1 otherwise.
     /// </summary>
     public static int RunJobs(IReadOnlyList<Job> jobs, string cache, string? settingsPath, CancellationToken cancel)
     {
-        var importer = new UnrealModImporter(settingsPath) { _cache = Path.GetFullPath(cache) };
-        Directory.CreateDirectory(importer._cache);
-        var work = Path.Combine(importer._cache, ".work");
+        cache = Path.GetFullPath(cache);
+        Directory.CreateDirectory(cache);
+        var work = Path.Combine(cache, ".work");
         try { if (Directory.Exists(work)) Directory.Delete(work, true); } catch (Exception) { }
         var mods = jobs.Select(job => new Mod(job)).ToList();
         foreach (var mod in mods.Where(m => m.Job.Export))
         {
-            var dir = Path.Combine(importer._cache, mod.Job.Id);
+            var dir = Path.Combine(cache, mod.Job.Id);
             if (Directory.Exists(dir)) Directory.Delete(dir, true);
             Directory.CreateDirectory(dir);
         }
@@ -135,18 +138,19 @@ internal sealed class UnrealModImporter
                 catch (Unusable unusable) { mods[i].Problem = unusable.Message; }
                 catch (Exception ex) when (ex is not OperationCanceledException) { mods[i].Problem = $"It could not be read: {Flat(ex.Message)}"; }
             }
-            try { importer.ImportAll(mods, cancel); }
-            catch (Unusable unusable)
+            foreach (var (game, group) in ByGame(mods, cache, settingsPath))
             {
-                foreach (var mod in mods.Where(m => m.Job.Export && m.Problem is null && m.Looks.Count == 0)) mod.Problem = unusable.Message;
-            }
-        }
-        catch (NeedsUser need)
-        {
-            foreach (var mod in mods.Where(m => m.Job.Export && m.Problem is null)) mod.Need = need.Message;
-            if (settingsPath is not null && !File.Exists(settingsPath))
-            {
-                try { File.WriteAllText(settingsPath, UnrealModSettings.Template); } catch (Exception) { }
+                cancel.ThrowIfCancellationRequested();
+                var importer = new UnrealModImporter(settingsPath) { _cache = cache };
+                try { importer.ImportGame(game, group, cancel); }
+                catch (Unusable unusable)
+                {
+                    foreach (var mod in group.Where(m => m.Job.Export && m.Problem is null && m.Looks.Count == 0)) mod.Problem = unusable.Message;
+                }
+                catch (NeedsUser need)
+                {
+                    foreach (var mod in group.Where(m => m.Job.Export && m.Problem is null)) mod.Need = need.Message;
+                }
             }
         }
         finally
@@ -166,11 +170,11 @@ internal sealed class UnrealModImporter
             }
             if (mod.Need is null && mod.Problem is null)
             {
-                result.Append($"game\t{importer._gameName}\n");
+                result.Append($"game\t{mod.GameName}\n");
                 foreach (var (name, folder) in mod.Looks) result.Append($"look\t{folder}\t{name}\n");
             }
             foreach (var note in mod.Notes.Distinct().Where(n => n != mod.Problem)) result.Append($"note\t{note}\n");
-            var dir = Path.Combine(importer._cache, mod.Job.Id);
+            var dir = Path.Combine(cache, mod.Job.Id);
             if (mod.Looks.Count == 0 || mod.Need is not null || mod.Problem is not null)
                 foreach (var entry in Directory.EnumerateFileSystemEntries(dir))
                     if (Directory.Exists(entry)) Directory.Delete(entry, true); else File.Delete(entry);
@@ -323,32 +327,53 @@ internal sealed class UnrealModImporter
             .Order(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private static string? ProjectOf(string path)
+    /// <summary>
+    /// The project a path is of: <c>SB</c> of <c>SB/Content/...</c>, and the game's of a mod packed as a plugin of it
+    /// (<c>SparkingZERO/Mods/&lt;Mod&gt;/Content/...</c>, <c>&lt;Game&gt;/Plugins/.../&lt;Mod&gt;/Content/...</c>).
+    /// </summary>
+    internal static string? ProjectOf(string path)
     {
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length > 2 && parts[1].Equals("Content", StringComparison.OrdinalIgnoreCase) && !parts[0].Equals("Engine", StringComparison.OrdinalIgnoreCase) ? parts[0] : null;
+        if (parts.Length <= 2 || parts[0].Equals("Engine", StringComparison.OrdinalIgnoreCase)) return null;
+        if (parts[1].Equals("Content", StringComparison.OrdinalIgnoreCase)) return parts[0];
+        var plugin = parts[1].Equals("Mods", StringComparison.OrdinalIgnoreCase) || parts[1].Equals("Plugins", StringComparison.OrdinalIgnoreCase);
+        return plugin && parts.Skip(3).SkipLast(1).Contains("Content", StringComparer.OrdinalIgnoreCase) ? parts[0] : null;
     }
 
-    /// <summary>A path's part under its project's <c>Content</c> folder, lower case, no extension: how a mod cooked under another project name is still found.</summary>
-    private static string ContentRel(string path)
+    /// <summary>A plugin's content folder in a path, and what is under it: the game names it <c>/&lt;Plugin&gt;/...</c>.</summary>
+    private static readonly Regex PluginContent = new(@"(?:^|/)(?:Mods|Plugins)/(?:.+/)?([^/]+)/Content/(.*)$", RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// A path's part under its project's <c>Content</c> folder, lower case, no extension: how a mod cooked under another
+    /// project name is still found. A plugin's content keeps the plugin's name in front, as the game names it
+    /// (<c>/Android18_2B_Outfit/SK_...</c>).
+    /// </summary>
+    internal static string ContentRel(string path)
     {
         path = path.Replace('\\', '/');
         var dot = path.LastIndexOf('.');
         if (dot > path.LastIndexOf('/')) path = path[..dot];
         if (path.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)) return path[6..].ToLowerInvariant();
+        if (PluginContent.Match(path) is { Success: true } plugin) return $"{plugin.Groups[1].Value}/{plugin.Groups[2].Value}".ToLowerInvariant();
         var content = path.IndexOf("/Content/", StringComparison.OrdinalIgnoreCase);
         return (content >= 0 ? path[(content + 9)..] : path.TrimStart('/')).ToLowerInvariant();
     }
 
     // ---- The game, and every mod over it ----
 
-    private void ImportAll(List<Mod> mods, CancellationToken cancel)
+    /// <summary>
+    /// The mods grouped by the installed game each is for, in load order within a group: the game whose project its
+    /// paths name. A CNS outfit cooked under a project name of its own (<c>Yor/Content/...</c>) goes with the game most
+    /// of the others are for (CNS is Stellar Blade's). Only a game with a mod to write is returned; a mod no installed
+    /// game is found for says why.
+    /// </summary>
+    private static List<(UnrealGame Game, List<Mod> Mods)> ByGame(List<Mod> mods, string cache, string? settingsPath)
     {
         var usable = mods.Where(m => m.Problem is null).ToList();
-        if (!usable.Any(m => m.Job.Export)) return;
+        if (!usable.Any(m => m.Job.Export)) return [];
 
         // Each container's paths, read with no game behind them: the project they name, and a locked one.
-        var empty = Path.Combine(_cache, ".work", "none");
+        var empty = Path.Combine(cache, ".work", "none");
         Directory.CreateDirectory(empty);
         using (var lister = new DefaultFileProvider(new DirectoryInfo(empty), SearchOption.TopDirectoryOnly, new VersionContainer(EGame.GAME_UE4_LATEST), StringComparer.OrdinalIgnoreCase))
         {
@@ -366,36 +391,38 @@ internal sealed class UnrealModImporter
             }
         }
         usable = usable.Where(m => m.Problem is null).ToList();
-        if (!usable.Any(m => m.Job.Export)) return;
+        if (!usable.Any(m => m.Job.Export)) return [];
 
-        // The game they are for: the one whose project they name. A mod cooked under a project name of its own
-        // (Yor/Content/...) is for the game the others are for.
-        var (fmodelGames, fmodelData) = UnrealGameLocator.FModelSettings();
-        var games = UnrealGameLocator.InstalledGames(_settings.Folders(), fmodelGames);
-        var named = usable.Select(m => m.Project).Where(p => p is not null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var found = named.Select(p => (Project: p!, Games: UnrealGameLocator.ForProject(p!, games))).Where(x => x.Games.Count > 0).ToList();
-        if (found.Count == 0)
-        {
-            var project = usable.First(m => m.Job.Export).Project;
-            if (project is null) throw new Unusable("its game files name no game content (no \"<Game>/Content/...\" paths), so the game it is for is unknown.");
-            throw new NeedsUser($"it is a mod for a game whose files are called \"{project}\", and no installed game has them. If that game is installed, add a line to {_settingsPath}:  {project} folder: <the game's folder>");
-        }
-        var game = found.GroupBy(x => x.Games[0].Paks, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => usable.Count(m => g.Any(x => x.Project.Equals(m.Project, StringComparison.OrdinalIgnoreCase)))).First().First().Games[0];
-        // A mod is read with the game it names; one cooked under a project name of its own only when it is a CNS
-        // outfit (those are Stellar Blade's). Reading another game's files as this game's corrupts memory in CUE4Parse.
+        var settings = UnrealModSettings.Load(settingsPath);
+        var games = UnrealGameLocator.InstalledGames(settings.Folders(), UnrealGameLocator.FModelSettings().Games);
+        var groups = new List<(UnrealGame Game, List<Mod> Mods)>();
+        var homeless = new List<Mod>();
         foreach (var mod in usable)
         {
-            var mine = mod.Project is not null && UnrealGameLocator.ForProject(mod.Project, games).Any(g => g.Paks.Equals(game.Paks, StringComparison.OrdinalIgnoreCase));
-            if (mine || (mod.Cns.Count > 0 && (mod.Project is null || UnrealGameLocator.ForProject(mod.Project, games).Count == 0))) continue;
-            var other = mod.Project is null ? null : UnrealGameLocator.ForProject(mod.Project, games).FirstOrDefault();
-            mod.Problem = other is not null
-                ? $"it is a mod for {other.Name}, not {game.Name}; mods of one game are read at a time, so drop it with that game's mods alone."
-                : mod.Project is null
-                    ? $"its game files name no content of {game.Name} or of another installed game (it is likely a mod for another game), so it cannot be read."
-                    : $"it is a mod for a game whose files are called \"{mod.Project}\", which no installed game has, so it cannot be read. If that game is installed, add a line to {_settingsPath}:  {mod.Project} folder: <the game's folder>";
+            var game = mod.Project is null ? null : UnrealGameLocator.ForProject(mod.Project, games).FirstOrDefault();
+            if (game is null) { homeless.Add(mod); continue; }
+            var group = groups.FirstOrDefault(g => g.Game.Paks.Equals(game.Paks, StringComparison.OrdinalIgnoreCase));
+            if (group.Mods is null) groups.Add(group = (game, []));
+            group.Mods.Add(mod);
         }
-        usable = usable.Where(m => m.Problem is null).ToList();
-        if (!usable.Any(m => m.Job.Export)) return;
+        var main = groups.OrderByDescending(g => g.Mods.Count).FirstOrDefault();
+        foreach (var mod in homeless)
+        {
+            if (mod.Cns.Count > 0 && main.Mods is not null) { main.Mods.Add(mod); continue; }
+            if (mod.Project is null)
+                mod.Problem = "its game files name no game content (no \"<Game>/Content/...\" paths), so the game it is for is unknown.";
+            else
+                mod.Need = $"it is a mod for a game whose files are called \"{mod.Project}\", and no installed game has them. If that game is installed, add a line to {settingsPath}:  {mod.Project} folder: <the game's folder>";
+        }
+        foreach (var (_, group) in groups) group.Sort((a, b) => mods.IndexOf(a).CompareTo(mods.IndexOf(b)));
+        return groups.Where(g => g.Mods.Any(m => m.Job.Export)).ToList();
+    }
+
+    /// <summary>One game's mods mounted together over it, in their order, and each one marked for export written.</summary>
+    private void ImportGame(UnrealGame game, List<Mod> usable, CancellationToken cancel)
+    {
+        var (fmodelGames, fmodelData) = UnrealGameLocator.FModelSettings();
+        foreach (var mod in usable) mod.GameName = game.Name;
         _gameName = game.Name;
         Say($"Game: {game.Name} ({game.Paks})");
         var fmodel = UnrealGameLocator.FModelEntry(game, fmodelGames);
@@ -413,22 +440,52 @@ internal sealed class UnrealModImporter
         }
         _provider.Initialize();
         Register(_provider, usable);
-        var keys = new List<KeyValuePair<FGuid, FAesKey>> { new(new FGuid(), new FAesKey(new byte[32])) };
-        foreach (var (guid, key) in _settings.Keys(game.Name, game.Project).Concat(fmodel?.Keys ?? []))
+        // Keys one at a time (CUE4Parse keeps one key a GUID from one call): the user's, then FModel's, then the key list's.
+        _provider.SubmitKey(new FGuid(), new FAesKey(new byte[32]));
+        List<CUE4Parse.UE4.VirtualFileSystem.IAesVfsReader> Locked() =>
+            _provider.UnloadedVfs.Where(vfs => vfs.IsEncrypted && !usable.Any(m => m.Registered.Contains(vfs.Name))).ToList();
+        foreach (var (guid, key, from) in _settings.Keys(game.Name, game.Project).Select(k => (k.Guid, k.Key, "Game settings.txt"))
+                     .Concat((fmodel?.Keys ?? []).Select(k => (k.Guid, k.Key, "FModel's settings"))))
         {
-            try { keys.Add(new(guid.Length == 0 ? new FGuid() : new FGuid(guid.Replace("-", "")), new FAesKey(key))); }
-            catch (Exception) { usable.ForEach(m => m.Notes.Add($"The key given for {game.Name} ({Short(key)}) is not a valid key, so it was not used.")); }
+            if (Locked().Count == 0) break;
+            try { _provider.SubmitKey(guid.Length == 0 ? new FGuid() : new FGuid(guid.Replace("-", "")), new FAesKey(key)); }
+            catch (Exception) { usable.ForEach(m => m.Notes.Add($"A key given for {game.Name} in {from} is not a valid key, so it was not used.")); }
         }
-        _provider.SubmitKeys(keys);
-        var locked = _provider.UnloadedVfs.Where(vfs => vfs.IsEncrypted && !usable.Any(m => m.Registered.Contains(vfs.Name))).ToList();
+        var keyList = AesKeyList.Load(KeyListPath());
+        if (Locked().Count > 0 && keyList.Path is not null)
+        {
+            if (keyList.Other.Count > 0)
+                Say($"Key list: {keyList.Entries.Count} AES keys; {keyList.Other.Count} under {string.Join(", ", keyList.Other.Select(o => o.Section).Distinct().Select(s => $"\"{s}\""))} are not game file keys and are not used.");
+            foreach (var (entry, key) in keyList.Candidates(game.Name, game.Project))
+            {
+                int opened;
+                try { opened = _provider.SubmitKey(new FGuid(), new FAesKey(key)); }
+                catch (Exception) { continue; }
+                if (opened == 0) continue;
+                Say($"AES key: the key list's entry \"{entry}\" opened {opened} containers");
+                usable.ForEach(m => m.Notes.Add($"{game.Name}'s files were opened with the key list's entry \"{entry}\"."));
+                if (Locked().Count == 0) break;
+            }
+        }
+        var locked = Locked();
         if (locked.Count > 0)
         {
             var needed = locked.Select(vfs => vfs.EncryptionKeyGuid).Distinct().ToList();
             var which = needed.All(g => g == new FGuid()) ? "key" : $"key ({string.Join(", ", needed.Select(g => g.ToString()))})";
-            throw new NeedsUser($"{game.Name} keeps its files locked and needs its AES {which}. Put it in {_settingsPath} as a line:  {game.Name} key: 0x<64 letters and digits>");
+            var tried = keyList.Path is null ? "" : $" No entry for it in the key list ({keyList.Path}) opens them.";
+            throw new NeedsUser($"{game.Name} keeps its files locked and needs its AES {which}.{tried} Put it in {_settingsPath} as a line:  {game.Name} key: 0x<64 letters and digits>");
         }
         _provider.PostMount();
         _project = _provider.ProjectName ?? game.Project;
+        // A game whose own files need mappings and has none: a mod over it would be read half (its own meshes, none of
+        // the game's skeleton, animations or textures), so it is said at once instead.
+        if (mappings is null && _provider.Files.Values.FirstOrDefault(f => f.Path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                && f.Path.StartsWith(_project + "/Content/", StringComparison.OrdinalIgnoreCase) && !(f is VfsEntry { Vfs: { } v } && usable.Any(m => m.Registered.Contains(v.Name)))) is { } sample)
+        {
+            try { _provider.LoadPackage(sample).GetExports().ToList(); }
+            catch (MappingException) { throw new NeedsUser(MappingsNeed(game, null)); }
+            catch (Exception) { }
+        }
         _shared = Path.Combine(_cache, "shared", Token(game.Name).Trim('_'));
         Say($"Mounted {_provider.MountedVfs.Count} containers, {_provider.Files.Count:N0} files");
         foreach (var mod in usable)
@@ -451,7 +508,7 @@ internal sealed class UnrealModImporter
             _notes = mod.Notes;
             var undo = Prefer(byId, mod);
             try { ExportMod(mod, cancel); }
-            catch (MappingException) { mod.Need = $"{game.Name} needs its mappings file (a .usmap made for this version of the game) to be read. Put a line in {_settingsPath}:  {game.Name} mappings: <where the .usmap file is>"; }
+            catch (MappingException) { mod.Need = MappingsNeed(game, mappings); }
             catch (Unusable unusable) { mod.Problem = unusable.Message; }
             catch (Exception ex) when (ex.Message.Contains("Oodle", StringComparison.OrdinalIgnoreCase))
             {
@@ -576,6 +633,24 @@ internal sealed class UnrealModImporter
                 return value;
         }
         return Enum.TryParse<EGame>($"GAME_UE{major}_{minor}", out var plain) ? plain : major == 5 ? EGame.GAME_UE5_LATEST : EGame.GAME_UE4_LATEST;
+    }
+
+    /// <summary>What the user is told when a game's files need a mappings file: the missing piece, where it was looked for, the line to add.</summary>
+    private string MappingsNeed(UnrealGame game, string? mappings) => mappings is null
+        ? $"{game.Name} needs a mappings file to be read: a .usmap file made for the version of {game.Name} that is installed. None is on this PC (not in {Path.GetFileName(_settingsPath)}, FModel's settings, FModel's .data folder or the game's folder). Get one made for this version of the game, then put a line in {_settingsPath}:  {game.Name} mappings: <where the .usmap file is>"
+        : $"{game.Name}'s mappings file ({mappings}) does not fit the installed version of the game, so its files cannot be read. Get a .usmap made for this version and name it in {_settingsPath}:  {game.Name} mappings: <where the .usmap file is>";
+
+    /// <summary>
+    /// The community AES key list (<see cref="AesKeyList.FileName"/>) beside the settings file or in the folder above it:
+    /// tried after the user's keys and FModel's, for a game whose files are still locked.
+    /// </summary>
+    private string? KeyListPath()
+    {
+        if (_settingsPath.Length == 0) return null;
+        var dir = Path.GetDirectoryName(Path.GetFullPath(_settingsPath));
+        for (var i = 0; i < 2 && dir is not null; i++, dir = Path.GetDirectoryName(dir))
+            if (Path.Combine(dir, AesKeyList.FileName) is var file && File.Exists(file)) return file;
+        return null;
     }
 
     private string? Mappings(UnrealGame game, FModelGame? fmodel, string? fmodelData)
@@ -1456,8 +1531,6 @@ internal sealed class UnrealModImporter
         }
         return picked;
     }
-
-    private static string Short(string key) => key.Length > 10 ? key[..10] + "…" : key;
 }
 
 

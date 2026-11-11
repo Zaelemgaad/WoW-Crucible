@@ -245,6 +245,94 @@ public static class UnrealGameLocator
 }
 
 /// <summary>
+/// A community list of Unreal games' AES keys (<c>aes keys.txt</c>), read as it is written: one game a line,
+/// <c>&lt;game name&gt;&lt;spaces or tab&gt;&lt;key&gt;</c>, the key <c>0x</c> and 64 hex digits, 64 hex digits, base64
+/// of 32 bytes, or the 32 characters an old Unreal game used as its key. A heading in capitals naming keys
+/// (<c>USM KEYS</c>) or a line ending in a colon starts a section: lines before any section and under one naming AES are pak keys; any other
+/// section (CriWare video keys) is kept apart and never tried on game files. Lines that are no key (notes, links,
+/// fragments) are passed over. A game is matched by its name without its <c>(PC)</c>, <c>(switch)</c> or
+/// <c>(demo)</c> part; the plain or PC entry is tried first.
+/// </summary>
+public sealed class AesKeyList
+{
+    public const string FileName = "aes keys.txt";
+
+    /// <summary>The list read, or <c>null</c> when there is none.</summary>
+    public string? Path { get; private init; }
+
+    /// <summary>Pak keys: the entry's name as written and the key's 32 bytes.</summary>
+    public List<(string Name, byte[] Key)> Entries { get; } = [];
+
+    /// <summary>Entries of another section, by section: not keys for game files.</summary>
+    public List<(string Section, string Name)> Other { get; } = [];
+
+    /// <summary>Lines of the AES part that hold no usable key.</summary>
+    public int Skipped { get; private set; }
+
+    /// <summary>Variants that are the game itself on PC, tried before a demo's or a console's.</summary>
+    private static readonly string[] Plain = ["pc", "steam", "windows", "win64", "epic", "epicgames", "egs", "gog", "release", "retail", "full", "global", "main", "mainkey", "live"];
+
+    public static AesKeyList Load(string? path)
+    {
+        if (path is null || !File.Exists(path)) return new AesKeyList();
+        var list = new AesKeyList { Path = path };
+        string? section = null;
+        foreach (var raw in File.ReadAllLines(path))
+        {
+            var line = raw.Trim().TrimStart('﻿').Trim();
+            if (line.Length == 0) continue;
+            var split = Regex.Match(line, @"^(.*?\S)\s+(\S+)$");
+            var key = split.Success ? Key(split.Groups[2].Value) : null;
+            if (key is null && (line.EndsWith(':') || (!line.Any(char.IsLower) && UnrealGameLocator.Fold(line).Contains("key"))))
+            {
+                section = line.TrimEnd(':').Trim();
+                continue;
+            }
+            var aes = section is null || UnrealGameLocator.Fold(section).Contains("aes");
+            if (!aes)
+            {
+                if (split.Success) list.Other.Add((section!, split.Groups[1].Value.Trim()));
+                continue;
+            }
+            if (key is not null) list.Entries.Add((split.Groups[1].Value.Trim(), key));
+            else list.Skipped++;
+        }
+        return list;
+    }
+
+    /// <summary>A key as written, as its 32 bytes; <c>null</c> when it is none.</summary>
+    public static byte[]? Key(string text)
+    {
+        var hex = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text;
+        if (hex.Length == 64 && hex.All(Uri.IsHexDigit)) return Convert.FromHexString(hex);
+        if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) return null;
+        if (text.Length == 32 && text.All(c => c is > ' ' and < (char)127)) return Encoding.ASCII.GetBytes(text);
+        var bytes = new byte[48];
+        return Convert.TryFromBase64String(text, bytes, out var written) && written == 32 ? bytes[..32] : null;
+    }
+
+    /// <summary>
+    /// The keys to try for a game known by <paramref name="names"/> (its Steam name, its project), with the entry each
+    /// is from, the likeliest first: the same name before one that holds the other, the plain or PC entry before a
+    /// demo's or a console's, then in the list's order.
+    /// </summary>
+    public IReadOnlyList<(string Entry, byte[] Key)> Candidates(params string[] names)
+    {
+        var wanted = names.Select(UnrealGameLocator.Fold).Where(n => n.Length > 0).Distinct().ToList();
+        return Entries.Select((entry, index) =>
+            {
+                var variants = Regex.Matches(entry.Name, @"\(([^)]*)\)").Select(m => UnrealGameLocator.Fold(m.Groups[1].Value)).ToList();
+                var name = UnrealGameLocator.Fold(Regex.Replace(entry.Name, @"\([^)]*\)", ""));
+                var tier = wanted.Contains(name) ? 0
+                    : name.Length >= 6 && wanted.Any(w => w.Length >= 6 && (w.Contains(name) || name.Contains(w))) ? 1 : -1;
+                return (entry, tier, plain: variants.All(Plain.Contains) ? 0 : 1, index);
+            })
+            .Where(x => x.tier >= 0).OrderBy(x => x.tier).ThenBy(x => x.plain).ThenBy(x => x.index)
+            .DistinctBy(x => Convert.ToHexString(x.entry.Key)).Select(x => (x.entry.Name, x.entry.Key)).ToList();
+    }
+}
+
+/// <summary>
 /// The one file where a user gives what a game needs before its mods can be read and nothing on this PC
 /// has it: one line a thing, <c>&lt;game&gt; key: 0x…</c>, <c>&lt;game&gt; mappings: &lt;file&gt;</c>,
 /// <c>&lt;game&gt; engine: 5.1</c> or <c>&lt;game&gt; folder: &lt;where it is installed&gt;</c>. A game is named
