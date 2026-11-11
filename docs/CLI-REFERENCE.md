@@ -40,6 +40,19 @@ wowcrucible customization export <folder> --out=<server customization folder>
 
 `<folder>` holds benilla's `merged_*.tsv` and `wardrobe_*.tsv`, and the user's `user/` beside them, which regenerating the merge never touches. `list` also shows the wardrobe's subjects and their option ids. `add` numbers the row, proves the folder with it valid and writes nothing otherwise; `export` refuses a folder with an error. Ids spell `u12` (user), `r966` (retail), `e966` (Epsilon) or a whole merged id. The format is benilla's `docs/wotlk/CUSTOMIZATION-EXTENSIONS.md`. The client skips and logs a bad row while the server refuses it, so validate first.
 
+## Unreal Engine game mods as models
+
+```text
+wowcrucible models import-mod <mod archive, .pak/.utoc, or folder>... --out <folder> [--settings <file>]
+```
+
+Reads a mod as it comes from a mod site (`.rar`, `.zip`, `.7z`, or loose `.pak`/`.utoc`/`.ucas`) over the installed game it is for, as FModel reads a mod pak loaded over a game's paks, and writes an FModel-style export: the character's `.psk` meshes, their material `.json`, each material's colour texture as `.png` (at most 2048 a side), a clip an action of its skeleton as `.psa` (cut to the bones its meshes use) and a `look.txt` naming the mod (from `modinfo.ini`) and its clips. benilla's "Add Models Here" runs it by itself and reads the folder like a hand-made export.
+
+- **The game** is the project the mod's asset paths name (`SB/Content/...`), among Steam's libraries (each `appmanifest_*.acf`, so a copy beside a game is not a game), Epic's manifests and FModel's game folders; the full game before a demo. Its engine version comes from FModel or the `++UE5+Release-5.1` string in its executable, as CUE4Parse's own entry for the game when it has one by that name.
+- **What it changes**: its skeletal meshes, and for textures and materials those do not wear, the game's mesh in the character's folder that wears the most of them (a head the mod retints). Animations come from the skeleton's folder, picked by name.
+- **What it needs**: AES keys and a `.usmap` come from FModel's settings, the game's own folder, or the `--settings` file; Oodle and zlib from beside the tool or FModel's data folder. Nothing is downloaded. When something is missing it says so and exits 3; the settings file takes one line a thing: `<game> key: 0x…`, `<game> key <guid>: 0x…`, `<game> mappings: <file>`, `<game> folder: <install>`, `<game> engine: 5.1`.
+- `import.txt` in `--out` has `game`, `name`, `need`, `problem` and `note` lines. Exit 0: a model was written; 1: no model could be made.
+
 ## Shared wire protocols
 
 ```text

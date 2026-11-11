@@ -26,6 +26,10 @@ WoW Crucible uses Microsoft.Data.Sqlite as the managed ADO.NET provider for proj
 
 WoW Crucible uses SQLitePCLRaw by Eric Sink / SourceGear to load the bundled native SQLite runtime. SQLitePCLRaw is distributed under the Apache License 2.0; the native SQLite library is in the public domain. The patched native package is pinned explicitly so NuGet cannot resolve the vulnerable SQLite build formerly pulled by the provider bundle. Projects: <https://github.com/ericsink/SQLitePCL.raw> and <https://sqlite.org/>.
 
+## CUE4Parse and CUE4Parse-Conversion
+
+The command line's `models import-mod` uses CUE4Parse and CUE4Parse-Conversion by FabianFG and contributors (the library FModel is built on) to read Unreal Engine paks and IoStore containers and to write ActorX meshes and animations. Both are distributed under the Apache License 2.0. Project: <https://github.com/FabianFG/CUE4Parse>. They bring their own dependencies through NuGet, among them SixLabors.ImageSharp (Six Labors Split License: Apache 2.0 for open source and qualifying use), SkiaSharp (MIT), SharpGLTF (MIT), Newtonsoft.Json (MIT), Serilog (Apache 2.0), BouncyCastle (MIT) and ZstdSharp (MIT). Oodle and zlib-ng are not bundled: the command uses copies already on the PC (beside it, or FModel's).
+
 ## Reference projects
 
 WDBX Editor, WoW Spell Editor, Keira3, WoW Database Editor, AzerothCore, and TrinityCore informed format research and workflow design. Their source code and game/server data are not vendored into this repository. Each remains subject to its own license.

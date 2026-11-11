@@ -10,6 +10,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../WoWCrucible.Core/WoWCrucible.Core.csproj" />
+    <PackageReference Include="CUE4Parse" Version="1.2.2.202610" />
+    <PackageReference Include="CUE4Parse-Conversion" Version="1.2.2.202610" />
     <EmbeddedResource Include="Assets/EpsilonLookWalker/*" LogicalName="%(Filename)%(Extension)" />
     <None Include="../../third_party/StormLib/win-x64/StormLib.dll" Link="StormLib.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="../../third_party/CascLib/win-x64/CascLib.dll" Link="CascLib.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

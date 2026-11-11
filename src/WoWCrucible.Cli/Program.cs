@@ -43,6 +43,7 @@ try
         "manifest" => Manifest(commandArguments[1..]),
         "protocol" => Protocol(commandArguments[1..]),
         "customization" => Customization(commandArguments[1..]),
+        "models" => Models(commandArguments[1..], cancellation.Token),
         _ => Fail($"Unknown command: {commandArguments[0]}")
     };
 }
@@ -83,6 +84,7 @@ static int RoutedHelp(string group) => group switch
     "manifest" => ManifestHelp(),
     "protocol" => ProtocolHelp(),
     "customization" => CustomizationHelp(),
+    "models" => ModelsHelp(),
     _ => Fail($"Unknown command group for help: {group}")
 };
 
@@ -134,6 +136,32 @@ static int Customization(string[] args)
         }
     }
     return Fail($"Unknown customization operation: {args[0]}");
+}
+
+static int Models(string[] args, CancellationToken cancel)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ModelsHelp();
+    if (!args[0].Equals("import-mod", StringComparison.OrdinalIgnoreCase)) return Fail($"Unknown models operation: {args[0]}");
+    var inputs = new List<string>();
+    string? output = null, settings = null;
+    for (var i = 1; i < args.Length; i++)
+    {
+        var argument = args[i];
+        string? Value(string name) => argument.StartsWith(name + "=", StringComparison.OrdinalIgnoreCase) ? argument[(name.Length + 1)..]
+            : argument.Equals(name, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length ? args[++i] : null;
+        if (Value("--out") is { } o) output = o;
+        else if (Value("--settings") is { } s) settings = s;
+        else if (argument.StartsWith("--", StringComparison.Ordinal)) return Fail($"Unknown models import-mod option: {argument}");
+        else inputs.Add(argument);
+    }
+    if (inputs.Count == 0 || string.IsNullOrWhiteSpace(output)) return ModelsHelp(2);
+    return UnrealModImporter.Run(inputs, output, settings, cancel);
+}
+
+static int ModelsHelp(int code = 0)
+{
+    Console.WriteLine("Usage:\n  wowcrucible models import-mod <mod archive, .pak/.utoc, or folder>... --out <folder> [--settings <file>]\n\nReads an Unreal Engine game mod (.rar, .zip, .7z, or loose .pak/.utoc/.ucas) over the installed game it is for, found by\nthe project its asset paths name in Steam's and Epic's libraries and FModel's settings, and writes an FModel-style export\nof the character it changes: .psk meshes, material .json, colour .png textures, a few .psa animations and look.txt.\nimport.txt says what happened in plain words. Exit 0: a model was written; 3: the user must give something once\n(a game's AES key, mappings or folder) in the --settings file, as the message says; 1: no model could be made.");
+    return code;
 }
 
 static int CustomizationHelp(int code = 0)

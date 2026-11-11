@@ -142,6 +142,7 @@ DbcBatchExportTestSuite.Run();
 ClientCorpusHardLinkTestSuite.Run();
 TactCdnFetchTestSuite.Run();
 CustomizationExtensionTestSuite.Run();
+UnrealGameLocatorTestSuite.Run();
 WireProtocolTestSuite.Run();
 AddonAuditTests.Run();
 ArtifactOwnershipTestSuite.Run();
