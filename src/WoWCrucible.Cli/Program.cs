@@ -141,9 +141,10 @@ static int Customization(string[] args)
 static int Models(string[] args, CancellationToken cancel)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ModelsHelp();
-    if (!args[0].Equals("import-mod", StringComparison.OrdinalIgnoreCase)) return Fail($"Unknown models operation: {args[0]}");
+    var batch = args[0].Equals("import-mods", StringComparison.OrdinalIgnoreCase);
+    if (!batch && !args[0].Equals("import-mod", StringComparison.OrdinalIgnoreCase)) return Fail($"Unknown models operation: {args[0]}");
     var inputs = new List<string>();
-    string? output = null, settings = null;
+    string? output = null, settings = null, jobs = null, cache = null;
     for (var i = 1; i < args.Length; i++)
     {
         var argument = args[i];
@@ -151,8 +152,18 @@ static int Models(string[] args, CancellationToken cancel)
             : argument.Equals(name, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length ? args[++i] : null;
         if (Value("--out") is { } o) output = o;
         else if (Value("--settings") is { } s) settings = s;
-        else if (argument.StartsWith("--", StringComparison.Ordinal)) return Fail($"Unknown models import-mod option: {argument}");
+        else if (Value("--jobs") is { } j) jobs = j;
+        else if (Value("--cache") is { } c) cache = c;
+        else if (argument.StartsWith("--", StringComparison.Ordinal)) return Fail($"Unknown models {args[0]} option: {argument}");
         else inputs.Add(argument);
+    }
+    if (batch)
+    {
+        if (string.IsNullOrWhiteSpace(jobs) || string.IsNullOrWhiteSpace(cache) || !File.Exists(jobs)) return ModelsHelp(2);
+        // One mod a line, in load order: id, 1 to write its looks or 0 to mount it only, its name, then its files or folders.
+        var list = File.ReadAllLines(jobs).Select(line => line.Split('\t')).Where(cells => cells.Length >= 4)
+            .Select(cells => new UnrealModImporter.Job(cells[0], cells[1] == "1", cells[2], cells[3..])).ToList();
+        return UnrealModImporter.RunJobs(list, cache, settings, cancel);
     }
     if (inputs.Count == 0 || string.IsNullOrWhiteSpace(output)) return ModelsHelp(2);
     return UnrealModImporter.Run(inputs, output, settings, cancel);
@@ -160,7 +171,7 @@ static int Models(string[] args, CancellationToken cancel)
 
 static int ModelsHelp(int code = 0)
 {
-    Console.WriteLine("Usage:\n  wowcrucible models import-mod <mod archive, .pak/.utoc, or folder>... --out <folder> [--settings <file>]\n\nReads an Unreal Engine game mod (.rar, .zip, .7z, or loose .pak/.utoc/.ucas) over the installed game it is for, found by\nthe project its asset paths name in Steam's and Epic's libraries and FModel's settings, and writes an FModel-style export\nof the character it changes: .psk meshes, material .json, colour .png textures, a few .psa animations and look.txt.\nimport.txt says what happened in plain words. Exit 0: a model was written; 3: the user must give something once\n(a game's AES key, mappings or folder) in the --settings file, as the message says; 1: no model could be made.");
+    Console.WriteLine("Usage:\n  wowcrucible models import-mod <mod archive, .pak/.utoc, or folder>... --out <folder> [--settings <file>]\n  wowcrucible models import-mods --jobs <file> --cache <folder> [--settings <file>]\n\nReads Unreal Engine game mods (.rar, .zip, .7z, loose .pak/.utoc/.ucas, or a mod manager's folder of them) over the\ninstalled game they are for, found by the project their asset paths name in Steam's and Epic's libraries and FModel's\nsettings. import-mods mounts every mod of the jobs file together in its order, the later winning as in the game (a line\neach: id, 1 to write its looks or 0 to mount it only, name, then its files or folders, tab separated). Each mod written\nbecomes a look a folder (<cache>\\<id>\\NN\\look.txt): an outfit of a Custom Nano Suit mod (.dekcns.json) a look per\nvariant, worn with the character's own face and hair, any other mod the character it changes. look.txt names the files\nit uses: .psk meshes, material .json, a .png of the colour each material shows, and a few .psa animations; what the game\nitself holds is written once under <cache>\\shared. <cache>\\<id>\\import.txt says what happened in plain words.\nExit 0: every mod written became a look; 3: the user must give something once (a game's AES key, mappings or folder) in\nthe --settings file, as the message says; 1: a mod gave no look.");
     return code;
 }
 

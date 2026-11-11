@@ -1,10 +1,14 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using CUE4Parse.Compression;
 using CUE4Parse.Encryption.Aes;
 using CUE4Parse.FileProvider;
+using CUE4Parse.FileProvider.Objects;
 using CUE4Parse.FileProvider.Vfs;
 using CUE4Parse.MappingsProvider.Usmap;
 using CUE4Parse.UE4.Assets;
@@ -14,24 +18,32 @@ using CUE4Parse.UE4.Assets.Exports.Material;
 using CUE4Parse.UE4.Assets.Exports.SkeletalMesh;
 using CUE4Parse.UE4.Assets.Exports.Texture;
 using CUE4Parse.UE4.Exceptions;
+using CUE4Parse.UE4.IO.Objects;
+using CUE4Parse.UE4.Objects.Core.Math;
 using CUE4Parse.UE4.Objects.Core.Misc;
 using CUE4Parse.UE4.Readers;
 using CUE4Parse.UE4.Versions;
+using CUE4Parse.UE4.VirtualFileSystem;
 using CUE4Parse_Conversion;
 using CUE4Parse_Conversion.Formats.Materials;
 using CUE4Parse_Conversion.Options;
 using CUE4Parse_Conversion.Textures;
+using SkiaSharp;
 using WoWCrucible.Core;
 using ILoadableObject = CUE4Parse.UE4.Objects.UObject.ILoadableObject;
 
 /// <summary>
-/// <c>wowcrucible models import-mod</c>: an Unreal Engine game mod as it comes from a mod site (a <c>.rar</c>, <c>.zip</c> or
-/// <c>.7z</c>, or loose <c>.pak</c>/<c>.utoc</c>/<c>.ucas</c> files) read over the installed game it is for, the way FModel
-/// reads a mod pak loaded over a game's paks, and written out as an FModel-style export: the character's meshes as
-/// <c>.psk</c>, its materials as <c>.json</c>, their colour textures as <c>.png</c> and a basic set of its animations as
-/// <c>.psa</c>, with a <c>look.txt</c> naming it. benilla's "Add Models Here" reads that folder like a hand-made export.
-/// What could not be done, or what the user must give once (a game's AES key, its mappings), is written to
-/// <c>import.txt</c> in plain words. CUE4Parse (Apache-2.0) reads the game files.
+/// <c>wowcrucible models import-mod</c> and <c>import-mods</c>: Unreal Engine game mods as they come from a mod site (a
+/// <c>.rar</c>, <c>.zip</c> or <c>.7z</c>, loose <c>.pak</c>/<c>.utoc</c>/<c>.ucas</c> files, or a mod manager's folder
+/// of them) read together over the installed game they are for, in their load order, the way the game mounts them, and
+/// written out as FModel-style exports: one folder a look, its <c>look.txt</c> naming it and the files it uses (the
+/// meshes as <c>.psk</c>, materials as <c>.json</c>, a colour picture each material really shows as <c>.png</c>, and a
+/// basic set of animations as <c>.psa</c>). A mod for Dekita's Custom Nano Suit framework (CNS: a
+/// <c>.dekcns.json</c> beside its paks) becomes a look for each outfit variant its JSON lists, worn with the character's
+/// own face and hair; any other mod becomes a look of the character meshes it changes. What the game itself holds is
+/// written once under <c>shared\</c> and named by every look that uses it. What could not be done, or what the user
+/// must give once (a game's AES key, its mappings), is written to each mod's <c>import.txt</c> in plain words.
+/// CUE4Parse (Apache-2.0) reads the game files.
 /// </summary>
 internal sealed class UnrealModImporter
 {
@@ -41,12 +53,45 @@ internal sealed class UnrealModImporter
     /// <summary>The mod cannot become a model; the message says why.</summary>
     private sealed class Unusable(string message) : Exception(message);
 
+    /// <summary>One mod to mount: <paramref name="Export"/> when its looks are to be written.</summary>
+    internal sealed record Job(string Id, bool Export, string Name, IReadOnlyList<string> Sources);
+
+    /// <summary>A mod as gathered: its containers, its CNS outfit lists and what was found wrong with it.</summary>
+    private sealed class Mod(Job job)
+    {
+        public Job Job { get; } = job;
+        public string Name { get; set; } = job.Name;
+        public List<string> Containers { get; } = [];
+        public List<string> Cns { get; } = [];
+        public List<string> Notes { get; } = [];
+        public string? Problem { get; set; }
+        public string? Need { get; set; }
+        /// <summary>The names its containers were registered by, and its files by content path.</summary>
+        public HashSet<string> Registered { get; } = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The same names, in the order of <see cref="Containers"/>.</summary>
+        public List<string> Order { get; } = [];
+        public Dictionary<string, GameFile> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public List<(string Name, string Folder)> Looks { get; } = [];
+        public string? Project { get; set; }
+    }
+
     private const int MaxTextureSide = 2048;
-    private readonly List<string> _notes = [];
-    /// <summary>Lines for <c>look.txt</c> beyond its name: the clip chosen for each action.</summary>
-    private readonly List<string> _look = [];
     private readonly string _settingsPath;
     private readonly UnrealModSettings _settings;
+    private string _cache = "";
+    private string _shared = "";
+    private DefaultFileProvider _provider = null!;
+    private string _project = "Game";
+    private readonly HashSet<string> _modVfs = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Every package of every mod by content path, the last in load order winning.</summary>
+    private readonly Dictionary<string, GameFile> _allModFiles = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>What was written this run, by object path: the files a look names for it.</summary>
+    private readonly Dictionary<string, List<string>> _written = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<(string Word, string Clip, string File)>> _clips = new(StringComparer.OrdinalIgnoreCase);
+    private List<string> _notes = [];
+    /// <summary>Bones the meshes written this run move, by skeleton; the clips written this run, kept to those.</summary>
+    private readonly Dictionary<string, HashSet<string>> _bones = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<(string Skeleton, string Clip)> _newClips = [];
 
     private UnrealModImporter(string? settingsPath)
     {
@@ -56,71 +101,99 @@ internal sealed class UnrealModImporter
 
     private static void Say(string line) => Console.WriteLine(line);
 
-    /// <summary>Runs the import; 0 when the folder holds a model, 3 when the user must give something, 1 otherwise.</summary>
+    /// <summary>One mod into <paramref name="outDir"/>: <c>import-mod</c>. The game's own files go beside it, in <c>shared\</c>.</summary>
     public static int Run(IReadOnlyList<string> inputs, string outDir, string? settingsPath, CancellationToken cancel)
     {
-        outDir = Path.GetFullPath(outDir);
-        var work = outDir.TrimEnd('\\', '/') + ".work";
-        var importer = new UnrealModImporter(settingsPath);
-        var result = new StringBuilder();
-        int code;
+        outDir = Path.GetFullPath(outDir).TrimEnd('\\', '/');
+        var name = Path.GetFileNameWithoutExtension(inputs[0]);
+        return RunJobs([new Job(Path.GetFileName(outDir), true, name, inputs)], Path.GetDirectoryName(outDir)!, settingsPath, cancel);
+    }
+
+    /// <summary>
+    /// <c>import-mods</c>: the mods of <paramref name="jobs"/> mounted together in that order over their game, the later
+    /// winning; each one marked for export written to <c>&lt;cache&gt;\&lt;id&gt;\</c>. 0 when every exported mod became
+    /// at least one look, 3 when one needs the user, 1 otherwise.
+    /// </summary>
+    public static int RunJobs(IReadOnlyList<Job> jobs, string cache, string? settingsPath, CancellationToken cancel)
+    {
+        var importer = new UnrealModImporter(settingsPath) { _cache = Path.GetFullPath(cache) };
+        Directory.CreateDirectory(importer._cache);
+        var work = Path.Combine(importer._cache, ".work");
+        try { if (Directory.Exists(work)) Directory.Delete(work, true); } catch (Exception) { }
+        var mods = jobs.Select(job => new Mod(job)).ToList();
+        foreach (var mod in mods.Where(m => m.Job.Export))
+        {
+            var dir = Path.Combine(importer._cache, mod.Job.Id);
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+            Directory.CreateDirectory(dir);
+        }
         try
         {
-            if (Directory.Exists(outDir)) Directory.Delete(outDir, true);
-            if (Directory.Exists(work)) Directory.Delete(work, true);
-            Directory.CreateDirectory(outDir);
-            var (game, name) = importer.Import(inputs, outDir, work, cancel);
-            File.WriteAllText(Path.Combine(outDir, "look.txt"), $"name: {name}\r\n" + string.Concat(importer._look.Select(line => line + "\r\n")));
-            if (game.Length > 0) result.Append($"game\t{game}\n");
-            result.Append($"name\t{name}\n");
-            code = 0;
+            for (var i = 0; i < mods.Count; i++)
+            {
+                try { Gather(mods[i], Path.Combine(work, i.ToString("D4"))); }
+                catch (Unusable unusable) { mods[i].Problem = unusable.Message; }
+                catch (Exception ex) when (ex is not OperationCanceledException) { mods[i].Problem = $"It could not be read: {Flat(ex.Message)}"; }
+            }
+            try { importer.ImportAll(mods, cancel); }
+            catch (Unusable unusable)
+            {
+                foreach (var mod in mods.Where(m => m.Job.Export && m.Problem is null && m.Looks.Count == 0)) mod.Problem = unusable.Message;
+            }
         }
         catch (NeedsUser need)
         {
-            result.Append($"need\t{need.Message}\n");
+            foreach (var mod in mods.Where(m => m.Job.Export && m.Problem is null)) mod.Need = need.Message;
             if (settingsPath is not null && !File.Exists(settingsPath))
             {
                 try { File.WriteAllText(settingsPath, UnrealModSettings.Template); } catch (Exception) { }
             }
-            code = 3;
-        }
-        catch (Unusable unusable)
-        {
-            result.Append($"problem\t{unusable.Message}\n");
-            code = 1;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            result.Append($"problem\tIt could not be read: {ex.Message.ReplaceLineEndings(" ")}\n");
-            code = 1;
         }
         finally
         {
             try { if (Directory.Exists(work)) Directory.Delete(work, true); } catch (Exception) { }
         }
-        foreach (var note in importer._notes) result.Append($"note\t{note}\n");
-        if (code != 0)
+
+        var code = 0;
+        foreach (var mod in mods.Where(m => m.Job.Export))
         {
-            // A folder that is no model holds nothing but the result.
-            foreach (var entry in Directory.EnumerateFileSystemEntries(outDir))
-                if (Directory.Exists(entry)) Directory.Delete(entry, true); else File.Delete(entry);
+            var result = new StringBuilder();
+            if (mod.Need is not null) { result.Append($"need\t{mod.Need}\n"); code = Math.Max(code, 3); }
+            else if (mod.Problem is not null || mod.Looks.Count == 0)
+            {
+                result.Append($"problem\t{mod.Problem ?? "no look could be made of it."}\n");
+                if (code == 0) code = 1;
+            }
+            if (mod.Need is null && mod.Problem is null)
+            {
+                result.Append($"game\t{importer._gameName}\n");
+                foreach (var (name, folder) in mod.Looks) result.Append($"look\t{folder}\t{name}\n");
+            }
+            foreach (var note in mod.Notes.Distinct().Where(n => n != mod.Problem)) result.Append($"note\t{note}\n");
+            var dir = Path.Combine(importer._cache, mod.Job.Id);
+            if (mod.Looks.Count == 0 || mod.Need is not null || mod.Problem is not null)
+                foreach (var entry in Directory.EnumerateFileSystemEntries(dir))
+                    if (Directory.Exists(entry)) Directory.Delete(entry, true); else File.Delete(entry);
+            File.WriteAllText(Path.Combine(dir, "import.txt"), result.ToString());
+            Console.Write($"== {mod.Job.Name}\n{result}");
         }
-        File.WriteAllText(Path.Combine(outDir, "import.txt"), result.ToString());
-        Console.Write(result.ToString());
         return code;
     }
 
-    private (string Game, string Name) Import(IReadOnlyList<string> inputs, string outDir, string work, CancellationToken cancel)
+    private string _gameName = "";
+
+    private static string Flat(string text) => text.ReplaceLineEndings(" ");
+
+    // ---- What was dropped ----
+
+    /// <summary>A mod's files: archives opened into <paramref name="work"/>, folders and loose files read where they are.</summary>
+    private static void Gather(Mod mod, string work)
     {
-        // What was dropped: archives are opened, loose files read where they are.
         var files = new List<string>();
         var archiveName = "";
-        foreach (var input in inputs.Select(Path.GetFullPath))
+        foreach (var input in mod.Job.Sources.Select(Path.GetFullPath))
         {
-            if (Directory.Exists(input))
-            {
-                files.AddRange(Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories));
-            }
+            if (Directory.Exists(input)) files.AddRange(Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories));
             else if (ArchiveKind(input) is not null)
             {
                 archiveName = archiveName.Length == 0 ? Path.GetFileNameWithoutExtension(input) : archiveName;
@@ -128,95 +201,29 @@ internal sealed class UnrealModImporter
                 Extract(input, dest, 0);
                 files.AddRange(Directory.EnumerateFiles(dest, "*", SearchOption.AllDirectories));
             }
-            else if (File.Exists(input))
-            {
-                files.Add(input);
-            }
+            else if (File.Exists(input)) files.Add(input);
             else throw new Unusable($"\"{input}\" is not there.");
         }
-        var stemName = archiveName.Length > 0 ? archiveName : Path.GetFileNameWithoutExtension(inputs[0]);
-        var name = ModName(files) ?? Regex.Replace(stemName, @"[_]+", " ").Trim();
-
-        var containers = Containers(files);
-        if (containers.Count == 0)
+        if (ModName(files) is { } named) mod.Name = named;
+        else if (archiveName.Length > 0) mod.Name = Regex.Replace(archiveName, "[_]+", " ").Trim();
+        else mod.Name = Nice(mod.Job.Name);
+        mod.Cns.AddRange(files.Where(f => f.EndsWith("dekcns.json", StringComparison.OrdinalIgnoreCase)).Order(StringComparer.OrdinalIgnoreCase));
+        mod.Containers.AddRange(Containers(files, mod.Notes));
+        if (mod.Containers.Count == 0)
         {
-            var exported = files.Where(file => Path.GetExtension(file).ToLowerInvariant() is ".psk" or ".pskx" or ".psa" or ".json" or ".png" or ".tga").ToList();
-            if (exported.Any(file => Path.GetExtension(file).ToLowerInvariant() is ".psk" or ".pskx"))
-            {
-                // Already an export: copied as it is.
-                var root = CommonRoot(exported);
-                foreach (var file in exported)
-                {
-                    var dest = Path.Combine(outDir, Path.GetRelativePath(root, file));
-                    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                    File.Copy(file, dest, true);
-                }
-                return ("", name);
-            }
-            if (exported.Count > 0) throw new Unusable("this has textures but no model; export the mesh too (a .psk or .pskx file).");
-            throw new Unusable("it holds no game files (.pak, .utoc) and no model (.psk), so there is nothing to make a model from.");
+            if (files.Any(f => Path.GetExtension(f).ToLowerInvariant() is ".psk" or ".pskx"))
+                throw new Unusable("it is already an export (.psk); drop it as a folder of its own, not with game files.");
+            throw new Unusable(mod.Notes.Count > 0 ? mod.Notes[0] : "it holds no game files (.pak, .utoc), so there is nothing to make a model from.");
         }
-
-        // The game it is for, from the project its asset paths name.
-        var modFiles = ListMod(containers, work);
-        var project = modFiles.Select(ProjectOf).Where(p => p is not null).GroupBy(p => p!, StringComparer.OrdinalIgnoreCase)
-            .OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault()
-            ?? throw new Unusable("its game files name no game content (no \"<Game>/Content/...\" paths), so the game it is for is unknown.");
-        var (fmodelGames, fmodelData) = UnrealGameLocator.FModelSettings();
-        var games = UnrealGameLocator.InstalledGames(_settings.Folders(), fmodelGames);
-        var candidates = UnrealGameLocator.ForProject(project, games);
-        if (candidates.Count == 0)
-            throw new NeedsUser($"it is a mod for a game whose files are called \"{project}\", and no installed game has them. If that game is installed, add a line to {_settingsPath}:  {project} folder: <the game's folder>");
-        var game = candidates[0];
-        Say($"Game: {game.Name} ({game.Paks})");
-        var fmodel = UnrealGameLocator.FModelEntry(game, fmodelGames);
-        var version = Version(game, fmodel)
-            ?? throw new NeedsUser($"the Unreal Engine version of {game.Name} could not be told. Add a line to {_settingsPath}:  {game.Name} engine: <version, like 5.1>");
-        Say($"Engine: {version}");
-        InitNatives(fmodelData);
-
-        var mappings = Mappings(game, fmodel, fmodelData);
-        var provider = new DefaultFileProvider(new DirectoryInfo(game.Paks), SearchOption.TopDirectoryOnly, new VersionContainer(version), StringComparer.OrdinalIgnoreCase);
-        if (mappings is not null)
-        {
-            Say($"Mappings: {mappings}");
-            provider.MappingsContainer = new FileUsmapTypeMappingsProvider(mappings, StringComparer.OrdinalIgnoreCase);
-        }
-        provider.Initialize();
-        var modNames = Register(provider, containers);
-        var keys = new List<KeyValuePair<FGuid, FAesKey>> { new(new FGuid(), new FAesKey(new byte[32])) };
-        foreach (var (guid, key) in _settings.Keys(game.Name, game.Project).Concat(fmodel?.Keys ?? []))
-        {
-            try { keys.Add(new(guid.Length == 0 ? new FGuid() : new FGuid(guid.Replace("-", "")), new FAesKey(key))); }
-            catch (Exception) { _notes.Add($"The key given for {game.Name} ({Short(key)}) is not a valid key, so it was not used."); }
-        }
-        provider.SubmitKeys(keys);
-        var locked = provider.UnloadedVfs.Where(vfs => vfs.IsEncrypted).ToList();
-        if (locked.Count > 0)
-        {
-            var needed = locked.Select(vfs => vfs.EncryptionKeyGuid).Distinct().ToList();
-            var which = needed.All(g => g == new FGuid()) ? "key" : $"key ({string.Join(", ", needed.Select(g => g.ToString()))})";
-            throw new NeedsUser($"{game.Name} keeps its files locked and needs its AES {which}. Put it in {_settingsPath} as a line:  {game.Name} key: 0x<64 letters and digits>");
-        }
-        provider.PostMount();
-        Say($"Mounted {provider.MountedVfs.Count} containers, {provider.Files.Count:N0} files");
-
-        try
-        {
-            ExportLook(provider, modNames, outDir, cancel);
-        }
-        catch (MappingException)
-        {
-            throw new NeedsUser($"{game.Name} needs its mappings file (a .usmap made for this version of the game) to be read. Put a line in {_settingsPath}:  {game.Name} mappings: <where the .usmap file is>");
-        }
-        catch (Exception ex) when (ex.Message.Contains("Oodle", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new NeedsUser("reading this game needs the Oodle decompressor (oodle-data-shared.dll), which FModel downloads the first time it runs. Run FModel once, or put that file beside wowcrucible.exe.");
-        }
-        return (game.Name, name);
     }
 
-    // ---- What was dropped ----
+    /// <summary>A Nexus or Vortex folder name made plain: no load-order prefix (<c>ZZZZ-</c>, <c>AIK-</c>), no id, version and time after it.</summary>
+    internal static string Nice(string name)
+    {
+        var n = Regex.Replace(name, @"^(Z{2,}|[A-Z]{3})-", "");
+        n = Regex.Replace(n, @"-\d+(-[0-9v]+)*-\d{9,}$", "");
+        return n.Trim(' ', '-');
+    }
 
     private static string? ArchiveKind(string file)
     {
@@ -297,66 +304,23 @@ internal sealed class UnrealModImporter
         return null;
     }
 
-    private static string CommonRoot(IReadOnlyList<string> files)
-    {
-        var root = Path.GetDirectoryName(files[0])!;
-        while (!files.All(f => f.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
-            root = Path.GetDirectoryName(root)!;
-        return root;
-    }
-
-    /// <summary>The mod's containers: an IoStore table (<c>.utoc</c>, with its <c>.ucas</c>) or a <c>.pak</c> with no table beside it.</summary>
-    private static List<string> Containers(IEnumerable<string> files)
+    /// <summary>
+    /// The mod's containers, in the game's order (by path): an IoStore table (<c>.utoc</c>, with its <c>.ucas</c>) or a
+    /// <c>.pak</c> that is a whole pak, not an IoStore set's stub. A set missing its table or its data is said in <paramref name="notes"/>.
+    /// </summary>
+    private static List<string> Containers(IEnumerable<string> files, List<string> notes)
     {
         var all = files.ToList();
-        var tables = all.Where(f => f.EndsWith(".utoc", StringComparison.OrdinalIgnoreCase)
-            && File.Exists(Path.ChangeExtension(f, ".ucas"))).ToList();
-        var paks = all.Where(f => f.EndsWith(".pak", StringComparison.OrdinalIgnoreCase)
-            && !tables.Any(t => Path.ChangeExtension(t, ".pak").Equals(f, StringComparison.OrdinalIgnoreCase))).ToList();
-        // A container named like the game's own global one holds no mod.
-        return tables.Concat(paks).Where(f => !Path.GetFileNameWithoutExtension(f).Equals("global", StringComparison.OrdinalIgnoreCase)).ToList();
-    }
-
-    /// <summary>
-    /// Registers each mod container with the provider as a patch (<c>_P</c>), so it wins over the game's own files the
-    /// way the game loads it; nothing is copied. Returns the names it was registered by.
-    /// </summary>
-    private static HashSet<string> Register(AbstractVfsFileProvider provider, IEnumerable<string> containers)
-    {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var container in containers)
-        {
-            var stem = Path.GetFileNameWithoutExtension(container);
-            var patch = stem.EndsWith("_P", StringComparison.OrdinalIgnoreCase) ? stem : stem + "_P";
-            var ext = Path.GetExtension(container);
-            var dir = Path.GetDirectoryName(container)!;
-            var named = Path.Combine(dir, patch + ext);
-            names.Add(patch + ext);
-            var real = container;
-            provider.RegisterVfs(named, [File.OpenRead(real)], open =>
-            {
-                var file = Path.GetFileName(open);
-                var actual = file.StartsWith(patch, StringComparison.OrdinalIgnoreCase) ? stem + file[patch.Length..] : file;
-                return new FRandomAccessFileStreamArchive(Path.Combine(dir, actual), provider.Versions);
-            });
-        }
-        return names;
-    }
-
-    /// <summary>Every path the mod's containers hold, read with no game behind them.</summary>
-    private static List<string> ListMod(IEnumerable<string> containers, string work)
-    {
-        var empty = Path.Combine(work, "none");
-        Directory.CreateDirectory(empty);
-        var lister = new DefaultFileProvider(new DirectoryInfo(empty), SearchOption.TopDirectoryOnly, new VersionContainer(EGame.GAME_UE4_LATEST), StringComparer.OrdinalIgnoreCase);
-        lister.Initialize();
-        Register(lister, containers);
-        lister.SubmitKey(new FGuid(), new FAesKey(new byte[32]));
-        var paths = lister.MountedVfs.SelectMany(vfs => vfs.Files.Keys).ToList();
-        if (paths.Count == 0 && lister.UnloadedVfs.Any(vfs => vfs.IsEncrypted))
-            throw new Unusable("the mod's own files are locked (encrypted) by its maker, so they cannot be read.");
-        lister.Dispose();
-        return paths;
+        bool Has(string f, string ext) => File.Exists(Path.ChangeExtension(f, ext));
+        var tables = all.Where(f => f.EndsWith(".utoc", StringComparison.OrdinalIgnoreCase)).ToList();
+        foreach (var lone in tables.Where(t => !Has(t, ".ucas")))
+            notes.Add($"\"{Path.GetFileName(lone)}\" has no .ucas beside it, so its set is incomplete and was not read.");
+        foreach (var data in all.Where(f => f.EndsWith(".ucas", StringComparison.OrdinalIgnoreCase) && !Has(f, ".utoc")))
+            notes.Add($"\"{Path.GetFileName(data)}\" has no .utoc beside it, so its set is incomplete and cannot be read (a mod manager may have given that file to another mod with the same file names).");
+        var paks = all.Where(f => f.EndsWith(".pak", StringComparison.OrdinalIgnoreCase) && !Has(f, ".utoc") && !Has(f, ".ucas")).ToList();
+        return tables.Where(t => Has(t, ".ucas")).Concat(paks)
+            .Where(f => !Path.GetFileNameWithoutExtension(f).Equals("global", StringComparison.OrdinalIgnoreCase))
+            .Order(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     private static string? ProjectOf(string path)
@@ -365,7 +329,227 @@ internal sealed class UnrealModImporter
         return parts.Length > 2 && parts[1].Equals("Content", StringComparison.OrdinalIgnoreCase) && !parts[0].Equals("Engine", StringComparison.OrdinalIgnoreCase) ? parts[0] : null;
     }
 
-    // ---- The game ----
+    /// <summary>A path's part under its project's <c>Content</c> folder, lower case, no extension: how a mod cooked under another project name is still found.</summary>
+    private static string ContentRel(string path)
+    {
+        path = path.Replace('\\', '/');
+        var dot = path.LastIndexOf('.');
+        if (dot > path.LastIndexOf('/')) path = path[..dot];
+        if (path.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase)) return path[6..].ToLowerInvariant();
+        var content = path.IndexOf("/Content/", StringComparison.OrdinalIgnoreCase);
+        return (content >= 0 ? path[(content + 9)..] : path.TrimStart('/')).ToLowerInvariant();
+    }
+
+    // ---- The game, and every mod over it ----
+
+    private void ImportAll(List<Mod> mods, CancellationToken cancel)
+    {
+        var usable = mods.Where(m => m.Problem is null).ToList();
+        if (!usable.Any(m => m.Job.Export)) return;
+
+        // Each container's paths, read with no game behind them: the project they name, and a locked one.
+        var empty = Path.Combine(_cache, ".work", "none");
+        Directory.CreateDirectory(empty);
+        using (var lister = new DefaultFileProvider(new DirectoryInfo(empty), SearchOption.TopDirectoryOnly, new VersionContainer(EGame.GAME_UE4_LATEST), StringComparer.OrdinalIgnoreCase))
+        {
+            lister.Initialize();
+            Register(lister, usable);
+            lister.SubmitKey(new FGuid(), new FAesKey(new byte[32]));
+            foreach (var mod in usable)
+            {
+                var paths = lister.MountedVfs.Where(v => mod.Registered.Contains(v.Name)).SelectMany(v => v.Files.Keys).ToList();
+                if (paths.Count == 0 && lister.UnloadedVfs.Any(v => mod.Registered.Contains(v.Name) && v.IsEncrypted))
+                    mod.Problem = "the mod's own files are locked (encrypted) by its maker, so they cannot be read.";
+                else if (paths.Count == 0) mod.Problem = mod.Notes.FirstOrDefault() ?? "its game files hold nothing that could be read.";
+                mod.Project = paths.Select(ProjectOf).Where(p => p is not null).GroupBy(p => p!, StringComparer.OrdinalIgnoreCase)
+                    .OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault();
+            }
+        }
+        usable = usable.Where(m => m.Problem is null).ToList();
+        if (!usable.Any(m => m.Job.Export)) return;
+
+        // The game they are for: the one whose project they name. A mod cooked under a project name of its own
+        // (Yor/Content/...) is for the game the others are for.
+        var (fmodelGames, fmodelData) = UnrealGameLocator.FModelSettings();
+        var games = UnrealGameLocator.InstalledGames(_settings.Folders(), fmodelGames);
+        var named = usable.Select(m => m.Project).Where(p => p is not null).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var found = named.Select(p => (Project: p!, Games: UnrealGameLocator.ForProject(p!, games))).Where(x => x.Games.Count > 0).ToList();
+        if (found.Count == 0)
+        {
+            var project = usable.First(m => m.Job.Export).Project;
+            if (project is null) throw new Unusable("its game files name no game content (no \"<Game>/Content/...\" paths), so the game it is for is unknown.");
+            throw new NeedsUser($"it is a mod for a game whose files are called \"{project}\", and no installed game has them. If that game is installed, add a line to {_settingsPath}:  {project} folder: <the game's folder>");
+        }
+        var game = found.GroupBy(x => x.Games[0].Paks, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => usable.Count(m => g.Any(x => x.Project.Equals(m.Project, StringComparison.OrdinalIgnoreCase)))).First().First().Games[0];
+        // A mod is read with the game it names; one cooked under a project name of its own only when it is a CNS
+        // outfit (those are Stellar Blade's). Reading another game's files as this game's corrupts memory in CUE4Parse.
+        foreach (var mod in usable)
+        {
+            var mine = mod.Project is not null && UnrealGameLocator.ForProject(mod.Project, games).Any(g => g.Paks.Equals(game.Paks, StringComparison.OrdinalIgnoreCase));
+            if (mine || (mod.Cns.Count > 0 && (mod.Project is null || UnrealGameLocator.ForProject(mod.Project, games).Count == 0))) continue;
+            var other = mod.Project is null ? null : UnrealGameLocator.ForProject(mod.Project, games).FirstOrDefault();
+            mod.Problem = other is not null
+                ? $"it is a mod for {other.Name}, not {game.Name}; mods of one game are read at a time, so drop it with that game's mods alone."
+                : mod.Project is null
+                    ? $"its game files name no content of {game.Name} or of another installed game (it is likely a mod for another game), so it cannot be read."
+                    : $"it is a mod for a game whose files are called \"{mod.Project}\", which no installed game has, so it cannot be read. If that game is installed, add a line to {_settingsPath}:  {mod.Project} folder: <the game's folder>";
+        }
+        usable = usable.Where(m => m.Problem is null).ToList();
+        if (!usable.Any(m => m.Job.Export)) return;
+        _gameName = game.Name;
+        Say($"Game: {game.Name} ({game.Paks})");
+        var fmodel = UnrealGameLocator.FModelEntry(game, fmodelGames);
+        var version = Version(game, fmodel)
+            ?? throw new NeedsUser($"the Unreal Engine version of {game.Name} could not be told. Add a line to {_settingsPath}:  {game.Name} engine: <version, like 5.1>");
+        Say($"Engine: {version}");
+        InitNatives(fmodelData);
+
+        var mappings = Mappings(game, fmodel, fmodelData);
+        _provider = new DefaultFileProvider(new DirectoryInfo(game.Paks), SearchOption.TopDirectoryOnly, new VersionContainer(version), StringComparer.OrdinalIgnoreCase);
+        if (mappings is not null)
+        {
+            Say($"Mappings: {mappings}");
+            _provider.MappingsContainer = new FileUsmapTypeMappingsProvider(mappings, StringComparer.OrdinalIgnoreCase);
+        }
+        _provider.Initialize();
+        Register(_provider, usable);
+        var keys = new List<KeyValuePair<FGuid, FAesKey>> { new(new FGuid(), new FAesKey(new byte[32])) };
+        foreach (var (guid, key) in _settings.Keys(game.Name, game.Project).Concat(fmodel?.Keys ?? []))
+        {
+            try { keys.Add(new(guid.Length == 0 ? new FGuid() : new FGuid(guid.Replace("-", "")), new FAesKey(key))); }
+            catch (Exception) { usable.ForEach(m => m.Notes.Add($"The key given for {game.Name} ({Short(key)}) is not a valid key, so it was not used.")); }
+        }
+        _provider.SubmitKeys(keys);
+        var locked = _provider.UnloadedVfs.Where(vfs => vfs.IsEncrypted && !usable.Any(m => m.Registered.Contains(vfs.Name))).ToList();
+        if (locked.Count > 0)
+        {
+            var needed = locked.Select(vfs => vfs.EncryptionKeyGuid).Distinct().ToList();
+            var which = needed.All(g => g == new FGuid()) ? "key" : $"key ({string.Join(", ", needed.Select(g => g.ToString()))})";
+            throw new NeedsUser($"{game.Name} keeps its files locked and needs its AES {which}. Put it in {_settingsPath} as a line:  {game.Name} key: 0x<64 letters and digits>");
+        }
+        _provider.PostMount();
+        _project = _provider.ProjectName ?? game.Project;
+        _shared = Path.Combine(_cache, "shared", Token(game.Name).Trim('_'));
+        Say($"Mounted {_provider.MountedVfs.Count} containers, {_provider.Files.Count:N0} files");
+        foreach (var mod in usable)
+        {
+            foreach (var vfs in _provider.MountedVfs.Where(v => mod.Registered.Contains(v.Name)))
+                foreach (var (path, file) in vfs.Files)
+                {
+                    if (!path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)) continue;
+                    mod.Files[ContentRel(path)] = file;
+                    _allModFiles[ContentRel(path)] = file;
+                }
+            _modVfs.UnionWith(mod.Registered);
+        }
+        var byId = PackageIndex();
+
+        foreach (var mod in usable.Where(m => m.Job.Export))
+        {
+            cancel.ThrowIfCancellationRequested();
+            Say($"-- {mod.Name}");
+            _notes = mod.Notes;
+            var undo = Prefer(byId, mod);
+            try { ExportMod(mod, cancel); }
+            catch (MappingException) { mod.Need = $"{game.Name} needs its mappings file (a .usmap made for this version of the game) to be read. Put a line in {_settingsPath}:  {game.Name} mappings: <where the .usmap file is>"; }
+            catch (Unusable unusable) { mod.Problem = unusable.Message; }
+            catch (Exception ex) when (ex.Message.Contains("Oodle", StringComparison.OrdinalIgnoreCase))
+            {
+                mod.Need = "reading this game needs the Oodle decompressor (oodle-data-shared.dll), which FModel downloads the first time it runs. Run FModel once, or put that file beside wowcrucible.exe.";
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException) { mod.Problem = $"It could not be read: {Flat(ex.Message)}"; }
+            finally { foreach (var (id, file) in undo) byId[id] = file; }
+        }
+        // A game skeleton can have hundreds of bones (cloth, hair, face rigs) no mesh here moves: the clips keep the used ones.
+        foreach (var (skeleton, clip) in _newClips)
+            if (_bones.TryGetValue(skeleton, out var bones) && bones.Count > 0) PsaTrim.Keep(clip, bones);
+    }
+
+    /// <summary>
+    /// Registers every mod's containers with the provider in load order, each under a name whose patch number is its
+    /// place (<c>m0003_3_P</c>), so the later wins over the earlier and all over the game, as the game mounts them.
+    /// </summary>
+    private static void Register(AbstractVfsFileProvider provider, IEnumerable<Mod> mods)
+    {
+        var order = 0;
+        foreach (var mod in mods)
+        {
+            // Each provider numbers the mods again: only this one's names count.
+            mod.Registered.Clear();
+            mod.Order.Clear();
+            foreach (var container in mod.Containers)
+            {
+                order++;
+                var stem = Path.GetFileNameWithoutExtension(container);
+                var patch = $"m{order:D4}_{order}_P";
+                var ext = Path.GetExtension(container);
+                var dir = Path.GetDirectoryName(container)!;
+                mod.Registered.Add(patch + ext);
+                mod.Order.Add(patch + ext);
+                provider.RegisterVfs(Path.Combine(dir, patch + ext), [File.OpenRead(container)], open =>
+                {
+                    var file = Path.GetFileName(open);
+                    var actual = file.StartsWith(patch, StringComparison.OrdinalIgnoreCase) ? stem + file[patch.Length..] : file;
+                    return new FRandomAccessFileStreamArchive(Path.Combine(dir, actual), provider.Versions);
+                });
+            }
+        }
+    }
+
+    /// <summary>
+    /// The provider's packages by id, with the version that wins by path put in: CUE4Parse resolves a reference (a
+    /// material's texture) by package id from whichever container it met first, the game's own, so a mod's
+    /// replacement texture would never be seen.
+    /// </summary>
+    private ConcurrentDictionary<FPackageId, GameFile> PackageIndex()
+    {
+        if (_provider.Files.ById is not ConcurrentDictionary<FPackageId, GameFile> byId)
+            throw new InvalidOperationException("CUE4Parse's package index is not the one this was written for.");
+        var replaced = 0;
+        foreach (var (id, file) in byId.ToArray())
+            if (_provider.Files.TryGetValue(file.Path, out var winner) && !ReferenceEquals(winner, file)) { byId[id] = winner; replaced++; }
+        Say($"Package index: {replaced} replaced by a mod's version");
+        return byId;
+    }
+
+    /// <summary>While one mod is exported its own packages win over every other mod's, as when it is the only one installed; the undo list puts the others back.</summary>
+    private List<(FPackageId, GameFile)> Prefer(ConcurrentDictionary<FPackageId, GameFile> byId, Mod mod)
+    {
+        var undo = new List<(FPackageId, GameFile)>();
+        var mine = mod.Files.Values.ToDictionary(f => f.Path, f => f, StringComparer.OrdinalIgnoreCase);
+        foreach (var (id, file) in byId)
+            if (mine.TryGetValue(file.Path, out var own) && !ReferenceEquals(own, file)) { undo.Add((id, file)); byId[id] = own; }
+        return undo;
+    }
+
+    private IPackage? Load(GameFile file)
+    {
+        try { return _provider.LoadPackage(file); }
+        catch (MappingException) { throw; }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>An object by its game path (<c>/Game/A/B.B</c>): the mod's own version first, then the winner of all.</summary>
+    private T? Find<T>(string gamePath, Mod? mod) where T : UObject
+    {
+        if (string.IsNullOrWhiteSpace(gamePath)) return null;
+        var rel = ContentRel(gamePath);
+        var file = mod?.Files.GetValueOrDefault(rel) ?? (_provider.Files.TryGetValue($"{_project}/Content/{rel}.uasset", out var g) ? g : null) ?? _allModFiles.GetValueOrDefault(rel);
+        if (file is null || Load(file) is not { } package) return null;
+        var objectName = gamePath.Contains('.') ? gamePath[(gamePath.LastIndexOf('.') + 1)..] : rel[(rel.LastIndexOf('/') + 1)..];
+        var exports = SafeExports(package).OfType<T>().ToList();
+        return exports.FirstOrDefault(e => e.Name.Equals(objectName, StringComparison.OrdinalIgnoreCase)) ?? exports.FirstOrDefault();
+    }
+
+    /// <summary>Whether an object comes from a mod (any dropped one), not from the game itself.</summary>
+    private bool FromMod(UObject obj)
+    {
+        var package = obj.Owner?.Name ?? obj.GetPathName();
+        var rel = ContentRel(package);
+        return _provider.Files.TryGetValue($"{_project}/Content/{rel}.uasset", out var file) ? file is VfsEntry { Vfs: { } vfs } && _modVfs.Contains(vfs.Name) : _allModFiles.ContainsKey(rel);
+    }
+
+    // ---- Versions, mappings, natives (as FModel finds them) ----
 
     /// <summary>
     /// How CUE4Parse reads the game: the user's line, FModel's choice for the folder, or the engine version in the game's
@@ -413,7 +597,10 @@ internal sealed class UnrealModImporter
         return null;
     }
 
-    /// <summary>Oodle and zlib for compressed game files: beside this tool, or where FModel keeps its own copies.</summary>
+    /// <summary>
+    /// Oodle and zlib for compressed game files, and Detex for some texture formats: beside this tool, or where FModel keeps its own copies.
+    /// CUE4Parse-Natives (animation decompression, ACL) ships beside this tool and is found by its name.
+    /// </summary>
     private static void InitNatives(string? fmodelData)
     {
         var places = new[] { AppContext.BaseDirectory, fmodelData }.Where(p => p is not null && Directory.Exists(p)).Cast<string>().ToList();
@@ -423,6 +610,12 @@ internal sealed class UnrealModImporter
             if (file is null) continue;
             try { OodleHelper.Initialize(file); break; } catch (Exception) { }
         }
+        // Detex decodes BC7 and other block formats some mods use; FModel keeps its copy beside Oodle.
+        var detex = places.Select(p => Path.Combine(p, CUE4Parse_Conversion.Textures.BC.DetexHelper.DLL_NAME)).FirstOrDefault(File.Exists);
+        if (detex is not null)
+        {
+            try { CUE4Parse_Conversion.Textures.BC.DetexHelper.Initialize(detex); } catch (Exception) { }
+        }
         var zlib = places.Select(p => Path.Combine(p, ZlibHelper.DLL_NAME)).FirstOrDefault(File.Exists);
         if (zlib is not null)
         {
@@ -430,7 +623,7 @@ internal sealed class UnrealModImporter
         }
     }
 
-    // ---- The look ----
+    // ---- Looks ----
 
     private static string Norm(string path, string project)
     {
@@ -465,102 +658,307 @@ internal sealed class UnrealModImporter
     /// <summary>Words of a mesh not meant to be worn: cinematics, debug and leftovers.</summary>
     private static readonly string[] OddMesh = ["title", "cin", "cinematic", "test", "dead", "die", "lod", "morph", "old", "temp", "ui", "photo", "preview", "proxy", "dummy", "physics", "jali"];
 
-    private void ExportLook(DefaultFileProvider provider, HashSet<string> modNames, string outDir, CancellationToken cancel)
+    /// <summary>One mesh a look wears, and what its material slots show instead of their own.</summary>
+    private sealed class Worn(USkeletalMesh mesh)
     {
-        var project = provider.ProjectName ?? "Game";
-        var modReaders = provider.MountedVfs.Where(vfs => modNames.Contains(Path.GetFileName(vfs.Name))).ToList();
-        var modPackages = modReaders.SelectMany(vfs => vfs.Files.Keys)
-            .Where(k => k.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        Say($"The mod changes {modPackages.Count} assets.");
+        public USkeletalMesh Mesh { get; } = mesh;
+        public Dictionary<int, UMaterialInterface> Materials { get; } = [];
+        public Dictionary<int, List<(string Name, JsonElement Value, string Type)>> Parameters { get; } = [];
+        public HashSet<int> Hidden { get; } = [];
+        /// <summary><c>hair</c> or <c>head</c> for a piece a CNS list says goes on the head, so benilla hangs it there.</summary>
+        public string? Role { get; set; }
+        public bool Changed => Materials.Count > 0 || Parameters.Count > 0 || Hidden.Count > 0;
+    }
 
-        var meshes = new List<USkeletalMesh>();
-        var overrides = new HashSet<string>();   // textures and materials the mod changes
-        foreach (var path in modPackages)
+    private void ExportMod(Mod mod, CancellationToken cancel)
+    {
+        var looks = new List<(string Name, List<Worn> Meshes)>();
+        if (mod.Cns.Count > 0) looks.AddRange(CnsLooks(mod, cancel));
+        if (looks.Count == 0) looks.AddRange(PlainLooks(mod, cancel));
+        if (looks.Count == 0) throw new Unusable("it changes no character model (no skeletal mesh, texture or material of one), so there is no look in it.");
+
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var k = 0; k < looks.Count; k++)
         {
             cancel.ThrowIfCancellationRequested();
-            if (!provider.TryLoadPackage(path, out var package)) continue;
-            foreach (var export in SafeExports(package))
+            var (name, meshes) = looks[k];
+            var unique = name;
+            for (var n = 2; !used.Add(unique); n++) unique = $"{name} {n}";
+            try
             {
-                switch (export)
+                var folder = (k + 1).ToString("D2");
+                WriteLook(mod, folder, unique, meshes, cancel);
+                mod.Looks.Add((unique, folder));
+            }
+            catch (MappingException) { throw; }
+            catch (Exception ex) when (ex is not OperationCanceledException) { mod.Notes.Add($"{unique}: it could not be written: {Flat(ex.Message)}"); }
+        }
+    }
+
+    // A CNS outfit list: what it says, read the way DekCNS's main.lua reads it.
+
+    private IEnumerable<(string Name, List<Worn> Meshes)> CnsLooks(Mod mod, CancellationToken cancel)
+    {
+        var entries = new List<JsonElement>();
+        foreach (var file in mod.Cns)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(file), new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
+                if (doc.RootElement.ValueKind == JsonValueKind.Array) entries.AddRange(doc.RootElement.EnumerateArray().Select(e => e.Clone()));
+                else if (doc.RootElement.ValueKind == JsonValueKind.Object) entries.Add(doc.RootElement.Clone());
+            }
+            catch (JsonException ex) { mod.Notes.Add($"Its outfit list \"{Path.GetFileName(file)}\" could not be read ({Flat(ex.Message)})."); }
+        }
+        string Str(JsonElement e, string key) => e.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+        List<string> Strs(JsonElement e, string key) => e.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Array
+            ? v.EnumerateArray().Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() ?? "" : "").ToList() : [];
+        string Type(JsonElement e) => Str(e, "FitMeshType") is { Length: > 0 } t ? t : "Body";
+
+        // The variants an entry offers: (name, the mesh it is, the slots it changes).
+        List<(string Variant, Worn Worn)> Variants(JsonElement e)
+        {
+            var list = new List<(string, Worn)>();
+            var names = Strs(e, "OutfitNames");
+            var hidden = new HashSet<int>();
+            if (e.TryGetProperty("UserConfigs", out var configs) && configs.TryGetProperty("MaterialToggles", out var toggles) && toggles.ValueKind == JsonValueKind.Array)
+                foreach (var t in toggles.EnumerateArray())
+                    if (t.TryGetProperty("Value", out var on) && on.ValueKind == JsonValueKind.False && t.TryGetProperty("MaterialIndex", out var mi) && mi.TryGetInt32(out var index))
+                        hidden.Add(index);
+            var datas = e.TryGetProperty("OutfitDatas", out var d) && d.ValueKind == JsonValueKind.Array ? d.EnumerateArray().ToList() : [];
+            if (datas.Count > 0)
+            {
+                for (var i = 0; i < datas.Count; i++)
                 {
-                    case USkeletalMesh mesh: meshes.Add(mesh); break;
-                    case UTexture or UMaterialInterface: overrides.Add(PackageOf(export, project)); break;
+                    var data = datas[i];
+                    var meshPath = Str(data, "Mesh");
+                    if (Find<USkeletalMesh>(meshPath, mod) is not { } mesh) { mod.Notes.Add($"{Str(e, "DisplayName")}: its mesh {meshPath} is not in the mod or the game, so that variant was skipped."); continue; }
+                    var worn = new Worn(mesh);
+                    worn.Hidden.UnionWith(hidden);
+                    var mats = Strs(data, "Materials");
+                    for (var m = 0; m < mats.Count; m++)
+                        if (mats[m].Length > 0 && Find<UMaterialInterface>(mats[m], mod) is { } material) worn.Materials[m] = material;
+                    if (data.TryGetProperty("Parameters", out var ps) && ps.ValueKind == JsonValueKind.Array)
+                        foreach (var p in ps.EnumerateArray())
+                        {
+                            if (p.TryGetProperty("LayerIndex", out var layer) && layer.TryGetInt32(out var li) && li >= 0) continue;
+                            var slot = p.TryGetProperty("MaterialIndex", out var s) && s.TryGetInt32(out var si) ? si : 0;
+                            if (!p.TryGetProperty("Value", out var value)) continue;
+                            if (!worn.Parameters.TryGetValue(slot, out var list2)) worn.Parameters[slot] = list2 = [];
+                            list2.Add((Str(p, "ParamName"), value.Clone(), Str(p, "ParamType")));
+                        }
+                    if (data.TryGetProperty("HiddenMats", out var hm) && hm.ValueKind == JsonValueKind.Array)
+                        foreach (var h in hm.EnumerateArray())
+                        {
+                            if (h.TryGetInt32(out var hi)) worn.Hidden.Add(hi);
+                            else if (h.ValueKind == JsonValueKind.String)
+                                for (var slot = 0; slot < mesh.Materials.Length; slot++)
+                                    if (mesh.Materials[slot]?.ResolvedObject?.Name.Text.Equals(h.GetString(), StringComparison.OrdinalIgnoreCase) == true) worn.Hidden.Add(slot);
+                        }
+                    list.Add((i < names.Count && names[i].Length > 0 ? names[i] : mesh.Name, worn));
                 }
             }
+            else
+            {
+                var paths = Strs(e, "OutfitPaths");
+                for (var i = 0; i < paths.Count; i++)
+                {
+                    if (Find<USkeletalMesh>(paths[i], mod) is not { } mesh) { mod.Notes.Add($"{Str(e, "DisplayName")}: its mesh {paths[i]} is not in the mod or the game, so that variant was skipped."); continue; }
+                    var worn = new Worn(mesh);
+                    worn.Hidden.UnionWith(hidden);
+                    list.Add((i < names.Count && names[i].Length > 0 ? names[i] : Regex.Replace(mesh.Name, "[_]+", " "), worn));
+                }
+            }
+            return list;
         }
 
+        var bodies = entries.Where(e => Type(e).Equals("Body", StringComparison.OrdinalIgnoreCase)).ToList();
+        var hairs = entries.Where(e => Type(e).Equals("Hair", StringComparison.OrdinalIgnoreCase)).ToList();
+        var pieces = entries.Except(bodies).Except(hairs).ToList();
+        var hair = hairs.SelectMany(Variants).Select(v => v.Worn).FirstOrDefault();
+        foreach (var piece in pieces.Where(_ => bodies.Count > 0))
+            mod.Notes.Add($"Its {Type(piece).ToLowerInvariant()} piece \"{Str(piece, "DisplayName")}\" is chosen apart from the outfit in the game, so it is not worn here.");
+        var made = 0;
+        foreach (var entry in bodies)
+        {
+            cancel.ThrowIfCancellationRequested();
+            var title = Str(entry, "DisplayName") is { Length: > 0 } dn ? dn : Str(entry, "UniqueFitID");
+            var variants = Variants(entry);
+            foreach (var (variant, worn) in variants)
+            {
+                made++;
+                var name = variants.Count == 1 ? title : $"{title} - {variant}";
+                yield return (name, WithCompanions([worn], hair));
+            }
+        }
+        if (bodies.Count > 0) yield break;
+
+        // No outfit of its own: what it adds, worn over the character's own suit.
+        foreach (var entry in pieces.Concat(hairs))
+        {
+            var type = Type(entry);
+            if (type.Equals("Weapon", StringComparison.OrdinalIgnoreCase)) { mod.Notes.Add($"\"{Str(entry, "DisplayName")}\" is a weapon, not something worn, so it was skipped."); continue; }
+            foreach (var (variant, worn) in Variants(entry).Take(1))
+            {
+                if ((OwnSuit(worn.Mesh) ?? SuitOf(Str(entry, "CharacterID"))) is not { } suit) { mod.Notes.Add($"\"{Str(entry, "DisplayName")}\": the character's own suit was not found to wear it with, so it was skipped."); continue; }
+                var name = Str(entry, "DisplayName") is { Length: > 0 } dn ? dn : variant;
+                var isHair = type.Equals("Hair", StringComparison.OrdinalIgnoreCase);
+                var meshes = WithCompanions([new Worn(suit)], isHair ? worn : null);
+                if (!isHair) { worn.Role = "head"; meshes.Add(worn); }
+                yield return ($"{name} (on{CharacterOf(suit)}'s own suit)", meshes);
+            }
+        }
+    }
+
+    private static string CharacterOf(USkeletalMesh mesh)
+    {
+        var words = Words(mesh.Name).TakeWhile(w => !w.Any(char.IsDigit)).Where(w => w is not ("ch" or "p" or "npc" or "sk")).ToList();
+        return words.Count == 0 ? "" : " " + string.Join(" ", words.Select(w => w.ToUpperInvariant()));
+    }
+
+    /// <summary>The character's own suit: <c>&lt;skeleton folder&gt;_Body</c> beside its skeleton (<c>CH_P_EVE_01_Body</c>).</summary>
+    private USkeletalMesh? OwnSuit(USkeletalMesh any)
+    {
+        var skeleton = any.Skeleton?.ResolvedObject?.GetPathName();
+        if (skeleton is null) return null;
+        var folder = skeleton[..skeleton.LastIndexOf('/')];
+        var name = folder[(folder.LastIndexOf('/') + 1)..];
+        return Find<USkeletalMesh>($"{folder}/{name}_Body.{name}_Body", null);
+    }
+
+    /// <summary>A CNS character's own suit by its id (<c>EVE</c>: <c>CH_P_EVE_01_Body</c>), for a piece made with a skeleton of its own.</summary>
+    private USkeletalMesh? SuitOf(string character)
+    {
+        if (character.Length == 0) character = "EVE";
+        var pattern = new Regex($@"/[A-Za-z]+_[A-Za-z]+_{Regex.Escape(character)}_0?1/[A-Za-z]+_[A-Za-z]+_{Regex.Escape(character)}_0?1_Body\.uasset$", RegexOptions.IgnoreCase);
+        var path = _provider.Files.Keys.FirstOrDefault(k => pattern.IsMatch(k));
+        return path is not null && _provider.Files.TryGetValue(path, out var file) && Load(file) is { } package ? SafeExports(package).OfType<USkeletalMesh>().FirstOrDefault() : null;
+    }
+
+    /// <summary>A body with the character's own face and hair added where it has none: found beside its skeleton.</summary>
+    private List<Worn> WithCompanions(List<Worn> worn, Worn? hair)
+    {
+        var body = worn[0].Mesh;
+        bool Wears(USkeletalMesh mesh, params string[] what) =>
+            Words(mesh.Name).Any(what.Contains) || mesh.Materials.Any(m => m?.ResolvedObject?.Name.Text is { } n && Words(n).Any(what.Contains));
+        var list = new List<Worn>(worn);
+        if (!worn.Any(w => Wears(w.Mesh, "head", "face")) && Companion(body, "face") is { } face) list.Add(new Worn(face));
+        if (hair is not null) { hair.Role = "hair"; list.Add(hair); }
+        else if (!worn.Any(w => Wears(w.Mesh, "hair")) && Companion(body, "hair") is { } own) list.Add(new Worn(own));
+        return list;
+    }
+
+    private readonly Dictionary<string, USkeletalMesh?> _companions = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The character's own <paramref name="what"/> (face or hair): a mesh of the body's skeleton in the skeleton's
+    /// folder or one beside it, named for the character (<c>CH_P_EVE</c> of <c>CH_P_EVE_01</c>) and <paramref name="what"/>,
+    /// the plainest name first.
+    /// </summary>
+    private USkeletalMesh? Companion(USkeletalMesh body, string what)
+    {
+        var skeleton = body.Skeleton?.ResolvedObject?.GetPathName();
+        if (skeleton is null) return null;
+        var key = skeleton + "|" + what;
+        if (_companions.TryGetValue(key, out var known)) return known;
+        var rel = ContentRel(skeleton);
+        var folder = rel[..Math.Max(0, rel.LastIndexOf('/'))];
+        var around = folder.Contains('/') ? folder[..folder.LastIndexOf('/')] + "/" : "";
+        var character = Words(folder[(folder.LastIndexOf('/') + 1)..]).TakeWhile(w => !w.Any(char.IsDigit)).ToList();
+        USkeletalMesh? found = null;
+        if (character.Count > 0 && around.Length > 0)
+        {
+            var prefix = $"{_project}/Content/{around}".ToLowerInvariant();
+            string[] never = ["skeleton", "physics", "clothdata", "anim", "blueprint", "mi", "ma", "t", "tex", "snapshot", "collision", "for", "seperate", "seperated", "separate", "ex", "exhair", "rig", "rigpls", "ctrl", "ponytail"];
+            var candidates = _provider.Files.Keys.Where(k => k.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase) && k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                    && k.Count(c => c == '/') <= prefix.Count(c => c == '/') + 1)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Select(k => (Path: k, Words: Words(Path.GetFileNameWithoutExtension(k))))
+                .Where(c => c.Words.Contains(what) && c.Words.Take(character.Count).SequenceEqual(character)
+                    && !c.Words.Any(w => OddMesh.Contains(w) || never.Contains(w) || w.StartsWith("jali", StringComparison.Ordinal)))
+                .OrderBy(c => c.Words.Count).ThenByDescending(c => Path.GetFileNameWithoutExtension(c.Path), StringComparer.OrdinalIgnoreCase).Take(20);
+            foreach (var (path, _) in candidates)
+            {
+                if (!_provider.Files.TryGetValue(path, out var file) || Load(file) is not { } package) continue;
+                var mesh = SafeExports(package).OfType<USkeletalMesh>().FirstOrDefault();
+                if (mesh is not null && mesh.Skeleton?.ResolvedObject?.GetPathName() == skeleton) { found = mesh; break; }
+            }
+        }
+        _companions[key] = found;
+        return found;
+    }
+
+    // Any other mod: the character meshes it changes, as the game would show them.
+
+    private IEnumerable<(string Name, List<Worn> Meshes)> PlainLooks(Mod mod, CancellationToken cancel)
+    {
+        // A folder of several pak sets each with a character of its own: a look each (options of one mod).
+        var perSet = new List<(string Name, List<string> Packages)>();
+        for (var i = 0; i < mod.Containers.Count; i++)
+        {
+            var registered = mod.Order[i];
+            if (_provider.MountedVfs.FirstOrDefault(v => v.Name.Equals(registered, StringComparison.OrdinalIgnoreCase)) is not { } vfs) continue;
+            perSet.Add((Path.GetFileNameWithoutExtension(mod.Containers[i]), vfs.Files.Keys.Where(k => k.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)).ToList()));
+        }
+        var all = perSet.SelectMany(s => s.Packages).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        (List<USkeletalMesh> Meshes, HashSet<string> Overrides) Read(List<string> packages)
+        {
+            var meshes = new List<USkeletalMesh>();
+            var overrides = new HashSet<string>();
+            foreach (var path in packages)
+            {
+                cancel.ThrowIfCancellationRequested();
+                if (!mod.Files.TryGetValue(ContentRel(path), out var file) || Load(file) is not { } package) continue;
+                foreach (var export in SafeExports(package))
+                {
+                    switch (export)
+                    {
+                        case USkeletalMesh mesh: meshes.Add(mesh); break;
+                        case UTexture or UMaterialInterface: overrides.Add(PackageOf(export, _project)); break;
+                    }
+                }
+            }
+            return (meshes, overrides);
+        }
+
+        var readSets = perSet.Select(s => (s.Name, Read: Read(s.Packages))).ToList();
+        if (readSets.Count(s => s.Read.Meshes.Count > 0) > 1 && readSets.All(s => s.Read.Meshes.Count > 0))
+        {
+            foreach (var (name, read) in readSets)
+                if (Assemble(read.Meshes, read.Overrides, cancel) is { Count: > 0 } meshes) yield return ($"{mod.Name} - {Regex.Replace(Regex.Replace(name, "_P$", ""), "[_]+", " ")}", meshes);
+            yield break;
+        }
+        var whole = (Meshes: readSets.SelectMany(s => s.Read.Meshes).ToList(), Overrides: readSets.SelectMany(s => s.Read.Overrides).ToHashSet());
+        Say($"The mod changes {all.Count} assets.");
+        var assembled = Assemble(whole.Meshes, whole.Overrides, cancel);
+        if (assembled.Count == 0)
+        {
+            if (whole.Overrides.Count > 0) throw new Unusable("it changes textures or materials, but no character in the game was found that wears them.");
+            yield break;
+        }
+        yield return (mod.Name, assembled);
+    }
+
+    private List<Worn> Assemble(List<USkeletalMesh> meshes, HashSet<string> overrides, CancellationToken cancel)
+    {
         // What the mod's own meshes wear; what is left is worn by meshes of the game it did not change.
         var worn = new HashSet<string>();
-        foreach (var mesh in meshes) foreach (var p in WornBy(mesh, project)) worn.Add(p);
+        foreach (var mesh in meshes) foreach (var p in WornBy(mesh, _project)) worn.Add(p);
         var leftover = overrides.Where(o => !worn.Contains(o)).ToList();
-        foreach (var mesh in BaseMeshesWearing(provider, leftover, meshes, project, cancel))
+        foreach (var mesh in BaseMeshesWearing(leftover, meshes, cancel))
         {
             Say($"Also worn: {mesh.Name} (from the game; the mod changes its look)");
             meshes.Add(mesh);
         }
-        if (meshes.Count == 0)
-            throw new Unusable(overrides.Count > 0
-                ? "it changes textures or materials, but no character in the game was found that wears them."
-                : "it changes no character model (no skeletal mesh, texture or material of one), so there is no look in it.");
-
-        var body = meshes[0];
-        if (!meshes.Any(m => Words(m.Name).Contains("hair")) && Hair(provider, body, cancel) is { } hair)
+        if (meshes.Count == 0) return [];
+        var list = meshes.Select(m => new Worn(m)).ToList();
+        if (!meshes.Any(m => Words(m.Name).Contains("hair")) && Companion(meshes[0], "hair") is { } hair)
         {
             Say($"Also worn: {hair.Name} (the character's hair, from the game)");
-            meshes.Add(hair);
+            list.Add(new Worn(hair));
         }
-        var skeleton = body.Skeleton?.ResolvedObject?.Load() as USkeleton;
-        var chosen = skeleton is null ? [] : Animations(provider, skeleton, project, cancel);
-        if (chosen.Count == 0) _notes.Add("No animations were found in the game for it, so it will stand still.");
-        else Say($"Animations: {string.Join(", ", chosen.Select(c => $"{c.Word} {c.Clip.Name}"))}");
-        foreach (var (word, clip) in chosen) _look.Add($"{word}: {clip.Name}");
-        var clips = chosen.Select(c => c.Clip).DistinctBy(c => c.GetPathName()).ToList();
-
-        var options = new ExportOptions(meshFormat: EMeshFormat.ActorX, meshQuality: EMeshQuality.Highest, texturePlatform: ETexturePlatform.DesktopMobile,
-            textureFormat: ETextureFormat.Png, exportMaterials: false, exportMorphTargets: false, socketFormat: ESocketFormat.Bone);
-        var session = new ExportSession();
-        foreach (var mesh in meshes) session.Add(mesh);
-        foreach (var clip in clips) session.Add(clip);
-        var results = session.RunAsync(outDir, options, null, cancel).GetAwaiter().GetResult();
-        foreach (var failed in results.Where(r => !r.Success))
-        {
-            if (failed.Error is MappingException mapping) throw mapping;
-            _notes.Add($"{Path.GetFileName(failed.ObjectPath)} could not be exported: {failed.Error?.Message}");
-        }
-        var models = results.Where(r => r.Success).SelectMany(r => r.DiskFilePaths).Where(p => p.EndsWith(".psk", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".pskx", StringComparison.OrdinalIgnoreCase)).ToList();
-        if (models.Count == 0) throw new Unusable("its model could not be exported from the game files.");
-        // A game skeleton can have thousands of bones (cloth, hair, face rigs) the meshes do not use: the clips keep the used ones.
-        var used = new HashSet<string>(models.SelectMany(PsaTrim.BoneNames), StringComparer.OrdinalIgnoreCase);
-        foreach (var clip in results.Where(r => r.Success).SelectMany(r => r.DiskFilePaths).Where(p => p.EndsWith(".psa", StringComparison.OrdinalIgnoreCase)))
-            PsaTrim.Keep(clip, used);
-
-        // Materials as FModel writes them, and the pictures that colour them.
-        var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var mesh in meshes)
-        {
-            foreach (var slot in mesh.Materials)
-            {
-                if (slot?.ResolvedObject?.Load() is not UMaterialInterface material || !written.Add(material.GetPathName())) continue;
-                var parameters = new CMaterialParams2();
-                try { material.GetParams(parameters, EMaterialDepth.AllLayersNoRef); }
-                catch (Exception ex) { _notes.Add($"The material {material.Name} could not be read: {ex.Message}"); continue; }
-                var diffuse = Diffuse(parameters, SavePath(provider, mesh));
-                if (diffuse is not null) parameters.Textures[CMaterialParams2.FallbackDiffuse] = diffuse;
-                var json = new JsonMaterialFormat().Build(material.Name, parameters);
-                var dest = Path.Combine(outDir, SavePath(provider, material) + ".json");
-                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                File.WriteAllBytes(dest, json.Data);
-                foreach (var (param, loadable) in parameters.Textures)
-                {
-                    var wanted = diffuse is not null ? ReferenceEquals(loadable, diffuse) || Cutout(param) : Colourish(param);
-                    if (!wanted || !loadable.TryLoad<UTexture>(out var texture) || texture is null) continue;
-                    if (diffuse is null && !Colourish(param, texture.Name)) continue;
-                    var picture = Path.Combine(outDir, SavePath(provider, texture) + ".png");
-                    if (File.Exists(picture)) continue;
-                    SaveTexture(texture, picture);
-                }
-            }
-        }
+        return list;
     }
 
     private static IEnumerable<UObject> SafeExports(IPackage package)
@@ -588,7 +986,7 @@ internal sealed class UnrealModImporter
     /// For textures and materials the mod changes that its own meshes do not wear: the game's meshes that wear them,
     /// found in the character's folder (the texture's folder, above any "Textures" or "Materials" folder), one a folder.
     /// </summary>
-    private List<USkeletalMesh> BaseMeshesWearing(DefaultFileProvider provider, List<string> leftover, List<USkeletalMesh> have, string project, CancellationToken cancel)
+    private List<USkeletalMesh> BaseMeshesWearing(List<string> leftover, List<USkeletalMesh> have, CancellationToken cancel)
     {
         var found = new List<USkeletalMesh>();
         if (leftover.Count == 0) return found;
@@ -600,7 +998,7 @@ internal sealed class UnrealModImporter
             return dir;
         }).Distinct().ToList();
         var haveSkeletons = have.Select(m => m.Skeleton?.ResolvedObject?.GetPathName()).Where(p => p is not null).ToHashSet();
-        var allPaths = provider.Files.Keys.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var allPaths = _provider.Files.Keys.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         foreach (var folder in folders)
         {
             if (folder.Split('/').Length < 4) continue; // never a whole game's content
@@ -611,11 +1009,11 @@ internal sealed class UnrealModImporter
                 cancel.ThrowIfCancellationRequested();
                 var name = Path.GetFileNameWithoutExtension(path);
                 if (Words(name).Any(w => w is "t" or "tex" or "mi" or "ma" or "m")) continue; // a texture or material by its name
-                if (!provider.TryLoadPackage(path, out var package)) continue;
+                if (!_provider.TryLoadPackage(path, out var package)) continue;
                 foreach (var mesh in SafeExports(package).OfType<USkeletalMesh>())
                 {
                     if (have.Any(h => h.GetPathName() == mesh.GetPathName())) continue;
-                    var wears = WornBy(mesh, project).Distinct().Count(leftover.Contains);
+                    var wears = WornBy(mesh, _project).Distinct().Count(leftover.Contains);
                     if (wears == 0) continue;
                     var sameSkeleton = haveSkeletons.Count == 0 || haveSkeletons.Contains(mesh.Skeleton?.ResolvedObject?.GetPathName()) ? 1 : 0;
                     var score = (wears + sameSkeleton, -Words(mesh.Name).Count(OddMesh.Contains), -mesh.Name.Length);
@@ -627,61 +1025,326 @@ internal sealed class UnrealModImporter
         return found;
     }
 
-    /// <summary>
-    /// The character's own hair when what it wears has none (games often keep hair a mesh of its own): a mesh of the
-    /// same skeleton beside the body's folder whose name is the body's character (<c>CH_P_EVE</c> of <c>CH_P_EVE_09</c>)
-    /// and "hair", the plainest name first.
-    /// </summary>
-    private static USkeletalMesh? Hair(DefaultFileProvider provider, USkeletalMesh body, CancellationToken cancel)
+    // ---- Writing a look ----
+
+    private static string Token(string name)
     {
-        var bodyPath = provider.FixPath(body.Owner?.Name ?? "").Replace('\\', '/');
-        var folder = bodyPath.Contains('/') ? bodyPath[..bodyPath.LastIndexOf('/')] : "";
-        if (!folder.Contains('/')) return null;
-        var around = folder[..folder.LastIndexOf('/')].ToLowerInvariant() + "/";
-        var character = Words(body.Name).TakeWhile(w => !w.Any(char.IsDigit)).ToList();
-        if (character.Count == 0) return null;
-        var skeleton = body.Skeleton?.ResolvedObject?.GetPathName();
-        var candidates = provider.Files.Keys.Where(k => k.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase) && k.ToLowerInvariant().StartsWith(around))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(k => (Path: k, Words: Words(Path.GetFileNameWithoutExtension(k))))
-            .Where(c => c.Words.Contains("hair") && c.Words.Take(character.Count).SequenceEqual(character)
-                && !c.Words.Any(w => OddMesh.Contains(w) || w is "skeleton" or "physics" or "clothdata" or "anim" or "blueprint" or "mi" or "ma" or "t" or "tex"))
-            .OrderBy(c => c.Words.Count).ThenBy(c => c.Path.Length).Take(20);
-        foreach (var (path, _) in candidates)
-        {
-            cancel.ThrowIfCancellationRequested();
-            if (!provider.TryLoadPackage(path, out var package)) continue;
-            var hair = SafeExports(package).OfType<USkeletalMesh>().FirstOrDefault();
-            if (hair is not null && (skeleton is null || hair.Skeleton?.ResolvedObject?.GetPathName() == skeleton)) return hair;
-        }
-        return null;
+        var t = new string(name.Select(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '_').ToArray()).Trim('.');
+        return t.Length == 0 ? "_" : t;
     }
 
-    private static string SavePath(DefaultFileProvider provider, UObject obj)
+    private string Rel(string full) => Path.GetRelativePath(_cache, full).Replace('\\', '/');
+
+    private string SavePath(UObject obj)
     {
         var package = obj.Owner?.Name ?? obj.GetPathName();
-        var fixedPath = provider.FixPath(package);
+        var fixedPath = _provider.FixPath(package);
         var dot = fixedPath.LastIndexOf('.');
         if (dot > fixedPath.LastIndexOf('/')) fixedPath = fixedPath[..dot];
         if (!fixedPath[(fixedPath.LastIndexOf('/') + 1)..].Equals(obj.Name, StringComparison.OrdinalIgnoreCase)) fixedPath += "/" + obj.Name;
         return fixedPath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
     }
 
-    // The words benilla's drop folder reads a colour picture by (added_models.rs), so only those pictures are written.
-    private static readonly string[] NotColour = ["normal", "n", "orm", "roughness", "metallic", "occlusion", "ao", "mask", "depth", "id", "specular", "spec", "height", "displacement", "emissive", "sss", "cavity", "flow", "tangent", "rough", "metal", "bump", "noise"];
-    private static readonly string[] Colour = ["basecolor", "base", "color", "colour", "diffuse", "albedo", "d", "col"];
+    /// <summary>Where an object's files go: <c>shared\</c> for the game's own, the mod's <c>files\</c> for a mod's.</summary>
+    private string RootFor(Mod mod, bool fromMod) => fromMod ? Path.Combine(_cache, mod.Job.Id, "files") : _shared;
 
-    private static bool Colourish(string param, string? texture = null)
+    private void WriteLook(Mod mod, string folder, string name, List<Worn> meshes, CancellationToken cancel)
     {
-        var p = param.ToLowerInvariant();
-        if (p == "pm_diffuse" || p == "alpha" || p.Contains("opacity")) return true;
-        if (new[] { "basecolor", "base color", "base_color", "diffuse", "albedo" }.Any(p.Contains) && !NotColour.Any(w => w.Length > 2 && p.Contains(w))) return true;
-        if (texture is null) return true; // decided by the texture's name
-        var words = Words(texture);
-        return !words.Any(NotColour.Contains) && words.Any(Colour.Contains);
+        var uses = new List<string>();
+        var roles = new List<string>();
+        var options = new ExportOptions(meshFormat: EMeshFormat.ActorX, meshQuality: EMeshQuality.Highest, texturePlatform: ETexturePlatform.DesktopMobile,
+            textureFormat: ETextureFormat.Png, exportMaterials: false, exportMorphTargets: false, socketFormat: ESocketFormat.Bone);
+        foreach (var worn in meshes)
+        {
+            var mesh = worn.Mesh;
+            var fromMod = FromMod(mesh);
+            var key = $"{(fromMod ? mod.Job.Id : "")}|{mesh.GetPathName()}";
+            if (!_written.TryGetValue(key, out var files))
+            {
+                var root = RootFor(mod, fromMod);
+                var stem = Path.Combine(root, SavePath(mesh));
+                var existing = new[] { ".pskx", ".psk" }.Select(e => stem + e).FirstOrDefault(File.Exists);
+                if (existing is null || fromMod)
+                {
+                    var session = new ExportSession();
+                    session.Add(mesh);
+                    var results = session.RunAsync(root, options, null, cancel).GetAwaiter().GetResult();
+                    foreach (var failed in results.Where(r => !r.Success))
+                    {
+                        if (failed.Error is MappingException mapping) throw mapping;
+                        _notes.Add($"{mesh.Name} could not be exported: {failed.Error?.Message}");
+                    }
+                    existing = results.Where(r => r.Success).SelectMany(r => r.DiskFilePaths ?? []).Cast<string?>()
+                        .FirstOrDefault(p => p!.EndsWith(".psk", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".pskx", StringComparison.OrdinalIgnoreCase));
+                }
+                files = existing is null ? [] : [Rel(existing)];
+                _written[key] = files;
+            }
+            uses.AddRange(files);
+            if (worn.Role is { } role && files.Count > 0) roles.Add($"{role}: {Path.GetFileNameWithoutExtension(files[0])}");
+            if (meshes[0].Mesh.Skeleton?.ResolvedObject?.GetPathName() is { } main)
+                foreach (var psk in files)
+                {
+                    if (!_bones.TryGetValue(main, out var bones)) _bones[main] = bones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    try { bones.UnionWith(PsaTrim.BoneNames(Path.Combine(_cache, psk))); } catch (Exception) { }
+                }
+            for (var slot = 0; slot < mesh.Materials.Length; slot++)
+                uses.AddRange(MaterialFiles(mod, folder, worn, slot));
+        }
+        if (!uses.Any(u => u.EndsWith(".psk", StringComparison.OrdinalIgnoreCase) || u.EndsWith(".pskx", StringComparison.OrdinalIgnoreCase)))
+            throw new Unusable("its model could not be exported from the game files.");
+
+        var look = new StringBuilder($"name: {name}\r\n");
+        foreach (var role in roles) look.Append(role + "\r\n");
+        var skeleton = meshes[0].Mesh.Skeleton?.ResolvedObject?.Load() as USkeleton;
+        if (skeleton is not null)
+        {
+            var clips = Clips(skeleton, cancel);
+            if (clips.Count == 0) _notes.Add("No animations were found in the game for it, so it will stand still.");
+            foreach (var (word, clip, file) in clips)
+            {
+                look.Append($"{word}: {clip}\r\n");
+                uses.Add(file);
+            }
+        }
+        foreach (var use in uses.Distinct(StringComparer.OrdinalIgnoreCase)) look.Append($"use: {use}\r\n");
+        var dir = Path.Combine(_cache, mod.Job.Id, folder);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "look.txt"), look.ToString());
     }
 
-    private static bool Cutout(string param) => param.Equals("alpha", StringComparison.OrdinalIgnoreCase) || param.Contains("opacity", StringComparison.OrdinalIgnoreCase);
+    /// <summary>A few animations of the skeleton, written once under <c>shared\</c> (or the mod's own where the mod has them).</summary>
+    private List<(string Word, string Clip, string File)> Clips(USkeleton skeleton, CancellationToken cancel)
+    {
+        var key = skeleton.GetPathName();
+        if (_clips.TryGetValue(key, out var known)) return known;
+        var chosen = Animations(skeleton, cancel);
+        var list = new List<(string, string, string)>();
+        if (chosen.Count > 0) Say($"Animations: {string.Join(", ", chosen.Select(c => $"{c.Word} {c.Clip.Name}"))}");
+        var options = new ExportOptions(meshFormat: EMeshFormat.ActorX, meshQuality: EMeshQuality.Highest, texturePlatform: ETexturePlatform.DesktopMobile,
+            textureFormat: ETextureFormat.Png, exportMaterials: false, exportMorphTargets: false, socketFormat: ESocketFormat.Bone);
+        var done = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (word, clip) in chosen)
+        {
+            if (!done.TryGetValue(clip.GetPathName(), out var file))
+            {
+                var root = FromMod(clip) ? Path.Combine(_cache, "shared-mods", Token(_gameName).Trim('_')) : _shared;
+                var target = Path.Combine(root, SavePath(clip) + ".psa");
+                if (!File.Exists(target))
+                {
+                    var session = new ExportSession();
+                    session.Add(clip);
+                    var results = session.RunAsync(root, options, null, cancel).GetAwaiter().GetResult();
+                    foreach (var failed in results.Where(r => !r.Success))
+                    {
+                        if (failed.Error is MappingException mapping) throw mapping;
+                        _notes.Add($"{Path.GetFileName(failed.ObjectPath)} could not be exported: {failed.Error?.Message}");
+                    }
+                    target = results.Where(r => r.Success).SelectMany(r => r.DiskFilePaths ?? []).Cast<string?>().FirstOrDefault(p => p!.EndsWith(".psa", StringComparison.OrdinalIgnoreCase));
+                    if (target is not null) _newClips.Add((key, target));
+                }
+                file = target is null ? null : Rel(target);
+                done[clip.GetPathName()] = file;
+            }
+            if (file is not null) list.Add((word, clip.Name, file));
+        }
+        _clips[key] = list;
+        return list;
+    }
+
+    // ---- Materials: the colour each really shows ----
+
+    /// <summary>
+    /// The files a mesh's material slot draws with: its <c>.json</c> as FModel writes it, and a <c>.png</c> of the
+    /// colour the material really shows (<see cref="Bake"/>) named in it as <c>PM_Diffuse</c>. A slot an outfit
+    /// changes (another material, parameters, hidden) is written for this look alone.
+    /// </summary>
+    private List<string> MaterialFiles(Mod mod, string lookFolder, Worn worn, int slot)
+    {
+        var original = worn.Mesh.Materials[slot]?.ResolvedObject?.Load() as UMaterialInterface;
+        var name = original?.Name ?? worn.Mesh.SkeletalMaterials.ElementAtOrDefault(slot)?.MaterialSlotName.Text;
+        if (string.IsNullOrEmpty(name) || name == "None") return [];
+        var material = worn.Materials.GetValueOrDefault(slot) ?? original;
+        var changed = worn.Materials.ContainsKey(slot) || worn.Parameters.ContainsKey(slot) || worn.Hidden.Contains(slot);
+        var key = changed || material is null ? null : $"{mod.Job.Id}|{material.GetPathName()}";
+        if (key is not null && _written.TryGetValue(key, out var known)) return known;
+
+        var parameters = new CMaterialParams2();
+        if (material is not null)
+        {
+            try { material.GetParams(parameters, EMaterialDepth.AllLayersNoRef); }
+            catch (MappingException) { throw; }
+            catch (Exception ex) { _notes.Add($"The material {material.Name} could not be read: {ex.Message}"); }
+        }
+        foreach (var (param, value, type) in worn.Parameters.GetValueOrDefault(slot) ?? [])
+        {
+            if (type.Equals("Texture", StringComparison.OrdinalIgnoreCase) && value.ValueKind == JsonValueKind.String && Find<UTexture>(value.GetString()!, mod) is { } texture)
+                parameters.Textures[param] = new LoadedTexture(texture);
+            else if (type.Equals("Vector", StringComparison.OrdinalIgnoreCase) && value.ValueKind == JsonValueKind.Array)
+            {
+                var c = value.EnumerateArray().Select(v => v.TryGetSingle(out var f) ? f : 0f).Concat([0f, 0f, 0f, 1f]).ToArray();
+                parameters.Colors[param] = new FLinearColor(c[0], c[1], c[2], c[3]);
+            }
+        }
+        var fromMod = changed || (material is not null && FromMod(material)) || parameters.Textures.Values.Any(t => t.TryLoad<UTexture>(out var x) && x is not null && FromMod(x));
+        var dir = changed ? Path.Combine(_cache, mod.Job.Id, "files", "looks", lookFolder) : RootFor(mod, fromMod);
+        var basePath = changed ? Path.Combine(dir, Token(name)) : Path.Combine(dir, material is not null ? SavePath(material) : Token(name));
+        if (!changed && Path.GetFileName(basePath) != name) basePath = Path.Combine(Path.GetDirectoryName(basePath)!, name);
+        var jsonPath = basePath + ".json";
+        var picturePath = basePath + "_Colour.png";
+        var files = new List<string> { Rel(jsonPath) };
+        if (!fromMod && File.Exists(jsonPath))
+        {
+            if (File.Exists(picturePath)) files.Add(Rel(picturePath));
+        }
+        else
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(jsonPath)!);
+            var json = JsonNode.Parse(new JsonMaterialFormat().Build(name, parameters).Data)!.AsObject();
+            var hidden = worn.Hidden.Contains(slot);
+            if (hidden) json["Hide"] = true;
+            else if (Bake(name, parameters, worn.Mesh) is { } png)
+            {
+                File.WriteAllBytes(picturePath, png);
+                files.Add(Rel(picturePath));
+                var textures = json["Textures"] as JsonObject ?? [];
+                json["Textures"] = textures;
+                var picture = Path.GetFileNameWithoutExtension(picturePath);
+                textures[CMaterialParams2.FallbackDiffuse] = new JsonObject
+                {
+                    ["ObjectName"] = $"Texture2D'{picture}'",
+                    ["ObjectPath"] = $"/{Rel(Path.GetDirectoryName(picturePath)!)}/{picture}.0",
+                };
+            }
+            File.WriteAllText(jsonPath, json.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        }
+        if (key is not null) _written[key] = files;
+        return files;
+    }
+
+    /// <summary>A texture already loaded, as a material parameter.</summary>
+    private sealed class LoadedTexture(UTexture texture) : ILoadableObject
+    {
+        public Type GetObjectType() => texture.GetType();
+        public UObject Load() => texture;
+        public bool TryLoad(out UObject export)
+        {
+            export = texture;
+            return true;
+        }
+        public Task<UObject?> LoadAsync() => Task.FromResult<UObject?>(texture);
+        public Task<UObject?> TryLoadAsync() => Task.FromResult<UObject?>(texture);
+        public override string ToString() => texture.GetPathName();
+    }
+
+    // Vector parameters that tint the base colour, and ones that are something else.
+    private static readonly string[] NotTint = ["pattern", "layer", "cosmetic", "emissive", "emission", "glow", "fresnel", "hdr", "hdri", "ao", "shadow", "blur", "rim",
+        "sss", "subsurface", "specular", "spec", "edge", "outline", "fog", "light", "flake", "metallic", "inner", "outer", "corner", "darkness", "sclera", "iris",
+        "limbus", "env", "cloth", "ml", "sheen", "scatter", "detail", "dirt", "blood", "wet", "noise", "scratch", "fx", "pivot", "axis", "balance", "ch", "mask"];
+
+    private static bool TintLike(string param, bool alone)
+    {
+        var words = Words(param);
+        if (words.Any(NotTint.Contains)) return false;
+        return words.Contains("tint") || (alone && words.Any(w => w is "color" or "colour" or "basecolor" or "basecolour" or "tone" or "albedo" or "diffuse"));
+    }
+
+    /// <summary>
+    /// The colour a material shows, baked into one picture: its base colour texture (the mod's own version) times the
+    /// tints it names, in linear light as Unreal multiplies them; with no texture, the colour it names; the alpha its mask
+    /// or opacity texture gives a see-through one (eyebrows, lashes). No side over 2048. <c>null</c> when it names no colour.
+    /// </summary>
+    private byte[]? Bake(string name, CMaterialParams2 parameters, USkeletalMesh mesh)
+    {
+        var diffuse = Diffuse(parameters, SavePath(mesh));
+        SKBitmap? colour = null;
+        if (diffuse is not null && diffuse.TryLoad<UTexture>(out var texture) && texture is not null) colour = Decode(texture);
+        var tints = parameters.Colors.Where(c => TintLike(c.Key, colour is null)).Select(c => c.Value).ToList();
+        if (colour is null && tints.Count == 0) return null;
+        var translucent = parameters.IsTranslucent || parameters.BlendMode is not EBlendMode.BLEND_Opaque;
+        SKBitmap? mask = null;
+        if (translucent)
+        {
+            var maskParam = parameters.Textures.FirstOrDefault(t => Words(t.Key).Any(w => w is "mask" or "opacity" or "alpha") && t.Value.TryLoad<UTexture>(out var x) && x is not null);
+            if (maskParam.Value is not null && maskParam.Value.TryLoad<UTexture>(out var m) && m is not null) mask = Decode(m);
+        }
+        using var image = colour ?? new SKBitmap(mask?.Width ?? 64, mask?.Height ?? 64, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+        if (colour is null)
+        {
+            var c = tints[0];
+            image.Erase(new SKColor(Srgb(c.R), Srgb(c.G), Srgb(c.B), 255));
+        }
+        else if (tints.Count > 0)
+        {
+            var (r, g, b) = (1f, 1f, 1f);
+            foreach (var t in tints) { r *= t.R; g *= t.G; b *= t.B; }
+            var pixels = image.Pixels;
+            for (var i = 0; i < pixels.Length; i++)
+            {
+                var p = pixels[i];
+                pixels[i] = new SKColor(Srgb(Linear(p.Red) * r), Srgb(Linear(p.Green) * g), Srgb(Linear(p.Blue) * b), p.Alpha);
+            }
+            image.Pixels = pixels;
+        }
+        if (mask is not null)
+        {
+            using var sized = mask.Width == image.Width && mask.Height == image.Height ? null : mask.Resize(new SKImageInfo(image.Width, image.Height), SKFilterQuality.Medium);
+            var source = sized ?? mask;
+            var pixels = image.Pixels;
+            var alpha = source.Pixels;
+            // A grey mask keeps its coverage in red; one with its own alpha keeps it there.
+            var useAlpha = alpha.Any(p => p.Alpha < 250);
+            for (var i = 0; i < pixels.Length && i < alpha.Length; i++)
+                pixels[i] = pixels[i].WithAlpha(useAlpha ? alpha[i].Alpha : alpha[i].Red);
+            image.Pixels = pixels;
+            mask.Dispose();
+        }
+        using var data = image.Encode(SKEncodedImageFormat.Png, 100);
+        return data.ToArray();
+    }
+
+    private static float Linear(byte c)
+    {
+        var v = c / 255f;
+        return v <= 0.04045f ? v / 12.92f : MathF.Pow((v + 0.055f) / 1.055f, 2.4f);
+    }
+
+    private static byte Srgb(float v)
+    {
+        v = Math.Clamp(v, 0f, 1f);
+        var s = v <= 0.0031308f ? v * 12.92f : 1.055f * MathF.Pow(v, 1 / 2.4f) - 0.055f;
+        return (byte)Math.Round(s * 255);
+    }
+
+    /// <summary>A texture as a picture, no side over 2048 (a smaller mip where it has one).</summary>
+    private SKBitmap? Decode(UTexture texture)
+    {
+        try
+        {
+            var mips = texture.PlatformData.Mips;
+            var first = texture.GetFirstMipIndex();
+            var index = first;
+            while (index < mips.Length - 1 && Math.Max(mips[index].SizeX, mips[index].SizeY) > MaxTextureSide) index++;
+            CTexture? decoded = null;
+            if (index != first && mips[index].EnsureValidBulkData(texture.MipDataProvider, index)) decoded = texture.DecodeMip(index, ETexturePlatform.DesktopMobile);
+            decoded ??= texture.DecodeMip(first, ETexturePlatform.DesktopMobile);
+            if (decoded is null) { _notes.Add($"The picture {texture.Name} could not be read, so what it colours draws grey."); return null; }
+            var png = decoded.Encode(ETextureFormat.Png, false, out _);
+            var bitmap = SKBitmap.Decode(png);
+            if (bitmap is null) return null;
+            if (bitmap.ColorType == SKColorType.Rgba8888 && bitmap.AlphaType == SKAlphaType.Unpremul) return bitmap;
+            var copy = new SKBitmap(bitmap.Width, bitmap.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+            bitmap.CopyTo(copy, SKColorType.Rgba8888);
+            if (copy.Width != bitmap.Width || copy.Pixels.Length == 0) { copy.Dispose(); return bitmap; }
+            bitmap.Dispose();
+            return copy;
+        }
+        catch (Exception ex) when (ex is not MappingException)
+        {
+            _notes.Add($"The picture {texture.Name} could not be read ({ex.Message}), so what it colours draws grey.");
+            return null;
+        }
+    }
 
     /// <summary>
     /// The texture that colours a material: a parameter named only for the base colour (<c>BaseColor</c>, <c>Diffuse</c>)
@@ -712,29 +1375,6 @@ internal sealed class UnrealModImporter
             if (score > best.Score) best = (loadable, score);
         }
         return best.Texture;
-    }
-
-    /// <summary>A texture as a PNG, no side over 2048 (a smaller mip where it has one).</summary>
-    private void SaveTexture(UTexture texture, string dest)
-    {
-        try
-        {
-            var mips = texture.PlatformData.Mips;
-            var first = texture.GetFirstMipIndex();
-            var index = first;
-            while (index < mips.Length - 1 && Math.Max(mips[index].SizeX, mips[index].SizeY) > MaxTextureSide) index++;
-            CTexture? decoded = null;
-            if (index != first && mips[index].EnsureValidBulkData(texture.MipDataProvider, index)) decoded = texture.DecodeMip(index, ETexturePlatform.DesktopMobile);
-            decoded ??= texture.DecodeMip(first, ETexturePlatform.DesktopMobile);
-            if (decoded is null) { _notes.Add($"The picture {texture.Name} could not be read, so what it colours draws grey."); return; }
-            var bytes = decoded.Encode(ETextureFormat.Png, false, out _);
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            File.WriteAllBytes(dest, bytes);
-        }
-        catch (Exception ex) when (ex is not MappingException)
-        {
-            _notes.Add($"The picture {texture.Name} could not be read ({ex.Message}), so what it colours draws grey.");
-        }
     }
 
     // ---- Animations ----
@@ -777,10 +1417,10 @@ internal sealed class UnrealModImporter
     /// A few animations of the body's skeleton, the ones benilla plays: from the skeleton's folder (and the folders
     /// beside it when that has too few), picked by name and proved by the skeleton they move.
     /// </summary>
-    private static List<(string Word, UAnimSequence Clip)> Animations(DefaultFileProvider provider, USkeleton skeleton, string project, CancellationToken cancel)
+    private List<(string Word, UAnimSequence Clip)> Animations(USkeleton skeleton, CancellationToken cancel)
     {
-        var skeletonPath = PackageOf(skeleton, project);
-        var all = provider.Files.Keys.Where(k => k.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var skeletonPath = PackageOf(skeleton, _project);
+        var all = _provider.Files.Keys.Where(k => k.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var dir = skeletonPath[..skeletonPath.LastIndexOf('/')];
         List<string> candidates = [];
         for (var up = 0; up < 3 && dir.Contains('/'); up++)
@@ -801,15 +1441,15 @@ internal sealed class UnrealModImporter
             {
                 cancel.ThrowIfCancellationRequested();
                 if (got >= action.Count) break;
-                if (picked.FirstOrDefault(p => p.Clip.Owner?.Name is { } owner && Norm(owner, project) == Norm(path, project)).Clip is { } again)
+                if (picked.FirstOrDefault(p => p.Clip.Owner?.Name is { } owner && Norm(owner, _project) == Norm(path, _project)).Clip is { } again)
                 {
                     picked.Add((action.Word, again));
                     got++;
                     continue;
                 }
-                if (!tried.Add(path) || !provider.TryLoadPackage(path, out var package)) continue;
+                if (!tried.Add(path) || !_provider.TryLoadPackage(path, out var package)) continue;
                 var clip = SafeExports(package).OfType<UAnimSequence>().FirstOrDefault();
-                if (clip?.Skeleton?.ResolvedObject is not { } owned || Norm(owned.GetPathName(), project) != skeletonPath) continue;
+                if (clip?.Skeleton?.ResolvedObject is not { } owned || Norm(owned.GetPathName(), _project) != skeletonPath) continue;
                 picked.Add((action.Word, clip));
                 got++;
             }

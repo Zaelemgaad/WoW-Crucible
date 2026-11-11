@@ -30,6 +30,10 @@ WoW Crucible uses SQLitePCLRaw by Eric Sink / SourceGear to load the bundled nat
 
 The command line's `models import-mod` uses CUE4Parse and CUE4Parse-Conversion by FabianFG and contributors (the library FModel is built on) to read Unreal Engine paks and IoStore containers and to write ActorX meshes and animations. Both are distributed under the Apache License 2.0. Project: <https://github.com/FabianFG/CUE4Parse>. They bring their own dependencies through NuGet, among them SixLabors.ImageSharp (Six Labors Split License: Apache 2.0 for open source and qualifying use), SkiaSharp (MIT), SharpGLTF (MIT), Newtonsoft.Json (MIT), Serilog (Apache 2.0), BouncyCastle (MIT) and ZstdSharp (MIT). Oodle and zlib-ng are not bundled: the command uses copies already on the PC (beside it, or FModel's).
 
+## CUE4Parse-Natives
+
+The command line's `models import-mod` and `import-mods` ship `CUE4Parse-Natives.dll`, the native part of CUE4Parse, beside `wowcrucible.exe`; it decompresses ACL-compressed animations. CUE4Parse is distributed under the Apache License 2.0; see [third_party/CUE4Parse-Natives/LICENSE](third_party/CUE4Parse-Natives/LICENSE). It is built with the Animation Compression Library and Realtime Math by Nicholas Frechette, both distributed under the MIT License; see [third_party/CUE4Parse-Natives/LICENSE-ACL](third_party/CUE4Parse-Natives/LICENSE-ACL) and [third_party/CUE4Parse-Natives/LICENSE-RTM](third_party/CUE4Parse-Natives/LICENSE-RTM). Where the binary comes from and its hash: [third_party/CUE4Parse-Natives/SOURCE.md](third_party/CUE4Parse-Natives/SOURCE.md). It holds no Oodle code.
+
 ## Reference projects
 
 WDBX Editor, WoW Spell Editor, Keira3, WoW Database Editor, AzerothCore, and TrinityCore informed format research and workflow design. Their source code and game/server data are not vendored into this repository. Each remains subject to its own license.
