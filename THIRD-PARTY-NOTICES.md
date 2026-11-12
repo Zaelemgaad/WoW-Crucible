@@ -34,6 +34,14 @@ The command line's `models import-mod` uses CUE4Parse and CUE4Parse-Conversion b
 
 The command line's `models import-mod` and `import-mods` ship `CUE4Parse-Natives.dll`, the native part of CUE4Parse, beside `wowcrucible.exe`; it decompresses ACL-compressed animations. CUE4Parse is distributed under the Apache License 2.0; see [third_party/CUE4Parse-Natives/LICENSE](third_party/CUE4Parse-Natives/LICENSE). It is built with the Animation Compression Library and Realtime Math by Nicholas Frechette, both distributed under the MIT License; see [third_party/CUE4Parse-Natives/LICENSE-ACL](third_party/CUE4Parse-Natives/LICENSE-ACL) and [third_party/CUE4Parse-Natives/LICENSE-RTM](third_party/CUE4Parse-Natives/LICENSE-RTM). Where the binary comes from and its hash: [third_party/CUE4Parse-Natives/SOURCE.md](third_party/CUE4Parse-Natives/SOURCE.md). It holds no Oodle code.
 
+## AESDumpster (fetched, not shipped)
+
+`models import-mods` and `prepare-game` fetch AESDumpster 1.2.5 by GHFear (Illusory Software) the first time a locked game's key is in no list: the release file `AESDumpster-Win64.exe` from the original project's GitHub releases (<https://github.com/GHFear/AESDumpster>; `NPC2000/AESDumpster` is a fork with no releases), checked against the SHA-256 pinned in the source (`2C0C0DE4853EB4988C4739C9714F6960A928B61527B9C98A7BADCA7291C917BB`; the project publishes none), into `Tools\AESDumpster-1.2.5\` beside the tool. The project publishes no licence, so it is not in this repository or in any package of Crucible; each user's copy comes from GHFear's release. It reads a game's executable as a file and does not change it.
+
+## UE4SS (fetched, not shipped)
+
+`models import-mods` and `prepare-game` fetch UE4SS v4.0.0 (<https://github.com/UE4SS-RE/RE-UE4SS>, MIT License, copyright Narknon and contributors) the first time a game needs a mappings file that is nowhere on the PC: `UE4SS_v4.0.0.zip` from the official release, checked against the SHA-256 GitHub publishes for it (`251AD0D1381A241750E036F5918CBF2B5D7EC58EBC608CB2DD09D459D0C81E45`), into `Tools\UE4SS-v4.0.0\`; the zip carries its own `LICENSE`. Its `dwmapi.dll`, `UE4SS.dll` and settings are put beside the game for one run and removed again. It is not in this repository.
+
 ## Reference projects
 
 WDBX Editor, WoW Spell Editor, Keira3, WoW Database Editor, AzerothCore, and TrinityCore informed format research and workflow design. Their source code and game/server data are not vendored into this repository. Each remains subject to its own license.

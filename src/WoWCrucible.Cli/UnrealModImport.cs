@@ -48,8 +48,14 @@ using FPackageIndex = CUE4Parse.UE4.Objects.UObject.FPackageIndex;
 /// </summary>
 internal sealed class UnrealModImporter
 {
-    /// <summary>The user must give something once; the message says what and where.</summary>
-    private sealed class NeedsUser(string message) : Exception(message);
+    /// <summary>
+    /// The user must give something once; the message says what and where. <paramref name="again"/>: it failed for a
+    /// passing reason (the game was running), so the mod is tried again at the next start.
+    /// </summary>
+    private sealed class NeedsUser(string message, bool again = false) : Exception(message)
+    {
+        public bool Again { get; } = again;
+    }
 
     /// <summary>The mod cannot become a model; the message says why.</summary>
     private sealed class Unusable(string message) : Exception(message);
@@ -67,6 +73,12 @@ internal sealed class UnrealModImporter
         public List<string> Notes { get; } = [];
         public string? Problem { get; set; }
         public string? Need { get; set; }
+        /// <summary>What it needs may come by itself: try it again at the next start.</summary>
+        public bool Again { get; set; }
+        /// <summary>The packages its containers hold and refer to, by id (IoStore): how its game is told when its project is its own.</summary>
+        public HashSet<FPackageId> PackageIds { get; } = [];
+        /// <summary>Its packages by content path (<see cref="ContentRel"/>), read with no game behind them.</summary>
+        public HashSet<string> Paths { get; } = new(StringComparer.OrdinalIgnoreCase);
         /// <summary>The names its containers were registered by, and its files by content path.</summary>
         public HashSet<string> Registered { get; } = new(StringComparer.OrdinalIgnoreCase);
         /// <summary>The same names, in the order of <see cref="Containers"/>.</summary>
@@ -81,6 +93,8 @@ internal sealed class UnrealModImporter
     private const int MaxTextureSide = 2048;
     private readonly string _settingsPath;
     private readonly UnrealModSettings _settings;
+    /// <summary>Whether a game's mappings may be made by starting it (<c>prepare-game --keys-only</c> says no).</summary>
+    private bool _makeMappings = true;
     private string _cache = "";
     private string _shared = "";
     private DefaultFileProvider _provider = null!;
@@ -105,7 +119,7 @@ internal sealed class UnrealModImporter
     /// <summary>The mod being written: what the game has is taken from it, a mod of the same page, or the game.</summary>
     private Mod? _current;
     /// <summary>Bumped when what a material is baked into changes, so the game's shared pictures are baked again.</summary>
-    private const string BakeVersion = "bake 2";
+    private const string BakeVersion = "bake 3";
 
     private UnrealModImporter(string? settingsPath)
     {
@@ -161,7 +175,7 @@ internal sealed class UnrealModImporter
                 }
                 catch (NeedsUser need)
                 {
-                    foreach (var mod in group.Where(m => m.Job.Export && m.Problem is null)) mod.Need = need.Message;
+                    foreach (var mod in group.Where(m => m.Job.Export && m.Problem is null)) (mod.Need, mod.Again) = (need.Message, need.Again);
                 }
             }
         }
@@ -174,7 +188,12 @@ internal sealed class UnrealModImporter
         foreach (var mod in mods.Where(m => m.Job.Export))
         {
             var result = new StringBuilder();
-            if (mod.Need is not null) { result.Append($"need\t{mod.Need}\n"); code = Math.Max(code, 3); }
+            if (mod.Need is not null)
+            {
+                result.Append($"need\t{mod.Need}\n");
+                if (mod.Again) result.Append("retry\tat the next start\n");
+                code = Math.Max(code, 3);
+            }
             else if (mod.Problem is not null || mod.Looks.Count == 0)
             {
                 result.Append($"problem\t{mod.Problem ?? "no look could be made of it."}\n");
@@ -194,6 +213,42 @@ internal sealed class UnrealModImporter
             Console.Write($"== {mod.Job.Name}\n{result}");
         }
         return code;
+    }
+
+    /// <summary>
+    /// <c>prepare-game</c>: makes an installed game ready for its mods as <c>import-mods</c> would, with no mod: its
+    /// locked files opened (the key found and written down when no list has it) and its mappings made when it needs
+    /// them. 0 ready, 3 when the user must give something.
+    /// </summary>
+    public static int PrepareGame(string name, string? settingsPath, bool keysOnly, CancellationToken cancel)
+    {
+        var settings = UnrealModSettings.Load(settingsPath);
+        var games = UnrealGameLocator.InstalledGames(settings.Folders(), UnrealGameLocator.FModelSettings().Games);
+        var folded = UnrealGameLocator.Fold(name);
+        var game = games.Where(g => UnrealGameLocator.Fold(g.Name) == folded || UnrealGameLocator.Fold(g.Project) == folded)
+            .Concat(games.Where(g => folded.Length >= 4 && UnrealGameLocator.Fold(g.Name).Contains(folded)))
+            .OrderByDescending(g => UnrealGameLocator.Fold(g.Name) == folded || UnrealGameLocator.Fold(g.Project) == folded).ThenByDescending(g => g.PaksBytes).FirstOrDefault();
+        if (game is null)
+        {
+            Console.WriteLine($"need\tNo installed Unreal Engine game called \"{name}\" was found.");
+            return 3;
+        }
+        var probe = new Mod(new Job("prepare", false, game.Name, []));
+        var importer = new UnrealModImporter(settingsPath) { _makeMappings = !keysOnly };
+        try
+        {
+            importer.Open(game, [probe], cancel);
+            foreach (var note in probe.Notes.Distinct()) Console.WriteLine($"note\t{note}");
+            Console.WriteLine($"ready\t{game.Name}");
+            return 0;
+        }
+        catch (NeedsUser need)
+        {
+            foreach (var note in probe.Notes.Distinct()) Console.WriteLine($"note\t{note}");
+            Console.WriteLine($"need\t{need.Message}");
+            if (need.Again) Console.WriteLine("retry\tat the next start");
+            return 3;
+        }
     }
 
     private string _gameName = "";
@@ -400,6 +455,17 @@ internal sealed class UnrealModImporter
                 else if (paths.Count == 0) mod.Problem = mod.Notes.FirstOrDefault() ?? "its game files hold nothing that could be read.";
                 mod.Project = paths.Select(ProjectOf).Where(p => p is not null).GroupBy(p => p!, StringComparer.OrdinalIgnoreCase)
                     .OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault();
+                mod.Paths.UnionWith(paths.Where(p => p.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)).Select(ContentRel));
+                foreach (var reader in lister.MountedVfs.Where(v => mod.Registered.Contains(v.Name)).OfType<CUE4Parse.UE4.IO.IoStoreReader>())
+                {
+                    try
+                    {
+                        if (reader.ContainerHeader is not { } header) continue;
+                        mod.PackageIds.UnionWith(header.PackageIds ?? []);
+                        foreach (var entry in header.StoreEntries ?? []) mod.PackageIds.UnionWith(entry.ImportedPackages ?? []);
+                    }
+                    catch (Exception) { }
+                }
             }
         }
         usable = usable.Where(m => m.Problem is null).ToList();
@@ -418,9 +484,20 @@ internal sealed class UnrealModImporter
             group.Mods.Add(mod);
         }
         var main = groups.OrderByDescending(g => g.Mods.Count).FirstOrDefault();
+        var listings = new Dictionary<string, (HashSet<string> Paths, HashSet<FPackageId> Ids)?>(StringComparer.OrdinalIgnoreCase);
         foreach (var mod in homeless)
         {
             if (mod.Cns.Count > 0 && main.Mods is not null) { main.Mods.Add(mod); continue; }
+            // Cooked under a project name of its own (SB_OneMillion/Content/...): the installed game whose files its
+            // paths are and whose packages it refers to (its skeleton, the game's textures).
+            if (mod.Project is not null && GameByContent(mod, games, listings, cache, settings, settingsPath) is { } found)
+            {
+                Say($"{mod.Job.Name}: packed as \"{mod.Project}\", its files and what they refer to are {found.Name}'s");
+                var group = groups.FirstOrDefault(g => g.Game.Paks.Equals(found.Paks, StringComparison.OrdinalIgnoreCase));
+                if (group.Mods is null) groups.Add(group = (found, []));
+                group.Mods.Add(mod);
+                continue;
+            }
             if (mod.Project is null)
                 mod.Problem = "its game files name no game content (no \"<Game>/Content/...\" paths), so the game it is for is unknown.";
             else
@@ -430,11 +507,69 @@ internal sealed class UnrealModImporter
         return groups.Where(g => g.Mods.Any(m => m.Job.Export)).ToList();
     }
 
-    /// <summary>One game's mods mounted together over it, in their order, and each one marked for export written.</summary>
-    private void ImportGame(UnrealGame game, List<Mod> usable, CancellationToken cancel)
+    /// <summary>
+    /// The installed game a mod packed under a project name of its own is for: the one most of whose own packages the
+    /// mod's paths are (a replacer), or whose packages its containers hold and refer to by id (its skeleton, the game's
+    /// textures; an id is the package's name, the same whatever the mod's project). <c>null</c> when no game has any.
+    /// </summary>
+    private static UnrealGame? GameByContent(Mod mod, IReadOnlyList<UnrealGame> games, Dictionary<string, (HashSet<string> Paths, HashSet<FPackageId> Ids)?> listings,
+        string cache, UnrealModSettings settings, string? settingsPath)
+    {
+        var best = (Game: (UnrealGame?)null, Score: 0);
+        foreach (var game in games.DistinctBy(g => g.Paks, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.PaksBytes))
+        {
+            if (!listings.TryGetValue(game.Paks, out var listing)) listings[game.Paks] = listing = Listing(game, cache, settings, settingsPath);
+            if (listing is not var (paths, ids)) continue;
+            var score = mod.Paths.Count(paths.Contains) + mod.PackageIds.Count(ids.Contains);
+            if (score > best.Score) best = (game, score);
+        }
+        return best.Score >= 2 ? best.Game : null;
+    }
+
+    /// <summary>A game's own package paths (under its <c>Content</c>, as <see cref="ContentRel"/>) and ids, its locked containers opened with the keys known for it.</summary>
+    private static (HashSet<string> Paths, HashSet<FPackageId> Ids)? Listing(UnrealGame game, string cache, UnrealModSettings settings, string? settingsPath)
+    {
+        try
+        {
+            var engine = UnrealGameLocator.EngineVersion(game);
+            var version = engine is var (major, minor) && Enum.TryParse<EGame>($"GAME_UE{major}_{minor}", out var plain) ? plain
+                : engine?.Major == 4 ? EGame.GAME_UE4_LATEST : EGame.GAME_UE5_LATEST;
+            using var provider = new DefaultFileProvider(new DirectoryInfo(game.Paks), SearchOption.TopDirectoryOnly, new VersionContainer(version), StringComparer.OrdinalIgnoreCase);
+            provider.Initialize();
+            provider.SubmitKey(new FGuid(), new FAesKey(new byte[32]));
+            var fmodel = UnrealGameLocator.FModelEntry(game, UnrealGameLocator.FModelSettings().Games);
+            var keys = settings.Keys(game.Name, game.Project).Concat(fmodel?.Keys ?? []).Select(k => k.Key).ToList();
+            var list = settingsPath is null ? null : AesKeyList.Load(KeyListPath(settingsPath));
+            foreach (var key in keys.Select(AesKeyList.Key).OfType<byte[]>()
+                         .Concat(list?.Candidates(game.Name, game.Project).Select(c => c.Key) ?? []))
+            {
+                if (!provider.UnloadedVfs.Any(v => v.IsEncrypted)) break;
+                try { provider.SubmitKey(new FGuid(), new FAesKey(key)); } catch (Exception) { }
+            }
+            var paths = provider.Files.Keys.Where(p => p.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase) && ProjectOf(p) is not null).Select(ContentRel)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var ids = new HashSet<FPackageId>();
+            foreach (var reader in provider.MountedVfs.OfType<CUE4Parse.UE4.IO.IoStoreReader>())
+            {
+                try { ids.UnionWith(reader.ContainerHeader?.PackageIds ?? []); } catch (Exception) { }
+            }
+            return paths.Count + ids.Count > 0 ? (paths, ids) : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Opens a game for reading, with <paramref name="usable"/> mounted over it: its engine version, its locked
+    /// containers opened (the user's keys, FModel's, the key list's, then the key AESDumpster finds in its program,
+    /// written back to the key list), and its mappings (found, or made once with UE4SS when its packages need one and
+    /// none is on this PC or the one there is for another version of the game). Returns the mappings file used.
+    /// </summary>
+    private string? Open(UnrealGame game, List<Mod> usable, CancellationToken cancel)
     {
         var (fmodelGames, fmodelData) = UnrealGameLocator.FModelSettings();
-        foreach (var mod in usable) mod.GameName = game.Name;
         _gameName = game.Name;
         Say($"Game: {game.Name} ({game.Paks})");
         var fmodel = UnrealGameLocator.FModelEntry(game, fmodelGames);
@@ -479,25 +614,156 @@ internal sealed class UnrealModImporter
                 if (Locked().Count == 0) break;
             }
         }
+        if (Locked().Any(vfs => vfs.EncryptionKeyGuid == new FGuid())) KeyFromProgram(game, keyList, usable, () => Locked().Count);
         var locked = Locked();
         if (locked.Count > 0)
         {
             var needed = locked.Select(vfs => vfs.EncryptionKeyGuid).Distinct().ToList();
             var which = needed.All(g => g == new FGuid()) ? "key" : $"key ({string.Join(", ", needed.Select(g => g.ToString()))})";
-            var tried = keyList.Path is null ? "" : $" No entry for it in the key list ({keyList.Path}) opens them.";
+            var tried = keyList.Path is null ? "" : $" No entry for it in the key list ({keyList.Path}) opens them, and none was found in the game's program.";
             throw new NeedsUser($"{game.Name} keeps its files locked and needs its AES {which}.{tried} Put it in {_settingsPath} as a line:  {game.Name} key: 0x<64 letters and digits>");
         }
         _provider.PostMount();
         _project = _provider.ProjectName ?? game.Project;
-        // A game whose own files need mappings and has none: a mod over it would be read half (its own meshes, none of
-        // the game's skeleton, animations or textures), so it is said at once instead.
-        if (mappings is null && _provider.Files.Values.FirstOrDefault(f => f.Path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
-                && f.Path.StartsWith(_project + "/Content/", StringComparison.OrdinalIgnoreCase) && !(f is VfsEntry { Vfs: { } v } && usable.Any(m => m.Registered.Contains(v.Name)))) is { } sample)
+        return _makeMappings ? CheckMappings(game, mappings, usable, cancel) : mappings;
+    }
+
+    /// <summary>
+    /// The game's main key found in its program by AESDumpster, when no key known opens its files: each key it lists is
+    /// tried on the locked containers and the first that opens them is kept, and written to the key list under the
+    /// game's name (to <c>Game settings.txt</c> when there is no list). Never logged.
+    /// </summary>
+    private void KeyFromProgram(UnrealGame game, AesKeyList keyList, List<Mod> usable, Func<int> locked)
+    {
+        if (UnrealGameLocator.ShippingExe(game) is not { } exe) return;
+        Say("AES key: looking for it in the game's program with AESDumpster");
+        List<byte[]> keys;
+        try { keys = AesDumpster.Keys(exe); }
+        catch (Exception ex)
         {
-            try { _provider.LoadPackage(sample).GetExports().ToList(); }
-            catch (MappingException) { throw new NeedsUser(MappingsNeed(game, null)); }
+            usable.ForEach(m => m.Notes.Add($"AESDumpster, which finds a game's key in its program, could not be used: {Flat(ex.Message)}"));
+            return;
+        }
+        Say($"AES key: AESDumpster listed {keys.Count} possible keys");
+        foreach (var key in keys)
+        {
+            int opened;
+            try { opened = _provider.SubmitKey(new FGuid(), new FAesKey(key)); }
+            catch (Exception) { continue; }
+            if (opened == 0) continue;
+            var name = UnrealGameLocator.SteamApp(game.Root) is { } steam ? UnrealGameLocator.PlainName(steam.Name)
+                : FileVersionInfo.GetVersionInfo(exe).ProductName is { Length: > 0 } product ? UnrealGameLocator.PlainName(product) : UnrealGameLocator.PlainName(game.Name);
+            Say($"AES key: one AESDumpster found opened {opened} containers");
+            try
+            {
+                string where;
+                if (keyList.Path is not null)
+                    where = AesKeyList.Add(keyList.Path, name, key) is null ? $"it was already in {keyList.Path}" : $"it was added to {keyList.Path} as \"{name}\"";
+                else if (_settingsPath.Length > 0)
+                {
+                    UnrealModSettings.AddLine(_settingsPath, $"{name} key: 0x{Convert.ToHexString(key)}");
+                    where = $"it was added to {_settingsPath}";
+                }
+                else where = "it is used for this run only";
+                usable.ForEach(m => m.Notes.Add($"{game.Name}'s key was found in its program by AESDumpster; {where}."));
+            }
+            catch (Exception ex)
+            {
+                usable.ForEach(m => m.Notes.Add($"{game.Name}'s key was found in its program by AESDumpster, but it could not be written down ({Flat(ex.Message)}), so it is looked for again next time."));
+            }
+            if (locked() == 0) return;
+        }
+        if (locked() > 0) Say("AES key: none AESDumpster found opens the game's files (its program may be packed or protected)");
+    }
+
+    /// <summary>The folder made mappings go in: <c>Mappings\</c> beside the folder of the settings file (<c>coa-customization\Mappings</c>).</summary>
+    private string? MappingsFolder => _settingsPath.Length == 0 ? null
+        : Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(_settingsPath))) is { } up ? Path.Combine(up, "Mappings") : null;
+
+    /// <summary>The mappings file this makes for a game: <c>Mappings\&lt;Project&gt;.usmap</c>.</summary>
+    private string? MadeMappings(UnrealGame game) => MappingsFolder is { } folder ? Path.Combine(folder, Token(game.Project).Trim('_') + ".usmap") : null;
+
+    /// <summary>
+    /// Whether the game's own packages read with the mappings it has: a few of them, spread over the game, are loaded;
+    /// most failing for want of mappings (or with a mappings file that does not fit) says they are missing or stale. A
+    /// game whose packages carry their own layout reads with none.
+    /// </summary>
+    private bool PackagesRead(List<Mod> usable)
+    {
+        var own = _provider.Files.Values.Where(f => f.Path.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)
+                && f.Path.StartsWith(_project + "/Content/", StringComparison.OrdinalIgnoreCase) && !(f is VfsEntry { Vfs: { } v } && usable.Any(m => m.Registered.Contains(v.Name))))
+            .OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase).ToList();
+        if (own.Count == 0) return true;
+        var samples = Math.Min(8, own.Count);
+        var failed = 0;
+        for (var i = 0; i < samples; i++)
+        {
+            try { _provider.LoadPackage(own[(int)((long)i * own.Count / samples)]).GetExports().ToList(); }
+            catch (MappingException) { failed++; }
+            catch (Exception ex) when (ex.Message.Contains("mapping", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("usmap", StringComparison.OrdinalIgnoreCase)) { failed++; }
             catch (Exception) { }
         }
+        return failed * 2 < samples;
+    }
+
+    /// <summary>
+    /// A game whose own files need mappings and has none, or has ones this made for another version of it: they are
+    /// made (once a version of the game), so a mod over it is not read half (its own meshes, none of the game's
+    /// skeleton, animations or textures). Returns the mappings used.
+    /// </summary>
+    private string? CheckMappings(UnrealGame game, string? mappings, List<Mod> usable, CancellationToken cancel)
+    {
+        var made = MadeMappings(game);
+        var record = made is null ? [] : UnrealMappingsMaker.Record(made);
+        var stale = mappings is not null && made is not null && mappings.Equals(made, StringComparison.OrdinalIgnoreCase)
+            && record.TryGetValue("for", out var madeFor) && madeFor != UnrealMappingsMaker.Identity(game);
+        if (stale) Say($"Mappings: {mappings} was made for another version of {game.Name}");
+        // Stale ones that still read the game are kept while new ones cannot be made.
+        var reads = PackagesRead(usable);
+        if (!stale && reads) return mappings;
+        if (made is null) throw new NeedsUser(MappingsNeed(game, mappings));
+        var identity = UnrealMappingsMaker.Identity(game);
+        if (record.GetValueOrDefault("failed for") == identity)
+        {
+            if (reads) return mappings;
+            throw new NeedsUser($"{MappingsNeed(game, mappings)} (It could not be made by itself for this version of the game: {record.GetValueOrDefault("why")})");
+        }
+
+        Say($"Mappings: making them for {game.Name} with UE4SS");
+        var result = UnrealMappingsMaker.Make(game, UnrealGameLocator.EngineVersion(game), made,
+            text => { Say($"notice\t{text}"); Console.Out.Flush(); }, Say, cancel);
+        if (result.Mappings is null)
+        {
+            if (!result.Again) UnrealMappingsMaker.Failed(game, made, result.Problem!);
+            if (reads)
+            {
+                usable.ForEach(m => m.Notes.Add($"{result.Problem} The mappings file there is still used."));
+                return mappings;
+            }
+            if (result.Again) throw new NeedsUser(result.Problem!, true);
+            throw new NeedsUser($"{result.Problem} {MappingsNeed(game, mappings)}");
+        }
+        Say($"Mappings: made {made}");
+        _provider.MappingsContainer = new FileUsmapTypeMappingsProvider(made, StringComparer.OrdinalIgnoreCase);
+        if (!PackagesRead(usable))
+        {
+            UnrealMappingsMaker.Failed(game, made, "the mappings file it made does not read the game's files");
+            throw new NeedsUser(MappingsNeed(game, made));
+        }
+        // Found by itself from now on: a line in the settings file names it (no line there is changed). A line the user
+        // wrote for another file stays; the record beside this one says it replaces that one.
+        var given = _settings.Value("mappings", game.Name, game.Project);
+        if (given is null && _settingsPath.Length > 0) UnrealModSettings.AddLine(_settingsPath, $"{game.Name} mappings: {made}");
+        else if (given is not null && !given.Equals(made, StringComparison.OrdinalIgnoreCase)) UnrealMappingsMaker.Replaces(made, given);
+        usable.ForEach(m => m.Notes.Add($"{game.Name}'s mappings file was made by itself ({made}); the game's folder was put back as it was."));
+        return made;
+    }
+
+    /// <summary>One game's mods mounted together over it, in their order, and each one marked for export written.</summary>
+    private void ImportGame(UnrealGame game, List<Mod> usable, CancellationToken cancel)
+    {
+        foreach (var mod in usable) mod.GameName = game.Name;
+        var mappings = Open(game, usable, cancel);
         _shared = Path.Combine(_cache, "shared", Token(game.Name).Trim('_'));
         ForgetOldBakes(usable);
         Say($"Mounted {_provider.MountedVfs.Count} containers, {_provider.Files.Count:N0} files");
@@ -713,10 +979,12 @@ internal sealed class UnrealModImporter
     /// The community AES key list (<see cref="AesKeyList.FileName"/>) beside the settings file or in the folder above it:
     /// tried after the user's keys and FModel's, for a game whose files are still locked.
     /// </summary>
-    private string? KeyListPath()
+    private string? KeyListPath() => KeyListPath(_settingsPath);
+
+    private static string? KeyListPath(string settingsPath)
     {
-        if (_settingsPath.Length == 0) return null;
-        var dir = Path.GetDirectoryName(Path.GetFullPath(_settingsPath));
+        if (settingsPath.Length == 0) return null;
+        var dir = Path.GetDirectoryName(Path.GetFullPath(settingsPath));
         for (var i = 0; i < 2 && dir is not null; i++, dir = Path.GetDirectoryName(dir))
             if (Path.Combine(dir, AesKeyList.FileName) is var file && File.Exists(file)) return file;
         return null;
@@ -724,13 +992,19 @@ internal sealed class UnrealModImporter
 
     private string? Mappings(UnrealGame game, FModelGame? fmodel, string? fmodelData)
     {
+        // One this made (Mappings\<Project>.usmap) for this version of the game, in place of a given one that did not fit.
+        var made = MadeMappings(game);
+        var record = made is null ? [] : UnrealMappingsMaker.Record(made);
+        var fresh = made is not null && File.Exists(made) && record.GetValueOrDefault("for") == UnrealMappingsMaker.Identity(game);
         if (_settings.Value("mappings", game.Name, game.Project) is { } given)
         {
+            if (fresh && record.GetValueOrDefault("replaces") is { } replaced && replaced.Equals(given, StringComparison.OrdinalIgnoreCase)) return made;
             if (File.Exists(given)) return given;
             _notes.Add($"The mappings file given for {game.Name} is not there: {given}");
         }
         if (fmodel?.Mappings is { } fm && File.Exists(fm)) return fm;
         if (UnrealGameLocator.MappingsInside(game).FirstOrDefault() is { } inside) return inside;
+        if (made is not null && File.Exists(made)) return made;
         if (fmodelData is not null && Directory.Exists(Path.Combine(fmodelData, "mappings")))
         {
             var names = new[] { UnrealGameLocator.Fold(game.Name), UnrealGameLocator.Fold(game.Project) };
@@ -1200,10 +1474,17 @@ internal sealed class UnrealModImporter
             Say($"Also worn: {hair.Name} (the character's hair, from the game)");
             list.Add(new Worn(hair));
         }
-        // No face of its own nor beside its skeleton: the face and hair the game builds the character's head from.
-        if (!list.Any(w => Words(w.Mesh.Name).Any(x => x is "face" or "head") || w.Mesh.Materials.Any(m => m?.ResolvedObject?.Name.Text is { } n && Words(n).Any(x => x is "face" or "head")))
-            && Companion(meshes[0], "face") is null)
-            list.AddRange(FaceBlueprint(meshes[0]).Where(f => !list.Any(w => Words(w.Mesh.Name).Contains("hair")) || !Words(f.Mesh.Name).Contains("hair")));
+        // No face of its own: the character's face beside its skeleton, else the face and hair the game builds the
+        // character's head from.
+        if (!list.Any(w => Words(w.Mesh.Name).Any(x => x is "face" or "head") || w.Mesh.Materials.Any(m => m?.ResolvedObject?.Name.Text is { } n && Words(n).Any(x => x is "face" or "head"))))
+        {
+            if (Companion(meshes[0], "face") is { } face)
+            {
+                Say($"Also worn: {face.Name} (the character's face, from the game)");
+                list.Add(new Worn(face));
+            }
+            else list.AddRange(FaceBlueprint(meshes[0]).Where(f => !list.Any(w => Words(w.Mesh.Name).Contains("hair")) || !Words(f.Mesh.Name).Contains("hair")));
+        }
         return list;
     }
 
@@ -1462,6 +1743,8 @@ internal sealed class UnrealModImporter
                     ["ObjectPath"] = $"/{Rel(Path.GetDirectoryName(picturePath)!)}/{picture}.0",
                 };
             }
+            // A glowing part that names no colour at all is left out rather than drawn grey.
+            else if (Glowing(name, parameters)) json["Hide"] = true;
             File.WriteAllText(jsonPath, json.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         }
         if (key is not null) _written[key] = files;
@@ -1585,6 +1868,14 @@ internal sealed class UnrealModImporter
             var plain = parameters.Colors.Where(c => PlainColour(c.Key)).Select(c => c.Value).ToList();
             tints = plain.Count > 0 ? plain.Take(1).ToList() : parameters.Colors.Where(c => TintLike(c.Key, true)).Select(c => c.Value).ToList();
         }
+        if (colour is null && tints.Count == 0 && Glowing(name, parameters))
+        {
+            // A glowing strip or light: the colour it glows (its emissive picture, tinted by its brightest emissive colour).
+            if (parameters.Textures.FirstOrDefault(t => !t.Key.StartsWith("PM_", StringComparison.Ordinal) && Words(t.Key).Any(GlowWords.Contains) && !Placeholder(PathOf(t.Value))).Value is { } emissive
+                && emissive.TryLoad<UTexture>(out var glowTexture) && glowTexture is not null)
+                colour = Grey(Decode(glowTexture));
+            if (GlowColour(parameters) is { } glow) tints = [glow];
+        }
         if (colour is null && tints.Count == 0)
         {
             // A face's part with no material of its own (CNS faces' NewMaterial: the lashes) draws dark, not grey.
@@ -1687,6 +1978,26 @@ internal sealed class UnrealModImporter
         for (var i = 0; i < pixels.Length; i++) pixels[i] = new SKColor(pixels[i].Red, pixels[i].Red, pixels[i].Red, pixels[i].Alpha);
         bitmap.Pixels = pixels;
         return bitmap;
+    }
+
+    private static readonly string[] GlowWords = ["glow", "emissive", "emission", "neon"];
+
+    /// <summary>A material that glows (an accent strip, a light): named for it, or with an emissive picture.</summary>
+    private static bool Glowing(string name, CMaterialParams2 parameters) =>
+        Words(name).Any(GlowWords.Contains) || parameters.Textures.Keys.Any(k => !k.StartsWith("PM_", StringComparison.Ordinal) && Words(k).Any(GlowWords.Contains));
+
+    /// <summary>
+    /// The colour a glowing material glows: its brightest emissive colour (<c>Eye Core HDR Tint</c>, <c>Glow Color</c>),
+    /// brought from HDR into range with its hue kept. <c>null</c> when it names none.
+    /// </summary>
+    private static FLinearColor? GlowColour(CMaterialParams2 parameters)
+    {
+        var glows = parameters.Colors.Where(c => !Black(c.Value) && Words(c.Key) is var w && w.Any(x => x is "emissive" or "emission" or "glow" or "hdr" or "neon")
+            && !w.Any(x => x is "mask" or "clip" or "plane" or "normal" or "location" or "bound")).ToList();
+        if (glows.Count == 0) return null;
+        var c = glows.MaxBy(g => Math.Max(g.Value.R, Math.Max(g.Value.G, g.Value.B))).Value;
+        var max = Math.Max(c.R, Math.Max(c.G, c.B));
+        return new FLinearColor(c.R / max, c.G / max, c.B / max, 1f);
     }
 
     /// <summary>A hair material's colour (its picture is a stand-in): the root and tip colours, the blended ones where it has them.</summary>

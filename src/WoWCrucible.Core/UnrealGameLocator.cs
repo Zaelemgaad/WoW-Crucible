@@ -99,6 +99,36 @@ public static class UnrealGameLocator
         return games.DistinctBy(game => game.Paks, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
+    /// <summary>
+    /// The Steam app a game folder is installed as (its app manifest's <c>appid</c>, <c>buildid</c> and <c>name</c>), or
+    /// <c>null</c> for a game Steam does not manage.
+    /// </summary>
+    public static (string AppId, string BuildId, string Name)? SteamApp(string root)
+    {
+        foreach (var library in SteamLibraries())
+        {
+            var apps = Path.Combine(library, "steamapps");
+            foreach (var manifest in SafeFiles(apps, "appmanifest_*.acf"))
+            {
+                string text;
+                try { text = File.ReadAllText(manifest); } catch (Exception) { continue; }
+                if (VdfValues(text, "installdir").FirstOrDefault() is not { Length: > 0 } folder) continue;
+                if (!Path.GetFullPath(Path.Combine(apps, "common", folder)).TrimEnd('\\').Equals(Path.GetFullPath(root).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) continue;
+                return (VdfValues(text, "appid").FirstOrDefault() ?? "", VdfValues(text, "buildid").FirstOrDefault() ?? "", VdfValues(text, "name").FirstOrDefault() ?? folder);
+            }
+        }
+        return null;
+    }
+
+    /// <summary>A game's name as it is shown, without trademark signs (<c>Stellar Blade™</c> is Stellar Blade).</summary>
+    public static string PlainName(string name) => Regex.Replace(Regex.Replace(name, "[™®©]", ""), @"\s+", " ").Trim();
+
+    /// <summary>The game's own executable, the one that holds its code: <c>&lt;Project&gt;\Binaries\Win64\*-Shipping.exe</c>, else the largest there.</summary>
+    public static string? ShippingExe(UnrealGame game) =>
+        SafeFiles(Path.Combine(game.Root, game.Project, "Binaries", "Win64"), "*.exe")
+            .OrderByDescending(file => Path.GetFileNameWithoutExtension(file).EndsWith("-Shipping", StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(file => new FileInfo(file).Length).FirstOrDefault();
+
     /// <summary>The games a mod's project is for, the most likely first: the full game before a demo, by size.</summary>
     public static IReadOnlyList<UnrealGame> ForProject(string project, IEnumerable<UnrealGame> games) =>
         games.Where(game => game.Project.Equals(project, StringComparison.OrdinalIgnoreCase)).OrderByDescending(game => game.PaksBytes).ToList();
@@ -307,6 +337,130 @@ public sealed class AesKeyList
         return list;
     }
 
+    /// <summary>
+    /// Adds the key found for <paramref name="game"/> to the list at <paramref name="path"/>: one line in its AES part, in
+    /// alphabetical place within the longest alphabetical run of that part, written as those lines are (their indent, the
+    /// name, spaces to the next column of four, <c>0x</c> and the key in capitals, their line ending). No line already there
+    /// changes and nothing outside the AES part is touched. The whole file is written to a temporary file beside it and
+    /// moved over it, then read back: it must be the old file with only that line added, every old line unchanged and in
+    /// order, in the same encoding; otherwise the old bytes are put back and this throws. No backup copy is kept.
+    /// Returns the name written, or <c>null</c> when the list already has that key for the game.
+    /// </summary>
+    public static string? Add(string path, string game, byte[] key)
+    {
+        if (key.Length != 32) throw new ArgumentException("An AES key is 32 bytes.", nameof(key));
+        var name = UnrealGameLocator.PlainName(game).TrimEnd(':').Trim();
+        if (name.Length == 0) throw new ArgumentException("The game has no name.", nameof(game));
+        var original = File.ReadAllBytes(path);
+        var bom = original.AsSpan().StartsWith((ReadOnlySpan<byte>)[0xEF, 0xBB, 0xBF]);
+        // Strict: a file that is not UTF-8 is not rewritten, so no byte of it can change.
+        var text = new UTF8Encoding(false, true).GetString(original, bom ? 3 : 0, original.Length - (bom ? 3 : 0));
+        // Split at '\n' only: a line keeps its '\r', so joining again gives back the same bytes whatever the endings.
+        var lines = text.Split('\n').ToList();
+
+        var entries = new List<(int Line, string Name)>();
+        string? section = null;
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var line = lines[i].Trim().TrimStart('﻿').Trim();
+            if (line.Length == 0) continue;
+            var split = Regex.Match(line, @"^(.*?\S)\s+(\S+)$");
+            var lineKey = split.Success ? Key(split.Groups[2].Value) : null;
+            if (lineKey is null && (line.EndsWith(':') || (!line.Any(char.IsLower) && UnrealGameLocator.Fold(line).Contains("key"))))
+            {
+                section = line.TrimEnd(':').Trim();
+                continue;
+            }
+            if (section is not null && !UnrealGameLocator.Fold(section).Contains("aes")) continue;
+            if (lineKey is null) continue;
+            var entry = split.Groups[1].Value.Trim();
+            if (UnrealGameLocator.Fold(entry) == UnrealGameLocator.Fold(name) && lineKey.AsSpan().SequenceEqual(key)) return null;
+            entries.Add((i, entry));
+        }
+
+        // The longest run of entries in alphabetical order: the list may be several sorted blocks one after another.
+        var (bestStart, bestLength, start) = (0, 0, 0);
+        for (var i = 1; i <= entries.Count; i++)
+        {
+            if (i < entries.Count && string.CompareOrdinal(SortKey(entries[i].Name), SortKey(entries[i - 1].Name)) >= 0) continue;
+            if (i - start > bestLength) (bestStart, bestLength) = (start, i - start);
+            start = i;
+        }
+        var run = entries.Skip(bestStart).Take(bestLength).ToList();
+        int at;
+        if (run.Count == 0)
+        {
+            // No entry yet: after the last line with text before any other section, else at the end.
+            at = lines.Count;
+            while (at > 0 && lines[at - 1].Trim().Length == 0) at--;
+        }
+        else
+        {
+            var after = run.FirstOrDefault(e => string.CompareOrdinal(SortKey(e.Name), SortKey(name)) > 0);
+            at = after.Name is not null ? after.Line : run[^1].Line + 1;
+        }
+
+        // Written as the run's lines are: their indent, the gap they leave, their line ending.
+        var sample = run.Select(e => lines[e.Line]).DefaultIfEmpty(lines.FirstOrDefault(l => l.Trim().Length > 0) ?? "").ToList();
+        var indent = sample.Select(l => l[..(l.Length - l.TrimStart(' ', '\t').Length)]).GroupBy(s => s).OrderByDescending(g => g.Count()).First().Key;
+        var tabbed = sample.Count(l => Regex.IsMatch(l.Trim(), @"\S\t+\S")) * 2 > sample.Count;
+        var cr = sample.Count(l => l.EndsWith('\r')) * 2 > sample.Count || (run.Count == 0 && text.Contains("\r\n"));
+        var head = indent + name;
+        var gap = tabbed ? "\t" : new string(' ', 4 - head.Length % 4);
+        var added = head + gap + "0x" + Convert.ToHexString(key) + (cr ? "\r" : "");
+        var expected = new List<string>(lines);
+        if (at == lines.Count && at > 0)
+        {
+            // After a last line with no line end: that line gets one, and the new line goes without, as it was.
+            expected[at - 1] = lines[^1] + (cr ? "\r" : "");
+            added = added.TrimEnd('\r');
+        }
+        expected.Insert(at, added);
+        var bytes = (bom ? new byte[] { 0xEF, 0xBB, 0xBF } : []).Concat(Encoding.UTF8.GetBytes(string.Join('\n', expected))).ToArray();
+
+        var temporary = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, $".{System.IO.Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllBytes(temporary, bytes);
+            File.Move(temporary, path, true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+
+        var reread = File.ReadAllBytes(path);
+        var again = new UTF8Encoding(false, true).GetString(reread, bom ? 3 : 0, reread.Length - (bom ? 3 : 0)).Split('\n').ToList();
+        // Every old line still there, unchanged and in order (its line end aside, for a last line that now has one).
+        var kept = 0;
+        foreach (var line in again)
+            if (kept < lines.Count && line.TrimEnd('\r') == lines[kept].TrimEnd('\r')) kept++;
+        if (!reread.AsSpan().SequenceEqual(bytes) || kept != lines.Count || again.Count != lines.Count + 1
+            || reread.AsSpan().StartsWith((ReadOnlySpan<byte>)[0xEF, 0xBB, 0xBF]) != bom)
+        {
+            File.WriteAllBytes(temporary, original);
+            File.Move(temporary, path, true);
+            if (File.Exists(temporary)) File.Delete(temporary);
+            throw new IOException($"The key list {path} did not read back as written, so it was put back as it was.");
+        }
+        return name;
+    }
+
+    /// <summary>
+    /// How the list is sorted: case aside, hyphens and apostrophes passed over, spaces before other marks and those
+    /// before digits and letters ("CODE: SOG" before "CODE2040", "Hide Or Die" before "Hi-Fi Rush").
+    /// </summary>
+    internal static string SortKey(string name)
+    {
+        var key = new StringBuilder(name.Length);
+        foreach (var c in name)
+        {
+            if (c is '-' or '\'' or '’') continue;
+            key.Append(char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : char.IsWhiteSpace(c) ? ' ' : '!');
+        }
+        return key.ToString();
+    }
+
     /// <summary>A key as written, as its 32 bytes; <c>null</c> when it is none.</summary>
     public static byte[]? Key(string text)
     {
@@ -393,4 +547,28 @@ public sealed class UnrealModSettings
     /// <summary>The game folders the user named, with the name they gave.</summary>
     public IEnumerable<(string Name, string Folder)> Folders() =>
         _lines.Where(line => line.What == "folder").Select(line => (line.Name, line.Value));
+
+    /// <summary>
+    /// Adds <paramref name="line"/> at the end of the settings file (made when there is none), in the file's own line
+    /// ending; no line already there changes. Written to a temporary file beside it and moved over it.
+    /// </summary>
+    public static void AddLine(string path, string line)
+    {
+        var old = File.Exists(path) ? File.ReadAllBytes(path) : [];
+        var text = Encoding.UTF8.GetString(old);
+        var end = text.Contains("\r\n") || old.Length == 0 ? "\r\n" : "\n";
+        var add = (text.Length > 0 && !text.EndsWith('\n') ? end : "") + line + end;
+        var bytes = old.Concat(Encoding.UTF8.GetBytes(add)).ToArray();
+        var temporary = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, $".{System.IO.Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllBytes(temporary, bytes);
+            File.Move(temporary, path, true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+        if (!File.ReadAllBytes(path).AsSpan().StartsWith(old)) throw new IOException($"{path} did not read back as written.");
+    }
 }

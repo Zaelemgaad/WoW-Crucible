@@ -80,5 +80,52 @@ internal static class UnrealGameLocatorTestSuite
         {
             File.Delete(keyFile);
         }
+
+        // A key found for a game is added in alphabetical place, in the list's own format; nothing else changes.
+        Require(string.CompareOrdinal(AesKeyList.SortKey("CODE: SOG"), AesKeyList.SortKey("CODE2040")) < 0, "a mark sorts before a digit");
+        Require(string.CompareOrdinal(AesKeyList.SortKey("Hide Or Die"), AesKeyList.SortKey("Hi-Fi Rush")) < 0, "a hyphen is passed over");
+        var listFile = Path.Combine(Path.GetTempPath(), "crucible-aes-add-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            var before =
+                "    Zeta Old    " + hex('1') + "\r\n" +
+                "    Alpha   " + hex('2') + "\r\n" +
+                "    Delta Force " + hex('3') + "\r\n" +
+                "    Wild Hunt   " + hex('4') + "\r\n" +
+                "\t\r\n\tUSM KEYS\r\n" +
+                "\tPhantom Thing 0123456789ABCDEF";
+            File.WriteAllText(listFile, before);
+            var key = Enumerable.Range(0, 32).Select(i => (byte)(0xA0 + i)).ToArray();
+            Require(AesKeyList.Add(listFile, "Phantom Abyss™", key) == "Phantom Abyss", "the name without its trademark sign");
+            var after = File.ReadAllText(listFile);
+            var expected = before.Replace("    Wild Hunt", "    Phantom Abyss   0x" + Convert.ToHexString(key) + "\r\n    Wild Hunt");
+            Require(after == expected, "one line, between Delta Force and Wild Hunt of the longest run, padded to a column of four:\n" + after);
+            Require(AesKeyList.Add(listFile, "Phantom Abyss", key) is null && File.ReadAllText(listFile) == expected, "the same key again changes nothing");
+            Require(AesKeyList.Load(listFile).Candidates("Phantom Abyss").Single().Key.SequenceEqual(key), "the key is read back as the game's");
+            Require(AesKeyList.Load(listFile).Other.Single().Name == "Phantom Thing", "the video section is untouched");
+
+            File.WriteAllText(listFile, "\uFEFF    Alpha   " + hex('2') + "\n    Beta    " + hex('3'));
+            AesKeyList.Add(listFile, "Zulu", key);
+            Require(File.ReadAllBytes(listFile).AsSpan().StartsWith((ReadOnlySpan<byte>)[0xEF, 0xBB, 0xBF]), "a byte order mark is kept");
+            Require(File.ReadAllText(listFile) == "    Alpha   " + hex('2') + "\n    Beta    " + hex('3') + "\n    Zulu    0x" + Convert.ToHexString(key),
+                "after a last line with no line end, in the file's own line ending:\n" + File.ReadAllText(listFile));
+            Require(Directory.GetFiles(Path.GetTempPath(), "." + Path.GetFileName(listFile) + ".*").Length == 0, "no temporary file left");
+        }
+        finally
+        {
+            File.Delete(listFile);
+        }
+
+        var settingsFile = Path.Combine(Path.GetTempPath(), "crucible-settings-add-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            File.WriteAllText(settingsFile, "Old Game mappings: D:\\a.usmap\r\n");
+            UnrealModSettings.AddLine(settingsFile, "New Game mappings: D:\\b.usmap");
+            Require(File.ReadAllText(settingsFile) == "Old Game mappings: D:\\a.usmap\r\nNew Game mappings: D:\\b.usmap\r\n", "a settings line added after the last one:\n" + File.ReadAllText(settingsFile));
+        }
+        finally
+        {
+            File.Delete(settingsFile);
+        }
     }
 }

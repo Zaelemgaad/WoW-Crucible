@@ -142,9 +142,11 @@ static int Models(string[] args, CancellationToken cancel)
 {
     if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return ModelsHelp();
     var batch = args[0].Equals("import-mods", StringComparison.OrdinalIgnoreCase);
-    if (!batch && !args[0].Equals("import-mod", StringComparison.OrdinalIgnoreCase)) return Fail($"Unknown models operation: {args[0]}");
+    var prepare = args[0].Equals("prepare-game", StringComparison.OrdinalIgnoreCase);
+    if (!batch && !prepare && !args[0].Equals("import-mod", StringComparison.OrdinalIgnoreCase)) return Fail($"Unknown models operation: {args[0]}");
     var inputs = new List<string>();
     string? output = null, settings = null, jobs = null, cache = null;
+    var keysOnly = false;
     for (var i = 1; i < args.Length; i++)
     {
         var argument = args[i];
@@ -154,9 +156,11 @@ static int Models(string[] args, CancellationToken cancel)
         else if (Value("--settings") is { } s) settings = s;
         else if (Value("--jobs") is { } j) jobs = j;
         else if (Value("--cache") is { } c) cache = c;
+        else if (argument.Equals("--keys-only", StringComparison.OrdinalIgnoreCase)) keysOnly = true;
         else if (argument.StartsWith("--", StringComparison.Ordinal)) return Fail($"Unknown models {args[0]} option: {argument}");
         else inputs.Add(argument);
     }
+    if (prepare) return inputs.Count == 1 ? UnrealModImporter.PrepareGame(inputs[0], settings, keysOnly, cancel) : ModelsHelp(2);
     if (batch)
     {
         if (string.IsNullOrWhiteSpace(jobs) || string.IsNullOrWhiteSpace(cache) || !File.Exists(jobs)) return ModelsHelp(2);
@@ -171,7 +175,7 @@ static int Models(string[] args, CancellationToken cancel)
 
 static int ModelsHelp(int code = 0)
 {
-    Console.WriteLine("Usage:\n  wowcrucible models import-mod <mod archive, .pak/.utoc, or folder>... --out <folder> [--settings <file>]\n  wowcrucible models import-mods --jobs <file> --cache <folder> [--settings <file>]\n\nReads Unreal Engine game mods (.rar, .zip, .7z, loose .pak/.utoc/.ucas, or a mod manager's folder of them) over the\ninstalled game they are for, found by the project their asset paths name in Steam's and Epic's libraries and FModel's\nsettings. import-mods groups the mods of the jobs file by game and mounts each game's together in their order, the later winning as in the game (a line\neach: id, 1 to write its looks or 0 to mount it only, name, then its files or folders, tab separated). Each mod written\nbecomes a look a folder (<cache>\\<id>\\NN\\look.txt): an outfit of a Custom Nano Suit mod (.dekcns.json) a look per\nvariant, worn with the character's own face and hair, any other mod the character it changes. look.txt names the files\nit uses: .psk meshes, material .json, a .png of the colour each material shows, and a few .psa animations; what the game\nitself holds is written once under <cache>\\shared. <cache>\\<id>\\import.txt says what happened in plain words.\nLocked games are opened with the --settings file's keys, FModel's, then the key list \"aes keys.txt\" beside the settings\nfile or above it (its AES part only). Exit 0: every mod written became a look; 3: the user must give something once (a\ngame's AES key, mappings or folder) in the --settings file, as the message says; 1: a mod gave no look.");
+    Console.WriteLine("Usage:\n  wowcrucible models import-mod <mod archive, .pak/.utoc, or folder>... --out <folder> [--settings <file>]\n  wowcrucible models import-mods --jobs <file> --cache <folder> [--settings <file>]\n  wowcrucible models prepare-game <game> [--settings <file>] [--keys-only]\n\nReads Unreal Engine game mods (.rar, .zip, .7z, loose .pak/.utoc/.ucas, or a mod manager's folder of them) over the\ninstalled game they are for, found by the project their asset paths name in Steam's and Epic's libraries and FModel's\nsettings. import-mods groups the mods of the jobs file by game and mounts each game's together in their order, the later winning as in the game (a line\neach: id, 1 to write its looks or 0 to mount it only, name, then its files or folders, tab separated). Each mod written\nbecomes a look a folder (<cache>\\<id>\\NN\\look.txt): an outfit of a Custom Nano Suit mod (.dekcns.json) a look per\nvariant, worn with the character's own face and hair, any other mod the character it changes. look.txt names the files\nit uses: .psk meshes, material .json, a .png of the colour each material shows, and a few .psa animations; what the game\nitself holds is written once under <cache>\\shared. <cache>\\<id>\\import.txt says what happened in plain words.\nLocked games are opened with the --settings file's keys, FModel's, then the key list \"aes keys.txt\" beside the settings\nfile or above it (its AES part only). Exit 0: every mod written became a look; 3: the user must give something once (a\ngame's AES key, mappings or folder) in the --settings file, as the message says; 1: a mod gave no look.\nA locked game no key opens has its key looked for in its program with AESDumpster (fetched once) and written to the key\nlist; a game whose files need mappings and has none is started once with UE4SS (fetched once) to make them, its folder\nput back exactly. prepare-game does that for one game with no mod.");
     return code;
 }
 
