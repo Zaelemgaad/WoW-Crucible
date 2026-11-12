@@ -31,6 +31,7 @@ using CUE4Parse_Conversion.Textures;
 using SkiaSharp;
 using WoWCrucible.Core;
 using ILoadableObject = CUE4Parse.UE4.Objects.UObject.ILoadableObject;
+using FPackageIndex = CUE4Parse.UE4.Objects.UObject.FPackageIndex;
 
 /// <summary>
 /// <c>wowcrucible models import-mod</c> and <c>import-mods</c>: Unreal Engine game mods as they come from a mod site (a
@@ -93,7 +94,18 @@ internal sealed class UnrealModImporter
     private List<string> _notes = [];
     /// <summary>Bones the meshes written this run move, by skeleton; the clips written this run, kept to those.</summary>
     private readonly Dictionary<string, HashSet<string>> _bones = new(StringComparer.OrdinalIgnoreCase);
-    private readonly List<(string Skeleton, string Clip)> _newClips = [];
+    private readonly List<(string Skeleton, string Clip, bool Foreign)> _newClips = [];
+    /// <summary>Clips of another skeleton than the character's (a game's common one), by object path.</summary>
+    private readonly HashSet<string> _foreign = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The game's own version of each package it has, by id and by content path, before any mod's.</summary>
+    private readonly Dictionary<FPackageId, GameFile> _gameById = [];
+    private readonly Dictionary<string, GameFile> _gameRel = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The mod each registered container belongs to.</summary>
+    private readonly Dictionary<string, Mod> _vfsOwner = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The mod being written: what the game has is taken from it, a mod of the same page, or the game.</summary>
+    private Mod? _current;
+    /// <summary>Bumped when what a material is baked into changes, so the game's shared pictures are baked again.</summary>
+    private const string BakeVersion = "bake 2";
 
     private UnrealModImporter(string? settingsPath)
     {
@@ -487,9 +499,11 @@ internal sealed class UnrealModImporter
             catch (Exception) { }
         }
         _shared = Path.Combine(_cache, "shared", Token(game.Name).Trim('_'));
+        ForgetOldBakes(usable);
         Say($"Mounted {_provider.MountedVfs.Count} containers, {_provider.Files.Count:N0} files");
         foreach (var mod in usable)
         {
+            foreach (var name in mod.Registered) _vfsOwner[name] = mod;
             foreach (var vfs in _provider.MountedVfs.Where(v => mod.Registered.Contains(v.Name)))
                 foreach (var (path, file) in vfs.Files)
                 {
@@ -506,6 +520,7 @@ internal sealed class UnrealModImporter
             cancel.ThrowIfCancellationRequested();
             Say($"-- {mod.Name}");
             _notes = mod.Notes;
+            _current = mod;
             var undo = Prefer(byId, mod);
             try { ExportMod(mod, cancel); }
             catch (MappingException) { mod.Need = MappingsNeed(game, mappings); }
@@ -515,11 +530,14 @@ internal sealed class UnrealModImporter
                 mod.Need = "reading this game needs the Oodle decompressor (oodle-data-shared.dll), which FModel downloads the first time it runs. Run FModel once, or put that file beside wowcrucible.exe.";
             }
             catch (Exception ex) when (ex is not OperationCanceledException) { mod.Problem = $"It could not be read: {Flat(ex.Message)}"; }
-            finally { foreach (var (id, file) in undo) byId[id] = file; }
+            finally { foreach (var (id, file) in undo) byId[id] = file; _current = null; }
         }
         // A game skeleton can have hundreds of bones (cloth, hair, face rigs) no mesh here moves: the clips keep the used ones.
-        foreach (var (skeleton, clip) in _newClips)
-            if (_bones.TryGetValue(skeleton, out var bones) && bones.Count > 0) PsaTrim.Keep(clip, bones);
+        // A clip of a common skeleton moves its hair, cloth and face bones about another rest pose than the character's:
+        // only the body's own bones keep its keys.
+        foreach (var (skeleton, clip, foreign) in _newClips)
+            if (_bones.TryGetValue(skeleton, out var bones) && bones.Count > 0)
+                PsaTrim.Keep(clip, foreign ? bones.Where(b => !Words(b).Any(Secondary.Contains)).ToHashSet(StringComparer.OrdinalIgnoreCase) : bones);
     }
 
     /// <summary>
@@ -564,19 +582,70 @@ internal sealed class UnrealModImporter
             throw new InvalidOperationException("CUE4Parse's package index is not the one this was written for.");
         var replaced = 0;
         foreach (var (id, file) in byId.ToArray())
+        {
+            if (OwnerOf(file) is null) { _gameById[id] = file; _gameRel[ContentRel(file.Path)] = file; }
             if (_provider.Files.TryGetValue(file.Path, out var winner) && !ReferenceEquals(winner, file)) { byId[id] = winner; replaced++; }
+        }
         Say($"Package index: {replaced} replaced by a mod's version");
         return byId;
     }
 
-    /// <summary>While one mod is exported its own packages win over every other mod's, as when it is the only one installed; the undo list puts the others back.</summary>
+    /// <summary>
+    /// While one mod is exported its own packages win over every other mod's, as when it is the only one installed, and
+    /// what the game has comes from the game, not from another mod (another mod's tanned face is not this outfit's), unless
+    /// that mod is of the same mod page (<see cref="Together"/>). What only mods have still comes from them (a CNS
+    /// framework). The undo list puts the others back.
+    /// </summary>
     private List<(FPackageId, GameFile)> Prefer(ConcurrentDictionary<FPackageId, GameFile> byId, Mod mod)
     {
         var undo = new List<(FPackageId, GameFile)>();
         var mine = mod.Files.Values.ToDictionary(f => f.Path, f => f, StringComparer.OrdinalIgnoreCase);
         foreach (var (id, file) in byId)
-            if (mine.TryGetValue(file.Path, out var own) && !ReferenceEquals(own, file)) { undo.Add((id, file)); byId[id] = own; }
+        {
+            if (mine.TryGetValue(file.Path, out var own)) { if (!ReferenceEquals(own, file)) { undo.Add((id, file)); byId[id] = own; } continue; }
+            if (_gameById.TryGetValue(id, out var game) && !ReferenceEquals(game, file) && OwnerOf(file) is { } other && !Together(other, mod))
+            { undo.Add((id, file)); byId[id] = game; }
+        }
         return undo;
+    }
+
+    /// <summary>The mod a file comes from, or <c>null</c> for the game's own.</summary>
+    private Mod? OwnerOf(GameFile? file) => file is VfsEntry { Vfs: { } vfs } && _vfsOwner.TryGetValue(vfs.Name, out var mod) ? mod : null;
+
+    /// <summary>A mod site's id in a Vortex or Nexus name (<c>Name-2182-1-1759420852</c>, <c>Name 3929 1.1.0 2026-10-09T…</c>).</summary>
+    internal static string? PageId(string name)
+    {
+        var vortex = Regex.Match(name, @"-(\d+)(-[0-9v.]+)*-\d{9,}$");
+        if (vortex.Success) return vortex.Groups[1].Value;
+        var nexus = Regex.Match(name, @"\s(\d+)\s+v?[\d.]+\s+\d{4}-\d\d-\d\dT");
+        return nexus.Success ? nexus.Groups[1].Value : null;
+    }
+
+    /// <summary>Two mods meant to be worn together: the same one, or files of the same mod page (a mesh and its textures).</summary>
+    private static bool Together(Mod a, Mod b) => ReferenceEquals(a, b) || (PageId(a.Job.Name) is { } id && id == PageId(b.Job.Name));
+
+    /// <summary>The package at a content path as the mod being written sees it (<see cref="Prefer"/>).</summary>
+    private GameFile? Resolve(string rel, Mod? mod)
+    {
+        if (mod?.Files.GetValueOrDefault(rel) is { } own) return own;
+        if (_current?.Files.GetValueOrDefault(rel) is { } current) return current;
+        var winner = _provider.Files.TryGetValue($"{_project}/Content/{rel}.uasset", out var w) ? w : null;
+        if (_current is not null && _gameRel.TryGetValue(rel, out var game) && !(OwnerOf(winner) is { } other && Together(other, _current))) return game;
+        return winner ?? _allModFiles.GetValueOrDefault(rel);
+    }
+
+    /// <summary>Removes the game's shared material pictures baked by an older bake, when every mod of the game is written again.</summary>
+    private void ForgetOldBakes(List<Mod> usable)
+    {
+        var marker = Path.Combine(_shared, ".bake");
+        var current = File.Exists(marker) && File.ReadAllText(marker).Trim() == BakeVersion;
+        if (current || !usable.All(m => m.Job.Export)) return;
+        if (Directory.Exists(_shared))
+            foreach (var file in Directory.EnumerateFiles(_shared, "*", SearchOption.AllDirectories)
+                         .Where(f => f.EndsWith(".json", StringComparison.OrdinalIgnoreCase) || f.EndsWith("_Colour.png", StringComparison.OrdinalIgnoreCase)).ToList())
+                File.Delete(file);
+        Directory.CreateDirectory(_shared);
+        File.WriteAllText(marker, BakeVersion);
     }
 
     private IPackage? Load(GameFile file)
@@ -591,19 +660,19 @@ internal sealed class UnrealModImporter
     {
         if (string.IsNullOrWhiteSpace(gamePath)) return null;
         var rel = ContentRel(gamePath);
-        var file = mod?.Files.GetValueOrDefault(rel) ?? (_provider.Files.TryGetValue($"{_project}/Content/{rel}.uasset", out var g) ? g : null) ?? _allModFiles.GetValueOrDefault(rel);
+        var file = Resolve(rel, mod);
         if (file is null || Load(file) is not { } package) return null;
         var objectName = gamePath.Contains('.') ? gamePath[(gamePath.LastIndexOf('.') + 1)..] : rel[(rel.LastIndexOf('/') + 1)..];
         var exports = SafeExports(package).OfType<T>().ToList();
         return exports.FirstOrDefault(e => e.Name.Equals(objectName, StringComparison.OrdinalIgnoreCase)) ?? exports.FirstOrDefault();
     }
 
-    /// <summary>Whether an object comes from a mod (any dropped one), not from the game itself.</summary>
+    /// <summary>Whether an object comes from a mod (any dropped one), not from the game itself, as the mod being written sees it.</summary>
     private bool FromMod(UObject obj)
     {
         var package = obj.Owner?.Name ?? obj.GetPathName();
         var rel = ContentRel(package);
-        return _provider.Files.TryGetValue($"{_project}/Content/{rel}.uasset", out var file) ? file is VfsEntry { Vfs: { } vfs } && _modVfs.Contains(vfs.Name) : _allModFiles.ContainsKey(rel);
+        return Resolve(rel, null) is { } file ? OwnerOf(file) is not null : _allModFiles.ContainsKey(rel);
     }
 
     // ---- Versions, mappings, natives (as FModel finds them) ----
@@ -745,8 +814,17 @@ internal sealed class UnrealModImporter
         public bool Changed => Materials.Count > 0 || Parameters.Count > 0 || Hidden.Count > 0;
     }
 
+    /// <summary>
+    /// Characters who are not adults, by the words of a game's asset paths: no mod that changes one becomes a look
+    /// (Expedition 33's Maelle; Sparking! ZERO's 0130, Videl of the Buu saga).
+    /// </summary>
+    private static readonly (string Project, string Word)[] Minors = [("Sandfall", "maelle"), ("SparkingZERO", "0130")];
+
     private void ExportMod(Mod mod, CancellationToken cancel)
     {
+        if (Minors.Any(m => m.Project.Equals(_project, StringComparison.OrdinalIgnoreCase)
+                && (Words(mod.Name).Contains(m.Word) || mod.Files.Keys.Any(k => k.Split('/').Any(part => Words(part).Contains(m.Word))))))
+            throw new Unusable("it changes a character who is not an adult, so no look is made of it.");
         var looks = new List<(string Name, List<Worn> Meshes)>();
         if (mod.Cns.Count > 0) looks.AddRange(CnsLooks(mod, cancel));
         if (looks.Count == 0) looks.AddRange(PlainLooks(mod, cancel));
@@ -976,6 +1054,13 @@ internal sealed class UnrealModImporter
             perSet.Add((Path.GetFileNameWithoutExtension(mod.Containers[i]), vfs.Files.Keys.Where(k => k.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase)).ToList()));
         }
         var all = perSet.SelectMany(s => s.Packages).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var dressed = BlueprintLooks(mod, all, cancel);
+        if (dressed.Count > 0)
+        {
+            Say($"The mod dresses the character in {dressed.Count} blueprint{(dressed.Count == 1 ? "" : "s")}.");
+            for (var k = 0; k < dressed.Count; k++) yield return (dressed.Count == 1 ? mod.Name : $"{mod.Name} {k + 1}", dressed[k]);
+            yield break;
+        }
 
         (List<USkeletalMesh> Meshes, HashSet<string> Overrides) Read(List<string> packages)
         {
@@ -1015,6 +1100,88 @@ internal sealed class UnrealModImporter
         yield return (mod.Name, assembled);
     }
 
+    /// <summary>
+    /// A character the mod dresses in a blueprint (a fighting game's costume): each skeletal mesh component of each
+    /// blueprint class in the mod, its mesh and its override materials (one slot's own over its template's in the game's
+    /// blueprint it derives from), the components it turns off left out; the body first. Only a blueprint that wears
+    /// one of the mod's own meshes counts. One look a blueprint.
+    /// </summary>
+    private List<List<Worn>> BlueprintLooks(Mod mod, List<string> packages, CancellationToken cancel)
+    {
+        var looks = new List<List<Worn>>();
+        foreach (var path in packages.Order(StringComparer.OrdinalIgnoreCase))
+        {
+            cancel.ThrowIfCancellationRequested();
+            if (!mod.Files.TryGetValue(ContentRel(path), out var file) || Load(file) is not { } package) continue;
+            var exports = SafeExports(package).ToList();
+            if (!exports.Any(e => e.ExportType == "BlueprintGeneratedClass")) continue;
+            var worn = BlueprintParts(exports);
+            if (!worn.Any(w => FromMod(w.Worn.Mesh))) continue;
+            var ordered = worn.OrderByDescending(w => Words(w.Component).Contains("body")).ThenByDescending(w => w.Worn.Mesh.Materials.Length).Select(w => w.Worn).ToList();
+            looks.Add(ordered);
+        }
+        return looks;
+    }
+
+    /// <summary>
+    /// A blueprint's skeletal mesh components as worn: each one's mesh and override materials (one slot's own over its
+    /// template's in the blueprint it derives from), the ones it turns off and stubs that only carry a skeleton left out.
+    /// </summary>
+    private static List<(string Component, Worn Worn)> BlueprintParts(List<UObject> exports)
+    {
+        var worn = new List<(string Component, Worn Worn)>();
+        foreach (var component in exports.Where(e => e.ExportType == "SkeletalMeshComponent"))
+        {
+            // The component and the templates it derives from, nearest first.
+            var chain = new List<UObject> { component };
+            for (var t = component.Template?.Load(); t is not null && chain.Count < 5; t = t.Template?.Load()) chain.Add(t);
+            bool? visible = null;
+            USkeletalMesh? mesh = null;
+            var overrides = new Dictionary<int, UMaterialInterface>();
+            foreach (var link in chain)
+            {
+                if (visible is null && link.TryGetValue(out bool v, "bVisible")) visible = v;
+                if (link.TryGetValue(out bool hidden, "bHiddenInGame") && hidden) visible ??= false;
+                if (mesh is null && (link.GetOrDefault<FPackageIndex?>("SkeletalMesh") ?? link.GetOrDefault<FPackageIndex?>("SkinnedAsset"))?.Load() is USkeletalMesh m) mesh = m;
+                var slots = link.GetOrDefault<FPackageIndex[]>("OverrideMaterials", []);
+                for (var s = 0; s < slots.Length; s++)
+                    if (!overrides.ContainsKey(s) && !slots[s].IsNull && slots[s].Load() is UMaterialInterface material) overrides[s] = material;
+            }
+            // A stub that only carries the skeleton (a cube of a few faces) is no part of the costume.
+            if (visible == false || mesh is null || (mesh.LODModels?.FirstOrDefault()?.NumVertices ?? 1000) < 64) continue;
+            var piece = new Worn(mesh);
+            foreach (var (slot, material) in overrides.Where(o => o.Key < mesh.Materials.Length)) piece.Materials[slot] = material;
+            worn.Add((component.Name, piece));
+        }
+        return worn;
+    }
+
+    /// <summary>
+    /// The face and hair a game puts on a character from a blueprint of its own (Expedition 33's
+    /// <c>BP_CharacterFaceBase_Lune</c>: a face mesh and a haircut), for a body that has none: a blueprint of the game whose
+    /// name says face and the character's name, its plainest (base) one first.
+    /// </summary>
+    private List<Worn> FaceBlueprint(USkeletalMesh body)
+    {
+        string[] plain = ["sk", "skm", "ue5", "ue4", "body", "mesh", "base", "default", "p", "ch", "npc"];
+        var names = Words(body.Name).Where(w => w.Length > 2 && !w.Any(char.IsDigit) && !plain.Contains(w)).ToList();
+        if (names.Count == 0) return [];
+        var candidates = _provider.Files.Keys
+            .Where(k => k.EndsWith(".uasset", StringComparison.OrdinalIgnoreCase))
+            .Select(k => (Path: k, Words: Words(Path.GetFileNameWithoutExtension(k))))
+            .Where(c => c.Words.Contains("bp") && c.Words.Any(w => w.StartsWith("face", StringComparison.Ordinal)) && names.Any(c.Words.Contains))
+            .OrderByDescending(c => c.Words.Contains("base")).ThenBy(c => c.Words.Count).ThenBy(c => c.Path.Length).Take(5);
+        foreach (var (path, _) in candidates)
+        {
+            if (!_provider.TryLoadPackage(path, out var package)) continue;
+            var parts = BlueprintParts(SafeExports(package).ToList());
+            if (parts.Count == 0) continue;
+            foreach (var (_, part) in parts) Say($"Also worn: {part.Mesh.Name} (from the game's {Path.GetFileNameWithoutExtension(path)})");
+            return parts.Select(p => p.Worn).ToList();
+        }
+        return [];
+    }
+
     private List<Worn> Assemble(List<USkeletalMesh> meshes, HashSet<string> overrides, CancellationToken cancel)
     {
         // What the mod's own meshes wear; what is left is worn by meshes of the game it did not change.
@@ -1033,6 +1200,10 @@ internal sealed class UnrealModImporter
             Say($"Also worn: {hair.Name} (the character's hair, from the game)");
             list.Add(new Worn(hair));
         }
+        // No face of its own nor beside its skeleton: the face and hair the game builds the character's head from.
+        if (!list.Any(w => Words(w.Mesh.Name).Any(x => x is "face" or "head") || w.Mesh.Materials.Any(m => m?.ResolvedObject?.Name.Text is { } n && Words(n).Any(x => x is "face" or "head")))
+            && Companion(meshes[0], "face") is null)
+            list.AddRange(FaceBlueprint(meshes[0]).Where(f => !list.Any(w => Words(w.Mesh.Name).Contains("hair")) || !Words(f.Mesh.Name).Contains("hair")));
         return list;
     }
 
@@ -1216,7 +1387,7 @@ internal sealed class UnrealModImporter
                         _notes.Add($"{Path.GetFileName(failed.ObjectPath)} could not be exported: {failed.Error?.Message}");
                     }
                     target = results.Where(r => r.Success).SelectMany(r => r.DiskFilePaths ?? []).Cast<string?>().FirstOrDefault(p => p!.EndsWith(".psa", StringComparison.OrdinalIgnoreCase));
-                    if (target is not null) _newClips.Add((key, target));
+                    if (target is not null) _newClips.Add((key, target, _foreign.Contains(clip.GetPathName())));
                 }
                 file = target is null ? null : Rel(target);
                 done[clip.GetPathName()] = file;
@@ -1276,9 +1447,9 @@ internal sealed class UnrealModImporter
         {
             Directory.CreateDirectory(Path.GetDirectoryName(jsonPath)!);
             var json = JsonNode.Parse(new JsonMaterialFormat().Build(name, parameters).Data)!.AsObject();
-            var hidden = worn.Hidden.Contains(slot);
+            var hidden = worn.Hidden.Contains(slot) || Overlay(parameters);
             if (hidden) json["Hide"] = true;
-            else if (Bake(name, parameters, worn.Mesh) is { } png)
+            else if (Bake(name, parameters, worn.Mesh, OwnTextures(material, parameters, worn.Parameters.ContainsKey(slot))) is { } png)
             {
                 File.WriteAllBytes(picturePath, png);
                 files.Add(Rel(picturePath));
@@ -1321,26 +1492,116 @@ internal sealed class UnrealModImporter
     {
         var words = Words(param);
         if (words.Any(NotTint.Contains)) return false;
-        return words.Contains("tint") || (alone && words.Any(w => w is "color" or "colour" or "basecolor" or "basecolour" or "tone" or "albedo" or "diffuse"));
+        // Over a texture only a tint of the whole base colour counts (Tint, BaseTint, Base Color Tint): a strap's, a
+        // decal's or a side's tint colours a part of it, and a decal tint of black would blacken all of it.
+        if (!alone) return words.Contains("tint") && words.All(w => w is "tint" or "base" or "color" or "colour" or "main" or "diffuse" or "albedo");
+        return words.Contains("tint") || words.Any(w => w is "color" or "colour" or "basecolor" or "basecolour" or "tone" or "albedo" or "diffuse");
+    }
+
+    /// <summary>A colour parameter named only for the colour (<c>Color1</c>, <c>BaseColor</c>), not a multiplier or an effect's.</summary>
+    private static bool PlainColour(string param)
+    {
+        var words = Words(param).Select(w => w.TrimEnd('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')).Where(w => w.Length > 0).ToList();
+        return words.Count > 0 && words.Any(w => w is "color" or "colour" or "albedo" or "diffuse" or "basecolor" or "basecolour")
+            && words.All(w => w is "base" or "color" or "colour" or "albedo" or "diffuse" or "main" or "basecolor" or "basecolour");
+    }
+
+    private static bool Black(FLinearColor c) => Math.Max(c.R, Math.Max(c.G, c.B)) < 0.004f;
+
+    /// <summary>The engine's and a game's stand-in pictures (solid black or white, a default mask): never a colour or a mask.</summary>
+    private static bool Placeholder(string path)
+    {
+        if (path.StartsWith("/Engine/", StringComparison.OrdinalIgnoreCase)) return true;
+        var name = path[(path.LastIndexOf('/') + 1)..];
+        if (name.Contains('.')) name = name[..name.IndexOf('.')];
+        var words = Words(name);
+        return words.Contains("solid") || name.Equals("Black", StringComparison.OrdinalIgnoreCase) || name.Equals("White", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("DefaultTexture", StringComparison.OrdinalIgnoreCase) || name.StartsWith("T_MaskDefault", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The textures a material instance sets itself (and its instance parents, and an outfit's parameters): not the
+    /// defaults of the master material, which a static switch may leave unused. <c>null</c> for a material that is no instance.
+    /// </summary>
+    private static HashSet<string>? OwnTextures(UMaterialInterface? material, CMaterialParams2 parameters, bool overridden)
+    {
+        if (material is not UMaterialInstance) return null;
+        var own = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var depth = 0;
+        for (var m = material as UMaterialInstance; m is not null && depth++ < 16; m = m.Parent?.Load() as UMaterialInstance)
+            if (m is UMaterialInstanceConstant constant)
+                foreach (var t in constant.TextureParameterValues ?? [])
+                    if (t.ParameterValue?.ResolvedObject?.GetPathName() is { } path) own.Add(path);
+        if (overridden) foreach (var t in parameters.Textures.Values.OfType<LoadedTexture>()) own.Add(PathOf(t));
+        return own;
+    }
+
+    private static string PathOf(ILoadableObject loadable) =>
+        (loadable as CUE4Parse.UE4.Objects.UObject.FPackageIndex)?.ResolvedObject?.GetPathName() ?? loadable.ToString() ?? "";
+
+    /// <summary>
+    /// A layer that draws over the surface rather than being one: additive or modulated light (an eye's highlight), and
+    /// a toon outline shell (drawn solid it would cover the figure). Left out of the look.
+    /// </summary>
+    private static bool Overlay(CMaterialParams2 parameters)
+    {
+        if (parameters.BlendMode is EBlendMode.BLEND_Additive or EBlendMode.BLEND_Modulate) return true;
+        return parameters.Colors.Keys.Any(k => Words(k).Any(w => w is "toonline" or "outline"))
+            && !parameters.Colors.Keys.Any(PlainColour);
     }
 
     /// <summary>
     /// The colour a material shows, baked into one picture: its base colour texture (the mod's own version) times the
-    /// tints it names, in linear light as Unreal multiplies them; with no texture, the colour it names; the alpha its mask
-    /// or opacity texture gives a see-through one (eyebrows, lashes). No side over 2048. <c>null</c> when it names no colour.
+    /// tints of the whole of it, in linear light as Unreal multiplies them; with no texture, the colour it names (a hair's
+    /// root and tip colour, a toon material's <c>Color1</c>); an eye's iris set into its white; the alpha its opacity
+    /// texture gives a see-through one (eyebrows, hair cards), cut at Unreal's clip value where it is masked; lashes with
+    /// no material of their own dark. No side over 2048. <c>null</c> when it names no colour.
     /// </summary>
-    private byte[]? Bake(string name, CMaterialParams2 parameters, USkeletalMesh mesh)
+    private byte[]? Bake(string name, CMaterialParams2 parameters, USkeletalMesh mesh, HashSet<string>? own)
     {
-        var diffuse = Diffuse(parameters, SavePath(mesh));
+        if (EyeBake(parameters) is { } eye)
+        {
+            using (eye) using (var eyeData = eye.Encode(SKEncodedImageFormat.Png, 100)) return eyeData.ToArray();
+        }
+        var diffuse = Diffuse(parameters, SavePath(mesh), parameters.Colors.Keys.Any(PlainColour) ? own : null);
         SKBitmap? colour = null;
-        if (diffuse is not null && diffuse.TryLoad<UTexture>(out var texture) && texture is not null) colour = Decode(texture);
-        var tints = parameters.Colors.Where(c => TintLike(c.Key, colour is null)).Select(c => c.Value).ToList();
-        if (colour is null && tints.Count == 0) return null;
+        if (diffuse is not null && diffuse.TryLoad<UTexture>(out var texture) && texture is not null) colour = Grey(Decode(texture));
+        if (colour is not null && parameters.Textures.FirstOrDefault(t => ReferenceEquals(t.Value, diffuse)).Key is "EyeTexture"
+            && parameters.Colors.FirstOrDefault(c => c.Key == "EyeColor").Value is var eyeColour && !Black(eyeColour))
+            colour = ToonEye(colour, eyeColour);
+        List<FLinearColor> tints;
+        var lashes = Words(name).Any(w => w is "eyelash" or "eyelashes" or "lash" or "lashes");
+        if (lashes) { colour?.Dispose(); colour = null; }
+        if (colour is not null)
+        {
+            tints = parameters.Colors.Where(c => TintLike(c.Key, false) && !Black(c.Value)).Select(c => c.Value).ToList();
+            // A hair card picture is grey: the hair's colours give it its colour.
+            if (parameters.ShadingModel is EMaterialShadingModel.MSM_Hair && HairColour(parameters) is { } cardColour) tints.Add(cardColour);
+        }
+        else if (lashes) tints = [new FLinearColor(0.012f, 0.008f, 0.006f, 1f)];
+        else if (HairColour(parameters) is { } hair) tints = [hair];
+        else
+        {
+            var plain = parameters.Colors.Where(c => PlainColour(c.Key)).Select(c => c.Value).ToList();
+            tints = plain.Count > 0 ? plain.Take(1).ToList() : parameters.Colors.Where(c => TintLike(c.Key, true)).Select(c => c.Value).ToList();
+        }
+        if (colour is null && tints.Count == 0)
+        {
+            // A face's part with no material of its own (CNS faces' NewMaterial: the lashes) draws dark, not grey.
+            if (parameters.Textures.Count == 0 && parameters.Colors.Count == 0 && Words(mesh.Name).Any(w => w is "face" or "head"))
+                tints = [new FLinearColor(0.012f, 0.008f, 0.006f, 1f)];
+            else return null;
+        }
+        var masked = parameters.BlendMode is EBlendMode.BLEND_Masked;
         var translucent = parameters.IsTranslucent || parameters.BlendMode is not EBlendMode.BLEND_Opaque;
         SKBitmap? mask = null;
         if (translucent)
         {
-            var maskParam = parameters.Textures.FirstOrDefault(t => Words(t.Key).Any(w => w is "mask" or "opacity" or "alpha") && t.Value.TryLoad<UTexture>(out var x) && x is not null);
+            var maskParam = parameters.Textures.Where(t => MaskRank(t.Key, PathOf(t.Value)) > 0 && !Placeholder(PathOf(t.Value)) && t.Value.TryLoad<UTexture>(out var x) && x is not null)
+                .OrderByDescending(t => MaskRank(t.Key, PathOf(t.Value))).FirstOrDefault();
+            if (maskParam.Value is null && lashes)
+                maskParam = parameters.Textures.FirstOrDefault(t => !t.Key.StartsWith("PM_", StringComparison.Ordinal)
+                    && Words(PathOf(t.Value)[(PathOf(t.Value).LastIndexOf('/') + 1)..]).Any(w => w is "coverage" or "opacity" or "alpha" or "mask"));
             if (maskParam.Value is not null && maskParam.Value.TryLoad<UTexture>(out var m) && m is not null) mask = Decode(m);
         }
         using var image = colour ?? new SKBitmap(mask?.Width ?? 64, mask?.Height ?? 64, SKColorType.Rgba8888, SKAlphaType.Unpremul);
@@ -1374,8 +1635,115 @@ internal sealed class UnrealModImporter
             image.Pixels = pixels;
             mask.Dispose();
         }
+        if (masked)
+        {
+            // Unreal cuts a masked material at its clip value (a third): the picture says so, whatever cut the client uses.
+            var pixels = image.Pixels;
+            for (var i = 0; i < pixels.Length; i++) pixels[i] = pixels[i].WithAlpha(pixels[i].Alpha >= 85 ? (byte)255 : (byte)0);
+            image.Pixels = pixels;
+        }
         using var data = image.Encode(SKEncodedImageFormat.Png, 100);
         return data.ToArray();
+    }
+
+    /// <summary>
+    /// How surely a texture parameter is the material's opacity: 2 named for it, 1 a plain <c>Mask</c> whose picture is
+    /// named for opacity (<c>Tex_P_EVE_eyebrow_O</c>; a <c>…_Mask01</c> is a layer mask), 0 a mask of something else.
+    /// </summary>
+    private static int MaskRank(string param, string path)
+    {
+        var words = Words(param);
+        if (words.Any(w => w is "fuzz" or "layer" or "detail" or "weathering" or "shading" or "flake" or "dye" or "color" or "colour" or "clip" or "decal"
+                or "material" or "specular" or "glow" or "emissive" or "id" or "light" or "model" or "metallic" or "sss")) return 0;
+        if (words.Any(w => w is "opacity" or "alpha")) return 2;
+        var picture = Words(path[(path.LastIndexOf('/') + 1)..].Split('.')[0]);
+        return words.Count == 1 && words[0] == "mask" && picture.Count > 0 && picture[^1] is "o" or "op" or "opacity" or "alpha" ? 1 : 0;
+    }
+
+    /// <summary>
+    /// A toon eye's mask (alpha the iris, red its ring) drawn as an eye: white, the ring in the eye's colour, the pupil
+    /// inside it dark.
+    /// </summary>
+    private static SKBitmap ToonEye(SKBitmap mask, FLinearColor eye)
+    {
+        var pixels = mask.Pixels;
+        for (var i = 0; i < pixels.Length; i++)
+        {
+            var (disc, ring) = (pixels[i].Alpha / 255f, pixels[i].Red / 255f);
+            var shade = ring + (1 - ring) * 0.15f;
+            var (r, g, b) = (1 + disc * (eye.R * shade - 1), 1 + disc * (eye.G * shade - 1), 1 + disc * (eye.B * shade - 1));
+            pixels[i] = new SKColor(Srgb(r), Srgb(g), Srgb(b), 255);
+        }
+        mask.Pixels = pixels;
+        return mask;
+    }
+
+    /// <summary>A one-channel picture (a grey map stored in red, BC4) as grey; any other as it is.</summary>
+    private static SKBitmap? Grey(SKBitmap? bitmap)
+    {
+        if (bitmap is null) return null;
+        var pixels = bitmap.Pixels;
+        if (!pixels.Any(p => p.Red > 0) || pixels.Any(p => p.Green > 0 || p.Blue > 0)) return bitmap;
+        for (var i = 0; i < pixels.Length; i++) pixels[i] = new SKColor(pixels[i].Red, pixels[i].Red, pixels[i].Red, pixels[i].Alpha);
+        bitmap.Pixels = pixels;
+        return bitmap;
+    }
+
+    /// <summary>A hair material's colour (its picture is a stand-in): the root and tip colours, the blended ones where it has them.</summary>
+    private static FLinearColor? HairColour(CMaterialParams2 parameters)
+    {
+        var hairShaded = parameters.ShadingModel is EMaterialShadingModel.MSM_Hair;
+        var colours = parameters.Colors.Where(c => !Black(c.Value) && Words(c.Key) is var w && !w.Any(NotTint.Contains)
+            && (w.Any(x => x is "root" or "tip") || (hairShaded && w.Any(x => x is "color" or "colour") && w.Any(x => x is "top" or "down" or "bottom")))).ToList();
+        if (colours.Count == 0) return null;
+        var blended = colours.Where(c => Words(c.Key).Contains("blended")).ToList();
+        if (blended.Count > 0) colours = blended;
+        return new FLinearColor(colours.Average(c => c.Value.R), colours.Average(c => c.Value.G), colours.Average(c => c.Value.B), 1f);
+    }
+
+    /// <summary>
+    /// An eye drawn from an iris and a sclera picture (an Unreal eye material): the white over the whole ball, the iris
+    /// tinted and set in its middle at the material's <c>Iris UV Radius</c>. <c>null</c> for any other material.
+    /// </summary>
+    private SKBitmap? EyeBake(CMaterialParams2 parameters)
+    {
+        UTexture? Picture(string word) => parameters.Textures
+            .Where(t => !t.Key.StartsWith("PM_", StringComparison.Ordinal) && Words(t.Key).Contains(word) && !Words(t.Key).Contains("normal") && !Placeholder(PathOf(t.Value)))
+            .Select(t => t.Value.TryLoad<UTexture>(out var x) ? x : null).FirstOrDefault(x => x is not null);
+        if (Picture("iris") is not { } irisTexture || Picture("sclera") is not { } scleraTexture) return null;
+        using var iris = Grey(Decode(irisTexture));
+        using var sclera = Grey(Decode(scleraTexture));
+        if (iris is null || sclera is null) return null;
+        float Scalar(string key, float fallback) => parameters.Scalars.FirstOrDefault(s => s.Key.Equals(key, StringComparison.OrdinalIgnoreCase)).Value is var v && v != 0 ? v : fallback;
+        var radius = Math.Clamp(Scalar("Iris UV Radius", 0.15f), 0.05f, 0.45f);
+        var brightness = Math.Clamp(Scalar("IrisBrightness", 1f), 0.5f, 5f);
+        var tint = parameters.Colors.FirstOrDefault(c => Words(c.Key).Contains("iris") && Words(c.Key).Contains("tint")).Value;
+        var (tr, tg, tb) = tint.A > 0 || tint.R + tint.G + tint.B > 0 ? (tint.R, tint.G, tint.B) : (1f, 1f, 1f);
+        const int side = 512;
+        var image = new SKBitmap(side, side, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+        var pixels = new SKColor[side * side];
+        SKColor Sample(SKBitmap b, float u, float v) => b.GetPixel(Math.Clamp((int)(u * b.Width), 0, b.Width - 1), Math.Clamp((int)(v * b.Height), 0, b.Height - 1));
+        for (var y = 0; y < side; y++)
+            for (var x = 0; x < side; x++)
+            {
+                var (u, v) = ((x + 0.5f) / side, (y + 0.5f) / side);
+                var d = MathF.Sqrt((u - 0.5f) * (u - 0.5f) + (v - 0.5f) * (v - 0.5f));
+                var s = Sample(sclera, u, v);
+                var (r, g, b) = (Linear(s.Red), Linear(s.Green), Linear(s.Blue));
+                if (d < radius)
+                {
+                    var k = 0.5f / radius;
+                    var p = Sample(iris, (u - 0.5f) * k + 0.5f, (v - 0.5f) * k + 0.5f);
+                    var (ir, ig, ib) = (Linear(p.Red) * tr * brightness, Linear(p.Green) * tg * brightness, Linear(p.Blue) * tb * brightness);
+                    // The limbus: the iris darkens and blends into the white over its outer edge.
+                    var edge = Math.Clamp((d - radius * 0.88f) / (radius * 0.12f), 0f, 1f);
+                    var dark = 1f - 0.5f * edge;
+                    (r, g, b) = (ir * dark * (1 - edge) + r * edge * 0.6f, ig * dark * (1 - edge) + g * edge * 0.6f, ib * dark * (1 - edge) + b * edge * 0.6f);
+                }
+                pixels[y * side + x] = new SKColor(Srgb(r), Srgb(g), Srgb(b), 255);
+            }
+        image.Pixels = pixels;
+        return image;
     }
 
     private static float Linear(byte c)
@@ -1426,7 +1794,7 @@ internal sealed class UnrealModImporter
     /// over one of a layer or pattern (<c>Pattern02_BaseColor</c>), a texture of the mesh's own folders over a shared
     /// library one, and never an environment or mask picture. <c>null</c> when nothing names a colour.
     /// </summary>
-    private static ILoadableObject? Diffuse(CMaterialParams2 parameters, string meshPath)
+    private static ILoadableObject? Diffuse(CMaterialParams2 parameters, string meshPath, HashSet<string>? instanceSet = null)
     {
         string[] plain = ["basecolor", "basecolour", "diffuse", "albedo", "color", "colour", "basecolormap", "diffusemap", "basemap", "maintex", "d"];
         string[] colour = ["basecolor", "basecolour", "diffuse", "albedo", "color", "colour"];
@@ -1442,8 +1810,9 @@ internal sealed class UnrealModImporter
             var path = (loadable as CUE4Parse.UE4.Objects.UObject.FPackageIndex)?.ResolvedObject?.GetPathName() ?? loadable.ToString() ?? "";
             var name = path[(path.LastIndexOf('/') + 1)..];
             var words = Words(param).Concat(Words(name)).ToList();
-            if (words.Any(never.Contains) || never.Any(key.Contains)) continue;
-            var score = plain.Contains(key) ? 4 : colour.Any(key.Contains) ? 2 : 0;
+            if (words.Any(never.Contains) || never.Any(key.Contains) || key.Contains("facecolor") || Placeholder(path) || (instanceSet is not null && !instanceSet.Contains(path))) continue;
+            // A toon eye's picture is its EyeTexture (the second one is a shared highlight).
+            var score = plain.Contains(key) ? 4 : colour.Any(key.Contains) ? 2 : key == "eyetexture" ? 3 : 0;
             if (Words(name).Any(w => w is "d" or "basecolor" or "diffuse" or "albedo" or "a" or "bc")) score += 1;
             if (score == 0) continue;
             if (own.Length > 0 && path.ToLowerInvariant().Replace("/game/", "/").Contains(own)) score += 3;
@@ -1527,6 +1896,62 @@ internal sealed class UnrealModImporter
                 if (clip?.Skeleton?.ResolvedObject is not { } owned || Norm(owned.GetPathName(), _project) != skeletonPath) continue;
                 picked.Add((action.Word, clip));
                 got++;
+            }
+        }
+        return picked.Count > 0 ? picked : Shorthand(skeleton, skeletonPath, all, cancel);
+    }
+
+    /// <summary>Words of bones a physics or face rig moves, not the body's animation: hair, jiggle, cloth, the face's.</summary>
+    private static readonly string[] Secondary = ["hair", "jiggle", "cloth", "skirt", "physics", "phys", "spring", "socket", "effector",
+        "eye", "brow", "lid", "lip", "mouth", "jaw", "cheek", "tongue", "teeth", "face", "nose"];
+
+    // Fighting games name clips in short words: A_0460_A_STD_b002_STD_G_LP (standing, on the ground, a loop),
+    // A_0460_B_MVE_a001_MOVE_C_F (moving forward). Read only when no clip has a plain name, so other games pick as before.
+    private static readonly Action[] ShortActions =
+    [
+        new("stand", [["std"], ["lp"]], ["g"], ["grd", "guard", "spcg", "mkwme", "zcnl", "apwn", "al", "dmg"]),
+        new("walk", [["move"], ["f"]], ["c"], []),
+        new("run", [["move"], ["f"]], ["c"], []),
+    ];
+
+    /// <summary>
+    /// <see cref="ShortActions"/> from the skeleton's folder up, the nearest folder first, so a character's own clips win
+    /// over another's; a clip may move a base skeleton the character's shares its bones with (a game's common one).
+    /// </summary>
+    private List<(string Word, UAnimSequence Clip)> Shorthand(USkeleton skeleton, string skeletonPath, List<string> all, CancellationToken cancel)
+    {
+        var ours = skeleton.ReferenceSkeleton.FinalRefBoneInfo.Select(b => b.Name.Text).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var fits = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        bool Fits(ResolvedObject owned)
+        {
+            var path = Norm(owned.GetPathName(), _project);
+            if (path == skeletonPath) return true;
+            if (fits.TryGetValue(path, out var known)) return known;
+            var bones = (owned.Load() as USkeleton)?.ReferenceSkeleton.FinalRefBoneInfo.Select(b => b.Name.Text).ToList() ?? [];
+            // A game's common skeleton holds every character's bones: it fits when it has most of this one's.
+            return fits[path] = bones.Count > 0 && bones.Count(ours.Contains) >= 0.8 * ours.Count;
+        }
+        var picked = new List<(string Word, UAnimSequence Clip)>();
+        var dir = skeletonPath[..skeletonPath.LastIndexOf('/')];
+        for (var up = 0; up < 3 && dir.Contains('/') && picked.Count < ShortActions.Length; up++, dir = dir[..dir.LastIndexOf('/')])
+        {
+            var prefix = dir + "/";
+            var candidates = all.Where(p => p.ToLowerInvariant().StartsWith(prefix)).ToList();
+            foreach (var action in ShortActions.Where(a => picked.All(p => p.Word != a.Word)))
+            {
+                var ranked = candidates.Select(p => (Path: p, Score: Score(p, action))).Where(c => c.Score is not null)
+                    .OrderByDescending(c => c.Score).ThenBy(c => c.Path.Length).Select(c => c.Path).Take(12);
+                foreach (var path in ranked)
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    if (picked.FirstOrDefault(p => p.Clip.Owner?.Name is { } owner && Norm(owner, _project) == Norm(path, _project)).Clip is { } again) { picked.Add((action.Word, again)); break; }
+                    if (!_provider.TryLoadPackage(path, out var package)) continue;
+                    var clip = SafeExports(package).OfType<UAnimSequence>().FirstOrDefault();
+                    if (clip?.Skeleton?.ResolvedObject is not { } owned || !Fits(owned)) continue;
+                    if (Norm(owned.GetPathName(), _project) != skeletonPath) _foreign.Add(clip.GetPathName());
+                    picked.Add((action.Word, clip));
+                    break;
+                }
             }
         }
         return picked;

@@ -115,6 +115,13 @@ public static class UnrealGameLocator
             .ThenByDescending(file => new FileInfo(file).Length);
         foreach (var exe in executables)
             if (ScanVersion(exe) is { } version) return version;
+        // A game built on its own branch (++streams+ProjectW-release) names no engine version; the mappings UE4SS
+        // dumped for it in its folder do (Sandfall-5.4.4-68322+++streams+ProjectW-release-….usmap).
+        foreach (var mappings in MappingsInside(game))
+        {
+            var match = Regex.Match(Path.GetFileName(mappings), @"^[^-]+-(\d+)\.(\d+)\.\d+-");
+            if (match.Success) return (int.Parse(match.Groups[1].Value), int.Parse(match.Groups[2].Value));
+        }
         return null;
     }
 
