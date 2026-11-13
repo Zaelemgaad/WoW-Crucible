@@ -40,6 +40,24 @@ wowcrucible customization export <folder> --out=<server customization folder>
 
 `<folder>` holds benilla's `merged_*.tsv` and `wardrobe_*.tsv`, and the user's `user/` beside them, which regenerating the merge never touches. `list` also shows the wardrobe's subjects and their option ids. `add` numbers the row, proves the folder with it valid and writes nothing otherwise; `export` refuses a folder with an error. Ids spell `u12` (user), `r966` (retail), `e966` (Epsilon) or a whole merged id. The format is benilla's `docs/wotlk/CUSTOMIZATION-EXTENSIONS.md`. The client skips and logs a bad row while the server refuses it, so validate first.
 
+## Game data as text
+
+```text
+wowcrucible data export <gamedata> [--server-dbc=<dir>] [--client-archives=<list.txt>|--client-dbc=<dir>] [--skip=<folder;folder>] [--definitions=<WoWDBDefs definitions>] [--world=host:port:user:database [--password-env=NAME] [--tables=a,b]]
+wowcrucible data build <gamedata> --out=<folder> [--definitions=<dir>] [--only=dbc|world] [--tables=a,b]
+wowcrucible data verify <gamedata> [--server-dbc=<dir>] [--client-archives=<list.txt>|--client-dbc=<dir>] [--skip=<folder;folder>] [--definitions=<dir>]
+```
+
+Game data lives as text in `<gamedata>` and is built back into DBCs and world SQL.
+
+- **DBC tables** become one TSV each, headed with WoWDBDefs column names for build 3.3.5.12340 (`Field[0]` for arrays, `Name_lang[enUS]` and `Name_lang[Flags]` for localized strings). `<gamedata>/defs/*.dbd` is searched before `--definitions`, for tables WoWDBDefs lacks. A table byte-identical on both sides goes to `dbc/shared/`, one that differs or exists on one side only to `dbc/server/` or `dbc/client/`; `--skip` leaves folders (backups) out. `--client-archives` lists the client's MPQs lowest priority first (one path a line, `#` comments) and the winning `DBFilesClient\*.dbc` of each name is read. Export rewrites the whole `dbc/` folder.
+- **Cells:** `\\`, `\t`, `\n`, `\r` and `\0` are escaped; a string that is not UTF-8 keeps its bytes as `\xHH`; a float whose text would not give back its bits (NaN payloads) is `0x<bits>`; a string offset that lies outside the string block (garbage in an unused locale) stays that number as `\o<offset>`.
+- **Locales other than enUS** leave the main TSV for `Table.locales.tsv`: a `*` line per column with its most common value, then each cell that differs, keyed by `ID` (or row number when the first column is no unique ID).
+- **`dbc/tables.tsv`** records each table's set, path, declared field count, rows, source SHA-256 and string layout: `blizzard` (one leading NUL, empty strings at 0, the rest in first-use order), `inline` (every string, empty ones too, in first-use order), or `raw` for a table with no definition: `Field_<offset>` columns and the string block kept verbatim as `Table.strings.tsv`. A table whose block neither layout reproduces (duplicates, unreferenced or reordered strings left by an editor) keeps its text, is rebuilt in the canonical `blizzard` order, and the export says why.
+- **World tables** (`--world`) are read in primary-key order (every column when there is none) into `world/<table>.tsv` (`\N` is NULL, binary is `0x<hex>`) and `world/schema.sql` holds their `CREATE TABLE` statements without `AUTO_INCREMENT` counters. `--tables` exports only those and leaves `schema.sql` alone.
+
+`build` writes `server-dbc/`, `client-dbc/DBFilesClient/` and `world.sql` (DROP/CREATE, batched INSERTs, non-strict `sql_mode`). A non-number in a numeric column is refused. `verify` builds every table in memory and compares it with the originals: `IDENTICAL`, `SAME VALUES` (only the string block's order differs; every cell, padding byte and offset kept as a number is equal) or the first difference. Exit 3: a table needs review (a raw table or a difference).
+
 ## Unreal Engine game mods as models
 
 ```text

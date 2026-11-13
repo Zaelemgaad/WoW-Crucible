@@ -68,6 +68,12 @@ if (args is ["--tact-fetch"])
     return;
 }
 
+if (args is ["--game-data", var gameDataCorpus])
+{
+    GameDataTextTestSuite.Run(gameDataCorpus);
+    return;
+}
+
 if (args is ["--batch-export"])
 {
     DbcBatchExportTestSuite.Run();
@@ -142,6 +148,7 @@ DbcBatchExportTestSuite.Run();
 ClientCorpusHardLinkTestSuite.Run();
 TactCdnFetchTestSuite.Run();
 CustomizationExtensionTestSuite.Run();
+GameDataTextTestSuite.Run(requiredCorpus);
 UnrealGameLocatorTestSuite.Run();
 WireProtocolTestSuite.Run();
 AddonAuditTests.Run();
@@ -263,7 +270,7 @@ var ambiguousAssetCommand = CliCommandAbbreviationService.Resolve(["as", "t"]);
 if (!shortTextureCommand.Success || !shortTextureCommand.Arguments.SequenceEqual(new[] { "asset", "texture-validate", "texture-library", "--summary-only" }) ||
     !shortCorpusCommand.Success || !shortCorpusCommand.Arguments.SequenceEqual(new[] { "client", "corpus", "output.txt", "index-a" }) ||
     !splitMapCommand.Success || !splitMapCommand.Arguments.SequenceEqual(new[] { "asset", "adt-height-plan", "map.adt", "2", "all", "plan.json" }) ||
-    ambiguousGroupCommand.Success || !ambiguousGroupCommand.Choices.SequenceEqual(new[] { "db", "dbc" }) ||
+    ambiguousGroupCommand.Success || !ambiguousGroupCommand.Choices.Order().SequenceEqual(new[] { "data", "db", "dbc" }) ||
     ambiguousAssetCommand.Success || !ambiguousAssetCommand.Choices.Any(choice => choice == "asset texture-validate"))
     throw new InvalidOperationException("CLI unambiguous prefix, split-hyphen, short executable vocabulary, or ambiguity reporting regressed.");
 

@@ -44,6 +44,7 @@ try
         "protocol" => Protocol(commandArguments[1..]),
         "customization" => Customization(commandArguments[1..]),
         "models" => Models(commandArguments[1..], cancellation.Token),
+        "data" => GameData(commandArguments[1..]),
         _ => Fail($"Unknown command: {commandArguments[0]}")
     };
 }
@@ -85,6 +86,7 @@ static int RoutedHelp(string group) => group switch
     "protocol" => ProtocolHelp(),
     "customization" => CustomizationHelp(),
     "models" => ModelsHelp(),
+    "data" => GameDataHelp(),
     _ => Fail($"Unknown command group for help: {group}")
 };
 
@@ -182,6 +184,93 @@ static int ModelsHelp(int code = 0)
 static int CustomizationHelp(int code = 0)
 {
     Console.WriteLine("Usage:\n  wowcrucible customization list <folder>\n  wowcrucible customization validate <folder> [--assets=<dir;dir>]\n  wowcrucible customization add <folder> <subjects|options|choices|items> --<column>=<value> ...\n  wowcrucible customization export <folder> --out=<server customization folder>\n\n<folder> holds merged_*.tsv and user/. A row is proved before it is written, and a folder with an error does not export.");
+    return code;
+}
+
+static int GameData(string[] args)
+{
+    if (args.Length == 0 || args[0] is "help" or "--help" or "-h") return GameDataHelp();
+    var operation = args[0].ToLowerInvariant();
+    if (operation is not ("export" or "build" or "verify")) return Fail($"Unknown data operation: {args[0]}");
+    var positional = args[1..].Where(option => !option.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    var options = args[1..].Where(option => option.StartsWith("--", StringComparison.Ordinal)).ToDictionary(
+        option => option[2..].Split('=', 2)[0].ToLowerInvariant(), option => option.Contains('=') ? option.Split('=', 2)[1] : "", StringComparer.Ordinal);
+    string[] known = ["server-dbc", "client-dbc", "client-archives", "definitions", "skip", "world", "password-env", "tables", "out", "only"];
+    if (options.Keys.FirstOrDefault(key => !known.Contains(key)) is { } unknown) return Fail($"Unknown data {operation} option: --{unknown}");
+    if (positional.Length != 1) return GameDataHelp(2);
+    var gamedata = Path.GetFullPath(positional[0]);
+    string? Option(string name) => options.TryGetValue(name, out var value) && value.Length > 0 ? value : null;
+    var roots = new List<string> { Path.Combine(gamedata, "defs") };
+    if (Option("definitions") is { } definitions) roots.Add(definitions);
+    var tables = Option("tables")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    if (operation == "build")
+    {
+        if (Option("out") is not { } output) return Fail("data build requires --out=<folder>.");
+        var only = Option("only");
+        if (only is not (null or "dbc" or "world")) return Fail("--only is dbc or world.");
+        var count = 0;
+        if (only is null or "dbc")
+            foreach (var result in GameDataDbcService.BuildAll(gamedata, Path.Combine(output, "server-dbc"), Path.Combine(output, "client-dbc", "DBFilesClient"), roots)) count++;
+        if (only is null or "world" && File.Exists(Path.Combine(gamedata, "world", GameDataWorldService.SchemaName)))
+            foreach (var result in GameDataWorldService.BuildSql(Path.Combine(gamedata, "world"), Path.Combine(output, "world.sql"), tables)) count++;
+        Console.WriteLine($"Built {count:N0} table(s) into {output}.");
+        return 0;
+    }
+
+    var temporary = Path.Combine(Path.GetTempPath(), "crucible-data-" + Guid.NewGuid().ToString("N")[..8]);
+    try
+    {
+        var skip = Option("skip")?.Split(';', StringSplitOptions.RemoveEmptyEntries) ?? [];
+        var server = Option("server-dbc") is { } serverFolder ? GameDataDbcService.FolderTables(serverFolder, skip) : null;
+        SortedDictionary<string, string>? client = null;
+        if (Option("client-dbc") is { } clientFolder) client = GameDataDbcService.FolderTables(clientFolder, skip);
+        else if (Option("client-archives") is { } list)
+        {
+            var archives = File.ReadAllLines(list).Select(line => line.Trim()).Where(line => line.Length > 0 && !line.StartsWith('#')).ToArray();
+            client = GameDataDbcService.ExtractClientTables(archives, temporary, line => Console.WriteLine($"ARCHIVE\t{line}"));
+        }
+        var failures = 0;
+        if (server is not null || client is not null)
+        {
+            if (tables is { Length: > 0 })
+            {
+                bool Wanted(string key) => tables.Contains(Path.GetFileNameWithoutExtension(key), StringComparer.OrdinalIgnoreCase);
+                server = server is null ? null : new(server.Where(pair => Wanted(pair.Key)).ToDictionary(), StringComparer.OrdinalIgnoreCase);
+                client = client is null ? null : new(client.Where(pair => Wanted(pair.Key)).ToDictionary(), StringComparer.OrdinalIgnoreCase);
+            }
+            void Print(GameDataTableResult result)
+            {
+                if (result.Status is "failed" or "raw" || result.Status.StartsWith("row", StringComparison.Ordinal) || result.Status.StartsWith("header", StringComparison.Ordinal)) failures++;
+                Console.WriteLine($"{result.Status.ToUpperInvariant()}\t{result.Set}\t{result.Path}\t{result.Rows}\t{result.Message}");
+            }
+            if (operation == "export")
+            {
+                if (tables is { Length: > 0 }) return Fail("data export rewrites the whole dbc folder; --tables applies to --world only.");
+                GameDataDbcService.Export(gamedata, server, client, roots, Print);
+            }
+            else GameDataDbcService.Verify(gamedata, server, client, roots, Print);
+        }
+        if (operation == "export" && Option("world") is { } world)
+        {
+            var parts = world.Split(':');
+            if (parts.Length != 4 || !int.TryParse(parts[1], out var port)) return Fail("--world is host:port:user:database.");
+            var password = Environment.GetEnvironmentVariable(Option("password-env") ?? "WOW_CRUCIBLE_DB_PASSWORD") ?? "";
+            GameDataWorldService.Export(GameDataWorldService.ConnectionString(parts[0], port, parts[2], password, parts[3]),
+                Path.Combine(gamedata, "world"), tables, line => Console.WriteLine($"WORLD\t{line}"));
+        }
+        Console.WriteLine(failures == 0 ? "Done." : $"{failures:N0} table(s) need review.");
+        return failures == 0 ? 0 : 3;
+    }
+    finally
+    {
+        if (Directory.Exists(temporary)) Directory.Delete(temporary, true);
+    }
+}
+
+static int GameDataHelp(int code = 0)
+{
+    Console.WriteLine("Usage:\n  wowcrucible data export <gamedata> [--server-dbc=<dir>] [--client-archives=<list.txt>|--client-dbc=<dir>] [--skip=<folder;folder>]\n      [--definitions=<WoWDBDefs definitions>] [--world=host:port:user:database [--password-env=NAME] [--tables=a,b]]\n  wowcrucible data build <gamedata> --out=<folder> [--definitions=<dir>] [--only=dbc|world] [--tables=a,b]\n  wowcrucible data verify <gamedata> [--server-dbc=<dir>] [--client-archives=<list.txt>|--client-dbc=<dir>] [--skip=<folder;folder>] [--definitions=<dir>]\n\nexport writes one TSV per table with WoWDBDefs column names into <gamedata>/dbc/{shared,server,client} and\n<gamedata>/dbc/tables.tsv; a table byte-identical on both sides is written once to shared. <gamedata>/defs holds\n.dbd files for tables WoWDBDefs lacks and is searched first. Localized columns other than enUS are left out when\nempty in every row. --client-archives lists MPQs lowest priority first; the winning DBFilesClient\\*.dbc of each\nname is read. --world reads every base table, ordered by primary key, into <gamedata>/world/<table>.tsv plus\nschema.sql (NULL is \\N). build writes server-dbc/, client-dbc/DBFilesClient/ and world.sql. verify builds every\ntable in memory and compares it with the originals: IDENTICAL, SAME VALUES (string block order only) or the\nfirst difference. Exit 3: a table needs review.");
     return code;
 }
 
